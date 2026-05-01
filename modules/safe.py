@@ -65,7 +65,7 @@ class RestrictedUnpickler(pickle.Unpickler):
 
 
 # Regular expression that accepts 'dirname/version', 'dirname/byteorder', 'dirname/data.pkl', '.data/serialization_id', and 'dirname/data/<number>'
-allowed_zip_names_re = re.compile(r"^([^/]+)/((data/\d+)|version|byteorder|.data/serialization_id|(data\.pkl))$")
+allowed_zip_names_re = re.compile(r"^([^/]+)/((data/\d+)|version|byteorder|.format_version|.storage_alignment|.data/serialization_id|(data\.pkl))$")
 data_pkl_re = re.compile(r"^([^/]+)/data\.pkl$")
 
 def check_zip_filenames(filename, names):
@@ -153,6 +153,10 @@ def load_with_extra(filename, extra_handler=None, *args, **kwargs):
         )
         return None
 
+    # PyTorch 2.6+ defaults torch.load to weights_only=True. After A1111's
+    # restricted unpickle precheck has accepted the file, preserve legacy
+    # checkpoint/embedding compatibility unless callers explicitly choose a mode.
+    kwargs.setdefault("weights_only", False)
     return unsafe_torch_load(filename, *args, **kwargs)
 
 

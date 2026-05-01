@@ -916,7 +916,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
     infotexts = []
     output_images = []
-    with torch.no_grad(), p.sd_model.ema_scope():
+    # Generation is pure inference; inference_mode avoids autograd view/version-counter overhead.
+    with torch.inference_mode(), p.sd_model.ema_scope():
         with devices.autocast():
             p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
 

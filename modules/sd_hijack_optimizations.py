@@ -4,6 +4,7 @@ import psutil
 import platform
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch import einsum
 
 from ldm.util import default
@@ -579,7 +580,7 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwa
 
 
 def scaled_dot_product_no_mem_attention_forward(self, x, context=None, mask=None, **kwargs):
-    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=False):
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
         return scaled_dot_product_attention_forward(self, x, context, mask)
 
 
@@ -858,7 +859,7 @@ def sdp_attnblock_forward(self, x):
 
 
 def sdp_no_mem_attnblock_forward(self, x):
-    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=False):
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
         return sdp_attnblock_forward(self, x)
 
 

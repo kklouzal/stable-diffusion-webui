@@ -228,11 +228,11 @@ def autocast(disable=False):
     if has_xpu() or has_mps() or cuda_no_autocast():
         return manual_cast(dtype)
 
-    return torch.autocast("cuda")
+    return torch.autocast("cuda", dtype=dtype)
 
 
 def without_autocast(disable=False):
-    return torch.autocast("cuda", enabled=False) if torch.is_autocast_enabled() and not disable else contextlib.nullcontext()
+    return torch.autocast("cuda", enabled=False) if torch.is_autocast_enabled("cuda") and not disable else contextlib.nullcontext()
 
 
 class NansException(Exception):
