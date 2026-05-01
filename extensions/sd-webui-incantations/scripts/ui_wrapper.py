@@ -33,5 +33,5 @@ class UIWrapper:
     def unhook_callbacks(self) -> None:
         pass
 
-    def get_xyz_axis_options(self) -> dict:
-        raise NotImplementedError
+    def get_xyz_axis_options(self) -> list:
+        return []

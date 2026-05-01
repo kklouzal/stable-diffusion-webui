@@ -4,12 +4,8 @@ import modules.scripts as scripts
 import gradio as gr
 from scripts.ui_wrapper import UIWrapper
 from modules import script_callbacks
-from modules.hypernetworks import hypernetwork
-#import modules.sd_hijack_optimizations
-from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams, AfterCFGCallbackParams
-from modules.prompt_parser import reconstruct_multicond_batch
+from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
-#from modules.shared import sd_model, opts
 from modules.sd_samplers_cfg_denoiser import catenate_conds
 from modules import shared
 
@@ -20,8 +16,6 @@ from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 logger.setLevel(environ.get("SD_WEBUI_LOG_LEVEL", logging.INFO))
-
-incantations_debug = environ.get("INCANTAIONS_DEBUG", False)
 
 """
 An unofficial implementation of "Self-Rectifying Diffusion Sampling with Perturbed-Attention Guidance" for Automatic1111 WebUI.
@@ -74,8 +68,6 @@ GitHub URL: https://github.com/v0xie/sd-webui-incantations
 """
 
 
-global_scale = 1
-
 SCHEDULES = [
         'Constant',
         'Clamp-Linear (c=4.0)',
@@ -120,17 +112,12 @@ class PAGStateParams:
                 self.text_uncond = None
                 self.make_condition_dict = None # callable lambda
                 self.crossattn_modules = [] # callable lambda
-                self.to_v_modules = []
-                self.to_out_modules = []
                 self.pag_x_out = None
                 self.batch_size = -1      # Batch size
-                self.conds_list = None
-                self.uncond_shape_0 = None
 
 
 class PAGExtensionScript(UIWrapper):
         def __init__(self):
-                self.cached_c = [None, None]
                 self._cfg_denoiser_callback = None
                 self._cfg_denoised_callback = None
                 self._pag_hook_handles = []
@@ -203,8 +190,7 @@ class PAGExtensionScript(UIWrapper):
                self.pag_process_batch(p, *args, **kwargs)
 
         def pag_process_batch(self, p: StableDiffusionProcessing, active, pag_scale, start_step, end_step, cfg_interval_enable, cfg_schedule, cfg_interval_low, cfg_interval_high, pag_sanf, *args, **kwargs):
-                # cleanup previous hooks always; callback cleanup is centralized
-                # in IncantBaseExtensionScript after all submodules finish.
+                # Clean previous hook handles before registering this batch.
                 self.remove_all_hooks()
 
                 active = getattr(p, "pag_active", active)
@@ -275,20 +261,18 @@ class PAGExtensionScript(UIWrapper):
                         return
                 pag_params.crossattn_modules = [m for m in cross_attn_modules if 'CrossAttention' in m.__class__.__name__]
 
-                # Use lambda to call the callback function with the parameters to avoid global variables
+                # Use lambdas to bind per-batch state without globals.
                 self.remove_callbacks()
                 cfg_denoise_lambda = lambda callback_params: self.on_cfg_denoiser_callback(callback_params, pag_params)
                 cfg_denoised_lambda = lambda callback_params: self.on_cfg_denoised_callback(callback_params, pag_params)
                 self._cfg_denoiser_callback = cfg_denoise_lambda
                 self._cfg_denoised_callback = cfg_denoised_lambda
-                #after_cfg_lambda = lambda x: self.cfg_after_cfg_callback(x, params)
                 if pag_params.pag_active:
                         self.ready_hijack_forward(pag_params.crossattn_modules, pag_scale)
 
-                logger.debug('Hooked callbacks')
+                logger.debug('Hooked PAG callbacks')
                 script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
                 script_callbacks.on_cfg_denoised(cfg_denoised_lambda)
-                #script_callbacks.on_cfg_after_cfg(after_cfg_lambda)
 
 
 
@@ -340,8 +324,8 @@ class PAGExtensionScript(UIWrapper):
                         to_v = getattr(module, 'to_v', None)
                         self.add_field_cross_attn_modules(module, 'pag_enable', False)
                         self.add_field_cross_attn_modules(module, 'pag_last_to_v', None)
-                        self.add_field_cross_attn_modules(to_v, 'pag_parent_module', [module])
-                        # self.add_field_cross_attn_modules(to_out, 'pag_parent_module', [module])
+                        if to_v is not None:
+                                self.add_field_cross_attn_modules(to_v, 'pag_parent_module', [module])
 
                 def to_v_pre_hook(module, input, kwargs, output):
                         """ Copy the output of the to_v module to the parent module """
@@ -353,20 +337,17 @@ class PAGExtensionScript(UIWrapper):
                         if hasattr(module, 'pag_enable') and getattr(module, 'pag_enable', False) is False:
                                 return
                         if not hasattr(module, 'pag_last_to_v'):
-                                # oops we forgot to unhook
                                 return
 
                         # get the last to_v output and save it
                         last_to_v = getattr(module, 'pag_last_to_v', None)
 
                         batch_size, seq_len, inner_dim = output.shape
-                        if last_to_v is not None:    
+                        if last_to_v is not None:
                                 # Multiplication by an expanded identity matrix is exactly this slice.
                                 # Avoid allocating the identity tensor and launching an einsum per attention call.
                                 return last_to_v[:, :seq_len, :]
-                        else:
-                                # this is bad
-                                return output
+                        return output
 
                 # Create hooks and keep RemovableHandles so cleanup does not need
                 # to rewrite PyTorch hook tables globally.
@@ -507,10 +488,6 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.image_cond = None
                         pag_params.sigma = None
         
-        def cfg_after_cfg_callback(self, params: AfterCFGCallbackParams, pag_params: PAGStateParams):
-                #self.unhook_callbacks(pag_params)
-                pass
-
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
                 extra_axis_options = {

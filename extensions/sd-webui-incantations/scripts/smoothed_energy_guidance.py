@@ -6,9 +6,8 @@ import modules.scripts as scripts
 import gradio as gr
 
 from modules import script_callbacks
-from modules.script_callbacks import CFGDenoiserParams, AfterCFGCallbackParams
+from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
-from modules import shared
 
 from scripts.ui_wrapper import UIWrapper
 from scripts.incant_utils import module_hooks
@@ -18,8 +17,6 @@ from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 logger.setLevel(environ.get("SD_WEBUI_LOG_LEVEL", logging.INFO))
-
-incantations_debug = environ.get("INCANTAIONS_DEBUG", False)
 
 """
 An unofficial implementation of "Smoothed Energy Guidance for SDXL" for Automatic1111 WebUI.
@@ -39,12 +36,9 @@ GitHub URL: https://github.com/v0xie/sd-webui-incantations
 """
 
 
-global_scale = 1
-
 class SEGStateParams:
         def __init__(self):
                 self.seg_active: bool = False      # SEG guidance scale
-                self.seg_scale: int = -1      # SEG guidance scale
                 self.seg_blur_sigma: float = 1.0
                 self.seg_blur_threshold: float = 15.0 # 2^13 ~= 8192
                 self.seg_start_step: int = 0
@@ -54,7 +48,6 @@ class SEGStateParams:
 
 class SEGExtensionScript(UIWrapper):
         def __init__(self):
-                self.cached_c = [None, None]
                 self.paste_field_names = []
                 self.infotext_fields = []
                 self._cfg_denoiser_callback = None
@@ -96,8 +89,7 @@ class SEGExtensionScript(UIWrapper):
                self.seg_process_batch(p, *args, **kwargs)
 
         def seg_process_batch(self, p: StableDiffusionProcessing, active, seg_blur_sigma, start_step, end_step, *args, **kwargs):
-                # cleanup previous hooks always; callback cleanup is centralized
-                # in IncantBaseExtensionScript after all submodules finish.
+                # Clean previous hook handles before registering this batch.
                 self.remove_all_hooks()
 
                 active = getattr(p, "seg_active", active)
@@ -255,9 +247,6 @@ class SEGExtensionScript(UIWrapper):
                         if hasattr(module.to_q, 'seg_enable'):
                                 module.to_q.seg_enable = in_interval
 
-        def cfg_after_cfg_callback(self, params: AfterCFGCallbackParams, seg_params: SEGStateParams):
-                pass
-
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
                 extra_axis_options = {
@@ -268,17 +257,6 @@ class SEGExtensionScript(UIWrapper):
                 }
                 return extra_axis_options
 
-
-# from modules/sd_samplers_cfg_denoiser.py:187-195
-def get_make_condition_dict_fn(text_uncond):
-        if shared.sd_model.model.conditioning_key == "crossattn-adm":
-                make_condition_dict = lambda c_crossattn, c_adm: {"c_crossattn": [c_crossattn], "c_adm": c_adm}
-        else:
-                if isinstance(text_uncond, dict):
-                        make_condition_dict = lambda c_crossattn, c_concat: {**c_crossattn, "c_concat": [c_concat]}
-                else:
-                        make_condition_dict = lambda c_crossattn, c_concat: {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
-        return make_condition_dict
 
 
 # XYZ Plot

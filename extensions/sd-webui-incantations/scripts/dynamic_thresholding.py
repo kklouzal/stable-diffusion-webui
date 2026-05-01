@@ -190,7 +190,7 @@ class Script(scripts.Script):
         if p.orig_latent_sampler_name:
             p.latent_sampler = p.orig_latent_sampler_name
         for added_sampler in p.fixed_samplers:
-            del sd_samplers.all_samplers_map[added_sampler]
+            sd_samplers.all_samplers_map.pop(added_sampler, None)
         del p.fixed_samplers
         del p.orig_sampler_name
         del p.orig_latent_sampler_name
