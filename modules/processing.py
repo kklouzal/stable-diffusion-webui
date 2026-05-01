@@ -636,7 +636,7 @@ def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
             try:
                 devices.test_for_nans(sample, "vae")
             except devices.NansException as e:
-                if shared.opts.auto_vae_precision_bfloat16:
+                if shared.opts.auto_vae_precision_bfloat16 and devices.dtype_vae != torch.bfloat16:
                     autofix_dtype = torch.bfloat16
                     autofix_dtype_text = "bfloat16"
                     autofix_dtype_setting = "Automatically convert VAE to bfloat16"

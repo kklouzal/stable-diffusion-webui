@@ -529,6 +529,12 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype == torch.float16 and devices.dtype_unet == torch.float16
 
+    if model.is_sdxl and not shared.cmd_opts.no_half and not shared.cmd_opts.no_half_vae and devices.device.type == 'cuda' and torch.cuda.is_bf16_supported():
+        devices.dtype_vae = torch.bfloat16
+        print('Using bfloat16 VAE for SDXL on BF16-capable CUDA device')
+    else:
+        devices.dtype_vae = torch.float32 if shared.cmd_opts.no_half or shared.cmd_opts.no_half_vae else torch.float16
+
     model.first_stage_model.to(devices.dtype_vae)
     timer.record("apply dtype to VAE")
 
