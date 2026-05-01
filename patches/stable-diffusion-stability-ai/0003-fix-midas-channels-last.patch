@@ -1,0 +1,27 @@
+diff --git a/ldm/modules/midas/midas/dpt_depth.py b/ldm/modules/midas/midas/dpt_depth.py
+index 4e9aab5..4024dd8 100644
+--- a/ldm/modules/midas/midas/dpt_depth.py
++++ b/ldm/modules/midas/midas/dpt_depth.py
+@@ -66,7 +66,7 @@ class DPT(BaseModel):
+ 
+     def forward(self, x):
+         if self.channels_last == True:
+-            x.contiguous(memory_format=torch.channels_last)
++            x = x.contiguous(memory_format=torch.channels_last)
+ 
+         layer_1, layer_2, layer_3, layer_4 = forward_vit(self.pretrained, x)
+ 
+diff --git a/ldm/modules/midas/midas/midas_net_custom.py b/ldm/modules/midas/midas/midas_net_custom.py
+index 50e4acb..6e4faf2 100644
+--- a/ldm/modules/midas/midas/midas_net_custom.py
++++ b/ldm/modules/midas/midas/midas_net_custom.py
+@@ -80,8 +80,7 @@ class MidasNet_small(BaseModel):
+             tensor: depth
+         """
+         if self.channels_last==True:
+-            print("self.channels_last = ", self.channels_last)
+-            x.contiguous(memory_format=torch.channels_last)
++            x = x.contiguous(memory_format=torch.channels_last)
+ 
+ 
+         layer_1 = self.pretrained.layer1(x)

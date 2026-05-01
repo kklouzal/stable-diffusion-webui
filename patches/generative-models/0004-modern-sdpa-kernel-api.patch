@@ -1,0 +1,113 @@
+diff --git a/scripts/tests/attention.py b/scripts/tests/attention.py
+index 4cd5543..84b4a7d 100644
+--- a/scripts/tests/attention.py
++++ b/scripts/tests/attention.py
+@@ -54,25 +54,13 @@ def benchmark_attn():
+     print(f"q/k/v shape:", query.shape, key.shape, value.shape)
+ 
+     # Lets explore the speed of each of the 3 implementations
+-    from torch.backends.cuda import SDPBackend, sdp_kernel
++    from torch.nn.attention import SDPBackend, sdpa_kernel
+ 
+-    # Helpful arguments mapper
++    # Helpful backend mapper
+     backend_map = {
+-        SDPBackend.MATH: {
+-            "enable_math": True,
+-            "enable_flash": False,
+-            "enable_mem_efficient": False,
+-        },
+-        SDPBackend.FLASH_ATTENTION: {
+-            "enable_math": False,
+-            "enable_flash": True,
+-            "enable_mem_efficient": False,
+-        },
+-        SDPBackend.EFFICIENT_ATTENTION: {
+-            "enable_math": False,
+-            "enable_flash": False,
+-            "enable_mem_efficient": True,
+-        },
++        SDPBackend.MATH: [SDPBackend.MATH],
++        SDPBackend.FLASH_ATTENTION: [SDPBackend.FLASH_ATTENTION],
++        SDPBackend.EFFICIENT_ATTENTION: [SDPBackend.EFFICIENT_ATTENTION],
+     }
+ 
+     from torch.profiler import ProfilerActivity, profile, record_function
+@@ -93,7 +81,7 @@ def benchmark_attn():
+     print(
+         f"The math implementation runs in {benchmark_torch_function_in_microseconds(F.scaled_dot_product_attention, query, key, value):.3f} microseconds"
+     )
+-    with sdp_kernel(**backend_map[SDPBackend.MATH]):
++    with sdpa_kernel(backend_map[SDPBackend.MATH]):
+         with profile(
+             activities=activities, record_shapes=False, profile_memory=True
+         ) as prof:
+@@ -102,7 +90,7 @@ def benchmark_attn():
+                     o = F.scaled_dot_product_attention(query, key, value)
+         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+ 
+-    with sdp_kernel(**backend_map[SDPBackend.FLASH_ATTENTION]):
++    with sdpa_kernel(backend_map[SDPBackend.FLASH_ATTENTION]):
+         try:
+             print(
+                 f"The flash attention implementation runs in {benchmark_torch_function_in_microseconds(F.scaled_dot_product_attention, query, key, value):.3f} microseconds"
+@@ -117,7 +105,7 @@ def benchmark_attn():
+                     o = F.scaled_dot_product_attention(query, key, value)
+         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+ 
+-    with sdp_kernel(**backend_map[SDPBackend.EFFICIENT_ATTENTION]):
++    with sdpa_kernel(backend_map[SDPBackend.EFFICIENT_ATTENTION]):
+         try:
+             print(
+                 f"The memory efficient implementation runs in {benchmark_torch_function_in_microseconds(F.scaled_dot_product_attention, query, key, value):.3f} microseconds"
+diff --git a/sgm/modules/attention.py b/sgm/modules/attention.py
+index f813be2..04b4e8f 100644
+--- a/sgm/modules/attention.py
++++ b/sgm/modules/attention.py
+@@ -10,31 +10,19 @@ from torch import nn
+ 
+ if version.parse(torch.__version__) >= version.parse("2.0.0"):
+     SDP_IS_AVAILABLE = True
+-    from torch.backends.cuda import SDPBackend, sdp_kernel
++    from torch.nn.attention import SDPBackend, sdpa_kernel
+ 
+     BACKEND_MAP = {
+-        SDPBackend.MATH: {
+-            "enable_math": True,
+-            "enable_flash": False,
+-            "enable_mem_efficient": False,
+-        },
+-        SDPBackend.FLASH_ATTENTION: {
+-            "enable_math": False,
+-            "enable_flash": True,
+-            "enable_mem_efficient": False,
+-        },
+-        SDPBackend.EFFICIENT_ATTENTION: {
+-            "enable_math": False,
+-            "enable_flash": False,
+-            "enable_mem_efficient": True,
+-        },
+-        None: {"enable_math": True, "enable_flash": True, "enable_mem_efficient": True},
++        SDPBackend.MATH: [SDPBackend.MATH],
++        SDPBackend.FLASH_ATTENTION: [SDPBackend.FLASH_ATTENTION],
++        SDPBackend.EFFICIENT_ATTENTION: [SDPBackend.EFFICIENT_ATTENTION],
++        None: [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH],
+     }
+ else:
+     from contextlib import nullcontext
+ 
+     SDP_IS_AVAILABLE = False
+-    sdp_kernel = nullcontext
++    sdpa_kernel = nullcontext
+     BACKEND_MAP = {}
+     print(
+         f"No SDP backend available, likely because you are running in pytorch versions < 2.0. In fact, "
+@@ -268,7 +256,7 @@ class CrossAttention(nn.Module):
+         out = einsum('b i j, b j d -> b i d', sim, v)
+         """
+         ## new
+-        with sdp_kernel(**BACKEND_MAP[self.backend]):
++        with sdpa_kernel(BACKEND_MAP[self.backend]):
+             # print("dispatching into backend", self.backend, "q/k/v shape: ", q.shape, k.shape, v.shape)
+             out = F.scaled_dot_product_attention(
+                 q, k, v, attn_mask=mask

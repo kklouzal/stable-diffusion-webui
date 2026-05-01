@@ -1,0 +1,56 @@
+diff --git a/tile_utils/attn.py b/tile_utils/attn.py
+index 5a74a36..6efd8ab 100644
+--- a/tile_utils/attn.py
++++ b/tile_utils/attn.py
+@@ -4,6 +4,7 @@
+ '''
+ import math
+ import torch
++from torch.nn.attention import SDPBackend, sdpa_kernel
+ 
+ from modules import shared, sd_hijack
+ from einops import rearrange
+@@ -13,7 +14,7 @@ try:
+     import xformers
+     import xformers.ops
+ except ImportError:
+-    pass
++    xformers = None
+ 
+ 
+ def get_attn_func():
+@@ -22,18 +23,22 @@ def get_attn_func():
+         return attn_forward
+     method = method.lower()
+     # The method should be one of the following:
+-    # ['none', 'sdp-no-mem', 'sdp', 'xformers', ''sub-quadratic', 'v1', 'invokeai', 'doggettx']
+-    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
++    # ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']
++    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
+         print(f"[Tiled VAE] Warning: Unknown attention optimization method {method}. Please try to update the extension.")
+         return attn_forward
+     
+     if method == 'none':
+         return attn_forward
+     elif method == 'xformers':
++        if xformers is None:
++            print("[Tiled VAE] Warning: xformers attention requested but xformers is unavailable; falling back to SDP.")
++            return sdp_attnblock_forward
+         return xformers_attnblock_forward
+     elif method == 'sdp-no-mem':
+         return sdp_no_mem_attnblock_forward
+-    elif method == 'sdp':
++    elif method in {'sdp', 'sage2', 'sage3'}:
++        # SageAttention A1111 backends do not expose a Tiled VAE AttnBlock path; SDP is the safest fast decode fallback.
+         return sdp_attnblock_forward
+     elif method == 'sub-quadratic':
+         return sub_quad_attnblock_forward
+@@ -147,7 +152,7 @@ def cross_attention_attnblock_forward(self, h_):
+     return h3
+ 
+ def sdp_no_mem_attnblock_forward(self, x):
+-    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=False):
++    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+         return sdp_attnblock_forward(self, x)
+ 
+ def sdp_attnblock_forward(self, h_):

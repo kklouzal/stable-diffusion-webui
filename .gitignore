@@ -42,3 +42,7 @@ notification.mp3
 /cache
 trace.json
 /sysinfo-????-??-??-??-??.json
+# GB10 local runtime/editor state
+.env
+.env.*
+out/

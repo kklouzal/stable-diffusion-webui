@@ -1,0 +1,54 @@
+diff --git a/main.py b/main.py
+index 384c6fe..f38f3b4 100644
+--- a/main.py
++++ b/main.py
+@@ -408,8 +408,8 @@ class ImageLogger(Callback):
+                 pl_module.eval()
+ 
+             gpu_autocast_kwargs = {
+-                "enabled": self.enable_autocast,  # torch.is_autocast_enabled(),
+-                "dtype": torch.get_autocast_gpu_dtype(),
++                "enabled": self.enable_autocast,  # torch.is_autocast_enabled("cuda"),
++                "dtype": torch.get_autocast_dtype("cuda"),
+                 "cache_enabled": torch.is_autocast_cache_enabled(),
+             }
+             with torch.no_grad(), torch.amp.autocast("cuda", **gpu_autocast_kwargs):
+diff --git a/sgm/modules/diffusionmodules/util.py b/sgm/modules/diffusionmodules/util.py
+index 55141ec..cb2ae7b 100644
+--- a/sgm/modules/diffusionmodules/util.py
++++ b/sgm/modules/diffusionmodules/util.py
+@@ -88,8 +88,8 @@ class MixedCheckpointFunction(torch.autograd.Function):
+         ctx.end_tensors = length_tensors
+         ctx.end_non_tensors = length_tensors + length_non_tensors
+         ctx.gpu_autocast_kwargs = {
+-            "enabled": torch.is_autocast_enabled(),
+-            "dtype": torch.get_autocast_gpu_dtype(),
++            "enabled": torch.is_autocast_enabled("cuda"),
++            "dtype": torch.get_autocast_dtype("cuda"),
+             "cache_enabled": torch.is_autocast_cache_enabled(),
+         }
+         assert (
+@@ -174,8 +174,8 @@ class CheckpointFunction(torch.autograd.Function):
+         ctx.input_tensors = list(args[:length])
+         ctx.input_params = list(args[length:])
+         ctx.gpu_autocast_kwargs = {
+-            "enabled": torch.is_autocast_enabled(),
+-            "dtype": torch.get_autocast_gpu_dtype(),
++            "enabled": torch.is_autocast_enabled("cuda"),
++            "dtype": torch.get_autocast_dtype("cuda"),
+             "cache_enabled": torch.is_autocast_cache_enabled(),
+         }
+         with torch.no_grad():
+diff --git a/sgm/util.py b/sgm/util.py
+index 89a3f5c..28de770 100644
+--- a/sgm/util.py
++++ b/sgm/util.py
+@@ -54,7 +54,7 @@ def autocast(f, enabled=True):
+         with torch.amp.autocast(
+             "cuda",
+             enabled=enabled,
+-            dtype=torch.get_autocast_gpu_dtype(),
++            dtype=torch.get_autocast_dtype("cuda"),
+             cache_enabled=torch.is_autocast_cache_enabled(),
+         ):
+             return f(*args, **kwargs)

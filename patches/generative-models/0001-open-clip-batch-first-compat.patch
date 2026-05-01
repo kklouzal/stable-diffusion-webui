@@ -1,0 +1,74 @@
+diff --git a/sgm/modules/encoders/modules.py b/sgm/modules/encoders/modules.py
+index ed3f2d2..3304c68 100644
+--- a/sgm/modules/encoders/modules.py
++++ b/sgm/modules/encoders/modules.py
+@@ -405,6 +405,14 @@ class FrozenCLIPEmbedder(AbstractEmbModel):
+         return self(text)
+ 
+ 
++def open_clip_transformer_batch_first(model):
++    resblocks = getattr(getattr(model, "transformer", None), "resblocks", None)
++    if not resblocks:
++        return False
++    attn = getattr(resblocks[0], "attn", None)
++    return bool(getattr(attn, "batch_first", False))
++
++
+ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
+     """
+     Uses the OpenCLIP transformer encoder for text
+@@ -464,10 +472,12 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
+         return z[self.layer]
+ 
+     def encode_with_transformer(self, text):
++        batch_first = open_clip_transformer_batch_first(self.model)
+         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+         x = x + self.model.positional_embedding
+-        x = x.permute(1, 0, 2)  # NLD -> LND
+-        x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
++        if not batch_first:
++            x = x.permute(1, 0, 2)  # NLD -> LND
++        x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask, batch_first=batch_first)
+         if self.legacy:
+             x = x[self.layer]
+             x = self.model.ln_final(x)
+@@ -488,11 +498,11 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
+         )
+         return x
+ 
+-    def text_transformer_forward(self, x: torch.Tensor, attn_mask=None):
++    def text_transformer_forward(self, x: torch.Tensor, attn_mask=None, batch_first=False):
+         outputs = {}
+         for i, r in enumerate(self.model.transformer.resblocks):
+             if i == len(self.model.transformer.resblocks) - 1:
+-                outputs["penultimate"] = x.permute(1, 0, 2)  # LND -> NLD
++                outputs["penultimate"] = x if batch_first else x.permute(1, 0, 2)  # LND -> NLD
+             if (
+                 self.model.transformer.grad_checkpointing
+                 and not torch.jit.is_scripting()
+@@ -500,7 +510,7 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
+                 x = checkpoint(r, x, attn_mask)
+             else:
+                 x = r(x, attn_mask=attn_mask)
+-        outputs["last"] = x.permute(1, 0, 2)  # LND -> NLD
++        outputs["last"] = x if batch_first else x.permute(1, 0, 2)  # LND -> NLD
+         return outputs
+ 
+     def encode(self, text):
+@@ -554,11 +564,14 @@ class FrozenOpenCLIPEmbedder(AbstractEmbModel):
+         return z
+ 
+     def encode_with_transformer(self, text):
++        batch_first = open_clip_transformer_batch_first(self.model)
+         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+         x = x + self.model.positional_embedding
+-        x = x.permute(1, 0, 2)  # NLD -> LND
++        if not batch_first:
++            x = x.permute(1, 0, 2)  # NLD -> LND
+         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
+-        x = x.permute(1, 0, 2)  # LND -> NLD
++        if not batch_first:
++            x = x.permute(1, 0, 2)  # LND -> NLD
+         x = self.model.ln_final(x)
+         return x
+ 

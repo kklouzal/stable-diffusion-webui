@@ -1,0 +1,28 @@
+diff --git a/ldm/modules/diffusionmodules/util.py b/ldm/modules/diffusionmodules/util.py
+index 0238e6e..c8a579e 100644
+--- a/ldm/modules/diffusionmodules/util.py
++++ b/ldm/modules/diffusionmodules/util.py
+@@ -129,8 +129,8 @@ class CheckpointFunction(torch.autograd.Function):
+         ctx.run_function = run_function
+         ctx.input_tensors = list(args[:length])
+         ctx.input_params = list(args[length:])
+-        ctx.gpu_autocast_kwargs = {"enabled": torch.is_autocast_enabled(),
+-                                   "dtype": torch.get_autocast_gpu_dtype(),
++        ctx.gpu_autocast_kwargs = {"enabled": torch.is_autocast_enabled("cuda"),
++                                   "dtype": torch.get_autocast_dtype("cuda"),
+                                    "cache_enabled": torch.is_autocast_cache_enabled()}
+         with torch.no_grad():
+             output_tensors = ctx.run_function(*ctx.input_tensors)
+diff --git a/ldm/util.py b/ldm/util.py
+index b8fd99f..201c3ec 100644
+--- a/ldm/util.py
++++ b/ldm/util.py
+@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
+ def autocast(f):
+     def do_autocast(*args, **kwargs):
+         with torch.amp.autocast("cuda", enabled=True,
+-                                     dtype=torch.get_autocast_gpu_dtype(),
++                                     dtype=torch.get_autocast_dtype("cuda"),
+                                      cache_enabled=torch.is_autocast_cache_enabled()):
+             return f(*args, **kwargs)
+ 

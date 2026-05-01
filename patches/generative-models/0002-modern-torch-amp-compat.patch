@@ -1,0 +1,49 @@
+diff --git a/main.py b/main.py
+index 5e03c1c..384c6fe 100644
+--- a/main.py
++++ b/main.py
+@@ -412,7 +412,7 @@ class ImageLogger(Callback):
+                 "dtype": torch.get_autocast_gpu_dtype(),
+                 "cache_enabled": torch.is_autocast_cache_enabled(),
+             }
+-            with torch.no_grad(), torch.cuda.amp.autocast(**gpu_autocast_kwargs):
++            with torch.no_grad(), torch.amp.autocast("cuda", **gpu_autocast_kwargs):
+                 images = pl_module.log_images(
+                     batch, split=split, **self.log_images_kwargs
+                 )
+diff --git a/sgm/modules/diffusionmodules/util.py b/sgm/modules/diffusionmodules/util.py
+index 069ff13..55141ec 100644
+--- a/sgm/modules/diffusionmodules/util.py
++++ b/sgm/modules/diffusionmodules/util.py
+@@ -123,7 +123,7 @@ class MixedCheckpointFunction(torch.autograd.Function):
+             for key in ctx.input_tensors
+         }
+ 
+-        with torch.enable_grad(), torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs):
++        with torch.enable_grad(), torch.amp.autocast("cuda", **ctx.gpu_autocast_kwargs):
+             # Fixes a bug where the first op in run_function modifies the
+             # Tensor storage in place, which is not allowed for detach()'d
+             # Tensors.
+@@ -185,7 +185,7 @@ class CheckpointFunction(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, *output_grads):
+         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+-        with torch.enable_grad(), torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs):
++        with torch.enable_grad(), torch.amp.autocast("cuda", **ctx.gpu_autocast_kwargs):
+             # Fixes a bug where the first op in run_function modifies the
+             # Tensor storage in place, which is not allowed for detach()'d
+             # Tensors.
+diff --git a/sgm/util.py b/sgm/util.py
+index c5e68f4..89a3f5c 100644
+--- a/sgm/util.py
++++ b/sgm/util.py
+@@ -51,7 +51,8 @@ def is_power_of_two(n):
+ 
+ def autocast(f, enabled=True):
+     def do_autocast(*args, **kwargs):
+-        with torch.cuda.amp.autocast(
++        with torch.amp.autocast(
++            "cuda",
+             enabled=enabled,
+             dtype=torch.get_autocast_gpu_dtype(),
+             cache_enabled=torch.is_autocast_cache_enabled(),

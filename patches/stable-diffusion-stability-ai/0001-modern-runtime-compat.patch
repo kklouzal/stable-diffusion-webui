@@ -1,0 +1,102 @@
+diff --git a/ldm/models/diffusion/ddpm.py b/ldm/models/diffusion/ddpm.py
+index 3350c03..9ba2919 100644
+--- a/ldm/models/diffusion/ddpm.py
++++ b/ldm/models/diffusion/ddpm.py
+@@ -17,7 +17,7 @@ from functools import partial
+ import itertools
+ from tqdm import tqdm
+ from torchvision.utils import make_grid
+-from pytorch_lightning.utilities.distributed import rank_zero_only
++from pytorch_lightning.utilities.rank_zero import rank_zero_only
+ from omegaconf import ListConfig
+ 
+ from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
+diff --git a/ldm/models/diffusion/dpm_solver/dpm_solver.py b/ldm/models/diffusion/dpm_solver/dpm_solver.py
+index da8d41f..0a77b23 100644
+--- a/ldm/models/diffusion/dpm_solver/dpm_solver.py
++++ b/ldm/models/diffusion/dpm_solver/dpm_solver.py
+@@ -13,7 +13,7 @@ class NoiseScheduleVP:
+             continuous_beta_0=0.1,
+             continuous_beta_1=20.,
+     ):
+-        """Create a wrapper class for the forward SDE (VP type).
++        r"""Create a wrapper class for the forward SDE (VP type).
+         ***
+         Update: We support discrete-time diffusion models by implementing a picewise linear interpolation for log_alpha_t.
+                 We recommend to use schedule='discrete' for the discrete-time diffusion models, especially for high-resolution images.
+diff --git a/ldm/modules/diffusionmodules/util.py b/ldm/modules/diffusionmodules/util.py
+index daf35da..0238e6e 100644
+--- a/ldm/modules/diffusionmodules/util.py
++++ b/ldm/modules/diffusionmodules/util.py
+@@ -140,7 +140,7 @@ class CheckpointFunction(torch.autograd.Function):
+     def backward(ctx, *output_grads):
+         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+         with torch.enable_grad(), \
+-                torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs):
++                torch.amp.autocast("cuda", **ctx.gpu_autocast_kwargs):
+             # Fixes a bug where the first op in run_function modifies the
+             # Tensor storage in place, which is not allowed for detach()'d
+             # Tensors.
+diff --git a/ldm/modules/image_degradation/utils_image.py b/ldm/modules/image_degradation/utils_image.py
+index 0175f15..cb2b9f1 100644
+--- a/ldm/modules/image_degradation/utils_image.py
++++ b/ldm/modules/image_degradation/utils_image.py
+@@ -94,8 +94,8 @@ def patches_from_image(img, p_size=512, p_overlap=64, p_max=800):
+     w, h = img.shape[:2]
+     patches = []
+     if w > p_max and h > p_max:
+-        w1 = list(np.arange(0, w-p_size, p_size-p_overlap, dtype=np.int))
+-        h1 = list(np.arange(0, h-p_size, p_size-p_overlap, dtype=np.int))
++        w1 = list(np.arange(0, w-p_size, p_size-p_overlap, dtype=int))
++        h1 = list(np.arange(0, h-p_size, p_size-p_overlap, dtype=int))
+         w1.append(w-p_size)
+         h1.append(h-p_size)
+ #        print(w1)
+diff --git a/ldm/modules/karlo/kakao/sampler.py b/ldm/modules/karlo/kakao/sampler.py
+index b56bf2f..3172d97 100644
+--- a/ldm/modules/karlo/kakao/sampler.py
++++ b/ldm/modules/karlo/kakao/sampler.py
+@@ -99,7 +99,7 @@ class T2ISampler(BaseSampler):
+             progressive_mode=None,
+     ) -> Iterator[torch.Tensor]:
+         assert progressive_mode in ("loop", "stage", "final")
+-        with torch.no_grad(), torch.cuda.amp.autocast():
++        with torch.no_grad(), torch.amp.autocast("cuda"):
+             (
+                 prompts_batch,
+                 prior_cf_scales_batch,
+@@ -246,7 +246,7 @@ class PriorSampler(BaseSampler):
+             progressive_mode=None,
+     ) -> Iterator[torch.Tensor]:
+         assert progressive_mode in ("loop", "stage", "final")
+-        with torch.no_grad(), torch.cuda.amp.autocast():
++        with torch.no_grad(), torch.amp.autocast("cuda"):
+             (
+                 prompts_batch,
+                 prior_cf_scales_batch,
+diff --git a/ldm/util.py b/ldm/util.py
+index 9ede259..b8fd99f 100644
+--- a/ldm/util.py
++++ b/ldm/util.py
+@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
+ 
+ def autocast(f):
+     def do_autocast(*args, **kwargs):
+-        with torch.cuda.amp.autocast(enabled=True,
++        with torch.amp.autocast("cuda", enabled=True,
+                                      dtype=torch.get_autocast_gpu_dtype(),
+                                      cache_enabled=torch.is_autocast_cache_enabled()):
+             return f(*args, **kwargs)
+diff --git a/scripts/txt2img.py b/scripts/txt2img.py
+index 9d955e3..c13a7c0 100644
+--- a/scripts/txt2img.py
++++ b/scripts/txt2img.py
+@@ -261,7 +261,7 @@ def main(opt):
+         transformer = model.cond_stage_model.model
+         unet = model.model.diffusion_model
+         decoder = model.first_stage_model.decoder
+-        additional_context = torch.cpu.amp.autocast() if opt.bf16 else nullcontext()
++        additional_context = torch.amp.autocast("cpu") if opt.bf16 else nullcontext()
+         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+ 
+         if opt.bf16 and not opt.torchscript and not opt.ipex:
