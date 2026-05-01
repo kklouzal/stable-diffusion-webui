@@ -65,6 +65,21 @@ def create_config(ckpt_result, config_source, a, b, c):
 checkpoint_dict_skip_on_merge = ["cond_stage_model.transformer.text_model.embeddings.position_ids"]
 
 
+def stringify_safetensors_metadata(metadata):
+    if not metadata:
+        return None
+
+    result = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        result[str(key)] = value
+
+    return result or None
+
+
 def to_half(tensor, enable):
     if enable and tensor.dtype == torch.float:
         return tensor.half()
@@ -312,7 +327,7 @@ def run_modelmerger(id_task, primary_model_name, secondary_model_name, tertiary_
 
     _, extension = os.path.splitext(output_modelname)
     if extension.lower() == ".safetensors":
-        safetensors.torch.save_file(theta_0, output_modelname, metadata=metadata if len(metadata)>0 else None)
+        safetensors.torch.save_file(theta_0, output_modelname, metadata=stringify_safetensors_metadata(metadata))
     else:
         torch.save(theta_0, output_modelname)
 
