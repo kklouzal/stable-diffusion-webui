@@ -229,61 +229,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention/sageattention3_blackwell \
     && ls -1 /opt/wheels/sageattention-*.whl /opt/wheels/sageattn3-*.whl
 
-FROM torch-base AS direct-base
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-SHELL ["/bin/bash", "-lc"]
-WORKDIR /opt/build
-
-COPY --from=wheelbuilder /opt/wheels /opt/wheels
-COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
-COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
-COPY requirements_versions.txt /opt/build/requirements-image.txt
-COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
-
-# Direct-dependency hoist doctrine:
-# TODO: the fork now owns the direct requirements in requirements_versions.txt.
-# Next cleanup: collapse this protected direct/indirect split into normal
-# image-level package installation once GB10 validation confirms the modernized
-# requirements resolve cleanly.
-# - treat the repo-selected A1111 direct package set as the main controlled surface
-# - hoist that direct set into a reusable base layer without allowing it to rewrite the CUDA/torch stack
-# - immediately resnapshot the protected package set so runtime installs cannot later shadow the hoisted directs either
-RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
-    && SOURCE=/opt/build/requirements-image.txt TARGET=/opt/build/requirements-direct-hoisted.txt BASE_PROTECTED_NAMES_FILE=/opt/build/base-python-protected-names.txt python /opt/build/filter-resolved-requirements.py \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/build/base-python-protected-constraints.txt -r /opt/build/requirements-direct-hoisted.txt \
-    && python -m pip install --break-system-packages --no-deps -c /opt/build/base-python-protected-constraints.txt /opt/wheels/clip-*.whl \
-    && python - <<'PY'
-import importlib.metadata as md
-import json
-import re
-from pathlib import Path
-
-def normalize(name: str) -> str:
-    return re.sub(r'[-_.]+', '-', name.strip().lower())
-
-pins = []
-seen = set()
-for dist in sorted(md.distributions(), key=lambda d: normalize(d.metadata.get('Name', ''))):
-    name = dist.metadata.get('Name')
-    if not name:
-        continue
-    norm = normalize(name)
-    if norm in seen:
-        continue
-    seen.add(norm)
-    pins.append(f'{norm}=={dist.version}')
-
-Path('/opt/build/base-python-protected-constraints.txt').write_text('\n'.join(pins) + '\n')
-Path('/opt/build/base-python-protected-names.txt').write_text('\n'.join(x.split('==', 1)[0] for x in pins) + '\n')
-print(json.dumps({
-    'protected_count_after_direct_hoist': len(pins),
-    'clip': md.version('clip'),
-}, indent=2))
-PY
-
-FROM direct-base AS runtime
+FROM torch-base AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG A1111_UID=2323
@@ -304,8 +251,8 @@ COPY --from=source /opt/build/stable-diffusion-webui /opt/stable-diffusion-webui
 COPY extensions/sd-webui-incantations /opt/stable-diffusion-webui/extensions/sd-webui-incantations
 COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
-COPY --from=direct-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
-COPY --from=direct-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
+COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
+COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
 COPY requirements_versions.txt /opt/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
@@ -314,28 +261,37 @@ COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 
 # Container-owned environment doctrine:
 # - do not let upstream webui.sh create/manage its own venv here
-# - do not let upstream launch bootstrap replace the CUDA-base + direct-hoisted package set
-# - do install only the remaining resolved indirect closure into the runtime layer
-# - do keep the expanded protected package set frozen via constraints during later installs
+# - do not let upstream launch bootstrap replace the CUDA-base + PyTorch package set
+# - do aggressively protect all packages present in the torch-base layer so later
+#   A1111 installs cannot upgrade or shadow CUDA/PyTorch/base-image packages
+# - do install the repo-owned A1111 dependency closure from requirements_versions.txt
+#   as normal application dependencies, filtered only against the protected base set
 RUN python - <<'PY'
 import importlib.metadata as md
 import json
+
+def version(name):
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return None
+
 print(json.dumps({
     'before_runtime_install': {
-        'torch': md.version('torch'),
-        'torchvision': md.version('torchvision'),
-        'torchaudio': md.version('torchaudio'),
-        'gradio': md.version('gradio'),
-        'transformers': md.version('transformers'),
-        'clip': md.version('clip'),
+        'torch': version('torch'),
+        'torchvision': version('torchvision'),
+        'torchaudio': version('torchaudio'),
+        'gradio': version('gradio'),
+        'transformers': version('transformers'),
+        'clip': version('clip'),
     }
 }, indent=2))
 PY
 RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
-    && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
+    && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels sageattention sageattn3 \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl sageattention sageattn3 \
     && python - <<'PY'
 import importlib.metadata as md
 import json
