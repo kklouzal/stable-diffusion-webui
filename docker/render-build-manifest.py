@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 BASE_CONSTRAINTS = Path(os.environ.get('BASE_CONSTRAINTS', '/opt/base-python-protected-constraints.txt'))
-DIRECT_REQUIREMENTS = Path(os.environ.get('DIRECT_REQUIREMENTS', '/opt/requirements-image.txt'))
+DIRECT_REQUIREMENTS = Path(os.environ.get('DIRECT_REQUIREMENTS', '/opt/requirements-image.txt'))  # copied from repo requirements_versions.txt
 A1111_DIR = Path(os.environ.get('A1111_DIR', '/opt/stable-diffusion-webui'))
 OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST.txt')))
 OUTPUT_JSON = Path(os.environ.get('OUTPUT_JSON', str(A1111_DIR / 'BUILD_MANIFEST.json')))
@@ -143,12 +143,10 @@ def direct_reason(name: str) -> str:
     hoisted = name in base_pkgs
     if name == 'clip':
         return 'Repo-Built-Wheel|Hoisted-Into-Base' if hoisted else 'Repo-Built-Wheel'
-    repo_line = repo_direct_map.get(name, '')
-    upstream_line = upstream_versions_map.get(name, '')
-    if upstream_line and canonical_req_line(repo_line) == canonical_req_line(upstream_line):
-        return 'A1111-Upstream-Pin|Hoisted-Into-Base' if hoisted else 'A1111-Upstream-Pin'
+    if name in repo_direct_map:
+        return 'Repo-Owned-Requirement|Hoisted-Into-Base' if hoisted else 'Repo-Owned-Requirement'
     if name in upstream_direct:
-        return 'Repo-Selected-Direct|A1111-Override|Hoisted-Into-Base' if hoisted else 'Repo-Selected-Direct|A1111-Override'
+        return 'A1111-Requirement|Hoisted-Into-Base' if hoisted else 'A1111-Requirement'
     return 'Repo-Selected-Direct|Hoisted-Into-Base' if hoisted else 'Repo-Selected-Direct'
 
 
@@ -205,7 +203,7 @@ lines.append('=== GB10 A1111 build manifest ===')
 lines.append('')
 lines.append('[classification summary]')
 lines.append('base-layer-provided = framework/base packages present before the A1111 direct-dependency hoist')
-lines.append('a1111-direct = explicitly selected by upstream A1111 requirements or repo-owned direct additions, whether hoisted into base or not')
+lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt, whether hoisted into base or not')
 lines.append('a1111-indirect = transitive dependencies pulled in under the direct set')
 lines.append(f"base_layer_provided: {len(sections['base'])}")
 lines.append(f"a1111_direct: {len(sections['direct'])}")

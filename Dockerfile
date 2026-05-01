@@ -166,7 +166,7 @@ RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --profile minimal --default-t
 COPY --from=source /opt/build/stable-diffusion-webui /opt/build/stable-diffusion-webui
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
-COPY docker/requirements-image.txt /opt/build/requirements-image.txt
+COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
@@ -177,10 +177,11 @@ COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
 # - prebuild wheels for the full resolved closure in this throwaway stage
 # - temporary compatibility concession: tokenizers 0.13.x fails on current Rust with
 #   `invalid_reference_casting`; relax that single lint in this builder stage only
-# - local resolver compatibility concession: the current Gradio runtime pin still advertises
-#   stale `numpy~=1.0` wheel metadata even though this stack runs on numpy 2.x, so the resolver
-#   input patches that metadata to `numpy>=1.0` before generating the dry-run report used to
-#   build the wheel closure
+# - local resolver compatibility concession: Gradio 3.41.2 still advertises stale
+#   `numpy~=1.0` wheel metadata even though this stack runs on numpy 2.x, so the resolver
+#   input patches that metadata to `numpy>=1.0` before generating the dry-run report used
+#   to build the wheel closure. This should disappear when the UI stack can move past
+#   the Gradio 3.x compatibility lane.
 RUN rustc --version \
     && cargo --version \
     && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
@@ -238,13 +239,14 @@ WORKDIR /opt/build
 COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
-COPY docker/requirements-image.txt /opt/build/requirements-image.txt
+COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 
 # Direct-dependency hoist doctrine:
-# TODO: this is the remaining legacy GB10 dependency-freeze lane. Once the fork's
-# requirements are directly modernized, collapse this into normal image-level
-# package installation and remove the protected direct/indirect split.
+# TODO: the fork now owns the direct requirements in requirements_versions.txt.
+# Next cleanup: collapse this protected direct/indirect split into normal
+# image-level package installation once GB10 validation confirms the modernized
+# requirements resolve cleanly.
 # - treat the repo-selected A1111 direct package set as the main controlled surface
 # - hoist that direct set into a reusable base layer without allowing it to rewrite the CUDA/torch stack
 # - immediately resnapshot the protected package set so runtime installs cannot later shadow the hoisted directs either
@@ -304,7 +306,7 @@ COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
 COPY --from=direct-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
 COPY --from=direct-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
-COPY docker/requirements-image.txt /opt/requirements-image.txt
+COPY requirements_versions.txt /opt/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
