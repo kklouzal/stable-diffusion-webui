@@ -70,7 +70,8 @@ class DisableInitialization(ReplaceHelper):
             return res
 
         def transformers_modeling_utils_load_pretrained_model(*args, **kwargs):
-            args = args[0:3] + ('/', ) + args[4:]  # resolved_archive_file; must set it to something to prevent what seems to be a bug
+            if len(args) > 3 and isinstance(args[3], str):
+                args = args[0:3] + ('/', ) + args[4:]  # resolved_archive_file; must set it to something to prevent what seems to be a bug
             return self.transformers_modeling_utils_load_pretrained_model(*args, **kwargs)
 
         def transformers_utils_hub_get_file_from_cache(original, url, *args, **kwargs):

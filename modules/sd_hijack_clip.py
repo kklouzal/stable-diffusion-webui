@@ -7,6 +7,14 @@ from modules import prompt_parser, devices, sd_hijack, sd_emphasis
 from modules.shared import opts
 
 
+def clip_text_transformer_module(transformer):
+    return getattr(transformer, 'text_model', transformer)
+
+
+def clip_text_embeddings(transformer):
+    return clip_text_transformer_module(transformer).embeddings
+
+
 class PromptChunk:
     """
     This object contains token ids, weight (multipliers:1.4) and textual inversion embedding info for a chunk of prompt.
@@ -353,14 +361,14 @@ class FrozenCLIPEmbedderWithCustomWords(FrozenCLIPEmbedderWithCustomWordsBase):
 
         if opts.CLIP_stop_at_last_layers > 1:
             z = outputs.hidden_states[-opts.CLIP_stop_at_last_layers]
-            z = self.wrapped.transformer.text_model.final_layer_norm(z)
+            z = clip_text_transformer_module(self.wrapped.transformer).final_layer_norm(z)
         else:
             z = outputs.last_hidden_state
 
         return z
 
     def encode_embedding_init_text(self, init_text, nvpt):
-        embedding_layer = self.wrapped.transformer.text_model.embeddings
+        embedding_layer = clip_text_embeddings(self.wrapped.transformer)
         ids = self.wrapped.tokenizer(init_text, max_length=nvpt, return_tensors="pt", add_special_tokens=False)["input_ids"]
         embedded = embedding_layer.token_embedding.wrapped(ids.to(embedding_layer.token_embedding.wrapped.weight.device)).squeeze(0)
 
