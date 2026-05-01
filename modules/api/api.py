@@ -31,7 +31,7 @@ from typing import Any
 import piexif
 import piexif.helper
 from contextlib import closing
-from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task
+from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
 
 def script_name_to_index(name, scripts):
     try:
@@ -475,27 +475,33 @@ class Api:
         args.pop('save_images', None)
 
         add_task_to_queue(task_id)
+        task_finished = False
 
-        with self.queue_lock:
-            with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
-                p.is_api = True
-                p.scripts = script_runner
-                p.outpath_grids = opts.outdir_txt2img_grids
-                p.outpath_samples = opts.outdir_txt2img_samples
+        try:
+            with self.queue_lock:
+                with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
+                    p.is_api = True
+                    p.scripts = script_runner
+                    p.outpath_grids = opts.outdir_txt2img_grids
+                    p.outpath_samples = opts.outdir_txt2img_samples
 
-                try:
-                    shared.state.begin(job="scripts_txt2img")
-                    start_task(task_id)
-                    if selectable_scripts is not None:
-                        p.script_args = script_args
-                        processed = scripts.scripts_txt2img.run(p, *p.script_args) # Need to pass args as list here
-                    else:
-                        p.script_args = tuple(script_args) # Need to pass args as tuple here
-                        processed = process_images(p)
-                    finish_task(task_id)
-                finally:
-                    shared.state.end()
-                    shared.total_tqdm.clear()
+                    try:
+                        shared.state.begin(job="scripts_txt2img")
+                        start_task(task_id)
+                        if selectable_scripts is not None:
+                            p.script_args = script_args
+                            processed = scripts.scripts_txt2img.run(p, *p.script_args) # Need to pass args as list here
+                        else:
+                            p.script_args = tuple(script_args) # Need to pass args as tuple here
+                            processed = process_images(p)
+                    finally:
+                        finish_task(task_id)
+                        task_finished = True
+                        shared.state.end()
+                        shared.total_tqdm.clear()
+        finally:
+            if not task_finished:
+                pending_tasks.pop(task_id, None)
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
@@ -544,29 +550,37 @@ class Api:
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
 
+        decoded_init_images = [decode_base64_to_image(x) for x in init_images]
+
         add_task_to_queue(task_id)
+        task_finished = False
 
-        with self.queue_lock:
-            with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
-                p.init_images = [decode_base64_to_image(x) for x in init_images]
-                p.is_api = True
-                p.scripts = script_runner
-                p.outpath_grids = opts.outdir_img2img_grids
-                p.outpath_samples = opts.outdir_img2img_samples
+        try:
+            with self.queue_lock:
+                with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
+                    p.init_images = decoded_init_images
+                    p.is_api = True
+                    p.scripts = script_runner
+                    p.outpath_grids = opts.outdir_img2img_grids
+                    p.outpath_samples = opts.outdir_img2img_samples
 
-                try:
-                    shared.state.begin(job="scripts_img2img")
-                    start_task(task_id)
-                    if selectable_scripts is not None:
-                        p.script_args = script_args
-                        processed = scripts.scripts_img2img.run(p, *p.script_args) # Need to pass args as list here
-                    else:
-                        p.script_args = tuple(script_args) # Need to pass args as tuple here
-                        processed = process_images(p)
-                    finish_task(task_id)
-                finally:
-                    shared.state.end()
-                    shared.total_tqdm.clear()
+                    try:
+                        shared.state.begin(job="scripts_img2img")
+                        start_task(task_id)
+                        if selectable_scripts is not None:
+                            p.script_args = script_args
+                            processed = scripts.scripts_img2img.run(p, *p.script_args) # Need to pass args as list here
+                        else:
+                            p.script_args = tuple(script_args) # Need to pass args as tuple here
+                            processed = process_images(p)
+                    finally:
+                        finish_task(task_id)
+                        task_finished = True
+                        shared.state.end()
+                        shared.total_tqdm.clear()
+        finally:
+            if not task_finished:
+                pending_tasks.pop(task_id, None)
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 

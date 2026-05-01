@@ -66,3 +66,39 @@ def test_img2img_sd_upscale_performed(url_img2img, simple_img2img_request):
     simple_img2img_request["script_name"] = "sd upscale"
     simple_img2img_request["script_args"] = ["", 8, "Lanczos", 2.0]
     assert requests.post(url_img2img, json=simple_img2img_request).status_code == 200
+
+
+def assert_task_not_pending(base_url, task_id):
+    pending = requests.get(f"{base_url}/internal/pending-tasks").json()
+    assert task_id not in pending["tasks"]
+
+
+def test_img2img_missing_init_images_returns_error_without_pending_task(base_url, url_img2img, simple_img2img_request):
+    task_id = "task(img2img-missing-init-test)"
+    simple_img2img_request["force_task_id"] = task_id
+    simple_img2img_request.pop("init_images")
+
+    response = requests.post(url_img2img, json=simple_img2img_request)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Init image not found"
+    assert_task_not_pending(base_url, task_id)
+
+
+def test_img2img_invalid_init_image_does_not_leak_pending_task(base_url, url_img2img, simple_img2img_request):
+    task_id = "task(img2img-invalid-init-test)"
+    simple_img2img_request["force_task_id"] = task_id
+    simple_img2img_request["init_images"] = ["not-valid-base64"]
+
+    response = requests.post(url_img2img, json=simple_img2img_request)
+    assert response.status_code != 200
+    assert_task_not_pending(base_url, task_id)
+
+
+def test_img2img_invalid_mask_does_not_leak_pending_task(base_url, url_img2img, simple_img2img_request):
+    task_id = "task(img2img-invalid-mask-test)"
+    simple_img2img_request["force_task_id"] = task_id
+    simple_img2img_request["mask"] = "not-valid-base64"
+
+    response = requests.post(url_img2img, json=simple_img2img_request)
+    assert response.status_code != 200
+    assert_task_not_pending(base_url, task_id)
