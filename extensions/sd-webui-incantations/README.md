@@ -28,6 +28,27 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 - Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
 - `scripts/incantation_base.py`: GB10-trimmed A1111 entrypoint that exposes only the supported combined guidance stack.
 
+
+## A1111 API argument order
+
+Keep the `incantations` always-on script argument order stable unless a caller migration is planned. The UI labels and `elem_id`s may be clarified, but positional API callers depend on this order:
+
+1. `seg_active`
+2. `seg_blur_sigma`
+3. `seg_start_step`
+4. `seg_end_step`
+5. `pag_active`
+6. `pag_scale`
+7. `pag_start_step`
+8. `pag_end_step`
+9. `cfg_interval_enable`
+10. `cfg_interval_schedule`
+11. `cfg_interval_low`
+12. `cfg_interval_high`
+13. `pag_sanf`
+
+This ordering intentionally differs from the PAG UI visual order because `pag_sanf` was appended last historically. Preserve behavior over cosmetic ordering.
+
 ## GB10 ownership doctrine
 
 The upstream extension appears effectively abandoned for our runtime needs, while PAG/SEG/CFG-combiner and CFG-Fix behavior are now quality-critical for this image. Treat this directory as first-class GB10 source:

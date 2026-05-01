@@ -8,6 +8,7 @@ from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
 from modules.sd_samplers_cfg_denoiser import catenate_conds
 from modules import shared
+from scripts.incant_utils import module_hooks
 
 import math
 import torch
@@ -133,13 +134,13 @@ class PAGExtensionScript(UIWrapper):
         # Setup menu ui detail
         def setup_ui(self, is_img2img) -> list:
                 with gr.Accordion('Perturbed Attention Guidance', open=False):
-                        active = gr.Checkbox(value=False, default=False, label="Active", elem_id='pag_active')
+                        active = gr.Checkbox(value=False, default=False, label="PAG Active", elem_id='pag_active')
                         pag_sanf = gr.Checkbox(value=False, default=False, label="Use Saliency-Adaptive Noise Fusion", elem_id='pag_sanf')
                         with gr.Row():
                                 pag_scale = gr.Slider(value = 0, minimum = 0, maximum = 20.0, step = 0.5, label="PAG Scale", elem_id = 'pag_scale', info="")
                         with gr.Row():
-                                start_step = gr.Slider(value = 0, minimum = 0, maximum = 150, step = 1, label="Start Step", elem_id = 'pag_start_step', info="")
-                                end_step = gr.Slider(value = 150, minimum = 0, maximum = 150, step = 1, label="End Step", elem_id = 'pag_end_step', info="")
+                                start_step = gr.Slider(value = 0, minimum = 0, maximum = 150, step = 1, label="PAG Start Step", elem_id = 'pag_start_step', info="")
+                                end_step = gr.Slider(value = 150, minimum = 0, maximum = 150, step = 1, label="PAG End Step", elem_id = 'pag_end_step', info="")
 
                 with gr.Accordion('CFG Scheduler', open=False):
                         cfg_interval_enable = gr.Checkbox(value=False, default=False, label="Enable CFG Scheduler", elem_id='cfg_interval_enable', info="If enabled, applies CFG only within noise interval with the selected schedule type. PAG must be enabled (scale can be 0). SDXL recommend CFG=15; CFG interval (0.28, 5.42]")
@@ -303,10 +304,10 @@ class PAGExtensionScript(UIWrapper):
                 cross_attn_modules = self.get_cross_attn_modules()
                 for module in cross_attn_modules:
                         to_v = getattr(module, 'to_v', None)
-                        self.remove_field_cross_attn_modules(module, 'pag_enable')
-                        self.remove_field_cross_attn_modules(module, 'pag_last_to_v')
+                        module_hooks.modules_remove_field(module, 'pag_enable')
+                        module_hooks.modules_remove_field(module, 'pag_last_to_v')
                         if to_v is not None:
-                                self.remove_field_cross_attn_modules(to_v, 'pag_parent_module')
+                                module_hooks.modules_remove_field(to_v, 'pag_parent_module')
 
         def unhook_callbacks(self, pag_params: PAGStateParams = None):
                 self.remove_all_hooks()
@@ -322,10 +323,10 @@ class PAGExtensionScript(UIWrapper):
                 # add field for last_to_v
                 for module in crossattn_modules:
                         to_v = getattr(module, 'to_v', None)
-                        self.add_field_cross_attn_modules(module, 'pag_enable', False)
-                        self.add_field_cross_attn_modules(module, 'pag_last_to_v', None)
+                        module_hooks.modules_add_field(module, 'pag_enable', False)
+                        module_hooks.modules_add_field(module, 'pag_last_to_v', None)
                         if to_v is not None:
-                                self.add_field_cross_attn_modules(to_v, 'pag_parent_module', [module])
+                                module_hooks.modules_add_field(to_v, 'pag_parent_module', [module])
 
                 def to_v_pre_hook(module, input, kwargs, output):
                         """ Copy the output of the to_v module to the parent module """
@@ -352,10 +353,10 @@ class PAGExtensionScript(UIWrapper):
                 # Create hooks and keep RemovableHandles so cleanup does not need
                 # to rewrite PyTorch hook tables globally.
                 for module in crossattn_modules:
-                        self._pag_hook_handles.append(module.register_forward_hook(pag_pre_hook, with_kwargs=True))
+                        self._pag_hook_handles.append(module_hooks.module_add_forward_hook(module, pag_pre_hook, hook_type="forward", with_kwargs=True))
                         to_v = getattr(module, 'to_v', None)
                         if to_v is not None:
-                                self._pag_hook_handles.append(to_v.register_forward_hook(to_v_pre_hook, with_kwargs=True))
+                                self._pag_hook_handles.append(module_hooks.module_add_forward_hook(to_v, to_v_pre_hook, hook_type="forward", with_kwargs=True))
 
         def get_middle_block_modules(self):
                 """ Get all attention modules from the middle block 
@@ -377,16 +378,6 @@ class PAGExtensionScript(UIWrapper):
         def get_cross_attn_modules(self):
                 """ Get all cross attention modules """
                 return self.get_middle_block_modules()
-
-        def add_field_cross_attn_modules(self, module, field, value):
-                """ Add a field to a module if it doesn't exist """
-                if not hasattr(module, field):
-                        setattr(module, field, value)
-        
-        def remove_field_cross_attn_modules(self, module, field):
-                """ Remove a field from a module if it exists """
-                if hasattr(module, field):
-                        delattr(module, field)
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates

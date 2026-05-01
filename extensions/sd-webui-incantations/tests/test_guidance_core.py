@@ -19,8 +19,17 @@ def install_a1111_stubs():
     class CFGDenoiserParams:
         pass
 
+    callback_registry = []
     script_callbacks_mod.CFGDenoiserParams = CFGDenoiserParams
-    script_callbacks_mod.on_cfg_denoiser = lambda *args, **kwargs: None
+    script_callbacks_mod.callback_registry = callback_registry
+    def on_cfg_denoiser(callback, *args, **kwargs):
+        callback_registry.append(callback)
+
+    def remove_callbacks_for_function(callback):
+        callback_registry[:] = [c for c in callback_registry if c is not callback]
+
+    script_callbacks_mod.on_cfg_denoiser = on_cfg_denoiser
+    script_callbacks_mod.remove_callbacks_for_function = remove_callbacks_for_function
     processing_mod = types.ModuleType("modules.processing")
     processing_mod.StableDiffusionProcessing = object
     shared_mod = types.ModuleType("modules.shared")
@@ -112,6 +121,59 @@ class CFGCombinerTests(unittest.TestCase):
         )
         self.assertEqual(tuple(out.shape), (2, 4, 4, 4))
         self.assertTrue(torch.equal(out, torch.full_like(out, 6.0)))
+
+    def test_cfg_combiner_wrapper_restores_only_own_wrapper(self):
+        script = self.cfg_combiner.CFGCombinerScript()
+
+        def original(x_out, conds_list, uncond, cond_scale):
+            return torch.full_like(x_out[-uncond.shape[0]:], cond_scale)
+
+        class Denoiser:
+            combine_denoised = staticmethod(original)
+
+        denoiser = Denoiser()
+        cfg_dict = {"denoiser": None, "original_combine_denoised": None, "wrapped_combine_denoised": None, "pag_params": None}
+        script.patch_cfg_denoiser(denoiser, cfg_dict)
+        wrapped = denoiser.combine_denoised
+        self.assertIs(cfg_dict["wrapped_combine_denoised"], wrapped)
+        self.assertIsNot(wrapped, original)
+
+        script.restore_cfg_denoiser(cfg_dict)
+        self.assertIs(denoiser.combine_denoised, original)
+        self.assertIsNone(cfg_dict["denoiser"])
+
+        script.patch_cfg_denoiser(denoiser, cfg_dict)
+        wrapped = denoiser.combine_denoised
+
+        def external_wrapper(*args, **kwargs):
+            return wrapped(*args, **kwargs)
+
+        denoiser.combine_denoised = external_wrapper
+        script.restore_cfg_denoiser(cfg_dict)
+        self.assertIs(denoiser.combine_denoised, external_wrapper)
+        self.assertIsNone(cfg_dict["denoiser"])
+
+
+class ModuleHookTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.module_hooks = importlib.import_module("scripts.incant_utils.module_hooks")
+
+    def test_forward_hook_handle_removal_is_local(self):
+        layer = torch.nn.Linear(2, 2, bias=False)
+        calls = {"count": 0}
+
+        def hook(module, args, output):
+            calls["count"] += 1
+            return output
+
+        handle = self.module_hooks.module_add_forward_hook(layer, hook)
+        layer(torch.ones(1, 2))
+        self.assertEqual(calls["count"], 1)
+        handle.remove()
+        layer(torch.ones(1, 2))
+        self.assertEqual(calls["count"], 1)
 
 
 if __name__ == "__main__":
