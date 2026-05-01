@@ -25,7 +25,7 @@ class DeepDanbooru:
         )
 
         self.model = deepbooru_model.DeepDanbooruModel()
-        self.model.load_state_dict(torch.load(files[0], map_location="cpu"))
+        self.model.load_state_dict(torch.load(files[0], map_location="cpu", weights_only=True))
 
         self.model.eval()
         self.model.to(devices.cpu, devices.dtype)

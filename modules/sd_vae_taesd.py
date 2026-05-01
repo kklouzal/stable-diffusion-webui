@@ -67,7 +67,7 @@ class TAESDDecoder(nn.Module):
 
         self.decoder = decoder(latent_channels)
         self.decoder.load_state_dict(
-            torch.load(decoder_path, map_location='cpu' if devices.device.type != 'cuda' else None))
+            torch.load(decoder_path, map_location='cpu' if devices.device.type != 'cuda' else None, weights_only=True))
 
 
 class TAESDEncoder(nn.Module):
@@ -83,7 +83,7 @@ class TAESDEncoder(nn.Module):
 
         self.encoder = encoder(latent_channels)
         self.encoder.load_state_dict(
-            torch.load(encoder_path, map_location='cpu' if devices.device.type != 'cuda' else None))
+            torch.load(encoder_path, map_location='cpu' if devices.device.type != 'cuda' else None, weights_only=True))
 
 
 def download_model(model_path, model_url):
