@@ -1,3 +1,5 @@
+import logging
+
 import ldm.modules.encoders.modules
 import open_clip
 import torch
@@ -62,7 +64,22 @@ class DisableInitialization(ReplaceHelper):
             pass
 
         def create_model_and_transforms_without_pretrained(*args, pretrained=None, **kwargs):
-            return self.create_model_and_transforms(*args, pretrained=None, **kwargs)
+            class SuppressNoPretrainedOpenClipWarning(logging.Filter):
+                def filter(self, record):
+                    return not (
+                        record.levelno == logging.WARNING
+                        and isinstance(record.getMessage(), str)
+                        and record.getMessage().startswith("No pretrained weights loaded for model ")
+                        and record.getMessage().endswith(". Model initialized randomly.")
+                    )
+
+            root_logger = logging.getLogger()
+            warning_filter = SuppressNoPretrainedOpenClipWarning()
+            root_logger.addFilter(warning_filter)
+            try:
+                return self.create_model_and_transforms(*args, pretrained=None, **kwargs)
+            finally:
+                root_logger.removeFilter(warning_filter)
 
         def CLIPTextModel_from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs):
             res = self.CLIPTextModel_from_pretrained(None, *model_args, config=pretrained_model_name_or_path, state_dict={}, **kwargs)
