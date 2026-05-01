@@ -393,6 +393,26 @@ def set_model_fields(model):
         model.latent_channels = 4
 
 
+def remap_sdxl_clip_text_model_state_dict_if_needed(model, state_dict):
+    if not getattr(model, 'is_sdxl', False) or not hasattr(model, 'conditioner'):
+        return
+
+    remapped = 0
+    for embedder_index, embedder in enumerate(getattr(model.conditioner, 'embedders', [])):
+        transformer = getattr(embedder, 'transformer', None)
+        if transformer is None or hasattr(transformer, 'text_model'):
+            continue
+
+        prefix = f'conditioner.embedders.{embedder_index}.transformer.text_model.'
+        for key in [k for k in list(state_dict.keys()) if k.startswith(prefix)]:
+            new_key = f'conditioner.embedders.{embedder_index}.transformer.{key[len(prefix):]}'
+            state_dict[new_key] = state_dict.pop(key)
+            remapped += 1
+
+    if remapped > 0:
+        print(f'Remapped {remapped} SDXL CLIP checkpoint keys for flat CLIPTextModel layout')
+
+
 def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer):
     sd_model_hash = checkpoint_info.calculate_shorthash()
     timer.record("calculate hash")
@@ -419,6 +439,8 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     if model.is_ssd:
         sd_hijack.model_hijack.convert_sdxl_to_ssd(model)
+
+    remap_sdxl_clip_text_model_state_dict_if_needed(model, state_dict)
 
     if shared.opts.sd_checkpoint_cache > 0:
         # cache newly loaded model
