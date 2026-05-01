@@ -2,8 +2,6 @@ import logging
 from os import environ
 import modules.scripts as scripts
 import gradio as gr
-import scipy.stats as stats
-
 from scripts.ui_wrapper import UIWrapper
 from modules import script_callbacks
 from modules.hypernetworks import hypernetwork
@@ -19,10 +17,6 @@ import math
 import torch
 from torch.nn import functional as F
 
-from warnings import warn
-from typing import Callable, Dict, Optional
-from collections import OrderedDict
-import torch
 
 logger = logging.getLogger(__name__)
 logger.setLevel(environ.get("SD_WEBUI_LOG_LEVEL", logging.INFO))
@@ -139,6 +133,7 @@ class PAGExtensionScript(UIWrapper):
                 self.cached_c = [None, None]
                 self._cfg_denoiser_callback = None
                 self._cfg_denoised_callback = None
+                self._pag_hook_handles = []
 
         # Extension title in menu UI
         def title(self) -> str:
@@ -317,14 +312,17 @@ class PAGExtensionScript(UIWrapper):
                         self._cfg_denoised_callback = None
 
         def remove_all_hooks(self):
+                for handle in self._pag_hook_handles:
+                        handle.remove()
+                self._pag_hook_handles = []
+
                 cross_attn_modules = self.get_cross_attn_modules()
                 for module in cross_attn_modules:
                         to_v = getattr(module, 'to_v', None)
                         self.remove_field_cross_attn_modules(module, 'pag_enable')
                         self.remove_field_cross_attn_modules(module, 'pag_last_to_v')
-                        self.remove_field_cross_attn_modules(to_v, 'pag_parent_module')
-                        _remove_all_forward_hooks(module, 'pag_pre_hook')
-                        _remove_all_forward_hooks(to_v, 'to_v_pre_hook')
+                        if to_v is not None:
+                                self.remove_field_cross_attn_modules(to_v, 'pag_parent_module')
 
         def unhook_callbacks(self, pag_params: PAGStateParams = None):
                 self.remove_all_hooks()
@@ -370,11 +368,13 @@ class PAGExtensionScript(UIWrapper):
                                 # this is bad
                                 return output
 
-                # Create hooks 
+                # Create hooks and keep RemovableHandles so cleanup does not need
+                # to rewrite PyTorch hook tables globally.
                 for module in crossattn_modules:
-                        handle_parent = module.register_forward_hook(pag_pre_hook, with_kwargs=True)
+                        self._pag_hook_handles.append(module.register_forward_hook(pag_pre_hook, with_kwargs=True))
                         to_v = getattr(module, 'to_v', None)
-                        handle_to_v = to_v.register_forward_hook(to_v_pre_hook, with_kwargs=True)
+                        if to_v is not None:
+                                self._pag_hook_handles.append(to_v.register_forward_hook(to_v_pre_hook, with_kwargs=True))
 
         def get_middle_block_modules(self):
                 """ Get all attention modules from the middle block 
@@ -445,18 +445,18 @@ class PAGExtensionScript(UIWrapper):
                         return
 
                 if isinstance(params.text_cond, dict):
-                        pag_params.text_cond = {key: value.detach().clone() for key, value in params.text_cond.items()}
+                        pag_params.text_cond = {key: value.detach() for key, value in params.text_cond.items()}
                         if isinstance(params.text_uncond, dict):
-                                pag_params.text_uncond = {key: value.detach().clone() for key, value in params.text_uncond.items()}
+                                pag_params.text_uncond = {key: value.detach() for key, value in params.text_uncond.items()}
                         else:
-                                pag_params.text_uncond = params.text_uncond.detach().clone()
+                                pag_params.text_uncond = params.text_uncond.detach()
                 else:
-                        pag_params.text_cond = params.text_cond.detach().clone()
-                        pag_params.text_uncond = params.text_uncond.detach().clone()
+                        pag_params.text_cond = params.text_cond.detach()
+                        pag_params.text_uncond = params.text_uncond.detach()
 
-                pag_params.x_in = params.x.detach().clone()
-                pag_params.sigma = params.sigma.detach().clone()
-                pag_params.image_cond = params.image_cond.detach().clone() if params.image_cond is not None else None
+                pag_params.x_in = params.x.detach()
+                pag_params.sigma = params.sigma.detach()
+                pag_params.image_cond = params.image_cond.detach() if params.image_cond is not None else None
                 pag_params.denoiser = params.denoiser
                 pag_params.make_condition_dict = get_make_condition_dict_fn(params.text_uncond)
 
@@ -486,22 +486,26 @@ class PAGExtensionScript(UIWrapper):
                 # concatenate the conditions 
                 # "modules/sd_samplers_cfg_denoiser.py:237"
                 cond_in = catenate_conds([tensor, uncond])
-                make_condition_dict = get_make_condition_dict_fn(uncond)
+                make_condition_dict = pag_params.make_condition_dict or get_make_condition_dict_fn(uncond)
                 conds = make_condition_dict(cond_in, image_cond_in)
-                
+
                 # set pag_enable to True for the hooked cross attention modules
                 for module in pag_params.crossattn_modules:
                         setattr(module, 'pag_enable', True)
 
-                # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
-                pag_x_out = params.inner_model(x_in, sigma_in, cond=conds)
-
-                # update pag_x_out
-                pag_params.pag_x_out = pag_x_out
-
-                # set pag_enable to False
-                for module in pag_params.crossattn_modules:
-                        setattr(module, 'pag_enable', False)
+                try:
+                        # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
+                        pag_x_out = params.inner_model(x_in, sigma_in, cond=conds)
+                        pag_params.pag_x_out = pag_x_out
+                finally:
+                        # set pag_enable to False even if the hidden PAG pass raises
+                        for module in pag_params.crossattn_modules:
+                                setattr(module, 'pag_enable', False)
+                        pag_params.x_in = None
+                        pag_params.text_cond = None
+                        pag_params.text_uncond = None
+                        pag_params.image_cond = None
+                        pag_params.sigma = None
         
         def cfg_after_cfg_callback(self, params: AfterCFGCallbackParams, pag_params: PAGStateParams):
                 #self.unhook_callbacks(pag_params)
@@ -765,56 +769,3 @@ def pag_apply_field(field):
                 setattr(p, "pag_active", True)
         setattr(p, field, x)
     return fun
-
-
-# thanks torch; removing hooks DOESN'T WORK
-# thank you to @ProGamerGov for this https://github.com/pytorch/pytorch/issues/70455
-def _remove_all_forward_hooks(
-    module: torch.nn.Module, hook_fn_name: Optional[str] = None
-) -> None:
-    """
-    This function removes all forward hooks in the specified module, without requiring
-    any hook handles. This lets us clean up & remove any hooks that weren't property
-    deleted.
-
-    Warning: Various PyTorch modules and systems make use of hooks, and thus extreme
-    caution should be exercised when removing all hooks. Users are recommended to give
-    their hook function a unique name that can be used to safely identify and remove
-    the target forward hooks.
-
-    Args:
-
-        module (nn.Module): The module instance to remove forward hooks from.
-        hook_fn_name (str, optional): Optionally only remove specific forward hooks
-            based on their function's __name__ attribute.
-            Default: None
-    """
-
-    if hook_fn_name is None:
-        warn("Removing all active hooks can break some PyTorch modules & systems.")
-
-
-    def _remove_hooks(m: torch.nn.Module, name: Optional[str] = None) -> None:
-        if hasattr(module, "_forward_hooks"):
-            if m._forward_hooks != OrderedDict():
-                if name is not None:
-                    dict_items = list(m._forward_hooks.items())
-                    m._forward_hooks = OrderedDict(
-                        [(i, fn) for i, fn in dict_items if fn.__name__ != name]
-                    )
-                else:
-                    m._forward_hooks: Dict[int, Callable] = OrderedDict()
-
-    def _remove_child_hooks(
-        target_module: torch.nn.Module, hook_name: Optional[str] = None
-    ) -> None:
-        for name, child in target_module._modules.items():
-            if child is not None:
-                _remove_hooks(child, hook_name)
-                _remove_child_hooks(child, hook_name)
-
-    # Remove hooks from target submodules
-    _remove_child_hooks(module, hook_fn_name)
-
-    # Remove hooks from the target module
-    _remove_hooks(module, hook_fn_name)

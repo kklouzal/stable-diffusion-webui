@@ -100,14 +100,22 @@ class DynThresh:
                 cfg_scaleref = cfg_centered.std(dim=2).unsqueeze(2)
             else: # 'AD'
                 mim_scaleref = mim_centered.abs().amax(dim=2).unsqueeze(2)
-                cfg_scaleref = torch.quantile(cfg_centered.abs(), self.threshold_percentile, dim=2).unsqueeze(2)
+                cfg_abs = cfg_centered.abs()
+                if self.threshold_percentile >= 1.0:
+                    cfg_scaleref = cfg_abs.amax(dim=2).unsqueeze(2)
+                else:
+                    cfg_scaleref = torch.quantile(cfg_abs, self.threshold_percentile, dim=2).unsqueeze(2)
         else:
             if self.variability_measure == 'STD':
                 mim_scaleref = mim_centered.std()
                 cfg_scaleref = cfg_centered.std()
             else: # 'AD'
                 mim_scaleref = mim_centered.abs().amax()
-                cfg_scaleref = torch.quantile(cfg_centered.abs(), self.threshold_percentile)
+                cfg_abs = cfg_centered.abs()
+                if self.threshold_percentile >= 1.0:
+                    cfg_scaleref = cfg_abs.amax()
+                else:
+                    cfg_scaleref = torch.quantile(cfg_abs, self.threshold_percentile)
 
         cfg_scaleref = self._safe_denominator(cfg_scaleref)
         mim_scaleref = self._safe_denominator(mim_scaleref)

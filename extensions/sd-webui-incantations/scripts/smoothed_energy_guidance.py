@@ -58,6 +58,7 @@ class SEGExtensionScript(UIWrapper):
                 self.paste_field_names = []
                 self.infotext_fields = []
                 self._cfg_denoiser_callback = None
+                self._seg_hook_handles = []
 
         # Extension title in menu UI
         def title(self) -> str:
@@ -166,11 +167,14 @@ class SEGExtensionScript(UIWrapper):
                         self._cfg_denoiser_callback = None
 
         def remove_all_hooks(self):
+                for handle in self._seg_hook_handles:
+                        handle.remove()
+                self._seg_hook_handles = []
+
                 self_attn_modules = self.get_cross_attn_modules()
                 for module in self_attn_modules:
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
-                        module_hooks.remove_module_forward_hook(module.to_q, 'seg_to_q_hook')
 
         def unhook_callbacks(self, seg_params: SEGStateParams = None):
                 self.remove_all_hooks()
@@ -191,8 +195,13 @@ class SEGExtensionScript(UIWrapper):
                         head_dim = inner_dim // h
 
                         module_attn_size = seq_len
-                        downscale_h = int((module_attn_size * (height / width)) ** 0.5)
+                        downscale_h = max(1, int((module_attn_size * (height / width)) ** 0.5))
+                        while downscale_h > 1 and module_attn_size % downscale_h != 0:
+                                downscale_h -= 1
                         downscale_w = module_attn_size // downscale_h
+                        if downscale_h * downscale_w != module_attn_size:
+                                logger.warning("SEG could not derive exact attention shape for seq_len=%s, image=%sx%s; skipping blur", seq_len, height, width)
+                                return
 
                         # actual sigma value is calculated as 2 ^ sigma
                         is_inf_blur = seg_blur_sigma > seg_blur_threshold
@@ -214,9 +223,10 @@ class SEGExtensionScript(UIWrapper):
 
                         return q
 
-                # Create hooks 
+                # Create hooks and keep RemovableHandles so cleanup does not need
+                # to rewrite PyTorch hook tables globally.
                 for module in selfattn_modules:
-                        module_hooks.module_add_forward_hook(module.to_q, seg_to_q_hook, hook_type="forward", with_kwargs=True)
+                        self._seg_hook_handles.append(module_hooks.module_add_forward_hook(module.to_q, seg_to_q_hook, hook_type="forward", with_kwargs=True))
 
         def get_middle_block_modules(self):
                 """ Get all attention modules from the middle block 
@@ -295,24 +305,27 @@ def seg_apply_field(field):
 
 # Gaussian blur
 # taken from https://github.com/SusungHong/SEG-SDXL/blob/master/pipeline_seg.py
+_GAUSSIAN_KERNEL_CACHE = {}
+
+
 def gaussian_blur_2d(img, kernel_size, sigma):
         height = img.shape[-1]
         kernel_size = min(kernel_size, height - (height % 2 - 1))
-        ksize_half = (kernel_size - 1) * 0.5
-
-        x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=img.device, dtype=torch.float32)
-
-        pdf = torch.exp(-0.5 * (x / sigma).pow(2))
-
-        x_kernel = (pdf / pdf.sum()).to(dtype=img.dtype)
-
-        kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
-        kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+        channels = img.shape[-3]
+        key = (img.device, img.dtype, channels, kernel_size, float(sigma))
+        kernel2d = _GAUSSIAN_KERNEL_CACHE.get(key)
+        if kernel2d is None:
+                ksize_half = (kernel_size - 1) * 0.5
+                x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=img.device, dtype=torch.float32)
+                pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+                x_kernel = (pdf / pdf.sum()).to(dtype=img.dtype)
+                base_kernel = torch.mm(x_kernel[:, None], x_kernel[None, :])
+                kernel2d = base_kernel.expand(channels, 1, base_kernel.shape[0], base_kernel.shape[1]).contiguous()
+                _GAUSSIAN_KERNEL_CACHE[key] = kernel2d
 
         padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
-
         img = F.pad(img, padding, mode="reflect")
-        img = F.conv2d(img, kernel2d, groups=img.shape[-3])
+        img = F.conv2d(img, kernel2d, groups=channels)
 
         return img
 

@@ -1,13 +1,35 @@
 import gradio as gr
 import logging
 import torch
-import torchvision.transforms as F
+import torch.nn.functional as F
 from modules import shared, scripts, script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper
 
 logger = logging.getLogger(__name__)
+_SANF_KERNEL_CACHE = {}
+
+
+def sanf_gaussian_blur3(x):
+        """Small cached 3x3 Gaussian blur for PAG SANF saliency maps."""
+        squeeze_batch = x.ndim == 3
+        if squeeze_batch:
+                x_in = x.unsqueeze(0)
+        else:
+                x_in = x
+        channels = x_in.shape[-3]
+        key = (x_in.device, x_in.dtype, channels)
+        kernel = _SANF_KERNEL_CACHE.get(key)
+        if kernel is None:
+                coords = torch.arange(-1, 2, device=x_in.device, dtype=torch.float32)
+                gaussian_1d = torch.exp(-0.5 * coords.pow(2)).to(dtype=x_in.dtype)
+                gaussian_1d = gaussian_1d / gaussian_1d.sum()
+                base = torch.mm(gaussian_1d[:, None], gaussian_1d[None, :])
+                kernel = base.expand(channels, 1, 3, 3).contiguous()
+                _SANF_KERNEL_CACHE[key] = kernel
+        x_blur = F.conv2d(F.pad(x_in, (1, 1, 1, 1), mode='reflect'), kernel, groups=channels)
+        return x_blur.squeeze(0) if squeeze_batch else x_blur
 
 
 class CFGCombinerScript(UIWrapper):
@@ -227,7 +249,6 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                 use_saliency_map = False
                 if pag_params is not None:
                         use_saliency_map = pag_params.pag_sanf
-                sanf_blur = F.GaussianBlur(kernel_size=3, sigma=1).to(device=denoised_uncond.device) if use_saliency_map and run_pag else None
                 if use_saliency_map and run_pag:
                         denoised = denoised_uncond.clone()
 
@@ -248,8 +269,8 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                                         # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
                                         model_delta = x_out[cond_index] - denoised_uncond[i]
                                         cfg_x = model_delta * (weight * cfg_scale)
-                                        omega_rt = sanf_blur(cfg_x.abs()).float()
-                                        omega_rs = sanf_blur(pag_x.abs()).float()
+                                        omega_rt = sanf_gaussian_blur3(cfg_x.abs()).float()
+                                        omega_rs = sanf_gaussian_blur3(pag_x.abs()).float()
                                         soft_rt = torch.softmax(omega_rt, dim=0)
                                         soft_rs = torch.softmax(omega_rs, dim=0)
 
