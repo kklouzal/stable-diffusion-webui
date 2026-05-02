@@ -122,6 +122,30 @@ class CFGCombinerTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (2, 4, 4, 4))
         self.assertTrue(torch.equal(out, torch.full_like(out, 6.0)))
 
+    def test_cfg_combiner_process_batch_skips_inactive_callback(self):
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.cfg_combiner.CFGCombinerScript()
+
+        class Processing:
+            incant_cfg_params = {"pag_params": None}
+
+        script.process_batch(Processing())
+        self.assertEqual(callbacks, [])
+
+    def test_cfg_combiner_process_batch_registers_when_pag_active(self):
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.cfg_combiner.CFGCombinerScript()
+
+        class Processing:
+            incant_cfg_params = {"pag_params": object()}
+
+        script.process_batch(Processing())
+        self.assertEqual(len(callbacks), 1)
+        script.remove_callbacks()
+        self.assertEqual(callbacks, [])
+
     def test_cfg_combiner_wrapper_restores_only_own_wrapper(self):
         script = self.cfg_combiner.CFGCombinerScript()
 

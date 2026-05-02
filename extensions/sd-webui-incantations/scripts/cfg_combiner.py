@@ -78,9 +78,18 @@ class CFGCombinerScript(UIWrapper):
             pass
         
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
-            """Register once; the wrapper no-ops unless PAG/CFG interval state exists."""
+            """Register only when PAG/CFG interval state exists for this batch.
+
+            The combiner is a no-op without PAG/CFG interval parameters, but
+            registering it anyway adds a CFG denoiser callback on every sampler
+            step and patches ``combine_denoised`` on the first step. Skipping
+            that inactive path preserves output semantics and removes avoidable
+            per-step Python work for normal generations.
+            """
             logger.debug("CFGCombinerScript process_batch")
             self.remove_callbacks()
+            if not getattr(p, 'incant_cfg_params', None) or p.incant_cfg_params.get('pag_params') is None:
+                return
             cfg_denoise_lambda = lambda params: self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
             self._cfg_denoiser_callback = cfg_denoise_lambda
             script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
