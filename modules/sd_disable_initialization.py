@@ -112,8 +112,6 @@ class DisableInitialization(ReplaceHelper):
         def transformers_utils_hub_get_from_cache(path_or_repo_id, *args, local_files_only=False, **kwargs):
             return transformers_utils_hub_get_file_from_cache(self.transformers_utils_hub_get_from_cache, path_or_repo_id, *args, **kwargs)
 
-        def transformers_utils_hub_cached_file(path_or_repo_id, *args, local_files_only=False, **kwargs):
-            return transformers_utils_hub_get_file_from_cache(self.transformers_utils_hub_cached_file, path_or_repo_id, *args, **kwargs)
 
         def transformers_tokenization_utils_base_cached_file(path_or_repo_id, *args, local_files_only=False, **kwargs):
             return transformers_utils_hub_get_file_from_cache(self.transformers_tokenization_utils_base_cached_file, path_or_repo_id, *args, **kwargs)
@@ -131,7 +129,6 @@ class DisableInitialization(ReplaceHelper):
             self.transformers_modeling_utils_load_pretrained_model = self.replace(transformers.modeling_utils.PreTrainedModel, '_load_pretrained_model', transformers_modeling_utils_load_pretrained_model)
             self.transformers_tokenization_utils_base_cached_file = self.replace(transformers.tokenization_utils_base, 'cached_file', transformers_tokenization_utils_base_cached_file)
             self.transformers_configuration_utils_cached_file = self.replace(transformers.configuration_utils, 'cached_file', transformers_configuration_utils_cached_file)
-            self.transformers_utils_hub_cached_file = self.replace(transformers.utils.hub, 'cached_file', transformers_utils_hub_cached_file)
             self.transformers_utils_hub_get_from_cache = self.replace(transformers.utils.hub, 'get_from_cache', transformers_utils_hub_get_from_cache)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
