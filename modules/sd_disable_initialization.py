@@ -91,33 +91,28 @@ class DisableInitialization(ReplaceHelper):
                 args = args[0:3] + ('/', ) + args[4:]  # resolved_archive_file; must set it to something to prevent what seems to be a bug
             return self.transformers_modeling_utils_load_pretrained_model(*args, **kwargs)
 
-        def transformers_utils_hub_get_file_from_cache(original, path_or_repo_id, *args, **kwargs):
-            filename = args[0] if args else kwargs.get('filename')
+        def transformers_utils_hub_get_file_from_cache(original, url, *args, **kwargs):
 
             # this file is always 404, prevent making request
-            if (
-                path_or_repo_id == f'{shared.hf_endpoint}/openai/clip-vit-large-patch14/resolve/main/added_tokens.json'
-                or path_or_repo_id == 'openai/clip-vit-large-patch14' and filename == 'added_tokens.json'
-            ):
+            if url == f'{shared.hf_endpoint}/openai/clip-vit-large-patch14/resolve/main/added_tokens.json' or url == 'openai/clip-vit-large-patch14' and args[0] == 'added_tokens.json':
                 return None
 
             try:
-                res = original(path_or_repo_id, *args, local_files_only=True, **kwargs)
+                res = original(url, *args, local_files_only=True, **kwargs)
                 if res is None:
-                    res = original(path_or_repo_id, *args, local_files_only=False, **kwargs)
+                    res = original(url, *args, local_files_only=False, **kwargs)
                 return res
             except Exception:
-                return original(path_or_repo_id, *args, local_files_only=False, **kwargs)
+                return original(url, *args, local_files_only=False, **kwargs)
 
-        def transformers_utils_hub_get_from_cache(path_or_repo_id, *args, local_files_only=False, **kwargs):
-            return transformers_utils_hub_get_file_from_cache(self.transformers_utils_hub_get_from_cache, path_or_repo_id, *args, **kwargs)
+        def transformers_utils_hub_get_from_cache(url, *args, local_files_only=False, **kwargs):
+            return transformers_utils_hub_get_file_from_cache(self.transformers_utils_hub_get_from_cache, url, *args, **kwargs)
 
+        def transformers_tokenization_utils_base_cached_file(url, *args, local_files_only=False, **kwargs):
+            return transformers_utils_hub_get_file_from_cache(self.transformers_tokenization_utils_base_cached_file, url, *args, **kwargs)
 
-        def transformers_tokenization_utils_base_cached_file(path_or_repo_id, *args, local_files_only=False, **kwargs):
-            return transformers_utils_hub_get_file_from_cache(self.transformers_tokenization_utils_base_cached_file, path_or_repo_id, *args, **kwargs)
-
-        def transformers_configuration_utils_cached_file(path_or_repo_id, *args, local_files_only=False, **kwargs):
-            return transformers_utils_hub_get_file_from_cache(self.transformers_configuration_utils_cached_file, path_or_repo_id, *args, **kwargs)
+        def transformers_configuration_utils_cached_file(url, *args, local_files_only=False, **kwargs):
+            return transformers_utils_hub_get_file_from_cache(self.transformers_configuration_utils_cached_file, url, *args, **kwargs)
 
         self.replace(torch.nn.init, 'kaiming_uniform_', do_nothing)
         self.replace(torch.nn.init, '_no_grad_normal_', do_nothing)
