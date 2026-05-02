@@ -622,6 +622,19 @@ class DecodedSamples(list):
     already_decoded = True
 
 
+def samples_to_uint8_images(samples):
+    """Convert clamped CHW torch image tensors to HWC uint8 NumPy arrays.
+
+    This intentionally preserves the old per-sample semantics:
+    multiply by 255, truncate toward zero, and then cast to uint8.
+    """
+
+    if isinstance(samples, torch.Tensor):
+        return (samples * 255.0).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
+
+    return [(sample * 255.0).byte().permute(1, 2, 0).contiguous().cpu().numpy() for sample in samples]
+
+
 def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
     samples = DecodedSamples()
 
@@ -1029,11 +1042,10 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             save_samples = p.save_samples()
 
-            for i, x_sample in enumerate(x_samples_ddim):
-                p.batch_index = i
+            x_samples_uint8 = samples_to_uint8_images(x_samples_ddim)
 
-                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-                x_sample = x_sample.astype(np.uint8)
+            for i, x_sample in enumerate(x_samples_uint8):
+                p.batch_index = i
 
                 if p.restore_faces:
                     if save_samples and opts.save_images_before_face_restoration:
