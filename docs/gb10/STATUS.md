@@ -2,7 +2,7 @@
 
 ## Mission
 
-Refactor the GB10-native AUTOMATIC1111 container from the older NVIDIA PyTorch-base approach to the newer NVIDIA CUDA-base + explicit PyTorch nightly `cu130` approach, while keeping the repo reviewable and the host-mounted user-data layout intact.
+Refactor the GB10-native AUTOMATIC1111 container from the older NVIDIA PyTorch-base approach to the newer NVIDIA CUDA-base + explicit PyTorch nightly `cu132` approach, while keeping the repo reviewable and the host-mounted user-data layout intact.
 
 ## Current status
 
@@ -11,7 +11,7 @@ Refactor the GB10-native AUTOMATIC1111 container from the older NVIDIA PyTorch-b
 The repo currently:
 
 - still targets the same upstream A1111 source and persistent host-mounted runtime surfaces
-- now defaults the Dockerfile/build flow to NVIDIA CUDA NGC + explicit PyTorch nightly `cu130`
+- now defaults the Dockerfile/build flow to NVIDIA CUDA NGC + explicit PyTorch nightly `cu132`
 - now freezes/protects the base Python package set after torch install so later app deps cannot overwrite or shadow it
 - now keeps `wheelbuilder` on a Rust + OpenSSL-capable path that can build `tokenizers==0.13.3`
 - now routes heavy builder compiles through `ccache` via BuildKit cache mounts
@@ -24,9 +24,9 @@ The repo currently:
 ## Current chosen defaults
 
 - base image family: `nvcr.io/nvidia/cuda`
-- base image tag: `nvcr.io/nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04`
-- PyTorch nightly CUDA lane: `cu130`
-- torch-extension arch policy in repo build path: `12.1a 12.1+PTX 12.0` (current best practical mapping of requested `12.1f > 12.1a > 12.0` for the PyTorch/xformers toolchain)
+- base image tag: `nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`
+- PyTorch nightly CUDA lane: `cu132`
+- torch-extension arch policy in repo build path: `12.1a` for GB10 Blackwell-targeted extension wheels; `12.1f` is not directly accepted by the current PyTorch extension build path and is no longer preferred over `12.1a`
 - upstream repo: `https://github.com/AUTOMATIC1111/stable-diffusion-webui.git`
 - upstream ref: `dev`
 - host storage root: `/opt/gb10/stable-diffusion`

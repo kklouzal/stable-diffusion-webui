@@ -10,8 +10,8 @@ Current repo defaults now target:
 
 - builds on the GB10 host itself
 - uses official **NVIDIA NGC CUDA** as the base image family
-- installs **PyTorch nightly** explicitly from the `cu130` wheel lane
-- builds torch-extension CUDA code with arch priority `12.1f` where tooling supports it; in the current PyTorch/xformers build path that concretely resolves to `12.1a 12.1+PTX 12.0` because `TORCH_CUDA_ARCH_LIST` does not accept `12.1f`
+- installs **PyTorch nightly** explicitly from the `cu132` wheel lane
+- builds torch-extension CUDA code with `12.1a` as the practical GB10 Blackwell target; `12.1f` is not directly accepted by the current PyTorch extension build path and should not be treated as the preferred repo target
 - freezes/protects the resulting base Python package set so later app dependency installs cannot overwrite or shadow it
 - uses official upstream **AUTOMATIC1111/stable-diffusion-webui** source
 - uses a **multi-stage Dockerfile**
@@ -67,8 +67,8 @@ That launch path runs:
 
 Current defaults:
 
-- base image: `nvcr.io/nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04`
-- PyTorch nightly lane: `https://download.pytorch.org/whl/nightly/cu130`
+- base image: `nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`
+- PyTorch nightly lane: `https://download.pytorch.org/whl/nightly/cu132`
 - upstream repo: `https://github.com/AUTOMATIC1111/stable-diffusion-webui.git`
 - upstream ref: `dev`
 - image tag: `local/gb10-a1111:scaffold`
