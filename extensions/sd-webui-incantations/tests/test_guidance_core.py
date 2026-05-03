@@ -19,21 +19,44 @@ def install_a1111_stubs():
     class CFGDenoiserParams:
         pass
 
+    class CFGDenoisedParams:
+        pass
+
     callback_registry = []
     script_callbacks_mod.CFGDenoiserParams = CFGDenoiserParams
+    script_callbacks_mod.CFGDenoisedParams = CFGDenoisedParams
     script_callbacks_mod.callback_registry = callback_registry
     def on_cfg_denoiser(callback, *args, **kwargs):
+        callback_registry.append(callback)
+
+    def on_cfg_denoised(callback, *args, **kwargs):
         callback_registry.append(callback)
 
     def remove_callbacks_for_function(callback):
         callback_registry[:] = [c for c in callback_registry if c is not callback]
 
     script_callbacks_mod.on_cfg_denoiser = on_cfg_denoiser
+    script_callbacks_mod.on_cfg_denoised = on_cfg_denoised
     script_callbacks_mod.remove_callbacks_for_function = remove_callbacks_for_function
     processing_mod = types.ModuleType("modules.processing")
     processing_mod.StableDiffusionProcessing = object
     shared_mod = types.ModuleType("modules.shared")
     shared_mod.device = torch.device("cpu")
+    shared_mod.opts = types.SimpleNamespace(batch_cond_uncond=False)
+    samplers_mod = types.ModuleType("modules.sd_samplers_cfg_denoiser")
+
+    def catenate_conds(conds):
+        if not isinstance(conds[0], dict):
+            return torch.cat(conds)
+        return {key: torch.cat([x[key] for x in conds]) for key in conds[0].keys()}
+
+    def subscript_cond(cond, a, b):
+        if not isinstance(cond, dict):
+            return cond[a:b]
+        return {key: value[a:b] for key, value in cond.items()}
+
+    samplers_mod.catenate_conds = catenate_conds
+    samplers_mod.subscript_cond = subscript_cond
 
     modules_pkg.scripts = scripts_mod
     modules_pkg.script_callbacks = script_callbacks_mod
@@ -45,6 +68,7 @@ def install_a1111_stubs():
         "modules.script_callbacks": script_callbacks_mod,
         "modules.processing": processing_mod,
         "modules.shared": shared_mod,
+        "modules.sd_samplers_cfg_denoiser": samplers_mod,
     })
 
 
@@ -176,6 +200,56 @@ class CFGCombinerTests(unittest.TestCase):
         script.restore_cfg_denoiser(cfg_dict)
         self.assertIs(denoiser.combine_denoised, external_wrapper)
         self.assertIsNone(cfg_dict["denoiser"])
+
+
+class PAGBatchingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.pag = importlib.import_module("scripts.pag")
+
+    def test_pag_extra_pass_splits_sdxl_cond_uncond_when_token_counts_differ(self):
+        calls = []
+
+        def inner_model(x_in, sigma_in, cond):
+            calls.append((tuple(x_in.shape), cond["crossattn"].shape[1], tuple(cond["c_concat"][0].shape)))
+            return torch.ones_like(x_in) * len(calls)
+
+        def make_condition_dict(c_crossattn, c_concat):
+            return {**c_crossattn, "c_concat": [c_concat]}
+
+        x_in = torch.zeros(3, 4, 2, 2)
+        sigma_in = torch.zeros(3)
+        image_cond = torch.zeros(3, 1, 2, 2)
+        tensor = {"crossattn": torch.randn(2, 539, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.randn(1, 462, 8), "vector": torch.randn(1, 4)}
+
+        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+
+        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call[1] for call in calls], [539, 539, 462])
+
+    def test_pag_extra_pass_concatenates_when_token_counts_match(self):
+        calls = []
+
+        def inner_model(x_in, sigma_in, cond):
+            calls.append(cond["crossattn"].shape)
+            return torch.ones_like(x_in)
+
+        def make_condition_dict(c_crossattn, c_concat):
+            return {**c_crossattn, "c_concat": [c_concat]}
+
+        x_in = torch.zeros(3, 4, 2, 2)
+        sigma_in = torch.zeros(3)
+        image_cond = torch.zeros(3, 1, 2, 2)
+        tensor = {"crossattn": torch.randn(2, 77, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
+
+        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+
+        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
+        self.assertEqual(calls, [torch.Size([3, 77, 8])])
 
 
 class ModuleHookTests(unittest.TestCase):

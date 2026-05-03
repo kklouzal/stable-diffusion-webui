@@ -6,7 +6,7 @@ from scripts.ui_wrapper import UIWrapper
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
-from modules.sd_samplers_cfg_denoiser import catenate_conds
+from modules.sd_samplers_cfg_denoiser import catenate_conds, subscript_cond
 from modules import shared
 from scripts.incant_utils import module_hooks
 
@@ -115,6 +115,59 @@ class PAGStateParams:
                 self.crossattn_modules = [] # callable lambda
                 self.pag_x_out = None
                 self.batch_size = -1      # Batch size
+
+
+def cond_crossattn(cond):
+        """Return the cross-attention tensor for plain or SDXL dict conditioning."""
+        return cond.get('crossattn') if isinstance(cond, dict) else cond
+
+
+def cond_batch_size(cond):
+        tensor = cond_crossattn(cond)
+        if tensor is None:
+                raise RuntimeError("PAG conditioning is missing a cross-attention tensor")
+        return tensor.shape[0]
+
+
+def cond_token_count(cond):
+        tensor = cond_crossattn(cond)
+        if tensor is None:
+                raise RuntimeError("PAG conditioning is missing a cross-attention tensor")
+        return tensor.shape[1]
+
+
+def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond_in, make_condition_dict, batch_size):
+        """Run PAG's hidden denoising pass with A1111's cond/uncond batching rules.
+
+        A1111 only concatenates positive and negative conditioning when their
+        token lengths match or prompt-padding is enabled. Otherwise it runs the
+        positive batches and the unconditional batch separately. PAG's extra
+        pass must mirror that split path; blindly calling ``catenate_conds`` for
+        SDXL prompt/negative pairs with different token counts makes the
+        callback fail before ``pag_x_out`` can be produced.
+        """
+        if cond_token_count(tensor) == cond_token_count(uncond):
+                cond_in = catenate_conds([tensor, uncond])
+                return inner_model(x_in, sigma_in, cond=make_condition_dict(cond_in, image_cond_in))
+
+        x_out = torch.zeros_like(x_in)
+        denoise_batch_size = max(1, batch_size * 2 if shared.opts.batch_cond_uncond else batch_size)
+        for batch_offset in range(0, cond_batch_size(tensor), denoise_batch_size):
+                a = batch_offset
+                b = min(a + denoise_batch_size, cond_batch_size(tensor))
+                x_out[a:b] = inner_model(
+                        x_in[a:b],
+                        sigma_in[a:b],
+                        cond=make_condition_dict(subscript_cond(tensor, a, b), image_cond_in[a:b]),
+                )
+
+        uncond_count = cond_batch_size(uncond)
+        x_out[-uncond_count:] = inner_model(
+                x_in[-uncond_count:],
+                sigma_in[-uncond_count:],
+                cond=make_condition_dict(uncond, image_cond_in[-uncond_count:]),
+        )
+        return x_out
 
 
 class PAGExtensionScript(UIWrapper):
@@ -455,11 +508,7 @@ class PAGExtensionScript(UIWrapper):
                 image_cond_in = pag_params.image_cond
                 sigma_in = pag_params.sigma
                 
-                # concatenate the conditions 
-                # "modules/sd_samplers_cfg_denoiser.py:237"
-                cond_in = catenate_conds([tensor, uncond])
                 make_condition_dict = pag_params.make_condition_dict or get_make_condition_dict_fn(uncond)
-                conds = make_condition_dict(cond_in, image_cond_in)
 
                 # set pag_enable to True for the hooked cross attention modules
                 for module in pag_params.crossattn_modules:
@@ -467,8 +516,16 @@ class PAGExtensionScript(UIWrapper):
 
                 try:
                         # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
-                        pag_x_out = params.inner_model(x_in, sigma_in, cond=conds)
-                        pag_params.pag_x_out = pag_x_out
+                        pag_params.pag_x_out = pag_inner_model_x_out(
+                                params.inner_model,
+                                x_in,
+                                sigma_in,
+                                tensor,
+                                uncond,
+                                image_cond_in,
+                                make_condition_dict,
+                                pag_params.batch_size,
+                        )
                 finally:
                         # set pag_enable to False even if the hidden PAG pass raises
                         for module in pag_params.crossattn_modules:
