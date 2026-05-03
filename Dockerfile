@@ -31,6 +31,7 @@ WORKDIR /opt/build
 ENV CUDA_HOME=/usr/local/cuda
 ENV CUDA_PATH=/usr/local/cuda
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_ROOT_USER_ACTION=ignore
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
@@ -119,15 +120,15 @@ COPY . /opt/build/stable-diffusion-webui
 RUN cd stable-diffusion-webui \
     && mkdir -p repositories \
     && git clone --filter=blob:none "${STABLE_DIFFUSION_REPO}" repositories/stable-diffusion-stability-ai \
-    && git -C repositories/stable-diffusion-stability-ai checkout "${STABLE_DIFFUSION_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/stable-diffusion-stability-ai checkout "${STABLE_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${GENERATIVE_MODELS_REPO}" repositories/generative-models \
-    && git -C repositories/generative-models checkout "${GENERATIVE_MODELS_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/generative-models checkout "${GENERATIVE_MODELS_COMMIT}" \
     && git clone --filter=blob:none "${K_DIFFUSION_REPO}" repositories/k-diffusion \
-    && git -C repositories/k-diffusion checkout "${K_DIFFUSION_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/k-diffusion checkout "${K_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${BLIP_REPO}" repositories/BLIP \
-    && git -C repositories/BLIP checkout "${BLIP_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/BLIP checkout "${BLIP_COMMIT}" \
     && git clone --filter=blob:none "${ASSETS_REPO}" repositories/stable-diffusion-webui-assets \
-    && git -C repositories/stable-diffusion-webui-assets checkout "${ASSETS_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/stable-diffusion-webui-assets checkout "${ASSETS_COMMIT}" \
     && ln -sfn repositories/generative-models ../generative-models \
     && ln -sfn repositories/k-diffusion ../k-diffusion \
     && ln -sfn repositories/BLIP ../BLIP \
@@ -170,6 +171,7 @@ COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
+COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
 
 # Builder-stage wheel doctrine:
 # - use a modern rustup-managed Rust toolchain here for packages like tokenizers
@@ -199,7 +201,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && ccache --zero-stats \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
     && test -n "${CLIP_PACKAGE_URL}" \
-    && python -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
+    && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
     && ls -1 /opt/wheels/clip-*.whl \
     && ccache --show-stats
 
@@ -213,20 +215,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     export CCACHE_DIR=/root/.cache/ccache \
     && export EXT_PARALLEL=2 \
     && export MAX_JOBS=8 \
-    && export NVCC_APPEND_FLAGS="--threads 4" \
     && export TORCH_CUDA_ARCH_LIST="12.1a" \
     && export CC=gcc \
     && export CXX=g++ \
     && python -m pip install --break-system-packages --no-cache-dir packaging \
     && rm -rf /opt/build/SageAttention \
     && git clone --filter=blob:none "${SAGEATTENTION_REPO}" /opt/build/SageAttention \
-    && git -C /opt/build/SageAttention checkout "${SAGEATTENTION_COMMIT}" \
+    && git -c advice.detachedHead=false -C /opt/build/SageAttention checkout "${SAGEATTENTION_COMMIT}" \
     && git clone --filter=blob:none "${CUTLASS_REPO}" /opt/build/SageAttention/sageattention3_blackwell/csrc/cutlass \
-    && git -C /opt/build/SageAttention/sageattention3_blackwell/csrc/cutlass checkout "${CUTLASS_COMMIT}" \
-    && python -c 'from pathlib import Path; path=Path("/opt/build/SageAttention/sageattention3_blackwell/setup.py"); text=path.read_text(); old="    cc_major, cc_minor = torch.cuda.get_device_capability()"; lines=["    forced_cc = os.getenv(\"SAGEATTN3_CUDA_ARCH\") or os.getenv(\"TORCH_CUDA_ARCH_LIST\", \"\")", "    if forced_cc:", "        normalized_cc = forced_cc.split(\";\")[0].strip().lower().removesuffix(\"a\")", "        cc_major, cc_minor = [int(part) for part in normalized_cc.split(\".\", 1)]", "    else:", "        cc_major, cc_minor = torch.cuda.get_device_capability()"]; new=chr(10).join(lines); assert old in text, "SageAttention3 setup.py arch probe anchor not found"; path.write_text(text.replace(old, new, 1))' \
+    && git -c advice.detachedHead=false -C /opt/build/SageAttention/sageattention3_blackwell/csrc/cutlass checkout "${CUTLASS_COMMIT}" \
+    && python /opt/build/patch-sageattention.py \
     && export SAGEATTN3_CUDA_ARCH="12.1" \
-    && python -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention \
-    && python -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention/sageattention3_blackwell \
+    && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention \
+    && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention/sageattention3_blackwell \
     && ls -1 /opt/wheels/sageattention-*.whl /opt/wheels/sageattn3-*.whl
 
 

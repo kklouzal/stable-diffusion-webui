@@ -88,14 +88,19 @@ Current runtime flow:
    - runs A1111 directly with the image-owned Python environment
    - skips upstream environment preparation
    - skips upstream Python-version enforcement
+   - relies on A1111's normal `COMMANDLINE_ARGS` parsing in `modules/paths_internal.py` instead of passing those flags a second time on `python launch.py`
 
-Actual launch command:
+`gb10/run.sh` is the canonical relaunch path for this appliance. It owns the default image/container names, persistent mounts, extension synchronization, and runtime `COMMANDLINE_ARGS`.
+
+xformers is intentionally not part of the GB10 runtime path. The launcher does not auto-install it; use SageAttention where supported and PyTorch SDPA otherwise.
+
+Actual launch command shape inside the container:
 
 ```bash
+COMMANDLINE_ARGS="--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access" \
 python launch.py \
   --skip-prepare-environment \
-  --skip-python-version-check \
-  --listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access
+  --skip-python-version-check
 ```
 
 ## Persistent mapping baseline

@@ -60,28 +60,47 @@ Use --skip-python-version-check to suppress this warning.
 """)
 
 
+def _webui_source_version_env(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
+@lru_cache()
+def _script_path_is_git_repo():
+    return os.path.isdir(os.path.join(script_path, ".git"))
+
+
 @lru_cache()
 def commit_hash():
+    env_commit = _webui_source_version_env("A1111_COMMIT_HASH")
+    if env_commit is not None:
+        return env_commit
+    if not _script_path_is_git_repo():
+        return "<none>"
     try:
-        return subprocess.check_output([git, "-C", script_path, "rev-parse", "HEAD"], shell=False, encoding='utf8').strip()
+        return subprocess.check_output([git, "-C", script_path, "rev-parse", "HEAD"], shell=False, stderr=subprocess.DEVNULL, encoding='utf8').strip()
     except Exception:
         return "<none>"
 
 
 @lru_cache()
 def git_tag():
-    try:
-        return subprocess.check_output([git, "-C", script_path, "describe", "--tags"], shell=False, encoding='utf8').strip()
-    except Exception:
+    env_tag = _webui_source_version_env("A1111_VERSION_TAG")
+    if env_tag is not None:
+        return env_tag
+    if _script_path_is_git_repo():
         try:
-
-            changelog_md = os.path.join(script_path, "CHANGELOG.md")
-            with open(changelog_md, "r", encoding="utf-8") as file:
-                line = next((line.strip() for line in file if line.strip()), "<none>")
-                line = line.replace("## ", "")
-                return line
+            return subprocess.check_output([git, "-C", script_path, "describe", "--tags"], shell=False, stderr=subprocess.DEVNULL, encoding='utf8').strip()
         except Exception:
-            return "<none>"
+            pass
+    try:
+        changelog_md = os.path.join(script_path, "CHANGELOG.md")
+        with open(changelog_md, "r", encoding="utf-8") as file:
+            line = next((line.strip() for line in file if line.strip()), "<none>")
+            line = line.replace("## ", "")
+            return line
+    except Exception:
+        return "<none>"
 
 
 def run(command, desc=None, errdesc=None, custom_env=None, live: bool = default_command_live) -> str:
@@ -373,7 +392,6 @@ def prepare_environment():
     requirements_file = os.environ.get('REQS_FILE', "requirements_versions.txt")
     requirements_file_for_npu = os.environ.get('REQS_FILE_FOR_NPU', "requirements_npu.txt")
 
-    xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.30')
     clip_package = os.environ.get('CLIP_PACKAGE', "https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip")
     openclip_package = os.environ.get('OPENCLIP_PACKAGE', "https://github.com/mlfoundations/open_clip/archive/bb6e834e9c70d9c27d0dc3ecedeebeaeb1ffad6b.zip")
 
@@ -446,9 +464,8 @@ def prepare_environment():
         run_pip(f"install {openclip_package}", "open_clip")
         startup_timer.record("install open_clip")
 
-    if (not is_installed("xformers") or args.reinstall_xformers) and args.xformers:
-        run_pip(f"install -U -I --no-deps {xformers_package}", "xformers")
-        startup_timer.record("install xformers")
+    if args.xformers or args.reinstall_xformers:
+        print("xformers auto-install is disabled in this fork; use PyTorch SDPA/SageAttention on GB10 or install xformers manually for experimental non-GB10 runs.")
 
     if not is_installed("ngrok") and args.ngrok:
         run_pip("install ngrok", "ngrok")

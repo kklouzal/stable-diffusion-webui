@@ -95,6 +95,9 @@ sudo chown -R 2323:2323 \
   "${HOST_ROOT}/Models" \
   "${HOST_ROOT}/config"
 
+A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
+A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(git -C "${PROJECT_ROOT}" describe --tags 2>/dev/null || true)}"
+
 DOCKER_ARGS=(
   -d
   --init
@@ -104,6 +107,8 @@ DOCKER_ARGS=(
   --network host
   --ipc host
   -e A1111_PORT="${PORT}"
+  -e A1111_COMMIT_HASH="${A1111_COMMIT_HASH}"
+  -e A1111_VERSION_TAG="${A1111_VERSION_TAG}"
   -e COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${PORT} --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access}"
   --tmpfs "/data/config:rw,noexec,nosuid,nodev,size=16m"
   --tmpfs "/data/embeddings:rw,noexec,nosuid,nodev,size=16m"

@@ -96,6 +96,7 @@ Current validated GB10 runtime:
 - `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
 - `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
+- `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, extension sync, container replacement, and `COMMANDLINE_ARGS`
 - source commit `ea5b866c` fixes the Incantations PAG hidden-denoise pass for SDXL positive/negative conditioning with mismatched token counts; this is committed and pushed, but live runtime confirmation waits for the next safe rebuild/restart window
 
 Older probe tags worth keeping as historical breadcrumbs:
@@ -107,6 +108,6 @@ Older probe tags worth keeping as historical breadcrumbs:
 
 ## Immediate next validation work
 
-1. validate the repo-visible `gb10/run.sh` path against the current default image/container names during a safe restart window
-2. rebuild/restart into `ea5b866c` or newer when active generation is idle, then confirm the prior Incantations PAG SDXL token-mismatch traceback no longer appears
-3. continue runtime polish: default launch/tuning choices, extension layering discipline, and noisy-warning reduction
+1. rebuild/restart into the next image after launch cleanup, then confirm duplicated launch flags and `.git` probe noise are gone
+2. continue xformers cleanup: keep it disabled on GB10, remove stale install/default paths, and document SageAttention/SDPA as the preferred runtime path
+3. continue modern Python/PyTorch/runtime warning cleanup until startup and generation logs are intentionally quiet

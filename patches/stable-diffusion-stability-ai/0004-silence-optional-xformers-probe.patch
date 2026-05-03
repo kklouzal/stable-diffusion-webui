@@ -1,0 +1,11 @@
+diff --git a/ldm/modules/diffusionmodules/model.py b/ldm/modules/diffusionmodules/model.py
+--- a/ldm/modules/diffusionmodules/model.py
++++ b/ldm/modules/diffusionmodules/model.py
+@@ -12,7 +12,6 @@ try:
+     XFORMERS_IS_AVAILBLE = True
+ except:
+     XFORMERS_IS_AVAILBLE = False
+-    print("No module 'xformers'. Proceeding without it.")
+ 
+ 
+ def get_timestep_embedding(timesteps, embedding_dim):
