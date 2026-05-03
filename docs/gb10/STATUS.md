@@ -95,13 +95,13 @@ Current validated GB10 runtime:
 - torchaudio after runtime install: `2.11.0.dev20260502+cu132`
 - Transformers/tokenizers/HF Hub runtime: `transformers==5.7.0`, `tokenizers==0.22.2`, `huggingface-hub==1.13.0`
 - tokenizers build guard: Docker build fails if Transformers, tokenizers, or Hugging Face Hub resolve below the validated floors, and tokenizers must resolve from a `.whl` artifact rather than an sdist/Rust source build
-- A1111 API health: `GET /sdapi/v1/progress`, `GET /sdapi/v1/sd-models`, and `GET /sdapi/v1/options` return JSON on `127.0.0.1:7860`; latest smoke saw `10` models and checkpoint `test2.safetensors`
+- A1111 API health after extension quarantine: `GET /sdapi/v1/progress`, `GET /sdapi/v1/sd-models`, and `GET /sdapi/v1/options` return JSON on `127.0.0.1:7860`; latest smoke saw `10` models and checkpoint `test2.safetensors`
 - `BUILD_MANIFEST.json` summary: `base=31`, `direct=52`, `indirect=87`
 - `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
 - `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
 - `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, first-class extension sync, container replacement, and `COMMANDLINE_ARGS`
-- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; UI-only extensions are purge candidates now that A1111-Controller is canonical
+- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; approved UI-only extensions were quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304` now that A1111-Controller is canonical
 
 Older probe tags worth keeping as historical breadcrumbs:
 
@@ -112,6 +112,6 @@ Older probe tags worth keeping as historical breadcrumbs:
 
 ## Immediate next validation work
 
-1. quarantine/purge UI-only external mounted extensions now superseded by A1111-Controller, preserving any useful user data first
-2. decide whether generation-affecting external extensions (`sd-webui-detail-daemon`, `sd-webui-refiner`, `multidiffusion-upscaler-for-automatic1111`, `ultimate-upscale-for-automatic1111`) are actually used; adopt first-class or purge/replace them accordingly
+1. decide whether `sd-webui-refiner` is needed for A1111-Controller/SDXL refiner workflows
+2. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
 3. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads

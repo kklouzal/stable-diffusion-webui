@@ -56,204 +56,151 @@ Currently first-class:
 
 External mounted extensions are tolerated only if they provide behavior we still need and are not yet worth adopting. Any external extension that materially affects generation quality, callback ordering, model loading, or high-value workflow behavior should either become first-class or be removed.
 
-## Purge candidates now that A1111-Controller is canonical
+## Removal decisions
 
-These are primarily Gradio UI/QOL extensions and should be removed from the live A1111 runtime once any user data worth preserving is exported.
-
-### `Config-Presets`
-
-Recommendation: **purge**.
-
-Reason:
-
-- UI preset switching belongs in A1111-Controller or explicit API/client presets.
-- It adds Gradio UI surface area without owning core generation behavior.
-
-Preserve first if needed:
-
-- `config-txt2img.json`
-- `config-img2img.json`
-- custom tracked component lists
-
-### `model-keyword`
-
-Recommendation: **purge after extracting useful mappings**.
-
-Reason:
-
-- automatic model/LoRA trigger-word insertion belongs in A1111-Controller's model/LoRA metadata layer.
-- this extension is large relative to its runtime value and is UI-coupled.
-
-Preserve first:
-
-- `model-keyword.txt`
-- `model-keyword-user.txt`
-- `lora-keyword.txt`
-- `custom-mappings.txt`
-- `settings.txt`
-
-Potential first-class replacement:
-
-- not this extension as-is; instead, ingest useful mappings into the Controller metadata/catalog path.
-
-### `sd_delete_button`
-
-Recommendation: **purge**.
-
-Reason:
-
-- A delete button is UI-only and not needed for Controller-canonical operation.
-- file/output management should live in Controller or ordinary filesystem tooling.
-
-### `sd-webui-cardmaster`
-
-Recommendation: **purge after confirming Controller covers the LoRA/card workflow**.
-
-Reason:
-
-- card browsing, LoRA activation text application, and extra-network interaction are exactly the kind of UI behavior A1111-Controller now owns for us.
-- current config contains Card Master preferences, so confirm there is no unique workflow before removal.
-
-Potential first-class replacement:
-
-- do not adopt Card Master as an A1111 extension; move any still-useful LoRA metadata/activation behavior into A1111-Controller.
-
-### `sd-webui-prompt-all-in-one`
-
-Recommendation: **purge after exporting prompt favorites/history if wanted**.
-
-Reason:
-
-- prompt UI, tag grouping, prompt history, and translation helpers are Controller/UI concerns.
-- it starts a background API service inside A1111, which is undesirable if Controller is the canonical frontend.
-
-Preserve first if useful:
-
-- `storage/favorite*.json`
-- `storage/history*.json`
-- `group_tags/*.yaml`
-- translation config only if still intentionally used
-
-Potential first-class replacement:
-
-- do not adopt the extension wholesale; migrate useful prompt/tag data into Controller-owned prompt tools if needed.
-
-### `sd-webui-state-manager`
-
-Recommendation: **purge**.
-
-Reason:
-
-- already disabled.
-- state/history restoration belongs in Controller.
-
-Preserve first if useful:
-
-- `history.txt`
-
-## Keep or adopt decision candidates
-
-These are not obviously superseded by A1111-Controller because they alter generation behavior or provide runtime utilities rather than just Gradio UI convenience.
-
-### `sd-webui-detail-daemon`
-
-Recommendation: **decide based on actual use; adopt if kept**.
-
-Reason:
-
-- it modifies generation behavior through sampling/noise scheduling.
-- if Schwi actually uses it, it should be first-class because it affects output quality and interacts with callback/hot-path modernization.
-- if not used, purge it rather than carrying another generation modifier.
-
-Current evidence:
-
-- no recent output metadata hits were found for `Detail Daemon` in the quick scan.
-
-### `sd-webui-refiner`
-
-Recommendation: **decide based on actual use; adopt if kept**.
-
-Reason:
-
-- it changes generation by swapping UNet/refiner behavior during sampling.
-- A1111-Controller can expose controls, but the generation implementation still lives inside A1111 unless replaced by source work.
-
-If kept:
-
-- adopt as first-class or replace with repo-owned refiner handling in core/source modernization.
-
-### `multidiffusion-upscaler-for-automatic1111`
-
-Recommendation: **keep temporarily only if tiled generation/upscaling is still used; adopt or replace if kept long-term**.
-
-Reason:
-
-- it provides tiled diffusion and Tiled VAE behavior that may still matter for large image workflows.
-- it already needed a GB10-local xformers/SageAttention/SDPA compatibility patch.
-- patched generation/runtime behavior should not remain as an untracked external checkout.
-
-Current repo note:
-
-- `patches/mounted-extensions/multidiffusion-upscaler-for-automatic1111/0001-modern-attention-fallbacks.patch` records the local attention fallback patch.
-
-If kept:
-
-- adopt first-class or replace with a repo-owned tiled upscale path.
-
-### `ultimate-upscale-for-automatic1111`
-
-Recommendation: **keep temporarily if used; otherwise purge**.
-
-Reason:
-
-- it provides a known tiled upscale workflow, but overlaps with multidiffusion/tiled upscaling and possible Controller-driven workflows.
-- if retained as a standard workflow, adopt or replace with a first-class implementation.
-
-### `sd-webui-model-converter`
-
-Recommendation: **remove from normal runtime; keep as an offline utility only if still useful**.
-
-Reason:
-
-- model conversion is not a normal generation-path extension and should not be loaded in the always-on A1111 runtime.
-- if needed, run conversion as a deliberate maintenance/offline action, not as a mounted WebUI extension.
-
-## Proposed purge/adoption plan
-
-1. Export data from UI-only extensions that might contain useful user state:
-   - Config Presets JSON files
-   - model-keyword mappings
-   - prompt-all-in-one favorites/history/group tags
-   - state-manager history if desired
-2. Move UI-only extension directories to a host-side quarantine outside `Extensions/` instead of deleting immediately.
-3. Restart A1111 and smoke test API/model load.
-4. Use A1111-Controller for normal prompt/model/LoRA/preset/state flows.
-5. For remaining generation-affecting extensions, choose one of:
-   - adopt first-class into `extensions/` with provenance and tests
-   - replace with source-level A1111 modernization
-   - purge if not actually used
-
-Recommended immediate quarantine set:
+Schwi approved removing these UI-only / Controller-superseded extensions from the live A1111 runtime:
 
 - `Config-Presets`
 - `model-keyword`
 - `sd_delete_button`
 - `sd-webui-cardmaster`
-- `sd-webui-prompt-all-in-one`
 - `sd-webui-state-manager`
-- `sd-webui-model-converter`
 
-Recommended hold pending use decision:
+`sd-webui-state-manager` was already disabled in `config.json`. The user referred to this as `sd-webui-statemaster`; the live directory name is `sd-webui-state-manager`.
 
-- `sd-webui-detail-daemon`
-- `sd-webui-refiner`
+Removal result:
+
+- quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304`
+- A1111 restarted successfully from `local/gb10-a1111:base-protected-app-latest`
+- smoke test passed after removal: progress endpoint OK, `10` models visible, checkpoint `test2.safetensors`, CUDA visible on `NVIDIA GB10`, required imports OK, and `xformers` intentionally absent
+- no new warning/error lines appeared; the accepted unauthenticated HF Hub warning remains the only warning
+
+## Keep decisions
+
+Schwi confirmed these external mounted extensions need to stay because A1111-Controller uses functionality from them:
+
+### `sd-webui-model-converter`
+
+Decision: **keep**.
+
+Reason:
+
+- A1111-Controller uses model-conversion functionality.
+- It should remain mounted for now.
+
+Future ownership:
+
+- consider adopting first-class or replacing with a Controller/offline utility only after identifying the exact conversion operations Controller depends on.
+
+### `sd-webui-detail-daemon`
+
+Decision: **keep**.
+
+Reason:
+
+- A1111-Controller uses this generation-control functionality.
+- It modifies generation behavior through sampling/noise scheduling, so if we patch it later, it should be treated as output-quality-affecting code.
+
+Future ownership:
+
+- likely first-class adoption candidate if it remains central to workflows.
+
+### `multidiffusion-upscaler-for-automatic1111`
+
+Decision: **keep**.
+
+Reason:
+
+- A1111-Controller uses tiled diffusion / tiled VAE / large-image functionality from it.
+- It already has GB10-specific xformers/SageAttention/SDPA compatibility handling.
+
+Future ownership:
+
+- strong first-class adoption candidate, because patched generation/runtime behavior should not remain opaque long-term.
+
+Current repo note:
+
+- `patches/mounted-extensions/multidiffusion-upscaler-for-automatic1111/0001-modern-attention-fallbacks.patch` records the local attention fallback patch.
+
+### `ultimate-upscale-for-automatic1111`
+
+Decision: **keep**.
+
+Reason:
+
+- A1111-Controller uses this upscaling functionality.
+
+Future ownership:
+
+- possible first-class adoption or replacement candidate after mapping exactly which upscale path Controller calls.
+
+### `sd-webui-prompt-all-in-one`
+
+Decision: **keep**.
+
+Reason:
+
+- A1111-Controller uses its prompt token count functionality.
+- Schwi expects we may use other functionality from it too.
+
+Future ownership:
+
+- keep mounted for now.
+- if token-count behavior becomes a hard Controller dependency, consider replacing that specific capability with a small first-class tokenizer/counting endpoint or Controller-side implementation rather than adopting the whole extension blindly.
+
+### `sd-webui-refiner`
+
+Decision: **undecided**.
+
+What it does:
+
+- integrates a refiner checkpoint into generation
+- loads only the refiner checkpoint UNet
+- replaces the base UNet during the final portion of sampling
+- exposes a percent-of-steps control for when the refiner takes over
+
+Why it might matter:
+
+- it is useful for SDXL-style base/refiner workflows where the base model establishes the image and a refiner model takes over for final detail cleanup.
+- it is generation-affecting, not just UI convenience.
+
+Recommendation:
+
+- keep temporarily until Schwi decides whether A1111-Controller needs this workflow.
+- if kept, adopt first-class or replace with repo-owned refiner handling during source modernization.
+- if Controller does not use it and SDXL refiner workflows are not needed, purge it in a later pass.
+
+## Current retained external mounted extensions
+
+After the approved quarantine pass, the intended live external set is:
+
 - `multidiffusion-upscaler-for-automatic1111`
+- `sd-webui-detail-daemon`
+- `sd-webui-model-converter`
+- `sd-webui-prompt-all-in-one`
+- `sd-webui-refiner` pending decision
 - `ultimate-upscale-for-automatic1111`
 
 Already first-class / keep:
 
 - `sd-webui-incantations`
 
+## Proposed adoption order
+
+1. `multidiffusion-upscaler-for-automatic1111`
+   - already locally patched for GB10 attention behavior
+   - generation/runtime hot path
+2. `sd-webui-detail-daemon`
+   - generation-affecting sampling/noise behavior
+3. `ultimate-upscale-for-automatic1111`
+   - high-value upscale workflow if Controller relies on it
+4. `sd-webui-model-converter`
+   - possibly better as an offline/Controller utility than an always-mounted A1111 extension
+5. `sd-webui-prompt-all-in-one`
+   - keep mounted for token counting for now; prefer replacing the token counter specifically before adopting the whole extension
+6. `sd-webui-refiner`
+   - decide after confirming whether Controller needs SDXL refiner handoff workflows
+
 ## Cleanup boundary
 
-Do not delete or quarantine live extension directories without a deliberate purge step. Extension removal is reversible if quarantined, but it changes the user-facing A1111 runtime and should be done as its own validated restart/smoke pass.
+Future extension removals should still be done as deliberate quarantine/restart/smoke passes. The current approved UI-only removal set has already been quarantined and validated.
