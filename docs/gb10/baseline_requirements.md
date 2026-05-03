@@ -1,58 +1,58 @@
-# baseline_requirements.md
+# GB10 current dependency baseline
 
-This file records the **currently proven working baseline** for the GB10-A1111 container.
+This file records the **currently validated GB10 A1111 runtime baseline**. It is the restore map for package/runtime hygiene, not a generic upstream A1111 requirements list.
 
-Use it as the ground truth before any package widening work.
+Use `docs/gb10/enhanced_requirements.md` for historical widening experiments and `BUILD_MANIFEST.txt` in the live image for the full package inventory.
 
-## Purpose
+## Validation snapshot
 
-This is **not** a generic list of everything A1111 might ever want.
-It is the exact stack we have currently validated as working for this project’s present baseline:
+Current validated runtime:
 
-- image builds successfully
-- container starts successfully
-- A1111 serves UI/API successfully
-- local model loads successfully
-- image generation succeeds
-- persistent host storage wiring works through direct bind mounts to the real A1111 paths
-- output and model-share host-side pathing can be expressed cleanly without requiring container-side path rewrites
+- repo branch: `latest`
+- image tag: `local/gb10-a1111:base-protected-app-latest`
+- image ID: `sha256:85c902073586364c4406d36604050c6ab7ccc531b1e7fa4449d26089d923b3c8`
+- image created: `2026-05-03T15:47:10.304319823-07:00`
+- live container: `gb10-a1111-latest`
+- host root: `/opt/gb10/stable-diffusion`
+- API: `http://127.0.0.1:7860`
 
-Any widening experiments should be judged against this baseline.
+Smoke evidence from the current image:
 
----
+- `/sdapi/v1/progress?skip_current_image=true`: OK, `progress=0.0`
+- `/sdapi/v1/sd-models`: OK, `10` models
+- `/sdapi/v1/options`: OK, checkpoint `test2.safetensors`
+- CUDA visible in-container on `NVIDIA GB10`
+- required imports pass for `sageattention`, `triton`, `gradio`, and `transformers`
+- `xformers` is intentionally absent
 
-## Current proven platform baseline
+The only current startup warning we accept as non-actionable is the unauthenticated Hugging Face Hub rate-limit warning. Do not add an HF token just to silence it.
 
-### Base image ownership
+## Current platform baseline
 
-The following framework components are confirmed to still come from the NVIDIA base image, not from our own pip overlay:
+### Base image and framework lane
 
-- base image: `nvcr.io/nvidia/pytorch:25.11-py3`
+- base image: `nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`
 - Python: `3.12.3`
-- torch: `2.10.0a0+b558c986e8.nv25.11`
-- torchvision: `0.25.0a0+7a13ad0f`
-- CUDA runtime reported by torch: `13.0`
-
-Also confirmed in both the NVIDIA base image and our runtime image:
-
-- `torchaudio`: not installed
-- `triton`: not installed as a Python package
+- PyTorch source: explicit nightly install from `https://download.pytorch.org/whl/nightly/cu132`
+- torch: `2.13.0.dev20260502+cu132`
+- torchvision: `0.27.0.dev20260502+cu132`
+- torchaudio: `2.11.0.dev20260502+cu132`
+- triton: `3.7.0+git88b227e2`
+- CUDA device: `NVIDIA GB10`
 
 ### Framework ownership doctrine
 
 These rules are part of the working baseline and should not be broken casually:
 
-- `torch` stays owned by the NVIDIA base image
-- `torchvision` stays owned by the NVIDIA base image
-- upstream A1111 bootstrap must **not** be allowed to replace the base-image framework stack
-- runtime package installation stays filtered and `--no-deps`
-- `TORCH_COMMAND=true` remains part of the anti-override posture
-
----
+- the CUDA/base/PyTorch stack is established before app dependency resolution
+- the base package set is frozen/protected after PyTorch install
+- app dependency resolution must not replace or shadow torch/torchvision/torchaudio/triton/CUDA packages
+- runtime app package install uses the resolved wheel set with `--no-deps`
+- `xformers` remains absent on GB10; use PyTorch SDPA and SageAttention paths instead
 
 ## Current proven runtime apt packages
 
-These are the apt packages explicitly installed in the runtime image layer:
+Runtime apt additions owned by this image include:
 
 - `bc`
 - `ca-certificates`
@@ -61,108 +61,98 @@ These are the apt packages explicitly installed in the runtime image layer:
 - `libgl1`
 - `libglib2.0-0`
 
-These are not the full contents of the base image; they are the repo-owned runtime additions on top of the NVIDIA base.
+Builder-only packages/toolchains do not define runtime package policy.
 
----
+## Current direct Python package baseline
 
-## Current proven Python package baseline
+The current direct package set is intentionally more modern than upstream A1111's older pins while preserving the protected CUDA/PyTorch stack.
 
-### Upstream-pinned / aligned core set
+High-signal direct versions:
 
-These are the currently installed and working package versions in the live container baseline, and they align with the current baked upstream `requirements_versions.txt` posture unless otherwise noted.
-
-- `GitPython==3.1.32`
-- `Pillow==9.5.0`
-- `accelerate==0.21.0`
-- `blendmodes==2022`
+- `GitPython==3.1.49`
+- `Pillow==12.2.0`
+- `accelerate==1.13.0`
+- `blendmodes==2025`
 - `clean-fid==0.1.35`
 - `diskcache==5.6.3`
-- `einops==0.4.1`
+- `einops==0.8.2`
 - `facexlib==0.3.0`
 - `fastapi==0.94.0`
 - `gradio==3.41.2`
-- `httpcore==0.15.0`
-- `httpx==0.24.1`
-- `inflection==0.5.1`
-- `jsonmerge==1.8.0`
-- `kornia==0.6.7`
-- `lark==1.1.2`
-- `numpy==1.26.2`
-- `omegaconf==2.2.3`
-- `open-clip-torch==2.20.0`
-- `piexif==1.1.3`
-- `protobuf==3.20.0`
-- `psutil==5.9.5`
-- `pytorch-lightning==1.9.4`
-- `resize-right==0.0.2`
-- `safetensors==0.4.5`
-- `scikit-image==0.21.0`
-- `spandrel==0.3.4`
-- `spandrel-extra-arches==0.1.1`
-- `tomesd==0.1.3`
-- `torchdiffeq==0.2.3`
-- `torchsde==0.2.6`
-- `transformers==4.30.2`
-- `pillow-avif-plugin==1.4.3`
-
-### Supplemental / compatibility cluster we currently rely on
-
-These are part of the currently working baseline even though they are not simply “copy the exact upstream pinned line and stop thinking.”
-
-- `tokenizers==0.13.3`
-  - compatible with the current `transformers==4.30.2` posture
-  - currently needs the builder-stage Rust concession on this Python 3.12 / arm64 path
-- `torchmetrics==1.9.0`
+- `httpcore==1.0.9`
+- `httpx==0.28.1`
+- `jsonmerge==1.9.2`
+- `kornia==0.8.2`
+- `lark==1.3.1`
 - `lightning-utilities==0.15.3`
-  - part of the explicit Lightning runtime cluster needed for this containerized baseline
-- `clip==1.0`
-  - built from the pinned OpenAI CLIP source archive expected by the current stack
+- `numpy==2.4.4`
+- `omegaconf==2.3.0`
+- `open-clip-torch==3.3.0`
+- `pillow-avif-plugin==1.5.5`
+- `protobuf==7.34.1`
+- `psutil==7.2.2`
+- `pydantic==1.10.26`
+- `pytorch-lightning==2.6.1`
+- `safetensors==0.7.0`
+- `scikit-image==0.26.0`
+- `spandrel==0.4.2`
+- `spandrel-extra-arches==0.2.0`
+- `tokenizers==0.22.2`
+- `tomesd==0.1.3`
+- `torchdiffeq==0.2.5`
+- `torchmetrics==1.9.0`
+- `torchsde==0.2.6`
+- `transformers==5.7.0`
+- `huggingface-hub==1.13.0`
 
-### Framework packages intentionally not repo-owned
+The full inventory is emitted at build time into `/opt/stable-diffusion-webui/BUILD_MANIFEST.txt`.
 
-These are intentionally **not** supplied by our curated requirements overlay:
+## Special package policy
 
-- `torch`
-- `torchvision`
-- `torchaudio`
-- `triton`
-- `nvidia-*`
-- `cuda-*`
+### Gradio
 
----
+`gradio==3.41.2` remains intentionally pinned. A prior `3.50.2` widening was rejected because the A1111 UI surface became materially broken. Do not casually widen Gradio as part of routine dependency cleanup.
 
-## Current proven upstream companion repos baked into the image
+The long-term direction is to reduce/replace Gradio dependency through the A1111-Controller lane, not to chase newer Gradio releases inside the current UI.
 
-These are required by the current working A1111 image layout:
+### Tokenizers / Transformers
 
-- `repositories/stable-diffusion-stability-ai`
-- `repositories/generative-models`
-- `repositories/k-diffusion`
-- `repositories/BLIP`
-- `repositories/stable-diffusion-webui-assets`
+Current validated versions:
 
-Sibling-path compatibility links are also intentionally provided for:
+- `transformers==5.7.0`
+- `tokenizers==0.22.2`
+- `huggingface-hub==1.13.0`
 
-- `../generative-models`
-- `../k-diffusion`
-- `../BLIP`
+Build guard policy:
 
----
+- fail if Transformers resolves below `5.7.0`
+- fail if tokenizers resolves below `0.22.2`
+- fail if Hugging Face Hub resolves below `1.13.0`
+- fail if tokenizers resolves to anything other than a `.whl` artifact
 
-## Current proven launch baseline
+This intentionally prevents returning to the old `tokenizers==0.13.3` Rust/source-build lane.
 
-### Launch flags
+### OpenAI CLIP module
 
-Current winning launch baseline:
+The original OpenAI `clip` module is still required by `k-diffusion` and is built from:
+
+- `https://github.com/openai/CLIP/archive/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6.zip`
+
+It is built as a wheel separately with `--no-build-isolation`, verified as `clip-*.whl`, and installed by explicit wheel path.
+
+## Current launch baseline
+
+Canonical launch flags:
 
 - `--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access`
 
-### Current UI/runtime settings confirmed on the live container
+Canonical host relaunch path:
 
-- `hypertile_enable_unet = true`
-- `hypertile_enable_vae = true`
+- `gb10/run.sh`
 
-### Current persistent surfaces
+`gb10/run.sh` owns runtime mounts, container replacement, owned-extension sync, and `COMMANDLINE_ARGS` defaults.
+
+## Persistent surfaces
 
 Host-owned persistent surfaces:
 
@@ -184,50 +174,33 @@ Host-owned persistent surfaces:
 - `/opt/gb10/stable-diffusion/Outputs`
 - `/opt/gb10/stable-diffusion/config`
 
-### Current host-path doctrine
+Special host-side paths:
 
-The container binds those host paths directly onto the real A1111 filesystem locations instead of mounting an intermediate `/data` tree and rebuilding the A1111 path map inside the container.
-
-Special host-side exceptions remain deliberate and explicit:
-
-- `Outputs` is a host-side symlink to the SERVER-002 output share
+- `Outputs` is a host-side symlink to `/mnt/nas-warehouse/StableDiffusion/Outputs`
 - `Models/ook` is local on GB10
-- `Models/SDXL` is a host-side symlink to the UGREEN NAS SDXL subtree
+- `Models/SDXL` is a host-side symlink to `/mnt/nas-warehouse/StableDiffusion/models/sdxl`
 
-Those choices are expressed on the host side; the container just sees the final mounted A1111 paths.
+## Companion repos baked into the image
 
----
+Pinned upstream companion repositories remain baked into the image:
 
-## Known current warning/noise that is not treated as a blocker
+- `repositories/stable-diffusion-stability-ai`
+- `repositories/generative-models`
+- `repositories/k-diffusion`
+- `repositories/BLIP`
+- `repositories/stable-diffusion-webui-assets`
 
-Current non-blocking log residue includes things like:
+Sibling-path compatibility links remain intentional:
 
-- `timm` deprecation warning noise
-- PyTorch TF32 API deprecation warning noise
-- some upstream Python `SyntaxWarning` noise
-- Hugging Face `resume_download` future-warning noise
-- `xformers` absence messages
-- partial failure of `--disable-console-progressbars` to fully suppress all sampler output paths
+- `../generative-models`
+- `../k-diffusion`
+- `../BLIP`
 
-These are baseline-quality annoyances, not known blockers.
+## Cleanup/widening rules
 
----
-
-## Widening rules
-
-When testing newer package versions:
-
-1. Start from this baseline only.
-2. Widen one package, or one tightly related package cluster, at a time.
-3. Preserve framework ownership by the NVIDIA base image.
-4. Rebuild cleanly.
-5. Re-test at least:
-   - image build
-   - container startup
-   - model load
-   - UI/API availability
-   - actual image generation
-6. If a widening passes, record it in `enhanced_requirements.md`.
-7. If it fails, record the failure there too if the result is informative enough to avoid future re-learning.
-
-Do **not** silently replace this file with speculative newer versions. This file is the known-good restore map.
+1. Do not downgrade currently validated packages during cleanup.
+2. Do not widen Gradio casually; that is a dedicated UI/controller migration lane.
+3. Do not install or enable `xformers` on GB10 unless a separate compatibility lane proves it.
+4. Keep the CUDA/PyTorch layer protected from app dependency churn.
+5. Treat external mounted extensions as separate from the image baseline unless they are adopted into repo-owned first-class source.
+6. Record meaningful widening experiments in `enhanced_requirements.md`; keep this file as the current validated baseline.

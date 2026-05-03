@@ -67,7 +67,7 @@ Current logs include `no module xformers. Processing without...`. This is expect
 
 ### HF_TOKEN warning
 
-`Warning: You are sending unauthenticated requests to the HF Hub...` is a rate-limit/auth warning, not a source API compatibility issue. Suppressing it or injecting an HF token should be treated as configuration/secrets work, not source patching.
+`Warning: You are sending unauthenticated requests to the HF Hub...` is a rate-limit/auth warning, not a source API compatibility issue. For this GB10 baseline it is accepted noise; do not inject an HF token just to silence it.
 
 ### Gradio 3.41.2
 

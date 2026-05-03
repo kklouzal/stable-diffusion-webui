@@ -1,12 +1,12 @@
 # enhanced_requirements.md
 
-This file is the **controlled widening ledger** for the GB10-A1111 container.
+This file is the **historical controlled widening ledger** for the GB10 A1111 container.
 
-Use it to record package-by-package or cluster-by-cluster experiments that try newer versions than the current proven baseline in `baseline_requirements.md`.
+Use it to record package-by-package or cluster-by-cluster experiments that try newer versions than the current proven baseline in `baseline_requirements.md`. Older entries intentionally preserve the package versions, image tags, and CUDA lanes that were true at experiment time; do not read them as the current baseline.
 
 ## Purpose
 
-This file is **not** the baseline.
+This file is **not** the current baseline.
 It is the experimental record of what we tried to widen, what passed, what failed, and what became safe to carry forward.
 
 If a widening survives real validation, record it here before promoting it into the repo baseline.
@@ -106,9 +106,9 @@ For each attempt, record:
 
 These are plausible future widening targets, but not yet approved as safe:
 
-- `tokenizers`
-- `torchmetrics`
-- `lightning-utilities`
+- Gradio replacement through A1111-Controller, not casual Gradio widening
+- generation-affecting mounted extension adoption/replacement
+- remaining source-level modern PyTorch/API cleanup after the maintenance baseline is quiet
 - other supplemental compatibility packages that are not simply inherited from A1111’s current `requirements_versions.txt`
 
 Core upstream-pinned packages should **not** be widened casually. If upstream already pins an exact version in the baked A1111 tree, treat widening that package as an explicit experiment rather than a presumed upgrade.

@@ -82,6 +82,8 @@ The Docker image bakes this extension into `/opt/stable-diffusion-webui/extensio
 
 Treat this extension as owned code: preserve GPL-3.0 provenance, keep changes reviewable here, and patch it conservatively because guidance math and hook cleanup materially affect generated image quality.
 
+Mounted external extensions are tracked separately in `docs/gb10/EXTENSIONS.md`. Now that A1111-Controller is canonical for Schwi's frontend/workflow direction, UI-only external extensions should be purged or migrated into Controller-owned data rather than adopted as A1111 extensions. Generation-affecting extensions that remain should become first-class repo-owned source or be replaced by source-level modernization.
+
 ## Persistent storage layout
 
 Default host root:
@@ -194,7 +196,7 @@ Some upstream runtime expectations are handled explicitly here because they are 
 
 Explicitly included:
 
-- `pytorch_lightning==1.9.4`
+- `pytorch_lightning==2.6.1`
 - `torchmetrics==1.9.0`
 - `lightning-utilities==0.15.3`
 

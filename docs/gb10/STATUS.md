@@ -100,7 +100,8 @@ Current validated GB10 runtime:
 - `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
 - `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
-- `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, extension sync, container replacement, and `COMMANDLINE_ARGS`
+- `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, first-class extension sync, container replacement, and `COMMANDLINE_ARGS`
+- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; UI-only extensions are purge candidates now that A1111-Controller is canonical
 
 Older probe tags worth keeping as historical breadcrumbs:
 
@@ -111,6 +112,6 @@ Older probe tags worth keeping as historical breadcrumbs:
 
 ## Immediate next validation work
 
-1. decide whether to provide an HF token for the runtime container; the only current startup warning is the unauthenticated HF Hub rate-limit warning
-2. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads
-3. keep Gradio replacement as a separate future A1111-Controller migration lane rather than mixing it into dependency hygiene
+1. quarantine/purge UI-only external mounted extensions now superseded by A1111-Controller, preserving any useful user data first
+2. decide whether generation-affecting external extensions (`sd-webui-detail-daemon`, `sd-webui-refiner`, `multidiffusion-upscaler-for-automatic1111`, `ultimate-upscale-for-automatic1111`) are actually used; adopt first-class or purge/replace them accordingly
+3. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads
