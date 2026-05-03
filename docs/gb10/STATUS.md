@@ -101,7 +101,7 @@ Current validated GB10 runtime:
 - `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
 - `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, first-class extension sync, container replacement, and `COMMANDLINE_ARGS`
-- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; approved UI-only extensions were quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304` now that A1111-Controller is canonical
+- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; approved removals were purged from `/opt/gb10/stable-diffusion/Extensions` and the quarantine tree was deleted after validation
 
 Older probe tags worth keeping as historical breadcrumbs:
 
@@ -112,6 +112,6 @@ Older probe tags worth keeping as historical breadcrumbs:
 
 ## Immediate next validation work
 
-1. decide whether `sd-webui-refiner` is needed for A1111-Controller/SDXL refiner workflows
-2. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
+1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
+2. map exactly which A1111-Controller paths depend on `sd-webui-model-converter`, `ultimate-upscale-for-automatic1111`, and `sd-webui-prompt-all-in-one`
 3. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads

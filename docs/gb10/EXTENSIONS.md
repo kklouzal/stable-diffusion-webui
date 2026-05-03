@@ -21,7 +21,6 @@ Current directories:
 - `sd-webui-incantations`
 - `sd-webui-model-converter`
 - `sd-webui-prompt-all-in-one`
-- `sd-webui-refiner`
 - `sd-webui-state-manager`
 - `ultimate-upscale-for-automatic1111`
 
@@ -74,6 +73,8 @@ Removal result:
 - A1111 restarted successfully from `local/gb10-a1111:base-protected-app-latest`
 - smoke test passed after removal: progress endpoint OK, `10` models visible, checkpoint `test2.safetensors`, CUDA visible on `NVIDIA GB10`, required imports OK, and `xformers` intentionally absent
 - no new warning/error lines appeared; the accepted unauthenticated HF Hub warning remains the only warning
+- Schwi later confirmed `sd-webui-refiner` is not needed, so it was removed as well
+- the quarantine tree `/opt/gb10/stable-diffusion/Extensions.quarantine` was purged completely after Schwi validated the runtime
 
 ## Keep decisions
 
@@ -148,37 +149,14 @@ Future ownership:
 - keep mounted for now.
 - if token-count behavior becomes a hard Controller dependency, consider replacing that specific capability with a small first-class tokenizer/counting endpoint or Controller-side implementation rather than adopting the whole extension blindly.
 
-### `sd-webui-refiner`
-
-Decision: **undecided**.
-
-What it does:
-
-- integrates a refiner checkpoint into generation
-- loads only the refiner checkpoint UNet
-- replaces the base UNet during the final portion of sampling
-- exposes a percent-of-steps control for when the refiner takes over
-
-Why it might matter:
-
-- it is useful for SDXL-style base/refiner workflows where the base model establishes the image and a refiner model takes over for final detail cleanup.
-- it is generation-affecting, not just UI convenience.
-
-Recommendation:
-
-- keep temporarily until Schwi decides whether A1111-Controller needs this workflow.
-- if kept, adopt first-class or replace with repo-owned refiner handling during source modernization.
-- if Controller does not use it and SDXL refiner workflows are not needed, purge it in a later pass.
-
 ## Current retained external mounted extensions
 
-After the approved quarantine pass, the intended live external set is:
+After the approved removal/purge pass, the live external set is:
 
 - `multidiffusion-upscaler-for-automatic1111`
 - `sd-webui-detail-daemon`
 - `sd-webui-model-converter`
 - `sd-webui-prompt-all-in-one`
-- `sd-webui-refiner` pending decision
 - `ultimate-upscale-for-automatic1111`
 
 Already first-class / keep:
@@ -198,9 +176,7 @@ Already first-class / keep:
    - possibly better as an offline/Controller utility than an always-mounted A1111 extension
 5. `sd-webui-prompt-all-in-one`
    - keep mounted for token counting for now; prefer replacing the token counter specifically before adopting the whole extension
-6. `sd-webui-refiner`
-   - decide after confirming whether Controller needs SDXL refiner handoff workflows
 
 ## Cleanup boundary
 
-Future extension removals should still be done as deliberate quarantine/restart/smoke passes. The current approved UI-only removal set has already been quarantined and validated.
+Future extension removals should still be done as deliberate remove/restart/smoke passes. The current approved removal set has been purged and validated.
