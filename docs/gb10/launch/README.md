@@ -4,8 +4,8 @@
 
 Current canonical container defaults:
 
-- image tag: `local/gb10-a1111:scaffold`
-- container name: `gb10-a1111`
+- image tag: `local/gb10-a1111:base-protected-app-latest`
+- container name: `gb10-a1111-latest`
 - host root: `/opt/gb10/stable-diffusion`
 - port: `7860`
 - network mode: `host`
@@ -29,9 +29,10 @@ Supported environment overrides:
 
 - `DOCKERFILE`
 - `BASE_IMAGE`
+- `PYTORCH_NIGHTLY_CUDA_TAG`
 - `IMAGE_TAG`
-- `A1111_REPO`
-- `A1111_REF`
+- `DOCKER_BUILDKIT`
+- `BUILDKIT_PROGRESS`
 
 ### Run
 
@@ -50,6 +51,21 @@ Supported environment overrides:
 Default `COMMANDLINE_ARGS` baseline:
 
 - `--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access`
+
+### Smoke test
+
+```bash
+./gb10/smoke-test.sh
+```
+
+The smoke test is intentionally non-generative. It checks A1111 API health, model listing, CUDA/PyTorch visibility, and required runtime imports against the live container.
+
+Supported environment overrides:
+
+- `CONTAINER_NAME`
+- `PORT`
+- `DOCKER_BIN`
+- `BASE_URL`
 
 ### Stop / remove
 

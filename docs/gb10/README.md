@@ -71,8 +71,8 @@ Current defaults:
 - PyTorch nightly lane: `https://download.pytorch.org/whl/nightly/cu132`
 - upstream repo: `https://github.com/AUTOMATIC1111/stable-diffusion-webui.git`
 - upstream ref: `dev`
-- image tag: `local/gb10-a1111:scaffold`
-- container name: `gb10-a1111`
+- image tag: `local/gb10-a1111:base-protected-app-latest`
+- container name: `gb10-a1111-latest`
 
 ## Owned A1111 extensions
 

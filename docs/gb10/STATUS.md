@@ -82,21 +82,29 @@ Host-owned persistent surfaces:
 - temporary builder-stage `RUSTFLAGS="-A invalid_reference_casting"` concession for `tokenizers 0.13.x`
 - explicit `libssl-dev` + `pkg-config` support in `wheelbuilder`
 
-## Latest build evidence
+## Latest build/runtime evidence
 
-Successful full-image probe on GB10:
+Current validated GB10 runtime:
 
-- image tag: `local/gb10-a1111:full-probe`
-- image digest: `sha256:205e443219a72e9e8792ca31046638fd0dc88c16f570d4314f0835a7c3157d99`
-- torch after runtime install: `2.13.0.dev20260422+cu130`
-- torchvision after runtime install: `0.27.0.dev20260423+cu130`
-- torchaudio after runtime install: `2.11.0.dev20260423+cu130`
-- wheelbuilder also succeeded separately as `local/gb10-a1111:wheelbuilder-probe`
-- follow-up arch-priority probe: `local/gb10-a1111:arch-priority-probe` (`xformers/_C.so` contains `sm_121a`, `sm_121`, and `sm_120` cubins plus `sm_121` PTX; torch/vision/audio remained on `+cu130`)
-- package-manifest probe: `local/gb10-a1111:manifest-probe` (`BUILD_MANIFEST.json` summary: `base=35`, `direct=45`, `indirect=81`; torch/xformers import cleanly with CUDA available)
+- image tag: `local/gb10-a1111:base-protected-app-latest`
+- live container: `gb10-a1111-latest`
+- torch after runtime install: `2.13.0.dev20260430+cu132`
+- torchvision after runtime install: `0.27.0.dev20260430+cu132`
+- torchaudio after runtime install: `2.11.0.dev20260430+cu132`
+- A1111 API health: `GET /sdapi/v1/progress` and `GET /sdapi/v1/sd-models` return JSON on `127.0.0.1:7860`
+- `BUILD_MANIFEST.json` summary: `base=31`, `direct=52`, `indirect=87`
+- `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
+- `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
+
+Older probe tags worth keeping as historical breadcrumbs:
+
+- `local/gb10-a1111:full-probe` / digest `sha256:205e443219a72e9e8792ca31046638fd0dc88c16f570d4314f0835a7c3157d99` proved the earlier full-image bring-up
+- `local/gb10-a1111:wheelbuilder-probe` proved the separate wheelbuilder path
+- `local/gb10-a1111:arch-priority-probe` proved the earlier `sm_121a` extension-build direction
+- `local/gb10-a1111:manifest-probe` proved the package-manifest path before the current `cu132` runtime refresh
 
 ## Immediate next validation work
 
-1. relaunch/validate the container against the existing host-mounted runtime surfaces
-2. confirm the repo-visible run path still behaves correctly with the refactored image
-3. decide whether any remaining docs cleanup beyond `README.md` / `STATUS.md` is worth doing
+1. validate the repo-visible `gb10/run.sh` path against the current default image/container names during a safe restart window
+2. add or document a small smoke-test command that checks API health, model listing, and package imports without triggering a generation job
+3. continue runtime polish: default launch/tuning choices, extension layering discipline, and noisy-warning reduction
