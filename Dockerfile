@@ -171,14 +171,14 @@ COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
+COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
 
 # Builder-stage wheel doctrine:
-# - use a modern rustup-managed Rust toolchain here for packages like tokenizers
 # - resolve the full dependency closure once against the CUDA-base + explicit torch lane
 # - prebuild wheels for the full resolved closure in this throwaway stage
-# - temporary compatibility concession: tokenizers 0.13.x fails on current Rust with
-#   `invalid_reference_casting`; relax that single lint in this builder stage only
+# - tokenizers follows the current Transformers-compatible range, but must not fall
+#   below the known-good GB10 floor or fall back to an sdist/Rust build
 # - local resolver compatibility concession: Gradio 3.41.2 still advertises stale
 #   `numpy~=1.0` wheel metadata even though this stack runs on numpy 2.x, so the resolver
 #   input patches that metadata to `numpy>=1.0` before generating the dry-run report used
@@ -189,14 +189,16 @@ RUN rustc --version \
     && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
     && python -m pip install --break-system-packages --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
+    && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
+    && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
+    && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
     && python /opt/build/render-resolved-requirements.py
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/root/.cache/cargo-target \
-    export RUSTFLAGS="-A invalid_reference_casting" \
-    && export CCACHE_DIR=/root/.cache/ccache \
+    export CCACHE_DIR=/root/.cache/ccache \
     && export MAX_JOBS="$(nproc)" \
     && ccache --zero-stats \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \

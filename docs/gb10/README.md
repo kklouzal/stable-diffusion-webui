@@ -216,14 +216,22 @@ The OpenAI CLIP package is built from the upstream-pinned source archive:
 
 Because that package has old packaging behavior, it is built separately with `--no-build-isolation`, verified as a `clip-*.whl` artifact, and then installed by explicit wheel path.
 
-#### Tokenizers 0.13.x builder concession
+#### Tokenizers resolver guard
 
-This project currently keeps `transformers==4.30.2`, which in turn keeps `tokenizers<0.14` and effectively lands on `tokenizers==0.13.3`.
+This project intentionally follows the latest compatible Transformers/tokenizers lane instead of keeping the old A1111-era `transformers==4.30.2` / `tokenizers==0.13.3` pair.
 
-On this Python 3.12 / aarch64 path, tokenizers 0.13.x needs a builder-stage Rust compatibility concession.
+Current validated runtime baseline:
+
+- `transformers==5.7.0`
+- `tokenizers==0.22.2`
+- `huggingface-hub==1.13.0`
 
 Current policy:
 
-- builder stage sets `RUSTFLAGS="-A invalid_reference_casting"`
-- this concession is builder-stage-only
-- runtime keeps the supported Transformers/tokenizers contract intact
+- keep `tokenizers` direct and unpinned in `requirements_versions.txt` so the resolver selects the newest version allowed by current Transformers metadata
+- fail the build if Transformers resolves below `5.7.0`
+- fail the build if tokenizers resolves below `0.22.2`
+- fail the build if tokenizers resolves to an sdist/source artifact instead of a prebuilt wheel
+- fail the build if Hugging Face Hub resolves below `1.13.0`
+
+This removes the old builder-stage `RUSTFLAGS="-A invalid_reference_casting"` workaround. If tokenizers ever lacks a compatible aarch64 wheel again, the Docker build should fail clearly instead of silently falling back into a Rust compatibility lane.

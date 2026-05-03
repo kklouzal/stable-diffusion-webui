@@ -13,7 +13,7 @@ The repo currently:
 - still targets the same upstream A1111 source and persistent host-mounted runtime surfaces
 - now defaults the Dockerfile/build flow to NVIDIA CUDA NGC + explicit PyTorch nightly `cu132`
 - now freezes/protects the base Python package set after torch install so later app deps cannot overwrite or shadow it
-- now keeps `wheelbuilder` on a Rust + OpenSSL-capable path that can build `tokenizers==0.13.3`
+- now keeps `wheelbuilder` on a Rust + OpenSSL-capable path for packages that still need native wheels, while `tokenizers` is required to resolve to a current compatible aarch64 wheel
 - now routes heavy builder compiles through `ccache` via BuildKit cache mounts
 - still keeps upstream `webui.sh` out of authority for runtime bootstrap
 - still keeps user-owned runtime surfaces under `/opt/gb10/stable-diffusion`
@@ -79,7 +79,7 @@ Host-owned persistent surfaces:
 - explicit `pytorch-lightning` / `torchmetrics` / `lightning-utilities` runtime cluster
 - explicit OpenAI CLIP wheel build/install path
 - config bootstrap repair for missing/zero-byte config files
-- temporary builder-stage `RUSTFLAGS="-A invalid_reference_casting"` concession for `tokenizers 0.13.x`
+- tokenizers resolver guard: `transformers>=5.7.0`, `tokenizers>=0.22.2`, `huggingface-hub>=1.13.0`, and tokenizers must resolve from a wheel rather than an sdist/Rust build
 - explicit `libssl-dev` + `pkg-config` support in `wheelbuilder`
 
 ## Latest build/runtime evidence
@@ -87,17 +87,20 @@ Host-owned persistent surfaces:
 Current validated GB10 runtime:
 
 - image tag: `local/gb10-a1111:base-protected-app-latest`
+- image ID: `sha256:85c902073586364c4406d36604050c6ab7ccc531b1e7fa4449d26089d923b3c8`
+- image created: `2026-05-03T15:47:10.304319823-07:00`
 - live container: `gb10-a1111-latest`
-- torch after runtime install: `2.13.0.dev20260430+cu132`
-- torchvision after runtime install: `0.27.0.dev20260430+cu132`
-- torchaudio after runtime install: `2.11.0.dev20260430+cu132`
-- A1111 API health: `GET /sdapi/v1/progress` and `GET /sdapi/v1/sd-models` return JSON on `127.0.0.1:7860`
+- torch after runtime install: `2.13.0.dev20260502+cu132`
+- torchvision after runtime install: `0.27.0.dev20260502+cu132`
+- torchaudio after runtime install: `2.11.0.dev20260502+cu132`
+- Transformers/tokenizers/HF Hub runtime: `transformers==5.7.0`, `tokenizers==0.22.2`, `huggingface-hub==1.13.0`
+- tokenizers build guard: Docker build fails if Transformers, tokenizers, or Hugging Face Hub resolve below the validated floors, and tokenizers must resolve from a `.whl` artifact rather than an sdist/Rust source build
+- A1111 API health: `GET /sdapi/v1/progress`, `GET /sdapi/v1/sd-models`, and `GET /sdapi/v1/options` return JSON on `127.0.0.1:7860`; latest smoke saw `10` models and checkpoint `test2.safetensors`
 - `BUILD_MANIFEST.json` summary: `base=31`, `direct=52`, `indirect=87`
 - `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
 - `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
 - `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, extension sync, container replacement, and `COMMANDLINE_ARGS`
-- source commit `ea5b866c` fixes the Incantations PAG hidden-denoise pass for SDXL positive/negative conditioning with mismatched token counts; this is committed and pushed, but live runtime confirmation waits for the next safe rebuild/restart window
 
 Older probe tags worth keeping as historical breadcrumbs:
 
@@ -108,6 +111,6 @@ Older probe tags worth keeping as historical breadcrumbs:
 
 ## Immediate next validation work
 
-1. rebuild/restart into the next image after launch cleanup, then confirm duplicated launch flags and `.git` probe noise are gone
-2. continue xformers cleanup: keep it disabled on GB10, remove stale install/default paths, and document SageAttention/SDPA as the preferred runtime path
-3. continue modern Python/PyTorch/runtime warning cleanup until startup and generation logs are intentionally quiet
+1. decide whether to provide an HF token for the runtime container; the only current startup warning is the unauthenticated HF Hub rate-limit warning
+2. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads
+3. keep Gradio replacement as a separate future A1111-Controller migration lane rather than mixing it into dependency hygiene
