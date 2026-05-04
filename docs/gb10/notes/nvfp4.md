@@ -233,3 +233,48 @@ Current caveats:
 - This validates first-stage eager NVFP4 generation, not LoRA compatibility.
 - Text encoders remain included if their Linear shapes are eligible; the VAE is excluded.
 - Next tuning should compare layer subsets, image drift, memory, LoRA behavior, and whether dynamic activation NVFP4 or weight-only NVFP4 is better for A1111.
+
+
+## 2026-05-04 LoRA compatibility research/prototype
+
+A1111's default LoRA path is not compatible with TorchAO `NVFP4Tensor` weights when the affected layer is quantized.
+
+Observed failure before the compatibility patch:
+
+- Prompt LoRA selection works and existing SDXL LoRA files are discovered normally.
+- Generation fails when LoRA touches a quantized `torch.nn.Linear`.
+- The first failure happened in `extensions-builtin/Lora/networks.py` while `network_apply_weights()` called `store_weights_backup(self.weight)` for a CLIP `q_proj` layer.
+- TorchAO rejected the backup/copy operation with an assertion from its `__torch_dispatch__` path because `NVFP4Tensor.to(devices.cpu, copy=True)` is not a normal dense tensor copy.
+- Forcing A1111's existing `lora_functional=True` was not sufficient while text-encoder Linear modules were quantized, because functional/non-functional behavior still reaches quantized tensor operations in fragile places.
+
+Best first integration:
+
+1. Keep LoRA checkpoint weights in normal bf16/fp16 tensors. Do not quantize LoRA files during initial LoRA load.
+2. Quantize only the denoiser/UNet Linear path for now; leave SDXL text encoders and VAE unquantized.
+3. Route LoRA over quantized Linear layers through A1111's functional LoRA forward path automatically, without globally forcing `lora_functional` for every layer.
+4. Let the quantized base Linear run through TorchAO/MSLK, compute the LoRA delta separately in normal tensor math, then add the output delta. Avoid modifying/restoring/copying `NVFP4Tensor` base weights.
+
+Prototype changes:
+
+- `modules/sd_models.py`: `nvfp4_linear_filter()` now skips `conditioner.*`, `cond_stage_model.*`, and `first_stage_model.*`, and counts eligibility using `model.named_modules()` so load logs reflect the actual filtered set.
+- `extensions-builtin/Lora/networks.py`: `network_Linear_forward()` detects TorchAO `NVFP4Tensor` weights and automatically uses `network_forward()` for those layers, even when the global `lora_functional` option is disabled.
+
+Validation:
+
+- Built image: `local/gb10-a1111:nvfp4-lora-test2`.
+- Test container: `gb10-a1111-nvfp4-lora-test` on port `7861` with `--dtype bfloat16`.
+- Options: `sd_model_checkpoint=test2.safetensors`, `fp8_storage=Disable`, `nvfp4_storage=Enable for SDXL`, `cache_fp16_weight=False`, `lora_functional=False`.
+- LoRA prompt tags: `<lora:Detail-Enhancer-v1.0:0.6>`, `<lora:Canopus-Realism-LoRA:0.35>`.
+- Load log: `Applied NVFP4 weight quantization to 743 Linear modules; skipped 168 incompatible Linear modules`.
+- Load timing: `Model loaded in 9.0s (... apply nvfp4: 1.7s ...)`.
+- Generation succeeded at 1024x1024, 20 steps, Euler, CFG 7, seed `424242424`.
+- API wall time including first LoRA/model work: `38.281s`.
+- Sampler steady-state after the first step was about `1.1 it/s` with two LoRAs active.
+- Output: `/tmp/gb10_nvfp4_lora_patch_1024.png` on GB10, copied to workspace `tmp/gb10_nvfp4_lora_patch_1024.png`.
+
+Current caveats:
+
+- This is a compatibility-first path, not the final performance-tuned path.
+- Leaving text encoders unquantized reduces NVFP4 coverage from the earlier 911 Linear modules to 743, but avoids the LoRA/text-encoder copy failure and is safer for prompt conditioning quality.
+- Functional LoRA over quantized Linear layers costs performance; the first validated two-LoRA render was slower than no-LoRA NVFP4.
+- Next profiling should compare no-LoRA, one-LoRA, and normal bf16 LoRA at matched prompts/seeds before deciding whether to optimize LoRA delta computation or selectively re-enable safe text-encoder quantization.

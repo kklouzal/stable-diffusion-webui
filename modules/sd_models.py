@@ -370,6 +370,8 @@ def check_weight_quantization_mutual_exclusion(model):
 def nvfp4_linear_filter(module, fqn):
     if not isinstance(module, torch.nn.Linear):
         return False
+    if fqn.startswith(("conditioner.", "cond_stage_model.", "first_stage_model.")):
+        return False
     if module.weight is None or module.weight.ndim != 2:
         return False
     out_features, in_features = module.weight.shape
@@ -387,9 +389,9 @@ def apply_nvfp4_weight_quantization(model, timer):
 
     eligible = 0
     skipped_linear = 0
-    for module in model.modules():
+    for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
-            if nvfp4_linear_filter(module, ""):
+            if nvfp4_linear_filter(module, fqn):
                 eligible += 1
             else:
                 skipped_linear += 1

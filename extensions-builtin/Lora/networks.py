@@ -575,8 +575,12 @@ def network_reset_cached_weight(self: Union[torch.nn.Conv2d, torch.nn.Linear]):
     self.network_bias_backup = None
 
 
+def is_nvfp4_weight(weight):
+    return type(weight).__name__ == "NVFP4Tensor" and type(weight).__module__.startswith("torchao.")
+
+
 def network_Linear_forward(self, input):
-    if shared.opts.lora_functional:
+    if shared.opts.lora_functional or is_nvfp4_weight(self.weight):
         return network_forward(self, input, originals.Linear_forward)
 
     network_apply_weights(self)
