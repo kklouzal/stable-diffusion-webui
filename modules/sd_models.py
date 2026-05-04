@@ -372,8 +372,6 @@ def check_weight_quantization_mutual_exclusion(model):
 def nvfp4_linear_skip_reason(module, fqn):
     if not isinstance(module, torch.nn.Linear):
         return "not_linear"
-    if fqn.startswith(("conditioner.", "cond_stage_model.")):
-        return "text_conditioner"
     if fqn.startswith("first_stage_model."):
         return "vae"
     if module.weight is None or module.weight.ndim != 2:
@@ -435,6 +433,76 @@ def apply_nvfp4_weight_quantization(model, timer):
 
     print(f"Applied NVFP4 weight quantization to {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})")
     timer.record("apply nvfp4")
+
+
+def nvfp4_vae_linear_skip_reason(module, fqn):
+    if not isinstance(module, torch.nn.Linear):
+        return "not_linear"
+    if module.weight is None or module.weight.ndim != 2:
+        return "not_2d_weight"
+    out_features, in_features = module.weight.shape
+    if out_features % 16 != 0 or in_features % 16 != 0:
+        return "shape_not_multiple_of_16"
+    return None
+
+
+def nvfp4_vae_linear_filter(module, fqn):
+    return nvfp4_vae_linear_skip_reason(module, fqn) is None
+
+
+def apply_nvfp4_vae_weight_quantization(model, timer):
+    if not check_nvfp4(model):
+        return
+    if devices.dtype != torch.bfloat16:
+        raise RuntimeError("NVFP4 weight requires --dtype bfloat16; TorchAO NVFP4 kernels do not support float16 activations")
+    if not torch.cuda.is_available():
+        raise RuntimeError("NVFP4 weight requires CUDA")
+
+    vae = getattr(model, "first_stage_model", None)
+    if vae is None:
+        return
+
+    eligible = 0
+    skipped_linear = 0
+    skipped_reasons = {}
+    skipped_names = []
+    for fqn, module in vae.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            reason = nvfp4_vae_linear_skip_reason(module, fqn)
+            if reason is None:
+                eligible += 1
+            else:
+                skipped_linear += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
+
+    if eligible == 0:
+        model.nvfp4_vae_quantization_stats = {
+            "eligible_linear": eligible,
+            "skipped_linear": skipped_linear,
+            "skipped_reasons": skipped_reasons,
+            "skipped_names": skipped_names,
+            "config": "NVFP4DynamicActivationNVFP4WeightConfig",
+        }
+        print(f"Applied NVFP4 weight quantization to 0 VAE Linear modules; skipped {skipped_linear} incompatible VAE Linear modules ({skipped_reasons})")
+        timer.record("apply nvfp4 to VAE")
+        return
+
+    from torchao.quantization import quantize_
+    from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+
+    config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
+    quantize_(vae, config, filter_fn=nvfp4_vae_linear_filter, device=devices.device)
+    model.nvfp4_vae_quantization_stats = {
+        "eligible_linear": eligible,
+        "skipped_linear": skipped_linear,
+        "skipped_reasons": skipped_reasons,
+        "skipped_names": skipped_names,
+        "config": "NVFP4DynamicActivationNVFP4WeightConfig",
+    }
+
+    print(f"Applied NVFP4 weight quantization to {eligible} VAE Linear modules; skipped {skipped_linear} incompatible VAE Linear modules ({skipped_reasons})")
+    timer.record("apply nvfp4 to VAE")
 
 
 def check_fp8(model):
@@ -647,6 +715,8 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     vae_file, vae_source = sd_vae.resolve_vae(checkpoint_info.filename).tuple()
     sd_vae.load_vae(model, vae_file, vae_source)
     timer.record("load VAE")
+
+    apply_nvfp4_vae_weight_quantization(model, timer)
 
 
 def enable_midas_autodownload():

@@ -422,6 +422,18 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
     current_names = getattr(self, "network_current_names", ())
     wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
 
+    if wanted_names != () and current_names != wanted_names:
+        has_network_module = False
+        for net in loaded_networks:
+            if net.modules.get(network_layer_name, None) is not None:
+                has_network_module = True
+                break
+            if isinstance(self, torch.nn.MultiheadAttention) and all(net.modules.get(network_layer_name + suffix, None) is not None for suffix in ("_q_proj", "_k_proj", "_v_proj", "_out_proj")):
+                has_network_module = True
+                break
+        if not has_network_module:
+            return
+
     weights_backup = getattr(self, "network_weights_backup", None)
     if weights_backup is None and wanted_names != ():
         if current_names != () and not allowed_layer_without_weight(self):
