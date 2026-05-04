@@ -15,6 +15,8 @@ PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https:/
 PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
 TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
 MSLK_NIGHTLY_INDEX_URL = os.environ.get('MSLK_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu130')
+MSLK_SOURCE_REPO = os.environ.get('MSLK_SOURCE_REPO')
+MSLK_SOURCE_COMMIT = os.environ.get('MSLK_SOURCE_COMMIT')
 EXTRA_DIRECT = {'clip'}
 
 
@@ -157,6 +159,8 @@ def base_reason(name: str) -> str:
         return 'Base-Provided|PyTorch-Nightly'
     if name.startswith('nvidia-') or name.startswith('cuda-') or name == 'triton':
         return 'Base-Provided|Torch-CUDA-Stack'
+    if name == 'mslk' and MSLK_SOURCE_COMMIT:
+        return f'Base-Provided|Torch-Quantization-Stack|Source-Built:{MSLK_SOURCE_COMMIT[:12]}'
     if name in TORCH_QUANTIZATION_PKGS:
         return 'Base-Provided|Torch-Quantization-Stack'
     return 'Base-Provided|Torch-Base'
@@ -201,6 +205,9 @@ for items in sections.values():
     for item in items:
         if item['normalized'] in PYTORCH_NIGHTLY_PKGS:
             extra = PYTORCH_NIGHTLY_INDEX_URL
+        elif item['normalized'] == 'mslk' and MSLK_SOURCE_COMMIT:
+            item['latest'] = f'source:{MSLK_SOURCE_COMMIT[:12]}'
+            continue
         elif item['normalized'] == 'mslk':
             extra = MSLK_NIGHTLY_INDEX_URL
         else:
