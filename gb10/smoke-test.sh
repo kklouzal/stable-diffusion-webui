@@ -42,7 +42,7 @@ print(f'torch: {torch.__version__} cuda={torch.cuda.is_available()}')
 if torch.cuda.is_available():
     print(f'cuda device: {torch.cuda.get_device_name(0)}')
 
-required = ['sageattention', 'triton', 'gradio', 'transformers']
+required = ['sageattention', 'triton', 'gradio', 'transformers', 'torchao', 'mslk']
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit(f'missing required modules: {", ".join(missing)}')
@@ -50,6 +50,27 @@ if missing:
 optional_absent = [name for name in ['xformers'] if importlib.util.find_spec(name) is None]
 if optional_absent:
     print(f'optional absent: {", ".join(optional_absent)}')
+
+
+from torchao.prototype.mx_formats.inference_workflow import NVFP4DynamicActivationNVFP4WeightConfig
+from torchao.quantization import quantize_
+
+if torch.cuda.is_available():
+    layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
+    quantize_(
+        layer,
+        config=NVFP4DynamicActivationNVFP4WeightConfig(
+            use_dynamic_per_tensor_scale=True,
+            use_triton_kernel=True,
+        ),
+        filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
+    )
+    sample = torch.randn(1, 1024, device='cuda', dtype=torch.bfloat16)
+    out = layer(sample)
+    torch.cuda.synchronize()
+    if out.dtype != torch.bfloat16 or not torch.isfinite(out).all():
+        raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
+    print('nvfp4 torchao/mslk: ok')
 
 print('container imports: ok')
 PY

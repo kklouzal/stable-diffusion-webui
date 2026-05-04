@@ -3,6 +3,9 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
 ARG PYTHON_VERSION=3.12
 ARG PYTORCH_NIGHTLY_CUDA_TAG=cu132
+ARG TORCHAO_PACKAGE=torchao
+ARG MSLK_NIGHTLY_CUDA_TAG=cu130
+ARG MSLK_PACKAGE=mslk
 ARG STABLE_DIFFUSION_REPO=https://github.com/w-e-w/stablediffusion.git
 ARG STABLE_DIFFUSION_COMMIT=cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf
 ARG GENERATIVE_MODELS_REPO=https://github.com/Stability-AI/generative-models.git
@@ -24,6 +27,9 @@ FROM ${BASE_IMAGE} AS torch-base
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTHON_VERSION
 ARG PYTORCH_NIGHTLY_CUDA_TAG
+ARG TORCHAO_PACKAGE
+ARG MSLK_NIGHTLY_CUDA_TAG
+ARG MSLK_PACKAGE
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/build
@@ -53,11 +59,17 @@ RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1
 # CUDA-base doctrine:
 # - start from the NVIDIA CUDA image, not the NVIDIA PyTorch image
 # - install the PyTorch nightly lane explicitly from the selected CUDA wheel index
+# - install TorchAO/MSLK beside torch so NVFP4 support is protected with the framework stack
+# - MSLK currently publishes CUDA 13.0 nightly wheels for aarch64; use that lane for the
+#   Triton NVFP4 path until a cu132 wheel is published or a source build proves better
 # - freeze the resulting system-Python package set so later app deps cannot overwrite it
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --break-system-packages --no-cache-dir --pre \
       torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}
+      --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG} \
+    && python -m pip install --break-system-packages --no-cache-dir --pre \
+      ${TORCHAO_PACKAGE} ${MSLK_PACKAGE} \
+      --extra-index-url https://download.pytorch.org/whl/nightly/${MSLK_NIGHTLY_CUDA_TAG}
 
 RUN python - <<'PY'
 import importlib.metadata as md
@@ -87,6 +99,8 @@ print(json.dumps({
     'torch': md.version('torch'),
     'torchvision': md.version('torchvision'),
     'torchaudio': md.version('torchaudio'),
+    'torchao': md.version('torchao'),
+    'mslk': md.version('mslk'),
 }, indent=2))
 PY
 
@@ -239,6 +253,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG A1111_UID=2323
 ARG A1111_GID=2323
 ARG PYTORCH_NIGHTLY_CUDA_TAG
+ARG MSLK_NIGHTLY_CUDA_TAG
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/stable-diffusion-webui
@@ -285,6 +300,8 @@ print(json.dumps({
         'torch': version('torch'),
         'torchvision': version('torchvision'),
         'torchaudio': version('torchaudio'),
+        'torchao': version('torchao'),
+        'mslk': version('mslk'),
         'gradio': version('gradio'),
         'transformers': version('transformers'),
         'clip': version('clip'),
@@ -304,6 +321,8 @@ print(json.dumps({
         'torch': md.version('torch'),
         'torchvision': md.version('torchvision'),
         'torchaudio': md.version('torchaudio'),
+        'torchao': md.version('torchao'),
+        'mslk': md.version('mslk'),
         'gradio': md.version('gradio'),
         'transformers': md.version('transformers'),
         'clip': md.version('clip'),
@@ -313,7 +332,9 @@ print(json.dumps({
 }, indent=2))
 PY
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
-    && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" /usr/local/bin/gb10-a1111-render-build-manifest
+    && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
+       MSLK_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${MSLK_NIGHTLY_CUDA_TAG}" \
+       /usr/local/bin/gb10-a1111-render-build-manifest
 RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /opt/requirements-runtime.txt /root/.cache/pip \
     && chmod +x /usr/local/bin/gb10-a1111-entrypoint /usr/local/bin/gb10-a1111-launch \
     && chown -R a1111:a1111 /opt/stable-diffusion-webui /home/a1111 \
