@@ -13,6 +13,8 @@ OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST
 OUTPUT_JSON = Path(os.environ.get('OUTPUT_JSON', str(A1111_DIR / 'BUILD_MANIFEST.json')))
 PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu130')
 PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
+TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
+MSLK_NIGHTLY_INDEX_URL = os.environ.get('MSLK_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu130')
 EXTRA_DIRECT = {'clip'}
 
 
@@ -155,6 +157,8 @@ def base_reason(name: str) -> str:
         return 'Base-Provided|PyTorch-Nightly'
     if name.startswith('nvidia-') or name.startswith('cuda-') or name == 'triton':
         return 'Base-Provided|Torch-CUDA-Stack'
+    if name in TORCH_QUANTIZATION_PKGS:
+        return 'Base-Provided|Torch-Quantization-Stack'
     return 'Base-Provided|Torch-Base'
 
 
@@ -195,7 +199,12 @@ for name in sorted(all_dists):
 
 for items in sections.values():
     for item in items:
-        extra = PYTORCH_NIGHTLY_INDEX_URL if item['normalized'] in PYTORCH_NIGHTLY_PKGS else None
+        if item['normalized'] in PYTORCH_NIGHTLY_PKGS:
+            extra = PYTORCH_NIGHTLY_INDEX_URL
+        elif item['normalized'] == 'mslk':
+            extra = MSLK_NIGHTLY_INDEX_URL
+        else:
+            extra = None
         item['latest'] = latest_visible(item['normalized'], extra)
 
 lines: list[str] = []
@@ -229,6 +238,7 @@ OUTPUT_TEXT.write_text(text)
 OUTPUT_JSON.write_text(json.dumps({
     'summary': {k: len(v) for k, v in sections.items()},
     'pytorch_nightly_index_url': PYTORCH_NIGHTLY_INDEX_URL,
+    'mslk_nightly_index_url': MSLK_NIGHTLY_INDEX_URL,
     'upstream_direct_count': len(upstream_direct),
     'repo_direct_count': len(repo_direct),
     'packages': sections,
