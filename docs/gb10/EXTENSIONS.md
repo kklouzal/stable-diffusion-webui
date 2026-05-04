@@ -10,29 +10,14 @@ Live host path:
 
 - `/opt/gb10/stable-diffusion/Extensions`
 
-Current directories:
+Expected retained directories after the 2026-05-03 cleanup pass:
 
-- `Config-Presets`
-- `model-keyword`
 - `multidiffusion-upscaler-for-automatic1111`
-- `sd_delete_button`
-- `sd-webui-cardmaster`
+- `openclaw-clear-cond-cache`
 - `sd-webui-detail-daemon`
 - `sd-webui-incantations`
 - `sd-webui-model-converter`
-- `sd-webui-prompt-all-in-one`
-- `sd-webui-state-manager`
 - `ultimate-upscale-for-automatic1111`
-
-Current disabled extension setting:
-
-- `sd-webui-state-manager` is already disabled in `config.json`.
-
-Current startup evidence:
-
-- no extension traceback in recent startup logs
-- `sd-webui-prompt-all-in-one` starts a background API service
-- only current startup warning is the accepted unauthenticated HF Hub notice
 
 ## Ownership policy
 
@@ -47,6 +32,13 @@ First-class means:
 
 Currently first-class:
 
+- `openclaw-clear-cond-cache`
+  - owns OpenClaw/A1111-Controller helper endpoints:
+    - `POST /sdapi/v1/openclaw/clear-cond-cache`
+    - `GET /sdapi/v1/openclaw/cond-cache`
+    - `POST /sdapi/v1/openclaw/token-count`
+    - `POST /sdapi/v1/openclaw/token_counter`
+  - replaces the former token-counter dependency on `sd-webui-prompt-all-in-one`
 - `sd-webui-incantations`
   - owns PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix behavior
   - replaces previous dependence on separate Incantations and Dynamic Thresholding checkouts
@@ -63,18 +55,20 @@ Schwi approved removing these UI-only / Controller-superseded extensions from th
 - `model-keyword`
 - `sd_delete_button`
 - `sd-webui-cardmaster`
+- `sd-webui-prompt-all-in-one`
 - `sd-webui-state-manager`
 
 `sd-webui-state-manager` was already disabled in `config.json`. The user referred to this as `sd-webui-statemaster`; the live directory name is `sd-webui-state-manager`.
 
+`sd-webui-prompt-all-in-one` originally stayed because A1111-Controller used its `/physton_prompt/token_counter` endpoint. That dependency was replaced by the first-class `openclaw-clear-cond-cache` endpoint `/sdapi/v1/openclaw/token-count`, after which the controller fallback to `/physton_prompt/token_counter` was removed.
+
 Removal result:
 
-- quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304`
-- A1111 restarted successfully from `local/gb10-a1111:base-protected-app-latest`
-- smoke test passed after removal: progress endpoint OK, `10` models visible, checkpoint `test2.safetensors`, CUDA visible on `NVIDIA GB10`, required imports OK, and `xformers` intentionally absent
-- no new warning/error lines appeared; the accepted unauthenticated HF Hub warning remains the only warning
-- Schwi later confirmed `sd-webui-refiner` is not needed, so it was removed as well
+- earlier UI-only removals were quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304`
 - the quarantine tree `/opt/gb10/stable-diffusion/Extensions.quarantine` was purged completely after Schwi validated the runtime
+- `sd-webui-prompt-all-in-one` was removed after owned token-count replacement and live validation
+- A1111 restarted successfully from `local/gb10-a1111:base-protected-app-latest`
+- smoke tests should include progress endpoint health, model listing, OpenClaw token-count endpoint, Controller token-count endpoint, and extension absence
 
 ## Keep decisions
 
@@ -135,20 +129,6 @@ Future ownership:
 
 - possible first-class adoption or replacement candidate after mapping exactly which upscale path Controller calls.
 
-### `sd-webui-prompt-all-in-one`
-
-Decision: **keep**.
-
-Reason:
-
-- A1111-Controller uses its prompt token count functionality.
-- Schwi expects we may use other functionality from it too.
-
-Future ownership:
-
-- keep mounted for now.
-- if token-count behavior becomes a hard Controller dependency, consider replacing that specific capability with a small first-class tokenizer/counting endpoint or Controller-side implementation rather than adopting the whole extension blindly.
-
 ## Current retained external mounted extensions
 
 After the approved removal/purge pass, the live external set is:
@@ -156,11 +136,11 @@ After the approved removal/purge pass, the live external set is:
 - `multidiffusion-upscaler-for-automatic1111`
 - `sd-webui-detail-daemon`
 - `sd-webui-model-converter`
-- `sd-webui-prompt-all-in-one`
 - `ultimate-upscale-for-automatic1111`
 
 Already first-class / keep:
 
+- `openclaw-clear-cond-cache`
 - `sd-webui-incantations`
 
 ## Proposed adoption order
@@ -174,8 +154,6 @@ Already first-class / keep:
    - high-value upscale workflow if Controller relies on it
 4. `sd-webui-model-converter`
    - possibly better as an offline/Controller utility than an always-mounted A1111 extension
-5. `sd-webui-prompt-all-in-one`
-   - keep mounted for token counting for now; prefer replacing the token counter specifically before adopting the whole extension
 
 ## Cleanup boundary
 

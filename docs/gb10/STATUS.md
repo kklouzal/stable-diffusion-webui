@@ -113,5 +113,5 @@ Older probe tags worth keeping as historical breadcrumbs:
 ## Immediate next validation work
 
 1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
-2. map exactly which A1111-Controller paths depend on `sd-webui-model-converter`, `ultimate-upscale-for-automatic1111`, and `sd-webui-prompt-all-in-one`
+2. map exactly which A1111-Controller paths depend on `sd-webui-model-converter` and `ultimate-upscale-for-automatic1111`
 3. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads
