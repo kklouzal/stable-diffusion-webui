@@ -27,12 +27,26 @@ def initialize():
     devices.device, devices.device_interrogate, devices.device_gfpgan, devices.device_esrgan, devices.device_codeformer = \
         (devices.cpu if any(y in cmd_opts.use_cpu for y in [x, 'all']) else devices.get_optimal_device() for x in ['sd', 'interrogate', 'gfpgan', 'esrgan', 'codeformer'])
 
-    devices.dtype = torch.float32 if cmd_opts.no_half else torch.float16
-    devices.dtype_vae = torch.float32 if cmd_opts.no_half or cmd_opts.no_half_vae else torch.float16
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    if cmd_opts.dtype == "auto":
+        devices.dtype = torch.float32 if cmd_opts.no_half else torch.float16
+    else:
+        assert not cmd_opts.no_half or cmd_opts.dtype == "float32", "--no-half conflicts with --dtype values other than float32"
+        devices.dtype = dtype_map[cmd_opts.dtype]
+
+    if devices.dtype == torch.bfloat16 and devices.device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("--dtype bfloat16 requires a CUDA device with bfloat16 support")
+
+    devices.dtype_vae = torch.float32 if cmd_opts.no_half_vae else devices.dtype
+    devices.dtype_unet = devices.dtype
     devices.dtype_inference = torch.float32 if cmd_opts.precision == 'full' else devices.dtype
 
     if cmd_opts.precision == "half":
-        msg = "--no-half and --no-half-vae conflict with --precision half"
+        msg = "--precision half requires fp16 model and VAE dtype; use --precision autocast with --dtype bfloat16"
         assert devices.dtype == torch.float16, msg
         assert devices.dtype_vae == torch.float16, msg
         assert devices.dtype_inference == torch.float16, msg

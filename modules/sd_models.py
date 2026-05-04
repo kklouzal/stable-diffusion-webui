@@ -474,34 +474,33 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         model.to(memory_format=torch.channels_last)
         timer.record("apply channels_last")
 
-    if shared.cmd_opts.no_half:
+    if devices.dtype == torch.float32:
         model.float()
         model.alphas_cumprod_original = model.alphas_cumprod
         devices.dtype_unet = torch.float32
-        assert shared.cmd_opts.precision != "half", "Cannot use --precision half with --no-half"
+        assert shared.cmd_opts.precision != "half", "Cannot use --precision half with --dtype float32/--no-half"
         timer.record("apply float()")
     else:
         vae = model.first_stage_model
         depth_model = getattr(model, 'depth_model', None)
 
-        # with --no-half-vae, remove VAE from model when doing half() to prevent its weights from being converted to float16
-        if shared.cmd_opts.no_half_vae:
-            model.first_stage_model = None
-        # with --upcast-sampling, don't convert the depth model weights to float16
+        # remove VAE from model-wide dtype conversion; VAE policy is applied explicitly below
+        model.first_stage_model = None
+        # with --upcast-sampling, don't convert the depth model weights to the low-precision UNet dtype
         if shared.cmd_opts.upcast_sampling and depth_model:
             model.depth_model = None
 
         alphas_cumprod = model.alphas_cumprod
         model.alphas_cumprod = None
-        model.half()
+        model.to(devices.dtype)
         model.alphas_cumprod = alphas_cumprod
         model.alphas_cumprod_original = alphas_cumprod
         model.first_stage_model = vae
         if depth_model:
             model.depth_model = depth_model
 
-        devices.dtype_unet = torch.float16
-        timer.record("apply half()")
+        devices.dtype_unet = devices.dtype
+        timer.record(f"apply {devices.dtype} to model")
 
     apply_alpha_schedule_override(model)
 
@@ -527,14 +526,9 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     else:
         devices.fp8 = False
 
-    devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype == torch.float16 and devices.dtype_unet == torch.float16
+    devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype_unet in (torch.float16, torch.bfloat16)
 
-    if model.is_sdxl and not shared.cmd_opts.no_half and not shared.cmd_opts.no_half_vae and devices.device.type == 'cuda' and torch.cuda.is_bf16_supported():
-        devices.dtype_vae = torch.bfloat16
-        print('Using bfloat16 VAE for SDXL on BF16-capable CUDA device')
-    else:
-        devices.dtype_vae = torch.float32 if shared.cmd_opts.no_half or shared.cmd_opts.no_half_vae else torch.float16
-
+    devices.dtype_vae = torch.float32 if shared.cmd_opts.no_half_vae else devices.dtype
     model.first_stage_model.to(devices.dtype_vae)
     timer.record("apply dtype to VAE")
 
@@ -619,9 +613,9 @@ def repair_config(sd_config, state_dict=None):
         sd_config.model.params.use_ema = False
 
     if hasattr(sd_config.model.params, 'unet_config'):
-        if shared.cmd_opts.no_half:
+        if devices.dtype == torch.float32:
             sd_config.model.params.unet_config.params.use_fp16 = False
-        elif shared.cmd_opts.upcast_sampling or shared.cmd_opts.precision == "half":
+        elif devices.dtype == torch.float16 and (shared.cmd_opts.upcast_sampling or shared.cmd_opts.precision == "half"):
             sd_config.model.params.unet_config.params.use_fp16 = True
 
     if hasattr(sd_config.model.params, 'first_stage_config'):
@@ -851,13 +845,13 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
 
     timer.record("create model")
 
-    if shared.cmd_opts.no_half:
+    if devices.dtype == torch.float32:
         weight_dtype_conversion = None
     else:
         weight_dtype_conversion = {
             'first_stage_model': None,
             'alphas_cumprod': None,
-            '': torch.float16,
+            '': devices.dtype,
         }
 
     with sd_disable_initialization.LoadStateDictOnMeta(state_dict, device=model_target_device(sd_model), weight_dtype_conversion=weight_dtype_conversion):

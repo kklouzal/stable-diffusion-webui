@@ -29,6 +29,7 @@ parser.add_argument("--gfpgan-dir", type=normalized_filepath, help="GFPGAN direc
 parser.add_argument("--gfpgan-model", type=normalized_filepath, help="GFPGAN model file name", default=None)
 parser.add_argument("--no-half", action='store_true', help="do not switch the model to 16-bit floats")
 parser.add_argument("--no-half-vae", action='store_true', help="do not switch the VAE model to 16-bit floats")
+parser.add_argument("--dtype", type=str, choices=["auto", "float32", "float16", "bfloat16"], default="auto", help="model runtime dtype; auto preserves legacy --no-half/float16 behavior")
 parser.add_argument("--no-progressbar-hiding", action='store_true', help="do not hide progressbar in gradio UI (we hide it because it slows down ML if you have hardware acceleration in browser)")
 parser.add_argument("--max-batch-count", type=int, default=16, help="does not do anything")
 parser.add_argument("--embeddings-dir", type=normalized_filepath, default=os.path.join(data_path, 'embeddings'), help="embeddings directory for textual inversion (default: embeddings)")
