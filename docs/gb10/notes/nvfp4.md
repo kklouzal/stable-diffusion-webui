@@ -194,3 +194,42 @@ Status: in progress with this note/change.
 - Existing LoRA weight mutation is incompatible with TorchAO NVFP4 tensors.
 - Diffusers benchmark wins rely on selective quantization, TorchAO, MSLK/Triton, and often `torch.compile`; A1111 will not inherit those speedups automatically.
 - MSLK is now source-built against the active CU132 PyTorch lane; the older `cu130` wheel remains only a historical fallback.
+
+## 2026-05-04 native-option MVP validation
+
+First native-style NVFP4 option path is now validated in the A1111 fork.
+
+Implemented surfaces:
+
+- `modules/shared_options.py`: added `NVFP4 weight` option beside `FP8 weight`, with `Disable` / `Enable for SDXL` / `Enable` choices.
+- `modules/devices.py`: added runtime `devices.nvfp4` state beside `devices.fp8`.
+- `modules/initialize_util.py`: option changes force model reload from checkpoint weights.
+- `modules/sd_models.py`: added model-load guardrails, FP8/NVFP4 mutual exclusion, bf16/CUDA requirement checks, selective TorchAO quantization, and load-time reporting.
+- `modules/processing.py` and `modules/infotext_utils.py`: generation metadata now records/restores `NVFP4 weight` similarly to `FP8 weight`.
+
+Initial quantization path:
+
+- Uses `torchao.quantization.quantize_` with `torchao.prototype.mx_formats.NVFP4DynamicActivationNVFP4WeightConfig`.
+- Applies to eligible `torch.nn.Linear` modules whose in/out feature dimensions are divisible by 16.
+- Temporarily excludes `first_stage_model`/VAE during the pass.
+- Requires `--dtype bfloat16`; float16 is rejected because TorchAO NVFP4 direct tests fail there.
+- Leaves FP8 Conv/Linear weight storage as a separate mutually-exclusive path.
+
+Validation image/runtime:
+
+- Built image: `local/gb10-a1111:nvfp4-native-test`.
+- Runtime container: `gb10-a1111-latest` with `--dtype bfloat16`.
+- Options: `fp8_storage=Disable`, `nvfp4_storage=Enable for SDXL`, `cache_fp16_weight=False`.
+- Model: `test2.safetensors` (`sd_xl_base.yaml`).
+- Load log: `Applied NVFP4 weight quantization to 911 Linear modules; skipped 0 incompatible Linear modules`.
+- Load timing: `Model loaded in 10.2s (... apply nvfp4: 2.1s ...)`.
+- Generation: 1024x1024, 20 steps, Euler, CFG 7, seed `123456789`.
+- API wall time: `10.918s`.
+- Sampler progress: final `20/20` at about `2.24 it/s`; steady-state mostly `2.27–2.30 it/s` after first step.
+- Output: `/tmp/gb10_nvfp4_test2_1024.png` on GB10.
+
+Current caveats:
+
+- This validates first-stage eager NVFP4 generation, not LoRA compatibility.
+- Text encoders remain included if their Linear shapes are eligible; the VAE is excluded.
+- Next tuning should compare layer subsets, image drift, memory, LoRA behavior, and whether dynamic activation NVFP4 or weight-only NVFP4 is better for A1111.

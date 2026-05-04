@@ -348,6 +348,70 @@ class SkipWritingToConfig:
         SkipWritingToConfig.skip = self.previous
 
 
+def check_nvfp4(model):
+    if model is None:
+        return None
+    if devices.get_optimal_device_name() == "mps":
+        enable_nvfp4 = False
+    elif shared.opts.nvfp4_storage == "Enable":
+        enable_nvfp4 = True
+    elif getattr(model, "is_sdxl", False) and shared.opts.nvfp4_storage == "Enable for SDXL":
+        enable_nvfp4 = True
+    else:
+        enable_nvfp4 = False
+    return enable_nvfp4
+
+
+def check_weight_quantization_mutual_exclusion(model):
+    if check_fp8(model) and check_nvfp4(model):
+        raise RuntimeError("FP8 weight and NVFP4 weight are mutually exclusive; disable one of them before loading the model")
+
+
+def nvfp4_linear_filter(module, fqn):
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if module.weight is None or module.weight.ndim != 2:
+        return False
+    out_features, in_features = module.weight.shape
+    return out_features % 16 == 0 and in_features % 16 == 0
+
+
+def apply_nvfp4_weight_quantization(model, timer):
+    if devices.dtype != torch.bfloat16:
+        raise RuntimeError("NVFP4 weight requires --dtype bfloat16; TorchAO NVFP4 kernels do not support float16 activations")
+    if not torch.cuda.is_available():
+        raise RuntimeError("NVFP4 weight requires CUDA")
+
+    first_stage = model.first_stage_model
+    model.first_stage_model = None
+
+    eligible = 0
+    skipped_linear = 0
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            if nvfp4_linear_filter(module, ""):
+                eligible += 1
+            else:
+                skipped_linear += 1
+
+    try:
+        from torchao.quantization import quantize_
+        from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+
+        config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
+        quantize_(model, config, filter_fn=nvfp4_linear_filter, device=devices.device)
+        model.nvfp4_quantization_stats = {
+            "eligible_linear": eligible,
+            "skipped_linear": skipped_linear,
+            "config": "NVFP4DynamicActivationNVFP4WeightConfig",
+        }
+    finally:
+        model.first_stage_model = first_stage
+
+    print(f"Applied NVFP4 weight quantization to {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules")
+    timer.record("apply nvfp4")
+
+
 def check_fp8(model):
     if model is None:
         return None
@@ -510,8 +574,11 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         if hasattr(module, 'fp16_bias'):
             del module.fp16_bias
 
+    check_weight_quantization_mutual_exclusion(model)
+
     if check_fp8(model):
         devices.fp8 = True
+        devices.nvfp4 = False
         first_stage = model.first_stage_model
         model.first_stage_model = None
         for module in model.modules():
@@ -525,6 +592,12 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         timer.record("apply fp8")
     else:
         devices.fp8 = False
+
+    if check_nvfp4(model):
+        devices.nvfp4 = True
+        apply_nvfp4_weight_quantization(model, timer)
+    else:
+        devices.nvfp4 = False
 
     devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype_unet in (torch.float16, torch.bfloat16)
 
@@ -962,9 +1035,11 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         current_checkpoint_info = None
     else:
         current_checkpoint_info = sd_model.sd_checkpoint_info
-        if check_fp8(sd_model) != devices.fp8:
-            # load from state dict again to prevent extra numerical errors
+        if check_fp8(sd_model) != devices.fp8 or check_nvfp4(sd_model) != devices.nvfp4:
+            # load from state dict again to prevent extra numerical errors and avoid loading into quantized weights
             forced_reload = True
+            send_model_to_trash(sd_model)
+            sd_model = None
         elif sd_model.sd_model_checkpoint == checkpoint_info.filename and not forced_reload:
             return sd_model
 

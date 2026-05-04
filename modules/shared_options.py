@@ -242,6 +242,7 @@ options_templates.update(options_section(('optimizations', "Optimizations", "sd"
     "persistent_cond_cache": OptionInfo(True, "Persistent cond cache").info("do not recalculate conds from prompts if prompts have not changed since previous calculation"),
     "batch_cond_uncond": OptionInfo(True, "Batch cond/uncond").info("do both conditional and unconditional denoising in one batch; uses a bit more VRAM during sampling, but improves speed; previously this was controlled by --always-batch-cond-uncond commandline argument"),
     "fp8_storage": OptionInfo("Disable", "FP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Use FP8 to store Linear/Conv layers' weight. Require pytorch>=2.1.0."),
+    "nvfp4_storage": OptionInfo("Disable", "NVFP4 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Use TorchAO NVFP4 to store eligible Linear weights. Requires CUDA sm100+, bfloat16 runtime dtype, torchao, and MSLK."),
     "cache_fp16_weight": OptionInfo(False, "Cache FP16 weight for LoRA").info("Cache fp16 weight when enabling FP8, will increase the quality of LoRA. Use more system ram."),
 }))
 
