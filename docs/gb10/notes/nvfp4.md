@@ -60,9 +60,9 @@ Current package lane:
 
 - torch/torchvision/torchaudio: PyTorch nightly `cu132`
 - TorchAO: `torchao` from the active Python package index; currently `0.17.0`
-- MSLK: PyTorch nightly `cu130`; currently `2026.5.2+cu130`
+- MSLK: source-built from `https://github.com/meta-pytorch/MSLK.git` at `952739ea2f527b2fe776e025eaec983bda9d394d`; currently `2026.5.4`
 
-MSLK note: as of this change, a CUDA 13.2 MSLK wheel was not available from the selected PyTorch nightly lane, while the CUDA 13.0 aarch64 nightly wheel was available and validated on GB10. The source-build lane remains available if the wheel stops aligning with GB10 hardware or if a source build proves better.
+MSLK note: the earlier CUDA 13.0 aarch64 nightly wheel (`2026.5.2+cu130`) validated the TorchAO NVFP4 Triton path, but GB10 now uses a source-built MSLK baseline against the active CUDA 13.2 / PyTorch nightly stack. This keeps `mslk.so` aligned for the bf16/NVFP4 implementation work.
 
 ## Why this is not checkpoint conversion first
 
@@ -193,4 +193,4 @@ Status: in progress with this note/change.
 - A1111's current dtype model is mostly fp16/fp32-oriented.
 - Existing LoRA weight mutation is incompatible with TorchAO NVFP4 tensors.
 - Diffusers benchmark wins rely on selective quantization, TorchAO, MSLK/Triton, and often `torch.compile`; A1111 will not inherit those speedups automatically.
-- MSLK source build may become useful, but the available PyTorch nightly `cu130` aarch64 wheel already validates the Triton NVFP4 path on GB10.
+- MSLK is now source-built against the active CU132 PyTorch lane; the older `cu130` wheel remains only a historical fallback.

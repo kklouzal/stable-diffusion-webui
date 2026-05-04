@@ -4,8 +4,9 @@ ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
 ARG PYTHON_VERSION=3.12
 ARG PYTORCH_NIGHTLY_CUDA_TAG=cu132
 ARG TORCHAO_PACKAGE=torchao
-ARG MSLK_NIGHTLY_CUDA_TAG=cu130
-ARG MSLK_PACKAGE=mslk
+ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
+ARG MSLK_COMMIT=952739ea2f527b2fe776e025eaec983bda9d394d
+ARG MSLK_PACKAGE_NAME=mslk
 ARG STABLE_DIFFUSION_REPO=https://github.com/w-e-w/stablediffusion.git
 ARG STABLE_DIFFUSION_COMMIT=cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf
 ARG GENERATIVE_MODELS_REPO=https://github.com/Stability-AI/generative-models.git
@@ -28,8 +29,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTHON_VERSION
 ARG PYTORCH_NIGHTLY_CUDA_TAG
 ARG TORCHAO_PACKAGE
-ARG MSLK_NIGHTLY_CUDA_TAG
-ARG MSLK_PACKAGE
+ARG MSLK_REPO
+ARG MSLK_COMMIT
+ARG MSLK_PACKAGE_NAME
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/build
@@ -38,14 +40,26 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV CUDA_PATH=/usr/local/cuda
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_ROOT_USER_ACTION=ignore
+ENV CCACHE_DIR=/root/.cache/ccache
+ENV CCACHE_MAXSIZE=50G
+ENV CCACHE_COMPILERCHECK=content
+ENV CCACHE_SLOPPINESS=time_macros
+ENV TORCH_CUDA_ARCH_LIST=12.1a
+ENV MAX_JOBS=4
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
+    build-essential \
     ca-certificates \
+    ccache \
+    cmake \
     curl \
     git \
     libgl1 \
     libglib2.0-0 \
+    ninja-build \
+    patchelf \
     python${PYTHON_VERSION} \
     python${PYTHON_VERSION}-dev \
     python${PYTHON_VERSION}-venv \
@@ -59,17 +73,33 @@ RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1
 # CUDA-base doctrine:
 # - start from the NVIDIA CUDA image, not the NVIDIA PyTorch image
 # - install the PyTorch nightly lane explicitly from the selected CUDA wheel index
-# - install TorchAO/MSLK beside torch so NVFP4 support is protected with the framework stack
-# - MSLK currently publishes CUDA 13.0 nightly wheels for aarch64; use that lane for the
-#   Triton NVFP4 path until a cu132 wheel is published or a source build proves better
+# - install TorchAO beside torch so NVFP4 support is protected with the framework stack
+# - build MSLK from source against the same CUDA 13.2 / PyTorch nightly stack so
+#   the native mslk.so baseline stays aligned with GB10 bf16/NVFP4 work
 # - freeze the resulting system-Python package set so later app deps cannot overwrite it
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --break-system-packages --no-cache-dir --pre \
       torch torchvision torchaudio \
       --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG} \
-    && python -m pip install --break-system-packages --no-cache-dir --pre \
-      ${TORCHAO_PACKAGE} ${MSLK_PACKAGE} \
-      --extra-index-url https://download.pytorch.org/whl/nightly/${MSLK_NIGHTLY_CUDA_TAG}
+    && python -m pip install --break-system-packages --no-cache-dir --pre ${TORCHAO_PACKAGE} \
+    && python -m pip install --break-system-packages --no-cache-dir \
+      scikit-build cmake ninja setuptools-git-versioning tabulate wheel build
+
+RUN git clone --filter=blob:none --recurse-submodules --shallow-submodules "${MSLK_REPO}" /opt/build/MSLK \
+    && git -C /opt/build/MSLK checkout "${MSLK_COMMIT}" \
+    && git -C /opt/build/MSLK submodule update --init --recursive --depth 1
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,id=gb10-global-ccache,target=/root/.cache/ccache,sharing=locked \
+    ccache --set-config=max_size=${CCACHE_MAXSIZE} \
+    && ccache --set-config=compiler_check=${CCACHE_COMPILERCHECK} \
+    && cd /opt/build/MSLK \
+    && MSLK_PACKAGE_NAME=${MSLK_PACKAGE_NAME} python setup.py --verbose bdist_wheel \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    && python -m pip install --break-system-packages --no-cache-dir --force-reinstall /opt/build/MSLK/dist/mslk-*.whl \
+    && ccache --show-stats \
+    && rm -rf /opt/build/MSLK
 
 RUN python - <<'PY'
 import importlib.metadata as md
@@ -253,7 +283,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG A1111_UID=2323
 ARG A1111_GID=2323
 ARG PYTORCH_NIGHTLY_CUDA_TAG
-ARG MSLK_NIGHTLY_CUDA_TAG
+ARG MSLK_REPO
+ARG MSLK_COMMIT
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/stable-diffusion-webui
@@ -333,7 +364,8 @@ print(json.dumps({
 PY
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
     && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
-       MSLK_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${MSLK_NIGHTLY_CUDA_TAG}" \
+       MSLK_SOURCE_REPO="${MSLK_REPO}" \
+       MSLK_SOURCE_COMMIT="${MSLK_COMMIT}" \
        /usr/local/bin/gb10-a1111-render-build-manifest
 RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /opt/requirements-runtime.txt /root/.cache/pip \
     && chmod +x /usr/local/bin/gb10-a1111-entrypoint /usr/local/bin/gb10-a1111-launch \
