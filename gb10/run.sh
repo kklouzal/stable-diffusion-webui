@@ -50,25 +50,35 @@ sudo touch "${HOST_ROOT}/config/config.json" \
            "${HOST_ROOT}/config/ui-config.json" \
            "${HOST_ROOT}/config/styles.csv"
 
-OWNED_EXTENSION_SOURCE="${PROJECT_ROOT}/extensions/sd-webui-incantations"
-OWNED_EXTENSION_TARGET="${HOST_ROOT}/Extensions/sd-webui-incantations"
+OWNED_EXTENSIONS=(
+  sd-webui-incantations
+  openclaw-clear-cond-cache
+)
 SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
 
-if [[ ! -d "${OWNED_EXTENSION_SOURCE}" ]]; then
-  echo "ERROR: owned extension source missing: ${OWNED_EXTENSION_SOURCE}" >&2
-  exit 1
-fi
+for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
+  if [[ ! -d "${owned_extension_source}" ]]; then
+    echo "ERROR: owned extension source missing: ${owned_extension_source}" >&2
+    exit 1
+  fi
+done
 
 # Stop the bind-mounted live container before mutating Extensions underneath it.
 sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
-sudo mkdir -p "${OWNED_EXTENSION_TARGET}"
-sudo rsync -a --delete --delete-excluded \
-  --exclude '.git/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  --exclude '.DS_Store' \
-  "${OWNED_EXTENSION_SOURCE}/" "${OWNED_EXTENSION_TARGET}/"
+for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
+  owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
+  sudo rm -rf "${owned_extension_target}"
+  sudo mkdir -p "${owned_extension_target}"
+  sudo rsync -a --delete --delete-excluded \
+    --exclude '.git/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.DS_Store' \
+    "${owned_extension_source}/" "${owned_extension_target}/"
+done
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"
