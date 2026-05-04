@@ -278,3 +278,25 @@ Current caveats:
 - Leaving text encoders unquantized reduces NVFP4 coverage from the earlier 911 Linear modules to 743, but avoids the LoRA/text-encoder copy failure and is safer for prompt conditioning quality.
 - Functional LoRA over quantized Linear layers costs performance; the first validated two-LoRA render was slower than no-LoRA NVFP4.
 - Next profiling should compare no-LoRA, one-LoRA, and normal bf16 LoRA at matched prompts/seeds before deciding whether to optimize LoRA delta computation or selectively re-enable safe text-encoder quantization.
+
+## Accepted benchmark/quality comparison settings
+
+Schwi accepted the NVFP4 + LoRA `DPM++ 2M SDE` render quality on 2026-05-04 and asked to use the same settings and seed for testing/benchmarking moving forward so quality comparisons remain meaningful.
+
+Baseline comparison settings:
+
+- Model: `test2.safetensors`
+- Sampler: `DPM++ 2M SDE`
+- Schedule type: `Exponential`
+- Steps: `20`
+- Size: `1024x1024`
+- CFG scale: `7`
+- Seed: `424242424`
+- Runtime dtype: `--dtype bfloat16`
+- NVFP4 option: `Enable for SDXL`
+- FP8 option: `Disable`
+- LoRA comparison set from the accepted render:
+  - `<lora:Detail-Enhancer-v1.0:0.6>`
+  - `<lora:Canopus-Realism-LoRA:0.35>`
+
+Use this as the standard quality/benchmark prompt configuration unless the comparison target specifically requires a different layer subset, LoRA set, or seed.
