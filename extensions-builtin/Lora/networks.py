@@ -721,7 +721,7 @@ def network_MultiheadAttention_load_state_dict(self, *args, **kwargs):
 def process_network_files(names: list[str] | None = None):
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
-    candidates = [x for x in candidates if not sd_models.bf16_model_cache.is_bf16_cache_path(x)]
+    candidates = [x for x in candidates if not sd_models.bf16_model_cache.is_bf16_cache_path(x) and not sd_models.nvfp4_model_cache.is_nvfp4_cache_path(x)]
 
     for filename in candidates:
         if os.path.isdir(filename):

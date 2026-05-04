@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, bf16_model_cache
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, bf16_model_cache, nvfp4_model_cache
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -173,7 +173,7 @@ def list_models():
     elif cmd_ckpt is not None and cmd_ckpt != shared.default_sd_model_file:
         print(f"Checkpoint in --ckpt argument not found (Possible it was moved to {model_path}: {cmd_ckpt}", file=sys.stderr)
 
-    model_list = [x for x in model_list if not bf16_model_cache.is_bf16_cache_path(x)]
+    model_list = [x for x in model_list if not bf16_model_cache.is_bf16_cache_path(x) and not nvfp4_model_cache.is_nvfp4_cache_path(x)]
 
     for filename in model_list:
         checkpoint_info = CheckpointInfo(filename)
@@ -386,7 +386,7 @@ def nvfp4_linear_filter(module, fqn):
     return nvfp4_linear_skip_reason(module, fqn) is None
 
 
-def apply_nvfp4_weight_quantization(model, timer):
+def apply_nvfp4_weight_quantization(model, timer, source_path=None):
     if devices.dtype != torch.bfloat16:
         raise RuntimeError("NVFP4 weight requires --dtype bfloat16; TorchAO NVFP4 kernels do not support float16 activations")
     if not torch.cuda.is_available():
@@ -409,30 +409,36 @@ def apply_nvfp4_weight_quantization(model, timer):
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
 
+    cache_loaded = False
     try:
-        from torchao.quantization import quantize_
-        from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
-
         for fqn, module in model.named_modules():
             if nvfp4_linear_filter(module, fqn):
                 module.network_nvfp4_base_weight = module.weight.detach().to(devices.cpu, copy=True)
                 if module.bias is not None:
                     module.network_nvfp4_base_bias = module.bias.detach().to(devices.cpu, copy=True)
 
-        config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
-        quantize_(model, config, filter_fn=nvfp4_linear_filter, device=devices.device)
+        cache_loaded = nvfp4_model_cache.load_into_model(model, source_path, nvfp4_linear_filter, shared.device)
+        if not cache_loaded:
+            from torchao.quantization import quantize_
+            from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+
+            config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
+            quantize_(model, config, filter_fn=nvfp4_linear_filter, device=devices.device)
+            nvfp4_model_cache.save_from_model(model, source_path, nvfp4_linear_filter, eligible, skipped_linear, skipped_reasons)
         model.nvfp4_quantization_stats = {
             "eligible_linear": eligible,
             "skipped_linear": skipped_linear,
             "skipped_reasons": skipped_reasons,
             "skipped_names": skipped_names,
             "config": "NVFP4DynamicActivationNVFP4WeightConfig",
+            "cache_loaded": cache_loaded,
         }
     finally:
         model.first_stage_model = first_stage
 
-    print(f"Applied NVFP4 weight quantization to {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})")
-    timer.record("apply nvfp4")
+    action = "Loaded cached" if cache_loaded else "Applied"
+    print(f"{action} NVFP4 weight quantization for {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})", flush=True)
+    timer.record("load nvfp4 cache" if cache_loaded else "apply nvfp4")
 
 
 def nvfp4_vae_linear_skip_reason(module, fqn):
@@ -450,7 +456,7 @@ def nvfp4_vae_linear_filter(module, fqn):
     return nvfp4_vae_linear_skip_reason(module, fqn) is None
 
 
-def apply_nvfp4_vae_weight_quantization(model, timer):
+def apply_nvfp4_vae_weight_quantization(model, timer, source_path=None):
     if not check_nvfp4(model):
         return
     if devices.dtype != torch.bfloat16:
@@ -488,21 +494,26 @@ def apply_nvfp4_vae_weight_quantization(model, timer):
         timer.record("apply nvfp4 to VAE")
         return
 
-    from torchao.quantization import quantize_
-    from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+    cache_loaded = nvfp4_model_cache.load_into_model(vae, source_path, nvfp4_vae_linear_filter, shared.device)
+    if not cache_loaded:
+        from torchao.quantization import quantize_
+        from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
 
-    config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
-    quantize_(vae, config, filter_fn=nvfp4_vae_linear_filter, device=devices.device)
+        config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
+        quantize_(vae, config, filter_fn=nvfp4_vae_linear_filter, device=devices.device)
+        nvfp4_model_cache.save_from_model(vae, source_path, nvfp4_vae_linear_filter, eligible, skipped_linear, skipped_reasons)
     model.nvfp4_vae_quantization_stats = {
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,
         "skipped_reasons": skipped_reasons,
         "skipped_names": skipped_names,
         "config": "NVFP4DynamicActivationNVFP4WeightConfig",
+        "cache_loaded": cache_loaded,
     }
 
-    print(f"Applied NVFP4 weight quantization to {eligible} VAE Linear modules; skipped {skipped_linear} incompatible VAE Linear modules ({skipped_reasons})")
-    timer.record("apply nvfp4 to VAE")
+    action = "Loaded cached" if cache_loaded else "Applied"
+    print(f"{action} NVFP4 weight quantization for {eligible} VAE Linear modules; skipped {skipped_linear} incompatible VAE Linear modules ({skipped_reasons})", flush=True)
+    timer.record("load nvfp4 VAE cache" if cache_loaded else "apply nvfp4 to VAE")
 
 
 def check_fp8(model):
@@ -688,7 +699,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     if check_nvfp4(model):
         devices.nvfp4 = True
-        apply_nvfp4_weight_quantization(model, timer)
+        apply_nvfp4_weight_quantization(model, timer, checkpoint_info.filename)
     else:
         devices.nvfp4 = False
 
@@ -716,7 +727,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     sd_vae.load_vae(model, vae_file, vae_source)
     timer.record("load VAE")
 
-    apply_nvfp4_vae_weight_quantization(model, timer)
+    apply_nvfp4_vae_weight_quantization(model, timer, vae_file)
 
 
 def enable_midas_autodownload():
@@ -932,11 +943,45 @@ def model_target_device(m):
         return devices.device
 
 
+def is_nvfp4_tensor(tensor):
+    return type(tensor).__name__ == "NVFP4Tensor" and type(tensor).__module__.startswith("torchao.")
+
+
+def is_effectively_on_device(tensor, device):
+    target = torch.device(device)
+    current = tensor.device
+    return current.type == target.type and (target.index is None or current.index == target.index)
+
+
+def send_nvfp4_model_to_device_without_reapplying_quantized_weights(m, device):
+    for module in m.modules():
+        for name, param in list(module._parameters.items()):
+            if param is None or is_effectively_on_device(param, device) or is_nvfp4_tensor(param):
+                continue
+            module._parameters[name] = torch.nn.Parameter(param.to(device), requires_grad=param.requires_grad)
+
+        for name, buffer in list(module._buffers.items()):
+            if buffer is None or is_effectively_on_device(buffer, device) or is_nvfp4_tensor(buffer):
+                continue
+            module._buffers[name] = buffer.to(device)
+
+
+def set_nvfp4_model_eval_flags(m):
+    # Some module eval()/train() overrides can touch TorchAO tensor subclasses and
+    # make cached NVFP4 startup much slower than the conversion we are avoiding.
+    # A1111 inference only needs the standard Module.training flags flipped here.
+    for module in m.modules():
+        module.training = False
+
+
 def send_model_to_device(m):
     lowvram.apply(m)
 
     if not m.lowvram:
-        m.to(shared.device)
+        if devices.nvfp4:
+            send_nvfp4_model_to_device_without_reapplying_quantized_weights(m, shared.device)
+        else:
+            m.to(shared.device)
 
 
 def send_model_to_trash(m):
@@ -1034,7 +1079,10 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
 
     timer.record("hijack")
 
-    sd_model.eval()
+    if devices.nvfp4:
+        set_nvfp4_model_eval_flags(sd_model)
+    else:
+        sd_model.eval()
     model_data.set_sd_model(sd_model)
     model_data.was_loaded_at_least_once = True
 
@@ -1051,7 +1099,7 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
 
     timer.record("calculate empty prompt")
 
-    print(f"Model loaded in {timer.summary()}.")
+    print(f"Model loaded in {timer.summary()}.", flush=True)
 
     return sd_model
 
