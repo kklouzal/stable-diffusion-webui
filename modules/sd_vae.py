@@ -99,6 +99,8 @@ def refresh_vae_list():
     for path in paths:
         candidates += glob.iglob(path, recursive=True)
 
+    candidates = [x for x in candidates if not sd_models.bf16_model_cache.is_bf16_cache_path(x)]
+
     for filepath in candidates:
         name = get_filename(filepath)
         vae_dict[name] = filepath

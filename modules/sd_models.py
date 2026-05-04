@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, bf16_model_cache
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -173,6 +173,8 @@ def list_models():
     elif cmd_ckpt is not None and cmd_ckpt != shared.default_sd_model_file:
         print(f"Checkpoint in --ckpt argument not found (Possible it was moved to {model_path}: {cmd_ckpt}", file=sys.stderr)
 
+    model_list = [x for x in model_list if not bf16_model_cache.is_bf16_cache_path(x)]
+
     for filename in model_list:
         checkpoint_info = CheckpointInfo(filename)
         checkpoint_info.register()
@@ -301,7 +303,7 @@ def read_state_dict(checkpoint_file, print_global_state=False, map_location=None
         device = map_location or shared.weight_load_location or devices.get_optimal_device_name()
 
         if not shared.opts.disable_mmap_load_safetensors:
-            pl_sd = safetensors.torch.load_file(checkpoint_file, device=device)
+            pl_sd = bf16_model_cache.load_file(checkpoint_file, device=device)
         else:
             pl_sd = safetensors.torch.load(open(checkpoint_file, 'rb').read())
             pl_sd = {k: v.to(device) for k, v in pl_sd.items()}
@@ -367,15 +369,23 @@ def check_weight_quantization_mutual_exclusion(model):
         raise RuntimeError("FP8 weight and NVFP4 weight are mutually exclusive; disable one of them before loading the model")
 
 
-def nvfp4_linear_filter(module, fqn):
+def nvfp4_linear_skip_reason(module, fqn):
     if not isinstance(module, torch.nn.Linear):
-        return False
-    if fqn.startswith(("conditioner.", "cond_stage_model.", "first_stage_model.")):
-        return False
+        return "not_linear"
+    if fqn.startswith(("conditioner.", "cond_stage_model.")):
+        return "text_conditioner"
+    if fqn.startswith("first_stage_model."):
+        return "vae"
     if module.weight is None or module.weight.ndim != 2:
-        return False
+        return "not_2d_weight"
     out_features, in_features = module.weight.shape
-    return out_features % 16 == 0 and in_features % 16 == 0
+    if out_features % 16 != 0 or in_features % 16 != 0:
+        return "shape_not_multiple_of_16"
+    return None
+
+
+def nvfp4_linear_filter(module, fqn):
+    return nvfp4_linear_skip_reason(module, fqn) is None
 
 
 def apply_nvfp4_weight_quantization(model, timer):
@@ -389,12 +399,17 @@ def apply_nvfp4_weight_quantization(model, timer):
 
     eligible = 0
     skipped_linear = 0
+    skipped_reasons = {}
+    skipped_names = []
     for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
-            if nvfp4_linear_filter(module, fqn):
+            reason = nvfp4_linear_skip_reason(module, fqn)
+            if reason is None:
                 eligible += 1
             else:
                 skipped_linear += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
 
     try:
         from torchao.quantization import quantize_
@@ -411,12 +426,14 @@ def apply_nvfp4_weight_quantization(model, timer):
         model.nvfp4_quantization_stats = {
             "eligible_linear": eligible,
             "skipped_linear": skipped_linear,
+            "skipped_reasons": skipped_reasons,
+            "skipped_names": skipped_names,
             "config": "NVFP4DynamicActivationNVFP4WeightConfig",
         }
     finally:
         model.first_stage_model = first_stage
 
-    print(f"Applied NVFP4 weight quantization to {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules")
+    print(f"Applied NVFP4 weight quantization to {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})")
     timer.record("apply nvfp4")
 
 
