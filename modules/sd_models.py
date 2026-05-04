@@ -400,6 +400,12 @@ def apply_nvfp4_weight_quantization(model, timer):
         from torchao.quantization import quantize_
         from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
 
+        for fqn, module in model.named_modules():
+            if nvfp4_linear_filter(module, fqn):
+                module.network_nvfp4_base_weight = module.weight.detach().to(devices.cpu, copy=True)
+                if module.bias is not None:
+                    module.network_nvfp4_base_bias = module.bias.detach().to(devices.cpu, copy=True)
+
         config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
         quantize_(model, config, filter_fn=nvfp4_linear_filter, device=devices.device)
         model.nvfp4_quantization_stats = {

@@ -579,8 +579,63 @@ def is_nvfp4_weight(weight):
     return type(weight).__name__ == "NVFP4Tensor" and type(weight).__module__.startswith("torchao.")
 
 
+def network_apply_nvfp4_merged_lora(self):
+    network_layer_name = getattr(self, 'network_layer_name', None)
+    base_weight = getattr(self, 'network_nvfp4_base_weight', None)
+    if network_layer_name is None or base_weight is None:
+        return False
+
+    wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    current_names = getattr(self, "network_current_names", ())
+    if current_names == wanted_names:
+        return True
+
+    try:
+        from torchao.quantization import quantize_
+        from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+
+        with torch.no_grad():
+            weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
+            base_bias = getattr(self, 'network_nvfp4_base_bias', None)
+            bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
+
+            for net in loaded_networks:
+                module = net.modules.get(network_layer_name, None)
+                if module is None:
+                    continue
+
+                updown, ex_bias = module.calc_updown(weight)
+                if len(weight.shape) == 4 and weight.shape[1] == 9:
+                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
+                if ex_bias is not None:
+                    bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
+
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
+            if bias is not None:
+                self.bias = torch.nn.Parameter(bias, requires_grad=False)
+            elif self.bias is not None:
+                self.bias = None
+
+            config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
+            quantize_(self, config, filter_fn=lambda module, fqn: module is self, device=devices.device)
+            self.network_current_names = wanted_names
+            return True
+    except RuntimeError as e:
+        logging.debug(f"Network {network_layer_name}: NVFP4 merged LoRA failed: {e}")
+        for net in loaded_networks:
+            if net.modules.get(network_layer_name, None) is not None:
+                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        return False
+
+
 def network_Linear_forward(self, input):
-    if shared.opts.lora_functional or is_nvfp4_weight(self.weight):
+    if is_nvfp4_weight(self.weight):
+        if network_apply_nvfp4_merged_lora(self):
+            return originals.Linear_forward(self, input)
+        return network_forward(self, input, originals.Linear_forward)
+
+    if shared.opts.lora_functional:
         return network_forward(self, input, originals.Linear_forward)
 
     network_apply_weights(self)
