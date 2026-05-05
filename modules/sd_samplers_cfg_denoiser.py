@@ -199,14 +199,31 @@ class CFGDenoiser(torch.nn.Module):
             else:
                 make_condition_dict = lambda c_crossattn, c_concat: {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
 
+        x_repeat_index = torch.repeat_interleave(
+            torch.arange(batch_size, device=x.device),
+            torch.as_tensor(repeats, device=x.device),
+        )
+        sigma_repeat_index = torch.repeat_interleave(
+            torch.arange(batch_size, device=sigma.device),
+            torch.as_tensor(repeats, device=sigma.device),
+        )
+        image_cond_repeat_index = torch.repeat_interleave(
+            torch.arange(batch_size, device=image_cond.device),
+            torch.as_tensor(repeats, device=image_cond.device),
+        )
+
+        x_repeated = x.index_select(0, x_repeat_index)
+        sigma_repeated = sigma.index_select(0, sigma_repeat_index)
+        image_cond_repeated = image_cond.index_select(0, image_cond_repeat_index)
+
         if not is_edit_model:
-            x_in = torch.cat([torch.stack([x[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x])
-            sigma_in = torch.cat([torch.stack([sigma[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma])
-            image_cond_in = torch.cat([torch.stack([image_cond[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [image_uncond])
+            x_in = torch.cat([x_repeated, x])
+            sigma_in = torch.cat([sigma_repeated, sigma])
+            image_cond_in = torch.cat([image_cond_repeated, image_uncond])
         else:
-            x_in = torch.cat([torch.stack([x[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x] + [x])
-            sigma_in = torch.cat([torch.stack([sigma[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma] + [sigma])
-            image_cond_in = torch.cat([torch.stack([image_cond[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [image_uncond] + [torch.zeros_like(self.init_latent)])
+            x_in = torch.cat([x_repeated, x, x])
+            sigma_in = torch.cat([sigma_repeated, sigma, sigma])
+            image_cond_in = torch.cat([image_cond_repeated, image_uncond, torch.zeros_like(self.init_latent)])
 
         denoiser_params = CFGDenoiserParams(x_in, image_cond_in, sigma_in, state.sampling_step, state.sampling_steps, tensor, uncond, self)
         cfg_denoiser_callback(denoiser_params)
@@ -263,7 +280,7 @@ class CFGDenoiser(torch.nn.Module):
                 if not is_edit_model:
                     c_crossattn = subscript_cond(tensor, a, b)
                 else:
-                    c_crossattn = torch.cat([tensor[a:b]], uncond)
+                    c_crossattn = torch.cat([tensor[a:b], uncond], dim=0)
 
                 x_out[a:b] = self.inner_model(x_in[a:b], sigma_in[a:b], cond=make_condition_dict(c_crossattn, image_cond_in[a:b]))
 
@@ -271,8 +288,9 @@ class CFGDenoiser(torch.nn.Module):
                 x_out[-uncond.shape[0]:] = self.inner_model(x_in[-uncond.shape[0]:], sigma_in[-uncond.shape[0]:], cond=make_condition_dict(uncond, image_cond_in[-uncond.shape[0]:]))
 
         denoised_image_indexes = [x[0][0] for x in conds_list]
+        denoised_image_indexes_tensor = torch.as_tensor(denoised_image_indexes, device=x_out.device, dtype=torch.long)
         if skip_uncond:
-            fake_uncond = torch.cat([x_out[i:i+1] for i in denoised_image_indexes])
+            fake_uncond = x_out.index_select(0, denoised_image_indexes_tensor)
             x_out = torch.cat([x_out, fake_uncond])  # we skipped uncond denoising, so we put cond-denoised image to where the uncond-denoised image should be
 
         denoised_params = CFGDenoisedParams(x_out, state.sampling_step, state.sampling_steps, self.inner_model)
@@ -292,14 +310,17 @@ class CFGDenoiser(torch.nn.Module):
         if not self.mask_before_denoising and self.mask is not None:
             denoised = apply_blend(denoised)
 
-        self.sampler.last_latent = self.get_pred_x0(torch.cat([x_in[i:i + 1] for i in denoised_image_indexes]), torch.cat([x_out[i:i + 1] for i in denoised_image_indexes]), sigma)
+        denoised_image_indexes_x_tensor = denoised_image_indexes_tensor.to(device=x_in.device)
+        x_in_denoised = x_in.index_select(0, denoised_image_indexes_x_tensor)
+        x_out_denoised = x_out.index_select(0, denoised_image_indexes_tensor)
+        self.sampler.last_latent = self.get_pred_x0(x_in_denoised, x_out_denoised, sigma)
 
         if opts.live_preview_content == "Prompt":
             preview = self.sampler.last_latent
         elif opts.live_preview_content == "Negative prompt":
             preview = self.get_pred_x0(x_in[-uncond.shape[0]:], x_out[-uncond.shape[0]:], sigma)
         else:
-            preview = self.get_pred_x0(torch.cat([x_in[i:i+1] for i in denoised_image_indexes]), torch.cat([denoised[i:i+1] for i in denoised_image_indexes]), sigma)
+            preview = self.get_pred_x0(x_in_denoised, denoised.index_select(0, denoised_image_indexes_tensor.to(device=denoised.device)), sigma)
 
         sd_samplers_common.store_latent(preview)
 
