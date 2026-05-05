@@ -157,6 +157,19 @@ def on_model_loaded(_: Any) -> None:
     if _compile_desired["main_model"] or _compile_desired["vae"]:
         apply_torch_compile_settings(**_compile_desired)
 
+
+def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
+    try:
+        import torch
+
+        torch.backends.cudnn.benchmark = bool(enabled)
+        return {
+            "ok": True,
+            "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
+
 def clear_cond_cache() -> dict:
     """Clear A1111 prompt-conditioning caches used by persistent_cond_cache."""
     global _last_cleared_at
@@ -215,6 +228,20 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.get("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile_status():
         return {"ok": True, "desired": dict(_compile_desired), "status": dict(_compile_status)}
+
+    @app.post("/sdapi/v1/openclaw/cudnn-benchmark")
+    async def _cudnn_benchmark(request: Request):
+        data = await request.json()
+        return apply_cudnn_benchmark(bool(data.get("enabled")))
+
+    @app.get("/sdapi/v1/openclaw/cudnn-benchmark")
+    async def _cudnn_benchmark_status():
+        try:
+            import torch
+
+            return {"ok": True, "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
 
     @app.get("/sdapi/v1/openclaw/cond-cache")
     async def _cond_cache_status():
