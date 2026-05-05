@@ -374,6 +374,12 @@ def nvfp4_linear_skip_reason(module, fqn):
         return "not_linear"
     if fqn.startswith("first_stage_model."):
         return "vae"
+    if fqn.startswith("conditioner."):
+        return "conditioner"
+    if ".attn1." in fqn:
+        return "self_attention"
+    if ".attn2." in fqn:
+        return "cross_attention"
     if module.weight is None or module.weight.ndim != 2:
         return "not_2d_weight"
     out_features, in_features = module.weight.shape

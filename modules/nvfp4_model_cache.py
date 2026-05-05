@@ -11,8 +11,8 @@ from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
 
 CACHE_DIR_NAME = "nvfp4"
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion", "Lora", "VAE")
-CACHE_VERSION = 1
-CONFIG_NAME = "NVFP4DynamicActivationNVFP4WeightConfig"
+CACHE_VERSION = 2
+CONFIG_NAME = "NVFP4DynamicActivationNVFP4WeightConfigSelectiveAttentionSafe"
 
 
 def _is_safetensors(filename: str) -> bool:
