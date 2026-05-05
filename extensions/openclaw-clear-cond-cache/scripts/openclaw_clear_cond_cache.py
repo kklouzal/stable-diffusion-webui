@@ -21,6 +21,7 @@ _backend_activity_token = 0
 _backend_hooks_installed = False
 _backend_lora_hooks_installed = False
 _backend_lora_batch: dict[str, Any] = {"total": 0, "index": 0}
+_startup_model_load_token: int | None = None
 
 try:
     from modules.sd_hijack import model_hijack
@@ -406,6 +407,11 @@ def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
 
 
 def on_model_loaded(_: Any) -> None:
+    global _startup_model_load_token
+    if _startup_model_load_token is not None:
+        _pop_backend_activity(_startup_model_load_token)
+        _startup_model_load_token = None
+
     if _compile_desired["vae"]:
         token = _push_backend_activity("torch_compile", "Reapplying VAE compile after model load")
         try:
@@ -522,6 +528,16 @@ def on_app_started(_: object, app: FastAPI) -> None:
 # meant to expose. The installer is idempotent and still called from
 # on_app_started as a safety net for reload paths.
 _install_backend_status_hooks()
+
+# Keep a broad startup/model-load activity on the stack until A1111 fires the
+# model_loaded callback. Some startup work is already inside original call
+# frames before extension hooks can wrap them, so this fills the unavoidable
+# gaps without adding measurable work to generation itself.
+try:
+    if not getattr(sd_models.model_data, "was_loaded_at_least_once", False):
+        _startup_model_load_token = _push_backend_activity("startup_model_load", "Starting Web UI / loading initial model")
+except Exception:
+    _startup_model_load_token = None
 
 script_callbacks.on_app_started(on_app_started)
 script_callbacks.on_model_loaded(on_model_loaded)
