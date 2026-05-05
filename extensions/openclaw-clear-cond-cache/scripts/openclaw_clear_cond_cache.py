@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 
 from modules import call_queue, extra_networks, prompt_parser, script_callbacks, sd_models, shared
-from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
+from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img
 
 _last_cleared_at = 0.0
 _compile_slots: dict[str, dict[str, Any]] = {}
@@ -163,16 +163,10 @@ def _install_backend_status_hooks() -> None:
 
     if not _backend_hooks_installed:
         try:
-            from modules import processing as _processing
             from modules import sd_models as _sd_models
             from modules import sd_vae as _sd_vae
         except Exception:
             return
-
-        try:
-            from modules.api import api as _api_module
-        except Exception:
-            _api_module = None
 
         _backend_hooks_installed = True
 
@@ -208,19 +202,6 @@ def _install_backend_status_hooks() -> None:
                 token = _push_backend_activity("checkpoint_apply", "Applying checkpoint weights", detail=_checkpoint_detail(checkpoint_info))
                 try:
                     return original(model, checkpoint_info, state_dict, timer)
-                finally:
-                    _pop_backend_activity(token)
-            return wrapped
-
-        def _wrap_process_images(original):
-            def wrapped(p, *args, **kwargs):
-                is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
-                phase = "img2img_pipeline" if is_img2img else "generation_pipeline"
-                label = "Running img2img pipeline" if is_img2img else "Running generation pipeline"
-                detail = getattr(p, "sd_model_checkpoint", None) or getattr(getattr(shared, "sd_model", None), "sd_checkpoint_info", None)
-                token = _push_backend_activity(phase, label, detail=_checkpoint_detail(detail))
-                try:
-                    return original(p, *args, **kwargs)
                 finally:
                     _pop_backend_activity(token)
             return wrapped
@@ -267,9 +248,6 @@ def _install_backend_status_hooks() -> None:
                     _pop_backend_activity(token)
             return wrapped
 
-        _wrap_backend_function(_processing, "process_images", _wrap_process_images)
-        if _api_module is not None:
-            _wrap_backend_function(_api_module, "process_images", _wrap_process_images)
         _wrap_backend_function(_sd_models, "reload_model_weights", _wrap_reload_model_weights)
         _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
         _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
