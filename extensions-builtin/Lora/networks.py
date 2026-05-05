@@ -707,6 +707,9 @@ def network_LayerNorm_load_state_dict(self, *args, **kwargs):
 
 
 def network_MultiheadAttention_forward(self, *args, **kwargs):
+    if is_nvfp4_weight(self.out_proj.weight):
+        return originals.MultiheadAttention_forward(self, *args, **kwargs)
+
     network_apply_weights(self)
 
     return originals.MultiheadAttention_forward(self, *args, **kwargs)
