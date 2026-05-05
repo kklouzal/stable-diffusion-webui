@@ -34,6 +34,47 @@ from contextlib import closing
 from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
 
 
+_precision_map_cache_key = None
+_precision_map_cache_value = None
+
+
+def _precision_lora_signature(lora_networks):
+    if lora_networks is None:
+        return ()
+    signature = []
+    for net in getattr(lora_networks, "loaded_networks", []) or []:
+        on_disk = getattr(net, "network_on_disk", None)
+        modules = getattr(net, "modules", {}) or {}
+        signature.append((
+            getattr(net, "name", None),
+            getattr(net, "mentioned_name", None),
+            getattr(net, "te_multiplier", None),
+            getattr(net, "unet_multiplier", None),
+            getattr(net, "dyn_dim", None),
+            getattr(on_disk, "filename", None),
+            getattr(on_disk, "shorthash", None),
+            tuple(sorted(modules.keys())),
+        ))
+    return tuple(signature)
+
+
+def _precision_model_signature(sd_model, lora_networks):
+    checkpoint = getattr(sd_model, "sd_checkpoint_info", None)
+    return (
+        id(sd_model),
+        getattr(checkpoint, "filename", None),
+        getattr(checkpoint, "sha256", None),
+        getattr(sd_model, "sd_model_hash", None),
+        getattr(sd_model, "loaded_vae_file", None) or getattr(sd_model, "base_vae", None),
+        str(getattr(devices, "dtype", None)),
+        str(getattr(devices, "dtype_unet", None)),
+        str(getattr(devices, "dtype_vae", None)),
+        bool(getattr(devices, "fp8", False)),
+        bool(getattr(devices, "nvfp4", False)),
+        _precision_lora_signature(lora_networks),
+    )
+
+
 def _precision_tensor_info(tensor):
     if tensor is None:
         return None
@@ -70,14 +111,22 @@ def _precision_layer_kind(name: str, module) -> str:
 
 
 def build_precision_map():
+    global _precision_map_cache_key, _precision_map_cache_value
+
     sd_model = shared.sd_model
     if sd_model is None:
-        return {"ok": False, "error": "No model loaded", "layers": [], "loras": []}
+        return {"ok": False, "error": "No model loaded", "layers": [], "loras": [], "cache": {"hit": False}}
 
     try:
         import networks as lora_networks
     except Exception:
         lora_networks = None
+
+    cache_key = _precision_model_signature(sd_model, lora_networks)
+    if _precision_map_cache_key == cache_key and _precision_map_cache_value is not None:
+        cached = dict(_precision_map_cache_value)
+        cached["cache"] = {"hit": True, "cached_at": _precision_map_cache_value.get("generated_at")}
+        return cached
 
     lora_targets = {}
     loras = []
@@ -164,7 +213,7 @@ def build_precision_map():
         by_source[src]["total"] += 1
         by_source[src]["precision"][layer["precision"]] = by_source[src]["precision"].get(layer["precision"], 0) + 1
 
-    return {
+    result = {
         "ok": True,
         "generated_at": time.time(),
         "checkpoint": {
@@ -191,7 +240,11 @@ def build_precision_map():
         },
         "loras": loras,
         "layers": layers,
+        "cache": {"hit": False},
     }
+    _precision_map_cache_key = cache_key
+    _precision_map_cache_value = result
+    return result
 
 def script_name_to_index(name, scripts):
     try:
