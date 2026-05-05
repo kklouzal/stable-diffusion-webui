@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 
 from modules import call_queue, extra_networks, prompt_parser, script_callbacks, sd_models, shared
-from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img
+from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 
 _last_cleared_at = 0.0
 _compile_slots: dict[str, dict[str, Any]] = {}
@@ -110,6 +110,25 @@ def _push_backend_activity(phase: str, label: str, *, detail: Any = None, progre
         return token
 
 
+def _update_backend_activity(token: int, *, label: Any = None, detail: Any = None, progress: Any = None, current: Any = None, total: Any = None) -> None:
+    now = time.time()
+    with _backend_activity_lock:
+        for item in reversed(_backend_activity_stack):
+            if item.get("token") == token:
+                if label is not None:
+                    item["label"] = str(label)
+                if detail is not None:
+                    item["detail"] = None if detail in (None, "") else str(detail)
+                if progress is not None:
+                    item["progress"] = progress
+                if current is not None:
+                    item["current"] = current
+                if total is not None:
+                    item["total"] = total
+                item["updated_at"] = now
+                break
+
+
 def _pop_backend_activity(token: int) -> None:
     with _backend_activity_lock:
         for idx in range(len(_backend_activity_stack) - 1, -1, -1):
@@ -143,7 +162,9 @@ def _install_backend_status_hooks() -> None:
         return
 
     try:
+        from modules import processing as _processing
         from modules import sd_models as _sd_models
+        from modules.api import api as _api_module
         from modules import sd_vae as _sd_vae
     except Exception:
         return
@@ -186,6 +207,19 @@ def _install_backend_status_hooks() -> None:
                 _pop_backend_activity(token)
         return wrapped
 
+    def _wrap_process_images(original):
+        def wrapped(p, *args, **kwargs):
+            is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
+            phase = "img2img_pipeline" if is_img2img else "generation_pipeline"
+            label = "Running img2img pipeline" if is_img2img else "Running generation pipeline"
+            detail = getattr(p, "sd_model_checkpoint", None) or getattr(getattr(shared, "sd_model", None), "sd_checkpoint_info", None)
+            token = _push_backend_activity(phase, label, detail=_checkpoint_detail(detail))
+            try:
+                return original(p, *args, **kwargs)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
     def _wrap_load_vae(original):
         def wrapped(model, vae_file=None, vae_source="from unknown source"):
             detail = os.path.basename(str(vae_file)) if vae_file else str(vae_source)
@@ -196,6 +230,8 @@ def _install_backend_status_hooks() -> None:
                 _pop_backend_activity(token)
         return wrapped
 
+    _wrap_backend_function(_processing, "process_images", _wrap_process_images)
+    _wrap_backend_function(_api_module, "process_images", _wrap_process_images)
     _wrap_backend_function(_sd_models, "reload_model_weights", _wrap_reload_model_weights)
     _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
     _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
@@ -214,7 +250,7 @@ def _install_backend_status_hooks() -> None:
                 total = len(names_list)
                 _backend_lora_batch["total"] = total
                 _backend_lora_batch["index"] = 0
-                token = _push_backend_activity("lora_batch", "Loading LoRAs", detail=f"{total} selected" if total else "No LoRAs", current=0 if total else None, total=total or None)
+                token = _push_backend_activity("lora_batch", "Loading/applying LoRAs", detail=f"{total} selected" if total else "No LoRAs", current=0 if total else None, total=total or None)
                 try:
                     return original(names, te_multipliers=te_multipliers, unet_multipliers=unet_multipliers, dyn_dims=dyn_dims)
                 finally:
@@ -275,8 +311,12 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
 
         original = unwrapped
         original.eval()
-        compiled = torch.compile(original, mode="reduce-overhead", fullgraph=False, dynamic=True)
-        setter(compiled)
+        token = _push_backend_activity("torch_compile", f"Compiling {name.upper()}", detail="torch.compile reduce-overhead/dynamic")
+        try:
+            compiled = torch.compile(original, mode="reduce-overhead", fullgraph=False, dynamic=True)
+            setter(compiled)
+        finally:
+            _pop_backend_activity(token)
         _compile_slots[name] = {
             "original": original,
             "original_id": id(original),
@@ -286,13 +326,21 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
         return {"name": name, "enabled": True, "changed": True, "mode": "reduce-overhead", "dynamic": True}
 
     if slot and id(module) == slot.get("compiled_id"):
-        setter(slot["original"])
+        token = _push_backend_activity("torch_compile", f"Restoring uncompiled {name.upper()}")
+        try:
+            setter(slot["original"])
+        finally:
+            _pop_backend_activity(token)
         _compile_slots.pop(name, None)
         _compile_status[name] = False
         return {"name": name, "enabled": False, "changed": True}
 
     if module is not unwrapped:
-        setter(unwrapped)
+        token = _push_backend_activity("torch_compile", f"Restoring uncompiled {name.upper()}")
+        try:
+            setter(unwrapped)
+        finally:
+            _pop_backend_activity(token)
         _compile_slots.pop(name, None)
         _compile_status[name] = False
         return {"name": name, "enabled": False, "changed": True}
@@ -316,7 +364,11 @@ def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
 
 def on_model_loaded(_: Any) -> None:
     if _compile_desired["vae"]:
-        apply_torch_compile_settings(**_compile_desired)
+        token = _push_backend_activity("torch_compile", "Reapplying VAE compile after model load")
+        try:
+            apply_torch_compile_settings(**_compile_desired)
+        finally:
+            _pop_backend_activity(token)
 
 
 def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
