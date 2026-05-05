@@ -234,6 +234,38 @@ def _install_backend_status_hooks() -> None:
                     _pop_backend_activity(token)
             return wrapped
 
+        def _wrap_instantiate_from_config(original):
+            def wrapped(config, state_dict=None):
+                detail = None
+                try:
+                    detail = config.get("target")
+                except Exception:
+                    detail = None
+                token = _push_backend_activity("model_create", "Creating model from config", detail=detail)
+                try:
+                    return original(config, state_dict=state_dict)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
+        def _wrap_send_model_to_device(original):
+            def wrapped(model):
+                token = _push_backend_activity("model_device", "Moving model to GPU")
+                try:
+                    return original(model)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
+        def _wrap_get_empty_cond(original):
+            def wrapped(sd_model):
+                token = _push_backend_activity("conditioning", "Calculating empty prompt conditioning")
+                try:
+                    return original(sd_model)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
         _wrap_backend_function(_processing, "process_images", _wrap_process_images)
         if _api_module is not None:
             _wrap_backend_function(_api_module, "process_images", _wrap_process_images)
@@ -241,6 +273,9 @@ def _install_backend_status_hooks() -> None:
         _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
         _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
         _wrap_backend_function(_sd_models, "load_model_weights", _wrap_load_model_weights)
+        _wrap_backend_function(_sd_models, "instantiate_from_config", _wrap_instantiate_from_config)
+        _wrap_backend_function(_sd_models, "send_model_to_device", _wrap_send_model_to_device)
+        _wrap_backend_function(_sd_models, "get_empty_cond", _wrap_get_empty_cond)
         _wrap_backend_function(_sd_vae, "load_vae", _wrap_load_vae)
 
     if _backend_lora_hooks_installed:
