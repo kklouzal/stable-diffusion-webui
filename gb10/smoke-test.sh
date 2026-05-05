@@ -52,16 +52,18 @@ if optional_absent:
     print(f'optional absent: {", ".join(optional_absent)}')
 
 
-from torchao.prototype.mx_formats.inference_workflow import NVFP4DynamicActivationNVFP4WeightConfig
+from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
+from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
 from torchao.quantization import quantize_
 
 if torch.cuda.is_available():
     layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
     quantize_(
         layer,
-        config=NVFP4DynamicActivationNVFP4WeightConfig(
-            use_dynamic_per_tensor_scale=True,
-            use_triton_kernel=True,
+        config=MXDynamicActivationMXWeightConfig(
+            activation_dtype=torch.float8_e4m3fn,
+            weight_dtype=torch.float8_e4m3fn,
+            kernel_preference=KernelPreference.AUTO,
         ),
         filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
     )
@@ -69,8 +71,8 @@ if torch.cuda.is_available():
     out = layer(sample)
     torch.cuda.synchronize()
     if out.dtype != torch.bfloat16 or not torch.isfinite(out).all():
-        raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
-    print('nvfp4 torchao/mslk: ok')
+        raise SystemExit('MXFP8 TorchAO/MSLK smoke failed')
+    print('mxfp8 torchao/mslk: ok')
 
 print('container imports: ok')
 PY

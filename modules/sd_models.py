@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -362,6 +362,94 @@ def check_fp8(model):
     return enable_fp8
 
 
+def check_mxfp8(model):
+    if model is None:
+        return None
+    if devices.get_optimal_device_name() == "mps":
+        enable_mxfp8 = False
+    elif shared.opts.mxfp8_storage == "Enable":
+        enable_mxfp8 = True
+    elif getattr(model, "is_sdxl", False) and shared.opts.mxfp8_storage == "Enable for SDXL":
+        enable_mxfp8 = True
+    else:
+        enable_mxfp8 = False
+    return enable_mxfp8
+
+
+def check_weight_quantization_mutual_exclusion(model):
+    enabled = [name for name, active in (("FP8 weight", check_fp8(model)), ("MXFP8 weight", check_mxfp8(model))) if active]
+    if len(enabled) > 1:
+        raise RuntimeError(f"Weight quantization modes are mutually exclusive; disable all but one: {', '.join(enabled)}")
+
+
+def mxfp8_linear_skip_reason(module, fqn):
+    if not isinstance(module, torch.nn.Linear):
+        return "not_linear"
+    if fqn.startswith("first_stage_model."):
+        return "vae"
+    if fqn.startswith("conditioner.") or fqn.startswith("cond_stage_model."):
+        return "conditioner"
+    if ".attn1." in fqn:
+        return "self_attention"
+    if ".attn2." in fqn:
+        return "cross_attention"
+    if module.weight is None or module.weight.ndim != 2:
+        return "not_2d_weight"
+    out_features, in_features = module.weight.shape
+    if out_features % 32 != 0 or in_features % 32 != 0:
+        return "shape_not_multiple_of_32"
+    return None
+
+
+def mxfp8_linear_filter(module, fqn):
+    return mxfp8_linear_skip_reason(module, fqn) is None
+
+
+def apply_mxfp8_weight_quantization(model, timer, source_path=None):
+    if devices.dtype != torch.bfloat16:
+        raise RuntimeError("MXFP8 weight requires --dtype bfloat16; TorchAO MXFP8 kernels do not support float16 activations")
+    if not torch.cuda.is_available():
+        raise RuntimeError("MXFP8 weight requires CUDA")
+
+    first_stage = model.first_stage_model
+    model.first_stage_model = None
+    eligible = 0
+    skipped_linear = 0
+    skipped_reasons = {}
+    skipped_names = []
+    for fqn, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            reason = mxfp8_linear_skip_reason(module, fqn)
+            if reason is None:
+                eligible += 1
+            else:
+                skipped_linear += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
+    cache_loaded = False
+    try:
+        for fqn, module in model.named_modules():
+            if mxfp8_linear_filter(module, fqn):
+                module.network_mxfp8_base_weight = module.weight.detach().to(devices.cpu, copy=True)
+                if module.bias is not None:
+                    module.network_mxfp8_base_bias = module.bias.detach().to(devices.cpu, copy=True)
+
+        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device)
+        if not cache_loaded:
+            from torchao.quantization import quantize_
+            from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
+            from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
+            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO)
+            quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
+            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons)
+        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "skipped_names": skipped_names, "config": "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO", "cache_loaded": cache_loaded}
+    finally:
+        model.first_stage_model = first_stage
+    action = "Loaded cached" if cache_loaded else "Applied"
+    print(f"{action} MXFP8 weight quantization for {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})", flush=True)
+    timer.record("load mxfp8 cache" if cache_loaded else "apply mxfp8")
+
+
 def set_model_type(model, state_dict):
     model.is_sd1 = False
     model.is_sd2 = False
@@ -446,6 +534,8 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         # cache newly loaded model
         checkpoints_loaded[checkpoint_info] = state_dict.copy()
 
+    check_weight_quantization_mutual_exclusion(model)
+
     if hasattr(model, "before_load_weights"):
         model.before_load_weights(state_dict)
 
@@ -525,6 +615,12 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         timer.record("apply fp8")
     else:
         devices.fp8 = False
+
+    if check_mxfp8(model):
+        devices.mxfp8 = True
+        apply_mxfp8_weight_quantization(model, timer, checkpoint_info.filename)
+    else:
+        devices.mxfp8 = False
 
     devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype_unet in (torch.float16, torch.bfloat16)
 

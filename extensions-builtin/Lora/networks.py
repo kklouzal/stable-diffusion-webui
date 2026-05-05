@@ -575,7 +575,69 @@ def network_reset_cached_weight(self: Union[torch.nn.Conv2d, torch.nn.Linear]):
     self.network_bias_backup = None
 
 
+def is_mxfp8_weight(weight):
+    return type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
+
+
+def network_apply_mxfp8_merged_lora(self):
+    network_layer_name = getattr(self, 'network_layer_name', None)
+    base_weight = getattr(self, 'network_mxfp8_base_weight', None)
+    if network_layer_name is None or base_weight is None:
+        return False
+
+    wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    current_names = getattr(self, "network_current_names", ())
+    if current_names == wanted_names:
+        return True
+
+    modules_for_layer = [(net, net.modules[network_layer_name]) for net in loaded_networks if network_layer_name in net.modules]
+    had_merged_lora = getattr(self, "network_mxfp8_merged_lora_applied", False)
+    if not modules_for_layer and not had_merged_lora:
+        self.network_current_names = wanted_names
+        return True
+
+    try:
+        from torchao.quantization import quantize_
+        from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
+        from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
+
+        with torch.no_grad():
+            weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
+            base_bias = getattr(self, 'network_mxfp8_base_bias', None)
+            bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
+
+            for net, module in modules_for_layer:
+                updown, ex_bias = module.calc_updown(weight)
+                if len(weight.shape) == 4 and weight.shape[1] == 9:
+                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
+                if ex_bias is not None:
+                    bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
+
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
+            if bias is not None:
+                self.bias = torch.nn.Parameter(bias, requires_grad=False)
+            elif self.bias is not None:
+                self.bias = None
+
+            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO)
+            quantize_(self, config, filter_fn=lambda module, fqn: module is self, device=devices.device)
+            self.network_current_names = wanted_names
+            self.network_mxfp8_merged_lora_applied = bool(modules_for_layer)
+            return True
+    except Exception as e:
+        logging.debug(f"Network {network_layer_name}: MXFP8 merged LoRA failed: {e}", exc_info=True)
+        for net, _module in modules_for_layer:
+            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        return False
+
+
 def network_Linear_forward(self, input):
+    if is_mxfp8_weight(self.weight):
+        if network_apply_mxfp8_merged_lora(self):
+            return originals.Linear_forward(self, input)
+        return network_forward(self, input, originals.Linear_forward)
+
     if shared.opts.lora_functional:
         return network_forward(self, input, originals.Linear_forward)
 
@@ -650,6 +712,7 @@ def network_MultiheadAttention_load_state_dict(self, *args, **kwargs):
 def process_network_files(names: list[str] | None = None):
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
+    candidates = [x for x in candidates if not sd_models.mxfp8_model_cache.is_mxfp8_cache_path(x)]
     for filename in candidates:
         if os.path.isdir(filename):
             continue

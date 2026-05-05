@@ -115,6 +115,7 @@ errors.run(enable_tf32, "Enabling TF32")
 
 cpu: torch.device = torch.device("cpu")
 fp8: bool = False
+mxfp8: bool = False
 # Force fp16 for all models in inference. No casting during inference.
 # This flag is controlled by "--precision half" command line arg.
 force_fp16: bool = False
