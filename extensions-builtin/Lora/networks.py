@@ -388,49 +388,6 @@ def restore_weights_backup(obj, field, weight):
     getattr(obj, field).copy_(weight)
 
 
-def network_module_cached_updown(module, weight, network_layer_name):
-    multiplier = module.multiplier()
-    if multiplier == 0:
-        return module.calc_updown(weight)
-
-    # Only cache module types whose delta is independent of the incoming base
-    # weight. IA3, GLora, OFT/BOFT, and DoRA depend on orig_weight and must stay
-    # on the conservative path, especially when multiple LoRAs are stacked.
-    cacheable_types = {
-        "NetworkModuleFull",
-        "NetworkModuleHada",
-        "NetworkModuleLokr",
-        "NetworkModuleLora",
-        "NetworkModuleNorm",
-    }
-    if type(module).__name__ not in cacheable_types or getattr(module, "dora_scale", None) is not None:
-        return module.calc_updown(weight)
-
-    cache_key = (
-        id(getattr(module, "sd_module", None)),
-        network_layer_name,
-        tuple(weight.shape),
-        str(weight.device),
-        str(weight.dtype),
-        getattr(module.network, "dyn_dim", None),
-    )
-    cached = getattr(module, "network_updown_cache", None)
-    if cached is not None and cached[0] == cache_key:
-        base_updown, base_ex_bias = cached[1], cached[2]
-        return base_updown * multiplier, None if base_ex_bias is None else base_ex_bias * multiplier
-
-    updown, ex_bias = module.calc_updown(weight)
-    # calc_updown includes the prompt multiplier, but the expensive LoRA matrix
-    # product does not depend on strength. Keep the cache on the same device as
-    # the active weight; offloading large per-layer deltas to CPU can itself stall
-    # the request before sampling starts.
-    module.network_updown_cache = (
-        cache_key,
-        (updown / multiplier).detach(),
-        None if ex_bias is None else (ex_bias / multiplier).detach(),
-    )
-
-    return updown, ex_bias
 
 def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.GroupNorm, torch.nn.LayerNorm, torch.nn.MultiheadAttention]):
     weights_backup = getattr(self, "network_weights_backup", None)
@@ -522,7 +479,7 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
                             bias = getattr(self, 'fp16_bias', None)
                             if bias is not None:
                                 bias = bias.clone().to(self.bias.device)
-                        updown, ex_bias = network_module_cached_updown(module, weight, network_layer_name)
+                        updown, ex_bias = module.calc_updown(weight)
 
                         if len(weight.shape) == 4 and weight.shape[1] == 9:
                             # inpainting model. zero pad updown to make channel[1]  4 to 9
@@ -667,7 +624,7 @@ def network_apply_nvfp4_merged_lora(self):
             bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
 
             for net, module in modules_for_layer:
-                updown, ex_bias = network_module_cached_updown(module, weight, network_layer_name)
+                updown, ex_bias = module.calc_updown(weight)
                 if len(weight.shape) == 4 and weight.shape[1] == 9:
                     updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
                 weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
@@ -694,9 +651,6 @@ def network_apply_nvfp4_merged_lora(self):
 
 def network_Linear_forward(self, input):
     if is_nvfp4_weight(self.weight):
-        network_layer_name = getattr(self, "network_layer_name", None)
-        if shared.opts.lora_functional or any(network_layer_name in net.modules for net in loaded_networks):
-            return network_forward(self, input, originals.Linear_forward)
         if network_apply_nvfp4_merged_lora(self):
             return originals.Linear_forward(self, input)
         return network_forward(self, input, originals.Linear_forward)
