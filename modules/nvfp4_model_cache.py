@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,14 +26,6 @@ def _stat_source(filename: str) -> dict:
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
-
-
-def _sha256(filename: str) -> str:
-    h = hashlib.sha256()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def is_nvfp4_cache_path(filename: str) -> bool:
@@ -199,7 +190,6 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         }
 
     source_stat = _stat_source(source_path)
-    source_sha256 = _sha256(source_path)
     payload = {
         "cache_version": CACHE_VERSION,
         "config": CONFIG_NAME,
@@ -219,7 +209,6 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         "cache_version": CACHE_VERSION,
         "config": CONFIG_NAME,
         "source": source_stat,
-        "source_sha256": source_sha256,
         "cache": _stat_source(cache_path),
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,

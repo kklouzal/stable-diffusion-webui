@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,14 +26,6 @@ def _stat_source(filename: str) -> dict:
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
-
-
-def _sha256(filename: str) -> str:
-    h = hashlib.sha256()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _read_safetensors_metadata(filename: str) -> dict[str, str]:
@@ -130,7 +121,6 @@ def ensure_bf16_cache(filename: str) -> Optional[str]:
         return cache_path
 
     source_stat = _stat_source(filename)
-    source_sha256 = _sha256(filename)
     print(f"Creating bf16 cache for {filename} -> {cache_path}")
     tensors = safetensors.torch.load_file(filename, device="cpu")
     tensors = {key: _tensor_to_bf16(value) for key, value in tensors.items()}
@@ -141,7 +131,6 @@ def ensure_bf16_cache(filename: str) -> Optional[str]:
         "bf16_cache_source_path": source_stat["path"],
         "bf16_cache_source_size": str(source_stat["size"]),
         "bf16_cache_source_mtime_ns": str(source_stat["mtime_ns"]),
-        "bf16_cache_source_sha256": source_sha256,
     })
 
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -153,7 +142,6 @@ def ensure_bf16_cache(filename: str) -> Optional[str]:
         "cache_version": CACHE_VERSION,
         "dtype": "bfloat16",
         "source": source_stat,
-        "source_sha256": source_sha256,
         "cache": _stat_source(cache_path),
     }
     _write_atomic_bytes(_sidecar_path(cache_path), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))

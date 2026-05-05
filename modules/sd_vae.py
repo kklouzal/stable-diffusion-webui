@@ -279,6 +279,9 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
     if not sd_model.lowvram:
         sd_model.to(devices.device)
 
+    timer = sd_models.Timer()
+    sd_models.apply_nvfp4_vae_weight_quantization(sd_model, timer, vae_file)
+
     script_callbacks.model_loaded_callback(sd_model)
 
     print("VAE weights loaded.")
