@@ -602,6 +602,17 @@ def network_apply_nvfp4_merged_lora(self):
     if current_names == wanted_names:
         return True
 
+    modules_for_layer = [(net, net.modules[network_layer_name]) for net in loaded_networks if network_layer_name in net.modules]
+    had_merged_lora = getattr(self, "network_nvfp4_merged_lora_applied", False)
+
+    # Most LoRAs only touch a subset of Linear layers. Do not dequantize/copy/re-quantize
+    # every NVFP4 layer just because the active LoRA signature changed; that makes the
+    # first generation after a LoRA switch look wedged at step 0. If this layer was never
+    # LoRA-merged, the existing base NVFP4 weight is already correct.
+    if not modules_for_layer and not had_merged_lora:
+        self.network_current_names = wanted_names
+        return True
+
     try:
         from torchao.quantization import quantize_
         from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
@@ -611,11 +622,7 @@ def network_apply_nvfp4_merged_lora(self):
             base_bias = getattr(self, 'network_nvfp4_base_bias', None)
             bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
 
-            for net in loaded_networks:
-                module = net.modules.get(network_layer_name, None)
-                if module is None:
-                    continue
-
+            for net, module in modules_for_layer:
                 updown, ex_bias = module.calc_updown(weight)
                 if len(weight.shape) == 4 and weight.shape[1] == 9:
                     updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
@@ -632,12 +639,12 @@ def network_apply_nvfp4_merged_lora(self):
             config = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=True, use_dynamic_per_tensor_scale=True)
             quantize_(self, config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
+            self.network_nvfp4_merged_lora_applied = bool(modules_for_layer)
             return True
     except RuntimeError as e:
         logging.debug(f"Network {network_layer_name}: NVFP4 merged LoRA failed: {e}")
-        for net in loaded_networks:
-            if net.modules.get(network_layer_name, None) is not None:
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        for net, _module in modules_for_layer:
+            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
         return False
 
 
