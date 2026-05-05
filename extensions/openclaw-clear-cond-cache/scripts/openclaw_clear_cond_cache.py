@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 import time
 from functools import reduce
 from typing import Any
@@ -11,8 +13,13 @@ from modules.processing import StableDiffusionProcessing, StableDiffusionProcess
 
 _last_cleared_at = 0.0
 _compile_slots: dict[str, dict[str, Any]] = {}
-_compile_desired: dict[str, bool] = {"main_model": False, "vae": False, "lora": False}
-_compile_status: dict[str, Any] = {"main_model": False, "vae": False, "lora": False, "last_error": None}
+_compile_desired: dict[str, bool] = {"vae": False}
+_compile_status: dict[str, Any] = {"vae": False, "last_error": None}
+_backend_activity_lock = threading.Lock()
+_backend_activity_stack: list[dict[str, Any]] = []
+_backend_activity_token = 0
+_backend_hooks_installed = False
+_backend_lora_batch: dict[str, Any] = {"total": 0, "index": 0}
 
 try:
     from modules.sd_hijack import model_hijack
@@ -61,13 +68,176 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
 
 
 
-def _get_main_model_module():
-    sd_model = sd_models.model_data.sd_model
-    return getattr(getattr(sd_model, "model", None), "diffusion_model", None)
+def _backend_status_payload() -> dict[str, Any]:
+    with _backend_activity_lock:
+        if _backend_activity_stack:
+            current = dict(_backend_activity_stack[-1])
+            current.pop("token", None)
+            return {"ok": True, **current}
+    return {
+        "ok": True,
+        "active": False,
+        "phase": None,
+        "label": None,
+        "detail": None,
+        "progress": None,
+        "current": None,
+        "total": None,
+        "started_at": None,
+        "updated_at": None,
+    }
 
 
-def _set_main_model_module(module: Any) -> None:
-    sd_models.model_data.sd_model.model.diffusion_model = module
+def _push_backend_activity(phase: str, label: str, *, detail: Any = None, progress: Any = None, current: Any = None, total: Any = None) -> int:
+    global _backend_activity_token
+    now = time.time()
+    detail_text = None if detail in (None, "") else str(detail)
+    with _backend_activity_lock:
+        _backend_activity_token += 1
+        token = _backend_activity_token
+        _backend_activity_stack.append({
+            "token": token,
+            "active": True,
+            "phase": phase,
+            "label": label,
+            "detail": detail_text,
+            "progress": progress,
+            "current": current,
+            "total": total,
+            "started_at": now,
+            "updated_at": now,
+        })
+        return token
+
+
+def _pop_backend_activity(token: int) -> None:
+    with _backend_activity_lock:
+        for idx in range(len(_backend_activity_stack) - 1, -1, -1):
+            if _backend_activity_stack[idx].get("token") == token:
+                _backend_activity_stack.pop(idx)
+                break
+
+
+def _checkpoint_detail(checkpoint_info: Any) -> str | None:
+    if checkpoint_info is None:
+        return None
+    for attr in ("title", "name", "model_name", "filename"):
+        value = getattr(checkpoint_info, attr, None)
+        if value:
+            return os.path.basename(str(value))
+    return str(checkpoint_info)
+
+
+def _wrap_backend_function(module: Any, attr: str, wrapper_factory) -> None:
+    original = getattr(module, attr, None)
+    if original is None or getattr(original, "__openclaw_backend_status_wrapped__", False):
+        return
+    wrapped = wrapper_factory(original)
+    wrapped.__openclaw_backend_status_wrapped__ = True
+    setattr(module, attr, wrapped)
+
+
+def _install_backend_status_hooks() -> None:
+    global _backend_hooks_installed
+    if _backend_hooks_installed:
+        return
+
+    try:
+        from modules import sd_models as _sd_models
+        from modules import sd_vae as _sd_vae
+    except Exception:
+        return
+
+    _backend_hooks_installed = True
+
+    def _wrap_reload_model_weights(original):
+        def wrapped(sd_model=None, info=None, forced_reload=False):
+            token = _push_backend_activity("model_load", "Reloading checkpoint", detail=_checkpoint_detail(info))
+            try:
+                return original(sd_model=sd_model, info=info, forced_reload=forced_reload)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
+    def _wrap_load_model(original):
+        def wrapped(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_config=None):
+            token = _push_backend_activity("model_load", "Loading checkpoint", detail=_checkpoint_detail(checkpoint_info))
+            try:
+                return original(checkpoint_info=checkpoint_info, already_loaded_state_dict=already_loaded_state_dict, checkpoint_config=checkpoint_config)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
+    def _wrap_get_checkpoint_state_dict(original):
+        def wrapped(checkpoint_info, timer):
+            token = _push_backend_activity("checkpoint_read", "Reading checkpoint", detail=_checkpoint_detail(checkpoint_info))
+            try:
+                return original(checkpoint_info, timer)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
+    def _wrap_load_model_weights(original):
+        def wrapped(model, checkpoint_info, state_dict, timer):
+            token = _push_backend_activity("checkpoint_apply", "Applying checkpoint weights", detail=_checkpoint_detail(checkpoint_info))
+            try:
+                return original(model, checkpoint_info, state_dict, timer)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
+    def _wrap_load_vae(original):
+        def wrapped(model, vae_file=None, vae_source="from unknown source"):
+            detail = os.path.basename(str(vae_file)) if vae_file else str(vae_source)
+            token = _push_backend_activity("vae_load", "Loading VAE", detail=detail)
+            try:
+                return original(model, vae_file=vae_file, vae_source=vae_source)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
+
+    _wrap_backend_function(_sd_models, "reload_model_weights", _wrap_reload_model_weights)
+    _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
+    _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
+    _wrap_backend_function(_sd_models, "load_model_weights", _wrap_load_model_weights)
+    _wrap_backend_function(_sd_vae, "load_vae", _wrap_load_vae)
+
+    try:
+        import networks as _lora_networks
+    except Exception:
+        _lora_networks = None
+
+    if _lora_networks is not None:
+        def _wrap_load_networks(original):
+            def wrapped(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):
+                names_list = [str(name) for name in (names or []) if name]
+                total = len(names_list)
+                _backend_lora_batch["total"] = total
+                _backend_lora_batch["index"] = 0
+                token = _push_backend_activity("lora_batch", "Loading LoRAs", detail=f"{total} selected" if total else "No LoRAs", current=0 if total else None, total=total or None)
+                try:
+                    return original(names, te_multipliers=te_multipliers, unet_multipliers=unet_multipliers, dyn_dims=dyn_dims)
+                finally:
+                    _backend_lora_batch["total"] = 0
+                    _backend_lora_batch["index"] = 0
+                    _pop_backend_activity(token)
+            return wrapped
+
+        def _wrap_load_network(original):
+            def wrapped(name, network_on_disk):
+                total = int(_backend_lora_batch.get("total") or 0)
+                _backend_lora_batch["index"] = int(_backend_lora_batch.get("index") or 0) + 1
+                current = _backend_lora_batch["index"] if total else None
+                detail = name or os.path.basename(getattr(network_on_disk, "filename", "") or "")
+                token = _push_backend_activity("lora_load", "Loading LoRA", detail=detail, current=current, total=total or None)
+                try:
+                    return original(name, network_on_disk)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
+        _wrap_backend_function(_lora_networks, "load_networks", _wrap_load_networks)
+        _wrap_backend_function(_lora_networks, "load_network", _wrap_load_network)
 
 
 def _get_vae_module():
@@ -103,8 +273,6 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
             _compile_status[name] = True
             return {"name": name, "enabled": True, "changed": False, "already_compiled": True}
 
-        # If A1111 reloaded the checkpoint/VAE, the module identity changes. Compile the
-        # current raw slot instead of reusing a stale wrapper from the previous model.
         original = unwrapped
         original.eval()
         compiled = torch.compile(original, mode="reduce-overhead", fullgraph=False, dynamic=True)
@@ -134,19 +302,12 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
     return {"name": name, "enabled": False, "changed": False}
 
 
-def apply_torch_compile_settings(main_model: bool = False, vae: bool = False, lora: bool = False) -> dict[str, Any]:
+def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
     results = []
     _compile_status["last_error"] = None
-    _compile_desired["main_model"] = bool(main_model)
     _compile_desired["vae"] = bool(vae)
-    _compile_desired["lora"] = bool(lora)
     try:
-        results.append(_compile_module_slot("main_model", _compile_desired["main_model"], _get_main_model_module, _set_main_model_module))
         results.append(_compile_module_slot("vae", _compile_desired["vae"], _get_vae_module, _set_vae_module))
-        # LoRA in this A1111 path is dynamically patched during prompt activation rather than a stable module slot.
-        # Keep the setting/status first-class now, but only report it as requested until we add a safe per-network hook.
-        _compile_status["lora"] = _compile_desired["lora"]
-        results.append({"name": "lora", "enabled": _compile_desired["lora"], "changed": False, "note": "LoRA compile flag recorded; dynamic LoRA modules are not compiled yet."})
         return {"ok": True, "desired": dict(_compile_desired), "status": dict(_compile_status), "results": results}
     except Exception as exc:
         _compile_status["last_error"] = str(exc)
@@ -154,7 +315,7 @@ def apply_torch_compile_settings(main_model: bool = False, vae: bool = False, lo
 
 
 def on_model_loaded(_: Any) -> None:
-    if _compile_desired["main_model"] or _compile_desired["vae"]:
+    if _compile_desired["vae"]:
         apply_torch_compile_settings(**_compile_desired)
 
 
@@ -169,6 +330,7 @@ def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
+
 
 def clear_cond_cache() -> dict:
     """Clear A1111 prompt-conditioning caches used by persistent_cond_cache."""
@@ -193,6 +355,8 @@ def clear_cond_cache() -> dict:
 
 
 def on_app_started(_: object, app: FastAPI) -> None:
+    _install_backend_status_hooks()
+
     @app.post("/sdapi/v1/openclaw/clear-cond-cache")
     async def _clear_cond_cache():
         return clear_cond_cache()
@@ -218,16 +382,16 @@ def on_app_started(_: object, app: FastAPI) -> None:
         target = data.get("target")
         with call_queue.queue_lock:
             if target == "vae-only":
-                return apply_torch_compile_settings(main_model=False, vae=True, lora=False)
-            return apply_torch_compile_settings(
-                main_model=bool(data.get("main_model")),
-                vae=bool(data.get("vae")),
-                lora=bool(data.get("lora")),
-            )
+                return apply_torch_compile_settings(vae=True)
+            return apply_torch_compile_settings(vae=bool(data.get("vae") or data.get("enabled")))
 
     @app.get("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile_status():
         return {"ok": True, "desired": dict(_compile_desired), "status": dict(_compile_status)}
+
+    @app.get("/sdapi/v1/openclaw/backend-status")
+    async def _backend_status():
+        return _backend_status_payload()
 
     @app.post("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark(request: Request):
