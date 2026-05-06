@@ -9,10 +9,12 @@ from typing import Callable, Optional
 import torch
 from torchao.prototype.mx_formats.mx_tensor import MXTensor
 
+from modules import mxfp8_config
+
 CACHE_DIR_NAME = "mxfp8"
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion", "Lora", "VAE")
 CACHE_VERSION = 1
-CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_SelectiveAttentionSafe_v2"
+CONFIG_NAME = mxfp8_config.CONFIG_NAME
 
 
 def _is_safetensors(filename: str) -> bool:
