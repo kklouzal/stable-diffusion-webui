@@ -369,6 +369,9 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
     if "MXFP8 weight" not in res:
         res["MXFP8 weight"] = "Disable"
 
+    if "MXFP8 Linear coverage" not in res and res["MXFP8 weight"] != "Disable":
+        res["MXFP8 Linear coverage"] = "unet_other"
+
     if "Cache FP16 weight for LoRA" not in res and res["FP8 weight"] != "Disable":
         res["Cache FP16 weight for LoRA"] = False
 

@@ -304,7 +304,8 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
             rows.append({"name": fqn, "shape": shape, "eligible": reason is None, "skip_reason": reason, "is_mxfp8": is_mx, "is_mxfp8_managed_bf16": is_managed_bf16, "weight_type": type(weight).__name__ if weight is not None else None})
     stats = getattr(model, "mxfp8_quantization_stats", None)
     lora_mode = getattr(shared.opts, "mxfp8_lora_mode", None)
-    return {"ok": True, "linear_total": linear_total, "eligible_linear": eligible, "quantized_linear": quantized, "mxfp8_managed_bf16_active_lora_linear": managed_bf16_active_lora, "skipped_linear": linear_total - eligible, "skipped_reasons": skipped_reasons, "mxfp8_lora_mode": lora_mode, "model_stats": stats, "sample_layers": rows}
+    coverage = getattr(shared.opts, "mxfp8_linear_coverage", None)
+    return {"ok": True, "linear_total": linear_total, "eligible_linear": eligible, "quantized_linear": quantized, "mxfp8_managed_bf16_active_lora_linear": managed_bf16_active_lora, "skipped_linear": linear_total - eligible, "skipped_reasons": skipped_reasons, "mxfp8_lora_mode": lora_mode, "mxfp8_linear_coverage": coverage, "model_stats": stats, "sample_layers": rows}
 
 
 def _check_ok(value: Any) -> bool:
