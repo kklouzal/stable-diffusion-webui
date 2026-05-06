@@ -396,8 +396,10 @@ def mxfp8_linear_skip_reason(module, fqn):
     if module.weight is None or module.weight.ndim != 2:
         return "not_2d_weight"
     out_features, in_features = module.weight.shape
-    if out_features % 32 != 0 or in_features % 32 != 0:
-        return "shape_not_multiple_of_32"
+    if in_features % 32 != 0:
+        return "in_features_not_multiple_of_32"
+    if out_features % 16 != 0:
+        return "out_features_not_multiple_of_16"
     return None
 
 
@@ -439,10 +441,11 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
             from torchao.quantization import quantize_
             from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
             from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
-            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO)
+            from torchao.prototype.mx_formats.config import ScaleCalculationMode
+            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO, scaling_mode=ScaleCalculationMode.RCEIL)
             quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
             mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons)
-        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "skipped_names": skipped_names, "config": "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO", "cache_loaded": cache_loaded}
+        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "skipped_names": skipped_names, "config": "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_SelectiveAttentionSafe_v2", "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
     action = "Loaded cached" if cache_loaded else "Applied"
@@ -1054,6 +1057,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
     if not sd_model:
         sd_model = model_data.sd_model
 
+    mxfp8_mode_changed = False
     if sd_model is None:  # previous model load failed
         current_checkpoint_info = None
     else:
@@ -1061,8 +1065,22 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         if check_fp8(sd_model) != devices.fp8:
             # load from state dict again to prevent extra numerical errors
             forced_reload = True
+        elif check_mxfp8(sd_model) != devices.mxfp8:
+            # MXTensor parameters cannot safely be overwritten by the normal
+            # state_dict reload path. Switching MXFP8 on/off needs a fresh
+            # model instance rather than copying checkpoint tensors into the
+            # existing MXFP8-mutated module tree.
+            forced_reload = True
+            mxfp8_mode_changed = True
         elif sd_model.sd_model_checkpoint == checkpoint_info.filename and not forced_reload:
             return sd_model
+
+    if mxfp8_mode_changed:
+        state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
+        checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
+        timer.record("find config")
+        load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
+        return model_data.sd_model
 
     sd_model = reuse_model_from_already_loaded(sd_model, checkpoint_info, timer)
     if not forced_reload and sd_model is not None and sd_model.sd_checkpoint_info.filename == checkpoint_info.filename:

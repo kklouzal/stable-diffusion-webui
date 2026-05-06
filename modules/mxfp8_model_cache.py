@@ -12,7 +12,7 @@ from torchao.prototype.mx_formats.mx_tensor import MXTensor
 CACHE_DIR_NAME = "mxfp8"
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion", "Lora", "VAE")
 CACHE_VERSION = 1
-CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_SelectiveAttentionSafe"
+CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_SelectiveAttentionSafe_v2"
 
 
 def _is_safetensors(filename: str) -> bool:

@@ -596,10 +596,16 @@ def network_apply_mxfp8_merged_lora(self):
         self.network_current_names = wanted_names
         return True
 
+    original_weight = self._parameters.get("weight")
+    original_bias = self._parameters.get("bias")
+    original_current_names = getattr(self, "network_current_names", None)
+    original_merged_lora = getattr(self, "network_mxfp8_merged_lora_applied", None)
+
     try:
         from torchao.quantization import quantize_
         from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
         from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
+        from torchao.prototype.mx_formats.config import ScaleCalculationMode
 
         with torch.no_grad():
             weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
@@ -620,12 +626,42 @@ def network_apply_mxfp8_merged_lora(self):
             elif self.bias is not None:
                 self.bias = None
 
-            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO)
+            lora_mode = getattr(shared.opts, "mxfp8_lora_mode", "Keep active LoRA layers in BF16")
+            if modules_for_layer and lora_mode == "Keep active LoRA layers in BF16":
+                self.network_current_names = wanted_names
+                self.network_mxfp8_merged_lora_applied = True
+                return True
+
+            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO, scaling_mode=ScaleCalculationMode.RCEIL)
             quantize_(self, config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
             self.network_mxfp8_merged_lora_applied = bool(modules_for_layer)
             return True
     except Exception as e:
+        # If requantization fails after temporarily installing merged BF16
+        # weights, restore the pre-call MXFP8/base state before falling back to
+        # the functional LoRA path. Without this, fallback can apply LoRA a
+        # second time on top of already-merged BF16 weights.
+        if original_weight is not None:
+            self._parameters["weight"] = original_weight
+        if original_bias is not None:
+            self._parameters["bias"] = original_bias
+        elif "bias" in self._parameters:
+            self._parameters["bias"] = None
+        if original_current_names is None:
+            try:
+                delattr(self, "network_current_names")
+            except Exception:
+                pass
+        else:
+            self.network_current_names = original_current_names
+        if original_merged_lora is None:
+            try:
+                delattr(self, "network_mxfp8_merged_lora_applied")
+            except Exception:
+                pass
+        else:
+            self.network_mxfp8_merged_lora_applied = original_merged_lora
         logging.debug(f"Network {network_layer_name}: MXFP8 merged LoRA failed: {e}", exc_info=True)
         for net, _module in modules_for_layer:
             extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
@@ -633,7 +669,7 @@ def network_apply_mxfp8_merged_lora(self):
 
 
 def network_Linear_forward(self, input):
-    if is_mxfp8_weight(self.weight):
+    if getattr(self, 'network_mxfp8_base_weight', None) is not None:
         if network_apply_mxfp8_merged_lora(self):
             return originals.Linear_forward(self, input)
         return network_forward(self, input, originals.Linear_forward)

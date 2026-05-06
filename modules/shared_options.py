@@ -243,6 +243,7 @@ options_templates.update(options_section(('optimizations', "Optimizations", "sd"
     "batch_cond_uncond": OptionInfo(True, "Batch cond/uncond").info("do both conditional and unconditional denoising in one batch; uses a bit more VRAM during sampling, but improves speed; previously this was controlled by --always-batch-cond-uncond commandline argument"),
     "fp8_storage": OptionInfo("Disable", "FP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Use native PyTorch FP8 to store Linear/Conv layers' weight. Require pytorch>=2.1.0."),
     "mxfp8_storage": OptionInfo("Disable", "MXFP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Experimental TorchAO MXFP8 Linear weight quantization for Blackwell. Requires --dtype bfloat16 and CUDA."),
+    "mxfp8_lora_mode": OptionInfo("Keep active LoRA layers in BF16", "MXFP8 LoRA handling", gr.Radio, {"choices": ["Keep active LoRA layers in BF16", "Requantize active LoRA layers to MXFP8"]}).info("Quality-first mode keeps only LoRA-touched MXFP8 layers in BF16 while LoRAs are active, then requantizes back to MXFP8 when they are removed."),
     "cache_fp16_weight": OptionInfo(False, "Cache FP16 weight for LoRA").info("Cache fp16 weight when enabling FP8, will increase the quality of LoRA. Use more system ram."),
 }))
 
