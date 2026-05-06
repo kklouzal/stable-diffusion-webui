@@ -136,6 +136,48 @@ def cond_token_count(cond):
         return tensor.shape[1]
 
 
+def _seg_to_q_modules():
+        """Return SEG-managed to_q modules currently installed on the shared model.
+
+        PAG runs an internal denoising pass to compute perturbed-attention output.
+        That pass mirrors A1111 batching and may execute cond/uncond separately; SEG
+        should not leak into it because SEG assumes a paired CFG attention batch.
+        """
+        try:
+                mapping = getattr(shared.sd_model, 'network_layer_mapping', {}) or {}
+        except Exception:
+                return []
+
+        modules = []
+        seen = set()
+        for parent in mapping.values():
+                to_q = getattr(parent, 'to_q', None)
+                if to_q is None or not hasattr(to_q, 'seg_enable'):
+                        continue
+                ident = id(to_q)
+                if ident in seen:
+                        continue
+                seen.add(ident)
+                modules.append(to_q)
+        return modules
+
+
+def _suspend_seg_for_pag_hidden_pass():
+        saved = []
+        for to_q in _seg_to_q_modules():
+                saved.append((to_q, getattr(to_q, 'seg_enable', False)))
+                setattr(to_q, 'seg_enable', False)
+        return saved
+
+
+def _restore_seg_after_pag_hidden_pass(saved):
+        for to_q, enabled in saved:
+                try:
+                        setattr(to_q, 'seg_enable', enabled)
+                except Exception:
+                        pass
+
+
 def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond_in, make_condition_dict, batch_size):
         """Run PAG's hidden denoising pass with A1111's cond/uncond batching rules.
 
@@ -514,6 +556,7 @@ class PAGExtensionScript(UIWrapper):
                 for module in pag_params.crossattn_modules:
                         setattr(module, 'pag_enable', True)
 
+                seg_saved_state = _suspend_seg_for_pag_hidden_pass()
                 try:
                         # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
                         pag_params.pag_x_out = pag_inner_model_x_out(
@@ -527,6 +570,7 @@ class PAGExtensionScript(UIWrapper):
                                 pag_params.batch_size,
                         )
                 finally:
+                        _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises
                         for module in pag_params.crossattn_modules:
                                 setattr(module, 'pag_enable', False)

@@ -5,7 +5,7 @@ import math
 import modules.scripts as scripts
 import gradio as gr
 
-from modules import script_callbacks
+from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 
@@ -200,17 +200,37 @@ class SEGExtensionScript(UIWrapper):
                         blur_sigma_exp = 2 ** seg_blur_sigma
                         kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
 
-                        q_uncond, q= output.chunk(2, dim=0) 
-                        q = q.view(batch_size//2, -1, h, head_dim).transpose(1, 2) # (batch, num_heads, seq_len, head_dim)
-                        q = q.permute(0, 1, 3, 2).reshape(batch_size//2 * h, head_dim, downscale_h, downscale_w) # (batch * num_heads, head_dim, height, width)
+                        # SEG mutates only the conditional half of A1111's paired
+                        # CFG attention batch. A1111 does not guarantee cond+uncond
+                        # are always evaluated together: token-length mismatches,
+                        # disabled batch-cond-uncond, skip-uncond paths, and hidden
+                        # extension passes can call attention with a singleton or
+                        # otherwise unpaired batch. torch.chunk(2) may return only one
+                        # chunk for batch=1, and even-sized unpaired batches can be
+                        # semantically wrong, so skip unless this forward looks like a
+                        # valid paired batch.
+                        output_batch = output.shape[0]
+                        if output_batch < 2 or output_batch % 2 != 0 or batch_size != output_batch:
+                                logger.debug(
+                                        "SEG skipping unpaired to_q batch: input_batch=%s output_batch=%s seq_len=%s",
+                                        batch_size,
+                                        output_batch,
+                                        seq_len,
+                                )
+                                return
+
+                        half_batch = output_batch // 2
+                        q_uncond, q = output.split(half_batch, dim=0)
+                        q = q.view(half_batch, -1, h, head_dim).transpose(1, 2) # (batch, num_heads, seq_len, head_dim)
+                        q = q.permute(0, 1, 3, 2).reshape(half_batch * h, head_dim, downscale_h, downscale_w) # (batch * num_heads, head_dim, height, width)
 
                         if is_inf_blur:
                                 q = gaussian_blur_inf(q, 1.0, blur_sigma_exp)
                         else:
                                 q = gaussian_blur_2d(q, kernel_size, blur_sigma_exp)
 
-                        q = q.reshape(batch_size // 2, h, head_dim, downscale_h * downscale_w) # (batch, num_heads, head_dim, seq_len)
-                        q = q.view(batch_size // 2, h * head_dim, seq_len).transpose(1, 2) # (batch, inner_dim, seq_len)
+                        q = q.reshape(half_batch, h, head_dim, downscale_h * downscale_w) # (batch, num_heads, head_dim, seq_len)
+                        q = q.view(half_batch, h * head_dim, seq_len).transpose(1, 2) # (batch, inner_dim, seq_len)
                         q = torch.cat((q_uncond, q), dim=0)
 
                         return q
@@ -243,9 +263,16 @@ class SEGExtensionScript(UIWrapper):
                         return
 
                 in_interval = seg_params.seg_start_step <= params.sampling_step <= seg_params.seg_end_step
+                should_enable = in_interval and getattr(shared.opts, 'batch_cond_uncond', False)
+                if not should_enable:
+                        logger.debug(
+                                "SEG disabled for this step: in_interval=%s batch_cond_uncond=%s",
+                                in_interval,
+                                getattr(shared.opts, 'batch_cond_uncond', False),
+                        )
                 for module in seg_params.crossattn_modules:
                         if hasattr(module.to_q, 'seg_enable'):
-                                module.to_q.seg_enable = in_interval
+                                module.to_q.seg_enable = should_enable
 
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
