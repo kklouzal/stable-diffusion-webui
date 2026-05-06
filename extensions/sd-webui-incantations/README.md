@@ -19,6 +19,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 - Local source branch at adoption time: `gb10-local`
 - License: GPL-3.0, preserved in `LICENSE`
 - Upstream documentation was intentionally not retained as shipped docs because removed legacy features would make it misleading.
+- Upstream watch note: even though the upstream appears effectively stale for GB10 runtime needs, periodically check `v0xie/sd-webui-incantations` for relevant issue reports or fixes before/while changing PAG, SEG, CFG-combiner, or hook lifecycle behavior.
 
 ## Source map
 
