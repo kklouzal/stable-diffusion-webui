@@ -2,11 +2,23 @@ from __future__ import annotations
 
 import torch
 
-CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_SelectiveAttentionSafe_v2"
+CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_DynamicLinearCoverage_v3"
 BLOCK_SIZE = 32
 OUT_FEATURE_MULTIPLE = 16
 LORA_MODE_MERGE_THEN_QUANTIZE = "Merge LoRA then quantize to MXFP8"
 LORA_MODE_KEEP_BF16 = "Keep active LoRA layers in BF16"
+
+LINEAR_COVERAGE_UNET_OTHER = "unet_other"
+LINEAR_COVERAGE_SELF_ATTENTION = "self_attention"
+LINEAR_COVERAGE_CROSS_ATTENTION = "cross_attention"
+LINEAR_COVERAGE_CONDITIONER = "conditioner"
+LINEAR_COVERAGE_CHOICES = [
+    LINEAR_COVERAGE_UNET_OTHER,
+    LINEAR_COVERAGE_SELF_ATTENTION,
+    LINEAR_COVERAGE_CROSS_ATTENTION,
+    LINEAR_COVERAGE_CONDITIONER,
+]
+LINEAR_COVERAGE_DEFAULT = [LINEAR_COVERAGE_UNET_OTHER]
 
 
 def get_mxfp8_config():

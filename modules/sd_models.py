@@ -382,15 +382,37 @@ def check_weight_quantization_mutual_exclusion(model):
         raise RuntimeError(f"Weight quantization modes are mutually exclusive; disable all but one: {', '.join(enabled)}")
 
 
-def mxfp8_linear_policy_skip_reason(module, fqn):
+def mxfp8_selected_linear_coverage():
+    selected = getattr(shared.opts, "mxfp8_linear_coverage", None)
+    if selected is None:
+        selected = mxfp8_config.LINEAR_COVERAGE_DEFAULT
+    if isinstance(selected, str):
+        selected = [selected]
+
+    valid = set(mxfp8_config.LINEAR_COVERAGE_CHOICES)
+    return {item for item in selected if item in valid}
+
+
+def mxfp8_linear_region(fqn):
     if fqn.startswith("first_stage_model."):
         return "vae"
     if fqn.startswith("conditioner.") or fqn.startswith("cond_stage_model."):
-        return "conditioner"
+        return mxfp8_config.LINEAR_COVERAGE_CONDITIONER
     if ".attn1." in fqn:
-        return "self_attention"
+        return mxfp8_config.LINEAR_COVERAGE_SELF_ATTENTION
     if ".attn2." in fqn:
-        return "cross_attention"
+        return mxfp8_config.LINEAR_COVERAGE_CROSS_ATTENTION
+    if fqn.startswith("model.diffusion_model."):
+        return mxfp8_config.LINEAR_COVERAGE_UNET_OTHER
+    return "other"
+
+
+def mxfp8_linear_policy_skip_reason(module, fqn):
+    region = mxfp8_linear_region(fqn)
+    if region in ("vae", "other"):
+        return region
+    if region not in mxfp8_selected_linear_coverage():
+        return region
     return None
 
 
@@ -462,11 +484,11 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
             mxfp8_config.validate_kernel_preference(config)
             quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
             mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons)
-        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
+        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": sorted(mxfp8_selected_linear_coverage()), "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
     action = "Loaded cached" if cache_loaded else "Applied"
-    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
+    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules with coverage {sorted(mxfp8_selected_linear_coverage())}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
     timer.record("load mxfp8 cache" if cache_loaded else "apply mxfp8")
 
 
