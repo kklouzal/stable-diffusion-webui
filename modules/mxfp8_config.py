@@ -7,7 +7,6 @@ BLOCK_SIZE = 32
 OUT_FEATURE_MULTIPLE = 16
 LORA_MODE_MERGE_THEN_QUANTIZE = "Merge LoRA then quantize to MXFP8"
 LORA_MODE_KEEP_BF16 = "Keep active LoRA layers in BF16"
-LORA_MODE_REQUANTIZE_LEGACY = "Requantize active LoRA layers to MXFP8"
 
 
 def get_mxfp8_config():
