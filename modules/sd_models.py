@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -382,9 +382,7 @@ def check_weight_quantization_mutual_exclusion(model):
         raise RuntimeError(f"Weight quantization modes are mutually exclusive; disable all but one: {', '.join(enabled)}")
 
 
-def mxfp8_linear_skip_reason(module, fqn):
-    if not isinstance(module, torch.nn.Linear):
-        return "not_linear"
+def mxfp8_linear_policy_skip_reason(module, fqn):
     if fqn.startswith("first_stage_model."):
         return "vae"
     if fqn.startswith("conditioner.") or fqn.startswith("cond_stage_model."):
@@ -393,14 +391,16 @@ def mxfp8_linear_skip_reason(module, fqn):
         return "self_attention"
     if ".attn2." in fqn:
         return "cross_attention"
-    if module.weight is None or module.weight.ndim != 2:
-        return "not_2d_weight"
-    out_features, in_features = module.weight.shape
-    if in_features % 32 != 0:
-        return "in_features_not_multiple_of_32"
-    if out_features % 16 != 0:
-        return "out_features_not_multiple_of_16"
     return None
+
+
+def mxfp8_linear_skip_reason(module, fqn):
+    if not isinstance(module, torch.nn.Linear):
+        return "not_linear"
+    policy_reason = mxfp8_linear_policy_skip_reason(module, fqn)
+    if policy_reason is not None:
+        return policy_reason
+    return mxfp8_config.technical_linear_skip_reason(module)
 
 
 def mxfp8_linear_filter(module, fqn):
@@ -416,12 +416,31 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
     first_stage = model.first_stage_model
     model.first_stage_model = None
     eligible = 0
+    technical_compatible_linear = 0
+    policy_skipped_linear = 0
+    incompatible_linear = 0
     skipped_linear = 0
     skipped_reasons = {}
+    policy_skipped_reasons = {}
+    incompatible_reasons = {}
     skipped_names = []
     for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
-            reason = mxfp8_linear_skip_reason(module, fqn)
+            technical_reason = mxfp8_config.technical_linear_skip_reason(module)
+            policy_reason = mxfp8_linear_policy_skip_reason(module, fqn)
+            if technical_reason is None:
+                technical_compatible_linear += 1
+            if policy_reason is not None:
+                policy_skipped_linear += 1
+                policy_skipped_reasons[policy_reason] = policy_skipped_reasons.get(policy_reason, 0) + 1
+                reason = policy_reason
+            elif technical_reason is not None:
+                incompatible_linear += 1
+                incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
+                reason = technical_reason
+            else:
+                reason = None
+
             if reason is None:
                 eligible += 1
             else:
@@ -439,17 +458,15 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
         cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device)
         if not cache_loaded:
             from torchao.quantization import quantize_
-            from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
-            from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
-            from torchao.prototype.mx_formats.config import ScaleCalculationMode
-            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO, scaling_mode=ScaleCalculationMode.RCEIL)
+            config = mxfp8_config.get_mxfp8_config()
+            mxfp8_config.validate_kernel_preference(config)
             quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
             mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons)
-        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "skipped_names": skipped_names, "config": "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_SelectiveAttentionSafe_v2", "cache_loaded": cache_loaded}
+        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
     action = "Loaded cached" if cache_loaded else "Applied"
-    print(f"{action} MXFP8 weight quantization for {eligible} Linear modules; skipped {skipped_linear} incompatible Linear modules ({skipped_reasons})", flush=True)
+    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
     timer.record("load mxfp8 cache" if cache_loaded else "apply mxfp8")
 
 

@@ -579,20 +579,77 @@ def is_mxfp8_weight(weight):
     return type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
 
 
+def network_mxfp8_wanted_names():
+    return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+
+
+def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
+    """Return LoRA operations for an MXFP8-managed Linear.
+
+    This mirrors A1111's normal direct-module and SD3 QkvLinear split q/k/v
+    handling closely enough that MXFP8-managed layers do not silently mark a
+    LoRA set current while skipping a supported split projection mutation.
+    """
+    ops = []
+    unsupported = []
+    for net in loaded_networks:
+        module = net.modules.get(network_layer_name, None)
+        if module is not None:
+            ops.append(("direct", net, module))
+            continue
+
+        module_q = net.modules.get(network_layer_name + "_q_proj", None)
+        module_k = net.modules.get(network_layer_name + "_k_proj", None)
+        module_v = net.modules.get(network_layer_name + "_v_proj", None)
+        module_out = net.modules.get(network_layer_name + "_out_proj", None)
+
+        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v and module_out is None:
+            ops.append(("qkv", net, (module_q, module_k, module_v)))
+            continue
+
+        if module_q or module_k or module_v or module_out:
+            unsupported.append((net, tuple(name for name, value in (("q_proj", module_q), ("k_proj", module_k), ("v_proj", module_v), ("out_proj", module_out)) if value is not None)))
+
+    return ops, unsupported
+
+
+def network_restore_mxfp8_original_state(self, original_weight, original_bias, original_current_names, original_merged_lora):
+    if original_weight is not None:
+        self._parameters["weight"] = original_weight
+    if original_bias is not None:
+        self._parameters["bias"] = original_bias
+    elif "bias" in self._parameters:
+        self._parameters["bias"] = None
+    if original_current_names is None:
+        try:
+            delattr(self, "network_current_names")
+        except Exception:
+            pass
+    else:
+        self.network_current_names = original_current_names
+    if original_merged_lora is None:
+        try:
+            delattr(self, "network_mxfp8_merged_lora_applied")
+        except Exception:
+            pass
+    else:
+        self.network_mxfp8_merged_lora_applied = original_merged_lora
+
+
 def network_apply_mxfp8_merged_lora(self):
     network_layer_name = getattr(self, 'network_layer_name', None)
     base_weight = getattr(self, 'network_mxfp8_base_weight', None)
     if network_layer_name is None or base_weight is None:
         return False
 
-    wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    wanted_names = network_mxfp8_wanted_names()
     current_names = getattr(self, "network_current_names", ())
     if current_names == wanted_names:
         return True
 
-    modules_for_layer = [(net, net.modules[network_layer_name]) for net in loaded_networks if network_layer_name in net.modules]
+    ops_for_layer, unsupported_ops = network_mxfp8_lora_ops_for_layer(self, network_layer_name)
     had_merged_lora = getattr(self, "network_mxfp8_merged_lora_applied", False)
-    if not modules_for_layer and not had_merged_lora:
+    if not ops_for_layer and not unsupported_ops and not had_merged_lora:
         self.network_current_names = wanted_names
         return True
 
@@ -602,23 +659,40 @@ def network_apply_mxfp8_merged_lora(self):
     original_merged_lora = getattr(self, "network_mxfp8_merged_lora_applied", None)
 
     try:
+        if unsupported_ops:
+            details = ", ".join(f"{net.name}:{'/'.join(parts)}" for net, parts in unsupported_ops)
+            raise RuntimeError(f"unsupported MXFP8 LoRA split projection target(s): {details}")
+
         from torchao.quantization import quantize_
-        from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationMXWeightConfig
-        from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
-        from torchao.prototype.mx_formats.config import ScaleCalculationMode
 
         with torch.no_grad():
             weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
             base_bias = getattr(self, 'network_mxfp8_base_bias', None)
             bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
 
-            for net, module in modules_for_layer:
-                updown, ex_bias = module.calc_updown(weight)
-                if len(weight.shape) == 4 and weight.shape[1] == 9:
-                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
-                weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
-                if ex_bias is not None:
-                    bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
+            for op_kind, net, payload in ops_for_layer:
+                if op_kind == "direct":
+                    module = payload
+                    updown, ex_bias = module.calc_updown(weight)
+                    if len(weight.shape) == 4 and weight.shape[1] == 9:
+                        updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                    weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
+                    if ex_bias is not None:
+                        bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
+                    continue
+
+                if op_kind == "qkv":
+                    module_q, module_k, module_v = payload
+                    qw, kw, vw = weight.chunk(3, 0)
+                    updown_q, _ = module_q.calc_updown(qw)
+                    updown_k, _ = module_k.calc_updown(kw)
+                    updown_v, _ = module_v.calc_updown(vw)
+                    del qw, kw, vw
+                    updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
+                    weight = (weight.to(dtype=updown_qkv.dtype) + updown_qkv).to(dtype=torch.bfloat16)
+                    continue
+
+                raise RuntimeError(f"unsupported MXFP8 LoRA operation kind: {op_kind}")
 
             self.weight = torch.nn.Parameter(weight, requires_grad=False)
             if bias is not None:
@@ -626,47 +700,31 @@ def network_apply_mxfp8_merged_lora(self):
             elif self.bias is not None:
                 self.bias = None
 
-            lora_mode = getattr(shared.opts, "mxfp8_lora_mode", "Keep active LoRA layers in BF16")
-            if modules_for_layer and lora_mode == "Keep active LoRA layers in BF16":
+            lora_mode = getattr(shared.opts, "mxfp8_lora_mode", mxfp8_config.LORA_MODE_MERGE_THEN_QUANTIZE)
+            if ops_for_layer and lora_mode == mxfp8_config.LORA_MODE_KEEP_BF16:
                 self.network_current_names = wanted_names
                 self.network_mxfp8_merged_lora_applied = True
+                self.network_mxfp8_lora_applied_ops = tuple((kind, net.name) for kind, net, _payload in ops_for_layer)
                 return True
 
-            config = MXDynamicActivationMXWeightConfig(activation_dtype=torch.float8_e4m3fn, weight_dtype=torch.float8_e4m3fn, kernel_preference=KernelPreference.AUTO, scaling_mode=ScaleCalculationMode.RCEIL)
+            config = mxfp8_config.get_mxfp8_config()
+            mxfp8_config.validate_kernel_preference(config)
             quantize_(self, config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
-            self.network_mxfp8_merged_lora_applied = bool(modules_for_layer)
+            self.network_mxfp8_merged_lora_applied = bool(ops_for_layer)
+            self.network_mxfp8_lora_applied_ops = tuple((kind, net.name) for kind, net, _payload in ops_for_layer)
             return True
     except Exception as e:
-        # If requantization fails after temporarily installing merged BF16
-        # weights, restore the pre-call MXFP8/base state before falling back to
-        # the functional LoRA path. Without this, fallback can apply LoRA a
-        # second time on top of already-merged BF16 weights.
-        if original_weight is not None:
-            self._parameters["weight"] = original_weight
-        if original_bias is not None:
-            self._parameters["bias"] = original_bias
-        elif "bias" in self._parameters:
-            self._parameters["bias"] = None
-        if original_current_names is None:
-            try:
-                delattr(self, "network_current_names")
-            except Exception:
-                pass
-        else:
-            self.network_current_names = original_current_names
-        if original_merged_lora is None:
-            try:
-                delattr(self, "network_mxfp8_merged_lora_applied")
-            except Exception:
-                pass
-        else:
-            self.network_mxfp8_merged_lora_applied = original_merged_lora
+        # Restore the pre-call MXFP8/base state before falling back. Without
+        # this, fallback can apply LoRA a second time on top of already-merged
+        # BF16 weights or silently leave a partially merged layer current.
+        network_restore_mxfp8_original_state(self, original_weight, original_bias, original_current_names, original_merged_lora)
         logging.debug(f"Network {network_layer_name}: MXFP8 merged LoRA failed: {e}", exc_info=True)
-        for net, _module in modules_for_layer:
+        for op_kind, net, _payload in ops_for_layer:
+            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        for net, _parts in unsupported_ops:
             extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
         return False
-
 
 def network_Linear_forward(self, input):
     if getattr(self, 'network_mxfp8_base_weight', None) is not None:
