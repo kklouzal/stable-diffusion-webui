@@ -863,14 +863,37 @@ def model_target_device(m):
         return devices.device
 
 
+def send_mxfp8_model_to_device(m):
+    try:
+        from torchao.prototype.mx_formats.mx_tensor import MXTensor
+    except Exception:
+        MXTensor = ()
+
+    target = shared.device
+    for module in m.modules():
+        for name, param in list(module._parameters.items()):
+            if param is None or isinstance(param, MXTensor):
+                continue
+            if getattr(param, "device", None) != target:
+                module._parameters[name] = torch.nn.Parameter(param.to(target), requires_grad=param.requires_grad)
+
+        for name, buffer in list(module._buffers.items()):
+            if buffer is None or isinstance(buffer, MXTensor):
+                continue
+            if getattr(buffer, "device", None) != target:
+                module._buffers[name] = buffer.to(target)
+
+
 def send_model_to_device(m):
     lowvram.apply(m)
 
     if not m.lowvram:
         if devices.mxfp8:
             # MXTensor does not implement all tensor-moving/aliasing ops that
-            # nn.Module.to() may call, and MXFP8 quantization has already
-            # materialized model weights on the target device.
+            # nn.Module.to() may call. Move ordinary parameters/buffers around
+            # the MXTensor leaves instead so CLIP embeddings and other skipped
+            # MXFP8 regions are not stranded on CPU.
+            send_mxfp8_model_to_device(m)
             return
         m.to(shared.device)
 

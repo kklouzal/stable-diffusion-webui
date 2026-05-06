@@ -274,9 +274,9 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
         from torchao.prototype.mx_formats.mx_tensor import MXTensor
     except Exception as e:
         return {"ok": False, "error": repr(e)}
-    model = getattr(shared, "sd_model", None)
+    model = getattr(getattr(sd_models, "model_data", None), "sd_model", None)
     if model is None:
-        return {"ok": False, "error": "shared.sd_model is not loaded"}
+        return {"ok": False, "error": "sd_model is not loaded"}
     rows = []
     skipped_reasons: dict[str, int] = {}
     eligible = 0
