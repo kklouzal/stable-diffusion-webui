@@ -422,6 +422,16 @@ def mxfp8_linear_skip_reason(module, fqn):
     policy_reason = mxfp8_linear_policy_skip_reason(module, fqn)
     if policy_reason is not None:
         return policy_reason
+
+    # The A1111 LoRA hook for torch.nn.MultiheadAttention mutates the parent
+    # module in_proj_weight/out_proj.weight directly instead of flowing through
+    # Linear.forward. When out_proj.weight is an MXTensor, the backup path
+    # attempts weight.to(cpu, copy=True), which TorchAO MXTensor rejects. Leave
+    # those out_proj linears BF16 so active LoRAs remain safe; ordinary Linear
+    # layers still use the MXFP8 merge-then-quantize path.
+    if fqn.endswith((".attn.out_proj", ".self_attn.out_proj")):
+        return "multihead_attention_out_proj_lora_backup"
+
     return mxfp8_config.technical_linear_skip_reason(module)
 
 
@@ -572,9 +582,16 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     remap_sdxl_clip_text_model_state_dict_if_needed(model, state_dict)
 
-    if shared.opts.sd_checkpoint_cache > 0:
-        # cache newly loaded model
+    if shared.opts.sd_checkpoint_cache > 0 and not check_mxfp8(model):
+        # cache newly loaded non-MXFP8 model. MXFP8 reloads need a pristine
+        # state_dict because LoadStateDictOnMeta intentionally mutates its input
+        # and stale/meta cache entries can later fail with
+        # "Cannot copy out of meta tensor; no data!".
         checkpoints_loaded[checkpoint_info] = state_dict.copy()
+    elif check_mxfp8(model):
+        for cached_info in list(checkpoints_loaded):
+            if getattr(cached_info, "filename", cached_info) == checkpoint_info.filename:
+                checkpoints_loaded.pop(cached_info, None)
 
     check_weight_quantization_mutual_exclusion(model)
 
@@ -1146,11 +1163,39 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             # module tree and can fail, so build a fresh model instance.
             forced_reload = True
             mxfp8_mode_changed = True
+        elif forced_reload and devices.mxfp8 and check_mxfp8(sd_model):
+            # Option onchange hooks pass forced_reload=True even when the selected
+            # coverage value resolves to the same effective policy. The normal
+            # forced reload path is still unsafe for an MXFP8-mutated tree because
+            # it can reuse meta-mutated checkpoint cache tensors and/or copy into
+            # MXTensor-backed modules. Treat any forced reload of an active MXFP8
+            # model as a fresh MXFP8 reload.
+            mxfp8_mode_changed = True
         elif sd_model.sd_model_checkpoint == checkpoint_info.filename and not forced_reload:
             return sd_model
 
+    if forced_reload and (devices.mxfp8 or bool(getattr(sd_model, "mxfp8_quantization_stats", None)) or check_mxfp8(sd_model)):
+        # forced_reload can be set before the MXFP8-specific branches above get
+        # a chance to classify the reload, including early option-onchange calls
+        # while model_data.sd_model is temporarily unset. Once MXFP8 is active or
+        # currently requested, the generic reload path is unsafe; force the fresh
+        # uncached MXFP8 path.
+        mxfp8_mode_changed = True
+
     if mxfp8_mode_changed:
-        state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
+        # LoadStateDictOnMeta mutates the dict it receives and get_checkpoint_state_dict()
+        # returns the cached dict by reference. If a cache entry from a previous
+        # optimized/meta load survives, a fresh model can still try to materialize
+        # parameters from meta checkpoint tensors and fail with
+        # "Cannot copy out of meta tensor; no data!". Invalidate every cache key
+        # for this checkpoint filename (CheckpointInfo object identity/equality is
+        # not a safe enough lookup here) and read directly from disk.
+        for cached_info in list(checkpoints_loaded):
+            if getattr(cached_info, "filename", cached_info) == checkpoint_info.filename:
+                checkpoints_loaded.pop(cached_info, None)
+        print(f"Reloading MXFP8-changed model from uncached checkpoint storage: {checkpoint_info.filename}")
+        state_dict = read_state_dict(checkpoint_info.filename)
+        timer.record("load weights from disk")
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         timer.record("find config")
 
@@ -1160,6 +1205,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         # MXFP8-mutated tree before constructing the fresh model instance.
         old_sd_model = model_data.sd_model
         model_data.sd_model = None
+        model_data.loaded_sd_models = [model for model in model_data.loaded_sd_models if model is not old_sd_model]
         if old_sd_model is not None:
             try:
                 sd_hijack.model_hijack.undo_hijack(old_sd_model)

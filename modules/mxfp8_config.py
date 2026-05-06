@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_DynamicLinearCoverage_v3"
+CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_DynamicLinearCoverage_v4"
 BLOCK_SIZE = 32
 OUT_FEATURE_MULTIPLE = 16
 LORA_MODE_MERGE_THEN_QUANTIZE = "Merge LoRA then quantize to MXFP8"
