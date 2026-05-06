@@ -1139,6 +1139,13 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             # existing MXFP8-mutated module tree.
             forced_reload = True
             mxfp8_mode_changed = True
+        elif devices.mxfp8 and sorted(getattr(sd_model, "mxfp8_quantization_stats", {}).get("selected_linear_coverage", [])) != sorted(mxfp8_selected_linear_coverage()):
+            # Changing Linear coverage can move already-quantized MXTensor
+            # parameters back out of the active policy. Reuse/reload would try
+            # to copy BF16 checkpoint tensors into the existing MXTensor
+            # module tree and can fail, so build a fresh model instance.
+            forced_reload = True
+            mxfp8_mode_changed = True
         elif sd_model.sd_model_checkpoint == checkpoint_info.filename and not forced_reload:
             return sd_model
 
