@@ -867,6 +867,11 @@ def send_model_to_device(m):
     lowvram.apply(m)
 
     if not m.lowvram:
+        if devices.mxfp8:
+            # MXTensor does not implement all tensor-moving/aliasing ops that
+            # nn.Module.to() may call, and MXFP8 quantization has already
+            # materialized model weights on the target device.
+            return
         m.to(shared.device)
 
 
@@ -1079,6 +1084,21 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         timer.record("find config")
+
+        # load_model() normally moves the existing model to meta before
+        # replacing it. TorchAO MXTensor does not support that path reliably
+        # (meta/cuda storage alias correction can throw), so detach the old
+        # MXFP8-mutated tree before constructing the fresh model instance.
+        old_sd_model = model_data.sd_model
+        model_data.sd_model = None
+        if old_sd_model is not None:
+            try:
+                sd_hijack.model_hijack.undo_hijack(old_sd_model)
+            except Exception:
+                pass
+            del old_sd_model
+            devices.torch_gc()
+
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
         return model_data.sd_model
 
