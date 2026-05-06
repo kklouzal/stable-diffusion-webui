@@ -110,6 +110,23 @@ Older probe tags worth keeping as historical breadcrumbs:
 - `local/gb10-a1111:arch-priority-probe` proved the earlier `sm_121a` extension-build direction
 - `local/gb10-a1111:manifest-probe` proved the package-manifest path before the current `cu132` runtime refresh
 
+
+## Latest MXFP8 img2img baseline
+
+The current known-good MXFP8/img2img baseline is documented in `docs/gb10/notes/mxfp8-img2img-final-baseline-2026-05-06.md`.
+
+Key validated defaults:
+
+- image tag: `local/gb10-a1111:latest-mxfp8-dev`
+- live container: `gb10-a1111-latest-mxfp8-dev`
+- checkpoint: `test2.safetensors`
+- VAE: `ftasticVAE_v10.safetensors`
+- attention backend: `sdpa`
+- MXFP8 storage: `Enable for SDXL`
+- MXFP8 LoRA handling: `Merge LoRA then quantize to MXFP8`
+- A1111 MXFP8 audit: `183/911` Linear modules quantized; attention and conditioner Linear modules intentionally skipped
+- 9-case txt2img/img2img SDPA/Sage/SEG/PAG generation matrix completed successfully
+
 ## Immediate next validation work
 
 1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
