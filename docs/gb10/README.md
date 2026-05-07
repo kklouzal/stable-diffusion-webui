@@ -13,7 +13,7 @@ Current repo defaults now target:
 - installs **PyTorch nightly** explicitly from the `cu132` wheel lane
 - builds torch-extension CUDA code with `12.1a` as the practical GB10 Blackwell target; `12.1f` is not directly accepted by the current PyTorch extension build path and should not be treated as the preferred repo target
 - freezes/protects the resulting base Python package set so later app dependency installs cannot overwrite or shadow it
-- uses official upstream **AUTOMATIC1111/stable-diffusion-webui** source
+- uses this fork checkout, which is upstream-derived from **AUTOMATIC1111/stable-diffusion-webui**
 - uses a **multi-stage Dockerfile**
 - keeps the runtime Python environment **image-owned**
 - persists user-owned models, outputs, configs, embeddings, and extensions on the host
@@ -37,7 +37,7 @@ The purpose is to keep the system understandable:
 
 - base CUDA/runtime stack comes from NVIDIA
 - PyTorch is installed explicitly and deliberately in repo-controlled build steps
-- A1111 application code comes from upstream
+- A1111 application code comes from this fork checkout, with upstream AUTOMATIC1111 provenance
 - large user data surfaces live on the host
 - launch/bootstrap behavior is owned here in repo-visible files
 - quality-critical extension behavior such as PAG/SEG/CFG-combiner/CFG-Fix is owned here in repo-visible files
@@ -61,7 +61,7 @@ Canonical launch path inside the image:
 
 That launch path runs:
 
-- `python launch.py --skip-prepare-environment --skip-python-version-check --listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access`
+- `python launch.py --skip-prepare-environment --skip-python-version-check --listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access`
 
 ## Base image and upstream target
 
@@ -69,16 +69,16 @@ Current defaults:
 
 - base image: `nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`
 - PyTorch nightly lane: `https://download.pytorch.org/whl/nightly/cu132`
-- upstream repo: `https://github.com/AUTOMATIC1111/stable-diffusion-webui.git`
-- upstream ref: `dev`
-- image tag: `local/gb10-a1111:base-protected-app-latest`
-- container name: `gb10-a1111-latest`
+- A1111 source: this fork checkout (`https://github.com/kklouzal/stable-diffusion-webui.git`), upstream-derived from AUTOMATIC1111
+- companion Stable Diffusion repo: `https://github.com/w-e-w/stablediffusion.git` at the Dockerfile-pinned ref
+- image tag: `local/gb10-a1111:latest-mxfp8-dev`
+- container name: `gb10-a1111-latest-mxfp8`
 
 ## Owned A1111 extensions
 
 The repo vendors `extensions/sd-webui-incantations` as first-class GB10 source. This replaces dependence on abandoned external checkouts for PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix behavior.
 
-The Docker image bakes this extension into `/opt/stable-diffusion-webui/extensions/sd-webui-incantations`. Because the normal run path bind-mounts the host `Extensions/` directory over A1111's extension directory, `gb10/run.sh` also syncs the repo-owned extension into `${HOST_ROOT}/Extensions/sd-webui-incantations` before starting the container.
+The normal run path bind-mounts the host `Extensions/` directory over A1111's extension directory, so `gb10/run.sh` syncs the repo-owned extensions into `${HOST_ROOT}/Extensions/` before starting the container. The image does not need duplicate baked extension copies.
 
 Treat this extension as owned code: preserve GPL-3.0 provenance, keep changes reviewable here, and patch it conservatively because guidance math and hook cleanup materially affect generated image quality.
 

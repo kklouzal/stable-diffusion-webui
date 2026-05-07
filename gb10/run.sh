@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8}"
+IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8-dev}"
 CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest-mxfp8}"
 HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
 PORT="${PORT:-7860}"

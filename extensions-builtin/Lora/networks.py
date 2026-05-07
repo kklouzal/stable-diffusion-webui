@@ -599,7 +599,6 @@ def network_mxfp8_active_config_signature():
         getattr(checkpoint_info, "sha256", None),
     )
     coverage = tuple(sorted(getattr(shared.opts, "mxfp8_linear_coverage", ()) or ()))
-    lora_mode = getattr(shared.opts, "mxfp8_lora_mode", None)
     config_name = mxfp8_config.CONFIG_NAME
 
     loras = []
@@ -620,7 +619,7 @@ def network_mxfp8_active_config_signature():
             mtime,
         ))
 
-    return (checkpoint_key, coverage, lora_mode, config_name, tuple(loras))
+    return (checkpoint_key, coverage, config_name, tuple(loras))
 
 
 def network_mxfp8_mark_model_unprepared(model=None):
@@ -656,8 +655,6 @@ def network_mxfp8_snapshot_state(module):
         module._parameters.get("bias"),
         getattr(module, "network_current_names", network_mxfp8_missing),
         getattr(module, "network_mxfp8_merged_lora_applied", network_mxfp8_missing),
-        getattr(module, "network_mxfp8_lora_applied_ops", network_mxfp8_missing),
-        getattr(module, "network_mxfp8_prepared_signature", network_mxfp8_missing),
     )
 
 
@@ -672,7 +669,7 @@ def network_mxfp8_restore_attr(module, attr, value):
 
 
 def network_mxfp8_restore_state(snapshot):
-    module, weight, bias, current_names, merged_lora, applied_ops, prepared_signature = snapshot
+    module, weight, bias, current_names, merged_lora = snapshot
     if weight is not None:
         module._parameters["weight"] = weight
     if bias is not None:
@@ -681,8 +678,6 @@ def network_mxfp8_restore_state(snapshot):
         module._parameters["bias"] = None
     network_mxfp8_restore_attr(module, "network_current_names", current_names)
     network_mxfp8_restore_attr(module, "network_mxfp8_merged_lora_applied", merged_lora)
-    network_mxfp8_restore_attr(module, "network_mxfp8_lora_applied_ops", applied_ops)
-    network_mxfp8_restore_attr(module, "network_mxfp8_prepared_signature", prepared_signature)
 
 
 def prepare_mxfp8_active_config():
@@ -692,8 +687,8 @@ def prepare_mxfp8_active_config():
     path must not merge LoRAs, scan active LoRAs, or quantize weights during
     sampling. For the current checkpoint + coverage + active LoRA signature,
     this rebuilds managed Linear layers from immutable BF16 master weights,
-    applies active LoRA deltas once, optionally quantizes the final effective
-    weights to MXFP8 once, and marks the model prepared.
+    applies active LoRA deltas once, quantizes the final effective weights to
+    MXFP8 once, and marks the model prepared.
     """
 
     model = getattr(shared, "sd_model", None)
@@ -723,7 +718,6 @@ def prepare_mxfp8_active_config():
 
     prepared = 0
     quantized = 0
-    kept_bf16 = 0
     untouched = 0
     failed = 0
     failures = []
@@ -731,13 +725,10 @@ def prepare_mxfp8_active_config():
 
     for fqn, module in managed_modules:
         snapshots.append(network_mxfp8_snapshot_state(module))
-        if network_apply_mxfp8_merged_lora(module, force=True, quantize_config=quantize_config, quantize_fn=quantize_fn):
+        if network_apply_mxfp8_merged_lora(module, quantize_config=quantize_config, quantize_fn=quantize_fn):
             prepared += 1
-            module.network_mxfp8_prepared_signature = signature
             if is_mxfp8_weight(getattr(module, "weight", None)):
                 quantized += 1
-            elif getattr(module, "network_mxfp8_merged_lora_applied", False):
-                kept_bf16 += 1
             else:
                 untouched += 1
             module.network_current_names = wanted_names
@@ -749,12 +740,10 @@ def prepare_mxfp8_active_config():
         "signature": signature,
         "prepared_linear": prepared,
         "quantized_linear": quantized,
-        "kept_bf16_linear": kept_bf16,
         "untouched_linear": untouched,
         "failed_linear": failed,
         "failed_layers": failures[:50],
         "active_lora_count": len(loaded_networks),
-        "mxfp8_lora_mode": getattr(shared.opts, "mxfp8_lora_mode", None),
         "mxfp8_linear_coverage": sorted(getattr(shared.opts, "mxfp8_linear_coverage", ()) or ()),
     }
     model.network_mxfp8_prepare_stats = stats
@@ -769,7 +758,7 @@ def prepare_mxfp8_active_config():
             print(
                 "Prepared active MXFP8 LoRA config: "
                 f"prepared {prepared} Linear, quantized {quantized}, "
-                f"kept BF16 {kept_bf16}, untouched {untouched}, "
+                f"untouched {untouched}, "
                 f"LoRAs {len(loaded_networks)}",
                 flush=True,
             )
@@ -814,34 +803,14 @@ def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
     return ops, unsupported
 
 
-def network_restore_mxfp8_original_state(self, original_weight, original_bias, original_current_names, original_merged_lora):
-    network_mxfp8_restore_state((
-        self,
-        original_weight,
-        original_bias,
-        original_current_names if original_current_names is not None else network_mxfp8_missing,
-        original_merged_lora if original_merged_lora is not None else network_mxfp8_missing,
-        network_mxfp8_missing,
-        network_mxfp8_missing,
-    ))
-
-
-def network_apply_mxfp8_merged_lora(self, force=False, quantize_config=None, quantize_fn=None):
+def network_apply_mxfp8_merged_lora(self, quantize_config=None, quantize_fn=None):
     network_layer_name = getattr(self, 'network_layer_name', None)
     base_weight = getattr(self, 'network_mxfp8_base_weight', None)
     if network_layer_name is None or base_weight is None:
         return False
 
     wanted_names = network_mxfp8_wanted_names()
-    current_names = getattr(self, "network_current_names", ())
-    if not force and current_names == wanted_names:
-        return True
-
     ops_for_layer, unsupported_ops = network_mxfp8_lora_ops_for_layer(self, network_layer_name)
-    had_merged_lora = getattr(self, "network_mxfp8_merged_lora_applied", False)
-    if not force and not ops_for_layer and not unsupported_ops and not had_merged_lora:
-        self.network_current_names = wanted_names
-        return True
 
     original_snapshot = network_mxfp8_snapshot_state(self)
 
@@ -885,13 +854,6 @@ def network_apply_mxfp8_merged_lora(self, force=False, quantize_config=None, qua
             elif self.bias is not None:
                 self.bias = None
 
-            lora_mode = getattr(shared.opts, "mxfp8_lora_mode", mxfp8_config.LORA_MODE_MERGE_THEN_QUANTIZE)
-            if ops_for_layer and lora_mode == mxfp8_config.LORA_MODE_KEEP_BF16:
-                self.network_current_names = wanted_names
-                self.network_mxfp8_merged_lora_applied = True
-                self.network_mxfp8_lora_applied_ops = tuple((kind, net.name) for kind, net, _payload in ops_for_layer)
-                return True
-
             if quantize_config is None or quantize_fn is None:
                 from torchao.quantization import quantize_
                 quantize_config = mxfp8_config.get_mxfp8_config()
@@ -900,12 +862,10 @@ def network_apply_mxfp8_merged_lora(self, force=False, quantize_config=None, qua
             quantize_fn(self, quantize_config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
             self.network_mxfp8_merged_lora_applied = bool(ops_for_layer)
-            self.network_mxfp8_lora_applied_ops = tuple((kind, net.name) for kind, net, _payload in ops_for_layer)
             return True
     except Exception as e:
-        # Restore the pre-call MXFP8/base state before falling back. Without
-        # this, fallback can apply LoRA a second time on top of already-merged
-        # BF16 weights or silently leave a partially merged layer current.
+        # Restore the pre-call MXFP8/base state before reporting preparation
+        # failure so callers never see partially merged effective weights.
         network_mxfp8_restore_state(original_snapshot)
         logging.debug(f"Network {network_layer_name}: MXFP8 merged LoRA failed: {e}", exc_info=True)
         for op_kind, net, _payload in ops_for_layer:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111}"
+CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest-mxfp8}"
 
 if sudo docker ps -a --format '{{.Names}}' | grep -Fxq "${CONTAINER_NAME}"; then
   sudo docker rm -f "${CONTAINER_NAME}"

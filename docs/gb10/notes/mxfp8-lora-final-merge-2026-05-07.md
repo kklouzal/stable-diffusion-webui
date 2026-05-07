@@ -29,7 +29,7 @@ There is intentionally no disk cache for LoRA permutations. The cache is one act
 `extensions-builtin/Lora/networks.py` now treats MXFP8+LoRA preparation as a model-level transaction:
 
 - `prepare_mxfp8_active_config()` computes the active signature and prepares all MXFP8-managed Linear modules outside the sampler hot path.
-- `network_apply_mxfp8_merged_lora(..., force=True)` is used by the prepare transaction to rebuild from `network_mxfp8_base_weight` / `network_mxfp8_base_bias` rather than from current mutable weights.
+- `network_apply_mxfp8_merged_lora()` is used only by the prepare transaction to rebuild from `network_mxfp8_base_weight` / `network_mxfp8_base_bias` rather than from current mutable weights.
 - Managed `network_Linear_forward()` no longer performs per-layer LoRA scanning, merging, quantization, or functional fallback during sampling. If the model is not prepared, it prepares the whole active config once or raises rather than silently reintroducing the slow per-step fallback.
 - `ExtraNetworkLora.activate()` now treats MXFP8 active-config preparation failure as a visible generation-stopping error.
 
@@ -41,7 +41,7 @@ There is intentionally no disk cache for LoRA permutations. The cache is one act
 
 Rebuilt image: `local/gb10-a1111:latest-mxfp8-dev` (`sha256:067427ac2bb5684f9dc65d244194b197f73b7c0ce647a03177e28f1b613a914a`). Live container relaunched as `gb10-a1111-latest-mxfp8` from that image.
 
-Benchmark payload: `832x832`, `4` steps, `Euler a`, `Karras`, `test2.safetensors`, MXFP8 storage `Enable for SDXL`, coverage `['unet_other']`, mode `Merge LoRA then quantize to MXFP8`.
+Benchmark payload: `832x832`, `4` steps, `Euler a`, `Karras`, `test2.safetensors`, MXFP8 storage `Enable for SDXL`, coverage `['unet_other']`, merge-then-quantize LoRA behavior.
 
 After the initial refactor:
 
@@ -61,13 +61,12 @@ Post-cleanup validation on the hot-patched live container, same `unet_other` ben
 
 The repeat generation path is now effectively flat across LoRA count, which validates the intended invariant.
 
-An img2img smoke with `<lora:Detail-Enhancer-v1.0:0.6:0.6>`, `unet_other`, and merge-then-quantize completed successfully in `24.368s` for 4 steps after correcting the test payload to avoid its older BF16 override. Logs showed the expected prepare sequence: `183` managed Linear modules, `183` quantized, `0` kept BF16, `1` LoRA.
+An img2img smoke with `<lora:Detail-Enhancer-v1.0:0.6:0.6>`, `unet_other`, and merge-then-quantize completed successfully in `24.368s` for 4 steps after correcting the test payload to avoid its older BF16 override. Logs showed the expected prepare sequence: `183` managed Linear modules, `183` quantized, `1` LoRA.
 
 Live testing was restored to the conservative live safety state after benchmarking. This is not the product default; it intentionally disables MXFP8 Linear coverage on the running service until another explicit test/use pass enables it:
 
 - `mxfp8_storage`: `Enable for SDXL`
 - `mxfp8_linear_coverage`: `[]`
-- `mxfp8_lora_mode`: `Merge LoRA then quantize to MXFP8`
 
 ## Final reload-path polish
 
@@ -82,5 +81,5 @@ Final validation from rebuilt image `sha256:05ab63a366b73ab6c4a69fc1969f54995410
 - startup fresh-log scan: no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors
 - img2img smoke: completed in `26.318s` for 4 steps with one active LoRA; diagnostics reported `prepared_linear=183`, `quantized_linear=183`, `failed_linear=0`, `active_lora_count=1`
 - repeat benchmark: `0` LoRAs `2.045s` / `0.511s/step`; `1` LoRA `2.093s` / `0.523s/step`; `4` LoRAs `2.064s` / `0.516s/step`; `13` LoRAs `2.109s` / `0.527s/step`
-- final live safety state restored to `mxfp8_storage=Enable for SDXL`, `mxfp8_linear_coverage=[]`, `mxfp8_lora_mode=Merge LoRA then quantize to MXFP8`
+- final live safety state restored to `mxfp8_storage=Enable for SDXL`, `mxfp8_linear_coverage=[]`
 - fresh validation log scan: no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors

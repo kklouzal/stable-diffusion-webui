@@ -4,8 +4,8 @@
 
 Current canonical container defaults:
 
-- image tag: `local/gb10-a1111:base-protected-app-latest`
-- container name: `gb10-a1111-latest`
+- image tag: `local/gb10-a1111:latest-mxfp8-dev`
+- container name: `gb10-a1111-latest-mxfp8`
 - host root: `/opt/gb10/stable-diffusion`
 - port: `7860`
 - network mode: `host`
@@ -50,7 +50,7 @@ Supported environment overrides:
 
 Default `COMMANDLINE_ARGS` baseline:
 
-- `--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access`
+- `--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access`
 
 ### Smoke test
 
@@ -97,7 +97,7 @@ xformers is intentionally not part of the GB10 runtime path. The launcher does n
 Actual launch command shape inside the container:
 
 ```bash
-COMMANDLINE_ARGS="--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --enable-insecure-extension-access" \
+COMMANDLINE_ARGS="--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access" \
 python launch.py \
   --skip-prepare-environment \
   --skip-python-version-check
