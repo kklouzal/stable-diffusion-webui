@@ -244,7 +244,6 @@ options_templates.update(options_section(('optimizations', "Optimizations", "sd"
     "fp8_storage": OptionInfo("Disable", "FP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Use native PyTorch FP8 to store Linear/Conv layers' weight. Require pytorch>=2.1.0."),
     "mxfp8_storage": OptionInfo("Disable", "MXFP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Experimental TorchAO MXFP8 Linear weight quantization for Blackwell. Requires --dtype bfloat16 and CUDA."),
     "mxfp8_linear_coverage": OptionInfo(["unet_other"], "MXFP8 Linear coverage", gr.CheckboxGroup, {"choices": ["unet_other", "self_attention", "cross_attention", "conditioner"]}).info("Select which Linear layer regions TorchAO MXFP8 quantizes. Changing this reloads/requantizes model weights. Conv2d and VAE MXFP8 are not available in the current TorchAO Linear path."),
-    "mxfp8_lora_mode": OptionInfo("Merge LoRA then quantize to MXFP8", "MXFP8 LoRA handling", gr.Radio, {"choices": ["Merge LoRA then quantize to MXFP8", "Keep active LoRA layers in BF16"]}).info("Applies active LoRA deltas to BF16 master weights once when the LoRA set changes, then quantizes policy-eligible LoRA-touched layers back to MXFP8. BF16 mode is a quality/debug fallback."),
     "cache_fp16_weight": OptionInfo(False, "Cache FP16 weight for LoRA").info("Cache fp16 weight when enabling FP8, will increase the quality of LoRA. Use more system ram."),
 }))
 

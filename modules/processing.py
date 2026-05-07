@@ -814,7 +814,6 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "FP8 weight": opts.fp8_storage if devices.fp8 else None,
         "MXFP8 weight": opts.mxfp8_storage if devices.mxfp8 else None,
         "MXFP8 Linear coverage": ",".join(opts.mxfp8_linear_coverage) if devices.mxfp8 else None,
-        "MXFP8 LoRA handling": opts.mxfp8_lora_mode if devices.mxfp8 else None,
         "Cache FP16 weight for LoRA": opts.cache_fp16_weight if devices.fp8 else None,
         "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
         "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,

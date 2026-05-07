@@ -5,8 +5,6 @@ import torch
 CONFIG_NAME = "MXDynamicActivationMXWeightConfig_e4m3fn_AUTO_RCEIL_DynamicLinearCoverage_v4"
 BLOCK_SIZE = 32
 OUT_FEATURE_MULTIPLE = 16
-LORA_MODE_MERGE_THEN_QUANTIZE = "Merge LoRA then quantize to MXFP8"
-LORA_MODE_KEEP_BF16 = "Keep active LoRA layers in BF16"
 
 LINEAR_COVERAGE_UNET_OTHER = "unet_other"
 LINEAR_COVERAGE_SELF_ATTENTION = "self_attention"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8}"
+IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8-dev}"
 CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest-mxfp8}"
 HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
 PORT="${PORT:-7860}"
@@ -120,11 +120,6 @@ DOCKER_ARGS=(
   -e A1111_COMMIT_HASH="${A1111_COMMIT_HASH}"
   -e A1111_VERSION_TAG="${A1111_VERSION_TAG}"
   -e COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${PORT} --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access}"
-  --tmpfs "/data/config:rw,noexec,nosuid,nodev,size=16m"
-  --tmpfs "/data/embeddings:rw,noexec,nosuid,nodev,size=16m"
-  --tmpfs "/data/extensions:rw,noexec,nosuid,nodev,size=16m"
-  --tmpfs "/data/models:rw,noexec,nosuid,nodev,size=64m"
-  --tmpfs "/data/outputs:rw,noexec,nosuid,nodev,size=16m"
   -v "${HOST_ROOT}/BLIP:/opt/stable-diffusion-webui/models/BLIP"
   -v "${HOST_ROOT}/CLIP:/opt/stable-diffusion-webui/models/CLIP"
   -v "${HOST_ROOT}/Codeformer:/opt/stable-diffusion-webui/models/Codeformer"

@@ -7,11 +7,15 @@ The `stable-diffusion-webui` patches formerly carried by GB10-A1111 have been
 applied directly to this fork's `latest` branch and are intentionally not kept
 here as build-time patches.
 
-Current patch targets:
+Build-applied patch targets:
 
 - `patches/stable-diffusion-stability-ai/*.patch`
 - `patches/generative-models/*.patch`
+
+These are applied in lexical order within each target directory by `docker/apply-local-patches.py`.
+
+Manual / host-mounted patch archive:
+
 - `patches/mounted-extensions/*/*.patch`
 
-Patches are applied in lexical order within each target directory by
-`docker/apply-local-patches.py`.
+Mounted-extension patches document changes for host-mounted extension checkouts. They are intentionally not applied during the Docker image build.

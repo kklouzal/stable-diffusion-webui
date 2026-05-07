@@ -12,7 +12,7 @@ from torchao.prototype.mx_formats.mx_tensor import MXTensor
 from modules import mxfp8_config
 
 CACHE_DIR_NAME = "mxfp8"
-SUPPORTED_ROOT_NAMES = ("Stable-diffusion", "Lora", "VAE")
+SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
 CACHE_VERSION = 1
 CONFIG_NAME = mxfp8_config.CONFIG_NAME
 

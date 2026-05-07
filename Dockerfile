@@ -297,8 +297,6 @@ RUN groupadd --gid ${A1111_GID} a1111 \
     && useradd --uid ${A1111_UID} --gid ${A1111_GID} --create-home --shell /bin/bash a1111
 
 COPY --from=source /opt/build/stable-diffusion-webui /opt/stable-diffusion-webui
-COPY extensions/sd-webui-incantations /opt/stable-diffusion-webui/extensions/sd-webui-incantations
-COPY extensions/openclaw-clear-cond-cache /opt/stable-diffusion-webui/extensions/openclaw-clear-cond-cache
 COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt

@@ -1,18 +1,18 @@
-# GB10 current dependency baseline
+# GB10 historical dependency baseline
 
-This file records the **currently validated GB10 A1111 runtime baseline**. It is the restore map for package/runtime hygiene, not a generic upstream A1111 requirements list.
+This file records the older pre-MXFP8 GB10 A1111 runtime baseline. It remains useful as a package/runtime hygiene reference, but the current operator state lives in `docs/gb10/STATUS.md` and `docs/gb10/launch/README.md`.
 
 Use `docs/gb10/enhanced_requirements.md` for historical widening experiments and `BUILD_MANIFEST.txt` in the live image for the full package inventory.
 
 ## Validation snapshot
 
-Current validated runtime:
+Historical validated runtime:
 
 - repo branch: `latest`
 - image tag: `local/gb10-a1111:base-protected-app-latest`
 - image ID: `sha256:85c902073586364c4406d36604050c6ab7ccc531b1e7fa4449d26089d923b3c8`
 - image created: `2026-05-03T15:47:10.304319823-07:00`
-- live container: `gb10-a1111-latest`
+- live container at the time: `gb10-a1111-latest`
 - host root: `/opt/gb10/stable-diffusion`
 - API: `http://127.0.0.1:7860`
 

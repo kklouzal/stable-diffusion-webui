@@ -306,9 +306,8 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
     prepare_stats = getattr(model, "network_mxfp8_prepare_stats", None)
     prepare_signature = getattr(model, "network_mxfp8_active_config_signature", None)
     prepare_error = getattr(model, "network_mxfp8_prepare_error", None)
-    lora_mode = getattr(shared.opts, "mxfp8_lora_mode", None)
     coverage = getattr(shared.opts, "mxfp8_linear_coverage", None)
-    return {"ok": True, "linear_total": linear_total, "eligible_linear": eligible, "quantized_linear": quantized, "mxfp8_managed_bf16_active_lora_linear": managed_bf16_active_lora, "skipped_linear": linear_total - eligible, "skipped_reasons": skipped_reasons, "mxfp8_lora_mode": lora_mode, "mxfp8_linear_coverage": coverage, "model_stats": stats, "prepare_stats": prepare_stats, "mxfp8_active_config_stats": prepare_stats, "prepare_signature_active": prepare_signature is not None, "prepare_error": prepare_error, "sample_layers": rows}
+    return {"ok": True, "linear_total": linear_total, "eligible_linear": eligible, "quantized_linear": quantized, "mxfp8_managed_bf16_active_lora_linear": managed_bf16_active_lora, "skipped_linear": linear_total - eligible, "skipped_reasons": skipped_reasons, "mxfp8_linear_coverage": coverage, "model_stats": stats, "prepare_stats": prepare_stats, "mxfp8_active_config_stats": prepare_stats, "prepare_signature_active": prepare_signature is not None, "prepare_error": prepare_error, "sample_layers": rows}
 
 
 def _check_ok(value: Any) -> bool:

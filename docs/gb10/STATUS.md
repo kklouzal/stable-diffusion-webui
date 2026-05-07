@@ -52,7 +52,7 @@ Host-owned persistent surfaces:
 - `extensions/sd-webui-incantations` is vendored in this repository under GPL-3.0
 - upstream provenance is preserved in the extension README and upstream README copy
 - the image contains the owned extension source directly
-- the repo run script syncs the owned extension into the host-mounted `Extensions/` surface so the bind mount does not hide the image copy
+- the repo run script syncs owned extensions into the host-mounted `Extensions/` surface before launch
 - future PAG/SEG/CFG-combiner/CFG-Fix fixes should be made in this repo, not in an untracked external extension checkout
 
 ## Current image/runtime doctrine
@@ -82,14 +82,14 @@ Host-owned persistent surfaces:
 - tokenizers resolver guard: `transformers>=5.7.0`, `tokenizers>=0.22.2`, `huggingface-hub>=1.13.0`, and tokenizers must resolve from a wheel rather than an sdist/Rust build
 - explicit `libssl-dev` + `pkg-config` support in `wheelbuilder`
 
-## Latest build/runtime evidence
+## Historical CUDA-base build/runtime evidence
 
-Current validated GB10 runtime:
+This pre-MXFP8 CUDA-base runtime remains a useful dependency baseline, but it is no longer the current live/default runtime. Current MXFP8 state is below.
 
 - image tag: `local/gb10-a1111:base-protected-app-latest`
 - image ID: `sha256:85c902073586364c4406d36604050c6ab7ccc531b1e7fa4449d26089d923b3c8`
 - image created: `2026-05-03T15:47:10.304319823-07:00`
-- live container: `gb10-a1111-latest`
+- live container at validation time: `gb10-a1111-latest`
 - torch after runtime install: `2.13.0.dev20260502+cu132`
 - torchvision after runtime install: `0.27.0.dev20260502+cu132`
 - torchaudio after runtime install: `2.11.0.dev20260502+cu132`
@@ -123,7 +123,7 @@ Key validated defaults:
 - VAE: `ftasticVAE_v10.safetensors`
 - attention backend: `sdpa`
 - MXFP8 storage: `Enable for SDXL`
-- MXFP8 LoRA handling: `Merge LoRA then quantize to MXFP8`
+- MXFP8 LoRA behavior: active LoRA deltas are merged into BF16 master weights once, then quantized back to MXFP8
 - A1111 MXFP8 audit: `183/911` Linear modules quantized; attention and conditioner Linear modules intentionally skipped
 - 9-case txt2img/img2img SDPA/Sage/SEG/PAG generation matrix completed successfully
 
@@ -132,6 +132,33 @@ Key validated defaults:
 The MXFP8+LoRA repeat-step slowdown was traced to LoRA-count-sensitive MXFP8 preparation work remaining in the generation path. The 2026-05-07 refactor makes MXFP8+LoRA preparation a model-level active-config transaction: BF16 master weights + active LoRA deltas are merged once, selected final effective weights are quantized once, and `Linear.forward()` stays a fast path while the active signature matches. Details and validation are in `docs/gb10/notes/mxfp8-lora-final-merge-2026-05-07.md`.
 
 Validated repeat timings after the fix at 832x832 / 4 Euler-a steps / `unet_other`: initial `0` LoRAs `0.516s/step`, `1` LoRA `0.516s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.519s/step`; post-cleanup `0` LoRAs `0.513s/step`, `1` LoRA `0.510s/step`, `4` LoRAs `0.506s/step`, `13` LoRAs `0.515s/step`; final image validation `0` LoRAs `0.511s/step`, `1` LoRA `0.523s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.527s/step`. The cleanup pass also added transactional rollback, live signature comparison, MXFP8-config identity in the active signature, better UI failure comments, coverage-aware MXFP8 cache sidecars, MXFP8-safe fully materialized model loading, and diagnostics coverage for prepared active-config stats. Fresh restart/smoke/benchmark log scans after the reload-path polish showed no `Cannot copy out of meta tensor; no data!`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors.
+
+## Final cleanup / polish pass — 2026-05-07
+
+A final repository cleanup pass removed the old selectable MXFP8 LoRA BF16 fallback and related dead bookkeeping after merge-then-quantize became the only validated path. Current helper defaults now consistently target `local/gb10-a1111:latest-mxfp8-dev` / `gb10-a1111-latest-mxfp8`, and the runtime image no longer carries duplicate baked copies of owned extensions that are always synced into the host-mounted `Extensions/` tree by `gb10/run.sh`.
+
+Validation from rebuilt image `sha256:3935811b3b43cb9348ada1da14821311fc278fc327988a312683eb2d77875c94`:
+
+- Docker build completed successfully.
+- `gb10/run.sh` relaunched `gb10-a1111-latest-mxfp8` from `local/gb10-a1111:latest-mxfp8-dev`.
+- `gb10/smoke-test.sh` passed API health, model listing, CUDA/PyTorch visibility, and required import checks.
+- MXFP8 diagnostics completed with no legacy `mxfp8_lora_mode` field.
+- A 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully and logged `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1`.
+- Fresh log scan after validation showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or other material exceptions.
+
+## Final end-to-end audit polish — 2026-05-07
+
+A follow-up repo-wide audit found only three more safe cleanups: removal of the unused deprecated Windows Blackwell early-access torch wheel helper from `modules/launch_utils.py`, removal of stale `/data/*` tmpfs mounts from `gb10/run.sh`, and ignore-rule tightening so first-class owned extensions remain trackable in Git but are excluded from the Docker build context. `docs/gb10/README.md` now also shows the accurate `COMMANDLINE_ARGS=... python launch.py --skip-*` launch shape.
+
+Validation from rebuilt image `sha256:11e9e2267eb0efe582632872b22cf153768983481a6f3f9ba3fd9b2cc8871857`:
+
+- full Docker build completed successfully
+- image-local owned extension copies are absent; owned extensions are supplied by the host-mounted `Extensions/` sync path
+- `gb10/run.sh` relaunched `gb10-a1111-latest-mxfp8` without `/data/*` tmpfs mounts
+- `gb10/smoke-test.sh` passed API health, model listing, CUDA/PyTorch visibility, and required import checks
+- 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully
+- logs showed `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1` for the LoRA smoke
+- fresh log scan showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or material exceptions
 
 ## Immediate next validation work
 

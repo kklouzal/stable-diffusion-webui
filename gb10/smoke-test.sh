@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest-mxfp8}"
 PORT="${PORT:-7860}"
 DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT}}"

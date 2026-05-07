@@ -8,7 +8,7 @@ Validated workflow:
 
 - SDXL img2img and txt2img through the A1111 API.
 - GB10 Blackwell runtime with PyTorch/TorchAO/Triton MXFP8 support.
-- Active LoRA stacks under the default MXFP8 LoRA handling mode.
+- Active LoRA stacks under the MXFP8 merge-then-quantize path.
 - SDPA/SageAttention backend switching smoke coverage.
 - SEG/PAG extension behavior with A1111 paired and unpaired CFG execution paths.
 
@@ -27,7 +27,7 @@ The current implementation is aligned with the relevant upstream semantics:
 Validated container/runtime:
 
 - image tag: `local/gb10-a1111:latest-mxfp8-dev`
-- live container: `gb10-a1111-latest-mxfp8-dev`
+- live container: `gb10-a1111-latest-mxfp8`
 - A1111 endpoint: `http://127.0.0.1:7860`
 - checkpoint: `test2.safetensors`
 - VAE: `ftasticVAE_v10.safetensors`
@@ -35,7 +35,7 @@ Validated container/runtime:
 - `batch_cond_uncond`: `true`
 - `s_min_uncond`: `0`
 - MXFP8 storage: `Enable for SDXL`
-- MXFP8 LoRA handling: `Merge LoRA then quantize to MXFP8`
+- MXFP8 LoRA behavior: merge active LoRA deltas into BF16 master weights, then quantize to MXFP8
 
 Runtime package evidence from `/sdapi/v1/mxfp8-diagnostics/run`:
 
@@ -72,7 +72,7 @@ Latest A1111 integration audit:
   - `self_attention`: `280`
   - `cross_attention`: `280`
   - `conditioner`: `168`
-- active BF16 fallback LoRA-managed MXFP8 layers: `0`
+- active BF16 LoRA-managed MXFP8 layers after preparation: `0`
 
 Shape guard evidence:
 
@@ -90,14 +90,14 @@ Scaling evidence:
 
 ## LoRA behavior
 
-Default: `Merge LoRA then quantize to MXFP8`.
+Default behavior: merge active LoRA deltas into BF16 master weights once, then quantize to MXFP8.
 
 Rationale:
 
 - Normal A1111 LoRA mutation expects ordinary mutable `torch.nn.Parameter` tensors.
 - TorchAO `MXTensor` weights do not compose safely with the normal in-place LoRA path.
 - The current path keeps BF16 base weight/bias masters, applies the active LoRA delta stack to BF16 once when the active LoRA set changes, then requantizes the touched layer back to MXFP8.
-- `Keep active LoRA layers in BF16` remains a quality/debug fallback, not the normal fast path.
+- The old selectable BF16 LoRA fallback was removed after merge-then-quantize became the only validated fast path.
 
 ## Attention backend posture
 
