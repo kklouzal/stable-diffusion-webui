@@ -43,6 +43,10 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             dyn_dims.append(dyn_dim)
 
         networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+        if not networks.prepare_mxfp8_active_config():
+            error = getattr(shared.sd_model, "network_mxfp8_prepare_error", "MXFP8 LoRA preparation failed")
+            p.comment(f"MXFP8 LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
+            raise RuntimeError(error)
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):
