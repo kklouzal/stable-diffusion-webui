@@ -74,7 +74,7 @@ def _load_sidecar(cache_path: str) -> Optional[dict]:
         return None
 
 
-def _sidecar_matches(filename: str, cache_path: str) -> bool:
+def _sidecar_matches(filename: str, cache_path: str, coverage=None) -> bool:
     if not os.path.exists(cache_path):
         return False
 
@@ -86,6 +86,7 @@ def _sidecar_matches(filename: str, cache_path: str) -> bool:
         sidecar.get("cache_version") == CACHE_VERSION
         and sidecar.get("config") == CONFIG_NAME
         and sidecar.get("source") == _stat_source(filename)
+        and (coverage is None or sidecar.get("coverage") in (None, sorted(coverage)))
     )
 
 
@@ -132,9 +133,9 @@ def _iter_eligible_linear_modules(model, filter_fn: Callable):
             yield fqn, module
 
 
-def load_into_model(model, source_path: Optional[str], filter_fn: Callable, device: torch.device | str) -> bool:
+def load_into_model(model, source_path: Optional[str], filter_fn: Callable, device: torch.device | str, coverage=None) -> bool:
     cache_path = _cache_path_for(source_path)
-    if cache_path is None or source_path is None or not _sidecar_matches(source_path, cache_path):
+    if cache_path is None or source_path is None or not _sidecar_matches(source_path, cache_path, coverage):
         return False
 
     print(f"Loading MXFP8 cache for {source_path} from {cache_path}", flush=True)
@@ -177,7 +178,7 @@ def load_into_model(model, source_path: Optional[str], filter_fn: Callable, devi
     return True
 
 
-def save_from_model(model, source_path: Optional[str], filter_fn: Callable, eligible: int, skipped_linear: int, skipped_reasons: dict) -> Optional[str]:
+def save_from_model(model, source_path: Optional[str], filter_fn: Callable, eligible: int, skipped_linear: int, skipped_reasons: dict, coverage=None) -> Optional[str]:
     cache_path = _cache_path_for(source_path)
     if cache_path is None or source_path is None or eligible == 0:
         return None
@@ -196,6 +197,7 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         "cache_version": CACHE_VERSION,
         "config": CONFIG_NAME,
         "source": source_stat,
+        "coverage": sorted(coverage) if coverage is not None else None,
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,
         "skipped_reasons": skipped_reasons,
@@ -211,6 +213,7 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         "cache_version": CACHE_VERSION,
         "config": CONFIG_NAME,
         "source": source_stat,
+        "coverage": sorted(coverage) if coverage is not None else None,
         "cache": _stat_source(cache_path),
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,

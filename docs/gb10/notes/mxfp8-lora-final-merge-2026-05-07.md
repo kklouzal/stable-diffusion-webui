@@ -43,17 +43,44 @@ Rebuilt image: `local/gb10-a1111:latest-mxfp8-dev` (`sha256:067427ac2bb5684f9dc6
 
 Benchmark payload: `832x832`, `4` steps, `Euler a`, `Karras`, `test2.safetensors`, MXFP8 storage `Enable for SDXL`, coverage `['unet_other']`, mode `Merge LoRA then quantize to MXFP8`.
 
-After the refactor:
+After the initial refactor:
 
 - `0` LoRAs: warm `2.541s`, repeat `2.059s`, repeat `0.515s/step`
 - `1` LoRA: warm `32.497s`, repeat `2.096s`, repeat `0.524s/step`
 - `4` LoRAs: warm `7.865s`, repeat `2.064s`, repeat `0.516s/step`
 - `13` LoRAs: warm `13.922s`, repeat `2.094s`, repeat `0.523s/step`
 
+Follow-up cleanup strengthened the prepared-state signature check, added whole-transaction rollback on prepare failure, includes MXFP8 config identity in the active signature, reports detailed prepare errors in the UI comment, prebuilds the quantization config once per prepare transaction, and prevents no-op active-LoRA modules from being left in stale BF16 state during forced prepare.
+
+Post-cleanup validation on the hot-patched live container, same `unet_other` benchmark:
+
+- `0` LoRAs: warm `2.183s`, repeat `2.052s`, repeat `0.513s/step`
+- `1` LoRA: warm `31.060s`, repeat `2.042s`, repeat `0.510s/step`
+- `4` LoRAs: warm `8.039s`, repeat `2.025s`, repeat `0.506s/step`
+- `13` LoRAs: warm `13.428s`, repeat `2.061s`, repeat `0.515s/step`
+
 The repeat generation path is now effectively flat across LoRA count, which validates the intended invariant.
 
-Live testing was restored to the safe state after benchmarking:
+An img2img smoke with `<lora:Detail-Enhancer-v1.0:0.6:0.6>`, `unet_other`, and merge-then-quantize completed successfully in `24.368s` for 4 steps after correcting the test payload to avoid its older BF16 override. Logs showed the expected prepare sequence: `183` managed Linear modules, `183` quantized, `0` kept BF16, `1` LoRA.
+
+Live testing was restored to the conservative live safety state after benchmarking. This is not the product default; it intentionally disables MXFP8 Linear coverage on the running service until another explicit test/use pass enables it:
 
 - `mxfp8_storage`: `Enable for SDXL`
 - `mxfp8_linear_coverage`: `[]`
 - `mxfp8_lora_mode`: `Merge LoRA then quantize to MXFP8`
+
+## Final reload-path polish
+
+A later end-to-end pass found that MXFP8 coverage transitions could still leave noisy meta-tensor load failures in the live logs, especially around SDXL conditioner/VAE reload paths. The root cause was the generic A1111 meta-device RAM optimization, which is useful for ordinary model loading but too fragile for MXFP8 reloads because custom SDXL/OpenCLIP/VAE state-dict paths can bypass the patched `Module._load_from_state_dict` route.
+
+`modules/sd_models.py` now disables the fast/meta loader only while MXFP8 storage is requested, forcing fully materialized model construction/load for MXFP8 startup and coverage reloads. This is deliberately scoped to MXFP8 because those reloads are comparatively rare and correctness is more important than preserving the generic RAM optimization there.
+
+`modules/mxfp8_diagnostics.py` also aliases `prepare_stats` as `mxfp8_active_config_stats`, so smoke tooling can directly report the active prepared LoRA/MXFP8 configuration instead of `null`.
+
+Final validation from rebuilt image `sha256:05ab63a366b73ab6c4a69fc1969f54995410a790fe4034ba6dc0f9004a20a210`:
+
+- startup fresh-log scan: no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors
+- img2img smoke: completed in `26.318s` for 4 steps with one active LoRA; diagnostics reported `prepared_linear=183`, `quantized_linear=183`, `failed_linear=0`, `active_lora_count=1`
+- repeat benchmark: `0` LoRAs `2.045s` / `0.511s/step`; `1` LoRA `2.093s` / `0.523s/step`; `4` LoRAs `2.064s` / `0.516s/step`; `13` LoRAs `2.109s` / `0.527s/step`
+- final live safety state restored to `mxfp8_storage=Enable for SDXL`, `mxfp8_linear_coverage=[]`, `mxfp8_lora_mode=Merge LoRA then quantize to MXFP8`
+- fresh validation log scan: no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors

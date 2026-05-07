@@ -376,6 +376,18 @@ def check_mxfp8(model):
     return enable_mxfp8
 
 
+class DisableFastModelLoadingForMxfp8:
+    def __enter__(self):
+        self.previous = None
+        if getattr(shared.opts, "mxfp8_storage", "Disable") != "Disable":
+            self.previous = shared.cmd_opts.disable_model_loading_ram_optimization
+            shared.cmd_opts.disable_model_loading_ram_optimization = True
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self.previous is not None:
+            shared.cmd_opts.disable_model_loading_ram_optimization = self.previous
+
+
 def check_weight_quantization_mutual_exclusion(model):
     enabled = [name for name, active in (("FP8 weight", check_fp8(model)), ("MXFP8 weight", check_mxfp8(model))) if active]
     if len(enabled) > 1:
@@ -497,18 +509,19 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
             except Exception:
                 pass
 
-        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device)
+        selected_coverage = sorted(mxfp8_selected_linear_coverage())
+        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device, selected_coverage)
         if not cache_loaded:
             from torchao.quantization import quantize_
             config = mxfp8_config.get_mxfp8_config()
             mxfp8_config.validate_kernel_preference(config)
             quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
-            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons)
-        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": sorted(mxfp8_selected_linear_coverage()), "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
+            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
+        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
     action = "Loaded cached" if cache_loaded else "Applied"
-    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules with coverage {sorted(mxfp8_selected_linear_coverage())}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
+    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules with coverage {selected_coverage}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
     timer.record("load mxfp8 cache" if cache_loaded else "apply mxfp8")
 
 
@@ -599,9 +612,10 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         # "Cannot copy out of meta tensor; no data!".
         checkpoints_loaded[checkpoint_info] = state_dict.copy()
     elif check_mxfp8(model):
-        for cached_info in list(checkpoints_loaded):
-            if getattr(cached_info, "filename", cached_info) == checkpoint_info.filename:
-                checkpoints_loaded.pop(cached_info, None)
+        # MXFP8 paths must never retain checkpoint state-dict cache entries: the
+        # optimized/meta loading path can mutate cached tensors into meta
+        # placeholders, and later MXFP8 reloads need pristine disk reads.
+        checkpoints_loaded.clear()
 
     check_weight_quantization_mutual_exclusion(model)
 
@@ -1022,8 +1036,9 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
     sd_model = None
     try:
         with sd_disable_initialization.DisableInitialization(disable_clip=clip_is_included_into_sd or shared.cmd_opts.do_not_download_clip):
-            with sd_disable_initialization.InitializeOnMeta():
-                sd_model = instantiate_from_config(sd_config.model, state_dict)
+            with DisableFastModelLoadingForMxfp8():
+                with sd_disable_initialization.InitializeOnMeta():
+                    sd_model = instantiate_from_config(sd_config.model, state_dict)
 
     except Exception as e:
         errors.display(e, "creating model quickly", full_traceback=True)
@@ -1031,8 +1046,9 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
     if sd_model is None:
         print('Failed to create model quickly; will retry using slow method.', file=sys.stderr)
 
-        with sd_disable_initialization.InitializeOnMeta():
-            sd_model = instantiate_from_config(sd_config.model, state_dict)
+        with DisableFastModelLoadingForMxfp8():
+            with sd_disable_initialization.InitializeOnMeta():
+                sd_model = instantiate_from_config(sd_config.model, state_dict)
 
     sd_model.used_config = checkpoint_config
 
@@ -1047,8 +1063,13 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
             '': devices.dtype,
         }
 
-    with sd_disable_initialization.LoadStateDictOnMeta(state_dict, device=model_target_device(sd_model), weight_dtype_conversion=weight_dtype_conversion):
-        load_model_weights(sd_model, checkpoint_info, state_dict, timer)
+    # MXFP8 load/reload correctness matters more than the generic meta-device
+    # RAM optimization: the optimized path can strand meta placeholders when
+    # custom SDXL/OpenCLIP/VAE loaders bypass the patched Module path, producing
+    # "Cannot copy out of meta tensor; no data!" on later reloads.
+    with DisableFastModelLoadingForMxfp8():
+        with sd_disable_initialization.LoadStateDictOnMeta(state_dict, device=model_target_device(sd_model), weight_dtype_conversion=weight_dtype_conversion):
+            load_model_weights(sd_model, checkpoint_info, state_dict, timer)
 
     timer.record("load weights from state dict")
 
@@ -1200,9 +1221,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         # "Cannot copy out of meta tensor; no data!". Invalidate every cache key
         # for this checkpoint filename (CheckpointInfo object identity/equality is
         # not a safe enough lookup here) and read directly from disk.
-        for cached_info in list(checkpoints_loaded):
-            if getattr(cached_info, "filename", cached_info) == checkpoint_info.filename:
-                checkpoints_loaded.pop(cached_info, None)
+        checkpoints_loaded.clear()
         print(f"Reloading MXFP8-changed model from uncached checkpoint storage: {checkpoint_info.filename}")
         state_dict = read_state_dict(checkpoint_info.filename)
         timer.record("load weights from disk")

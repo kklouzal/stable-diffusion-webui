@@ -33,6 +33,6 @@ For the current SDXL checkpoint/module graph, the important Linear coverage leve
 - `unet_other`: `183` Linear modules
 - `unet_other + self_attention`: `463` Linear modules
 - `unet_other + self_attention + cross_attention`: `743` Linear modules
-- all four regions including `conditioner`: about `911` Linear modules
+- all four regions including `conditioner`: about `867` Linear modules after the MultiheadAttention `out_proj` LoRA-safety exclusion
 
-Use these counts as quick sanity checks in `/sdapi/v1/mxfp8-diagnostics` after each coverage reload.
+Use these counts as quick sanity checks in `/sdapi/v1/mxfp8-diagnostics` after each coverage reload. The all-region count is lower than the original raw eligible count because `modules/sd_models.py` intentionally leaves PyTorch `MultiheadAttention` `out_proj` Linear layers in BF16 so split-projection LoRAs do not silently lose mutations.

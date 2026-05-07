@@ -118,7 +118,7 @@ The current known-good MXFP8/img2img baseline is documented in `docs/gb10/notes/
 Key validated defaults:
 
 - image tag: `local/gb10-a1111:latest-mxfp8-dev`
-- live container: `gb10-a1111-latest-mxfp8-dev`
+- live container: `gb10-a1111-latest-mxfp8`
 - checkpoint: `test2.safetensors`
 - VAE: `ftasticVAE_v10.safetensors`
 - attention backend: `sdpa`
@@ -131,7 +131,7 @@ Key validated defaults:
 
 The MXFP8+LoRA repeat-step slowdown was traced to LoRA-count-sensitive MXFP8 preparation work remaining in the generation path. The 2026-05-07 refactor makes MXFP8+LoRA preparation a model-level active-config transaction: BF16 master weights + active LoRA deltas are merged once, selected final effective weights are quantized once, and `Linear.forward()` stays a fast path while the active signature matches. Details and validation are in `docs/gb10/notes/mxfp8-lora-final-merge-2026-05-07.md`.
 
-Validated repeat timings after the fix at 832x832 / 4 Euler-a steps / `unet_other`: `0` LoRAs `0.516s/step`, `1` LoRA `0.516s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.519s/step`.
+Validated repeat timings after the fix at 832x832 / 4 Euler-a steps / `unet_other`: initial `0` LoRAs `0.516s/step`, `1` LoRA `0.516s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.519s/step`; post-cleanup `0` LoRAs `0.513s/step`, `1` LoRA `0.510s/step`, `4` LoRAs `0.506s/step`, `13` LoRAs `0.515s/step`; final image validation `0` LoRAs `0.511s/step`, `1` LoRA `0.523s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.527s/step`. The cleanup pass also added transactional rollback, live signature comparison, MXFP8-config identity in the active signature, better UI failure comments, coverage-aware MXFP8 cache sidecars, MXFP8-safe fully materialized model loading, and diagnostics coverage for prepared active-config stats. Fresh restart/smoke/benchmark log scans after the reload-path polish showed no `Cannot copy out of meta tensor; no data!`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors.
 
 ## Immediate next validation work
 
