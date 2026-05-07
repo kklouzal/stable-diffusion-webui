@@ -483,9 +483,19 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
     try:
         for fqn, module in model.named_modules():
             if mxfp8_linear_filter(module, fqn):
+                module.network_mxfp8_fqn = fqn
+                module.network_mxfp8_region = mxfp8_linear_region(fqn)
                 module.network_mxfp8_base_weight = module.weight.detach().to(devices.cpu, copy=True)
                 if module.bias is not None:
                     module.network_mxfp8_base_bias = module.bias.detach().to(devices.cpu, copy=True)
+                else:
+                    module.network_mxfp8_base_bias = None
+
+        for attr in ("network_mxfp8_active_config_signature", "network_mxfp8_prepare_stats", "network_mxfp8_prepare_error"):
+            try:
+                delattr(model, attr)
+            except Exception:
+                pass
 
         cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device)
         if not cache_loaded:

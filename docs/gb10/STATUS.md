@@ -127,6 +127,12 @@ Key validated defaults:
 - A1111 MXFP8 audit: `183/911` Linear modules quantized; attention and conditioner Linear modules intentionally skipped
 - 9-case txt2img/img2img SDPA/Sage/SEG/PAG generation matrix completed successfully
 
+## Latest MXFP8 LoRA final-merge fix
+
+The MXFP8+LoRA repeat-step slowdown was traced to LoRA-count-sensitive MXFP8 preparation work remaining in the generation path. The 2026-05-07 refactor makes MXFP8+LoRA preparation a model-level active-config transaction: BF16 master weights + active LoRA deltas are merged once, selected final effective weights are quantized once, and `Linear.forward()` stays a fast path while the active signature matches. Details and validation are in `docs/gb10/notes/mxfp8-lora-final-merge-2026-05-07.md`.
+
+Validated repeat timings after the fix at 832x832 / 4 Euler-a steps / `unet_other`: `0` LoRAs `0.516s/step`, `1` LoRA `0.516s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.519s/step`.
+
 ## Immediate next validation work
 
 1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`

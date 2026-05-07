@@ -18,7 +18,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -622,45 +622,107 @@ def network_mxfp8_active_config_signature():
     return (checkpoint_key, coverage, lora_mode, tuple(loras))
 
 
-def prepare_mxfp8_active_config():
-    """Eagerly prepare the one active in-memory MXFP8+LoRA configuration.
+def network_mxfp8_mark_model_unprepared(model=None):
+    model = model or getattr(shared, "sd_model", None)
+    if model is None:
+        return
+    for attr in (
+        "network_mxfp8_active_config_signature",
+        "network_mxfp8_prepare_stats",
+        "network_mxfp8_prepare_error",
+    ):
+        try:
+            delattr(model, attr)
+        except Exception:
+            pass
 
-    MXFP8 LoRA application used to happen lazily from Linear.forward(), which
-    pushed merge/requantization work into prompt conditioning and sampler steps.
-    Preparing here makes the first generation after an effective config change
-    pay the cost before sampling starts, while repeated same-config generations
-    reuse the already prepared in-memory module weights.
+
+def network_mxfp8_is_model_prepared(model=None):
+    model = model or getattr(shared, "sd_model", None)
+    return model is not None and getattr(model, "network_mxfp8_active_config_signature", None) is not None
+
+
+def prepare_mxfp8_active_config():
+    """Prepare the one active in-memory MXFP8+LoRA weight configuration.
+
+    This is deliberately a model-level transaction. The hot Linear.forward()
+    path must not merge LoRAs, scan active LoRAs, or quantize weights during
+    sampling. For the current checkpoint + coverage + active LoRA signature,
+    this rebuilds managed Linear layers from immutable BF16 master weights,
+    applies active LoRA deltas once, optionally quantizes the final effective
+    weights to MXFP8 once, and marks the model prepared.
     """
 
     model = getattr(shared, "sd_model", None)
     if model is None:
-        return
+        return False
 
     signature = network_mxfp8_active_config_signature()
     if getattr(model, "network_mxfp8_active_config_signature", None) == signature:
-        return
+        return True
 
+    network_mxfp8_mark_model_unprepared(model)
+
+    wanted_names = network_mxfp8_wanted_names()
     prepared = 0
+    quantized = 0
+    kept_bf16 = 0
+    untouched = 0
     failed = 0
+    failures = []
 
-    for _fqn, module in model.named_modules():
+    for fqn, module in model.named_modules():
         if getattr(module, "network_mxfp8_base_weight", None) is None:
             continue
-        if network_apply_mxfp8_merged_lora(module):
+
+        if network_apply_mxfp8_merged_lora(module, force=True):
             prepared += 1
+            module.network_mxfp8_prepared_signature = signature
+            if is_mxfp8_weight(getattr(module, "weight", None)):
+                quantized += 1
+            elif getattr(module, "network_mxfp8_merged_lora_applied", False):
+                kept_bf16 += 1
+            else:
+                untouched += 1
+            module.network_current_names = wanted_names
         else:
             failed += 1
+            failures.append(getattr(module, "network_layer_name", fqn))
+
+    stats = {
+        "signature": signature,
+        "prepared_linear": prepared,
+        "quantized_linear": quantized,
+        "kept_bf16_linear": kept_bf16,
+        "untouched_linear": untouched,
+        "failed_linear": failed,
+        "failed_layers": failures[:50],
+        "active_lora_count": len(loaded_networks),
+        "mxfp8_lora_mode": getattr(shared.opts, "mxfp8_lora_mode", None),
+        "mxfp8_linear_coverage": sorted(getattr(shared.opts, "mxfp8_linear_coverage", ()) or ()),
+    }
+    model.network_mxfp8_prepare_stats = stats
 
     if failed == 0:
         model.network_mxfp8_active_config_signature = signature
-    else:
         try:
-            delattr(model, "network_mxfp8_active_config_signature")
+            delattr(model, "network_mxfp8_prepare_error")
         except Exception:
             pass
+        if prepared:
+            print(
+                "Prepared active MXFP8 LoRA config: "
+                f"prepared {prepared} Linear, quantized {quantized}, "
+                f"kept BF16 {kept_bf16}, untouched {untouched}, "
+                f"LoRAs {len(loaded_networks)}",
+                flush=True,
+            )
+        return True
 
-    if prepared or failed:
-        logging.info("Prepared active MXFP8 LoRA config for %s Linear modules%s", prepared, f"; failed {failed}" if failed else "")
+    message = f"failed to prepare active MXFP8 LoRA config for {failed} Linear modules: {failures[:10]}"
+    model.network_mxfp8_prepare_error = message
+    logging.warning(message)
+    return False
 
 
 def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
@@ -716,7 +778,7 @@ def network_restore_mxfp8_original_state(self, original_weight, original_bias, o
         self.network_mxfp8_merged_lora_applied = original_merged_lora
 
 
-def network_apply_mxfp8_merged_lora(self):
+def network_apply_mxfp8_merged_lora(self, force=False):
     network_layer_name = getattr(self, 'network_layer_name', None)
     base_weight = getattr(self, 'network_mxfp8_base_weight', None)
     if network_layer_name is None or base_weight is None:
@@ -724,7 +786,7 @@ def network_apply_mxfp8_merged_lora(self):
 
     wanted_names = network_mxfp8_wanted_names()
     current_names = getattr(self, "network_current_names", ())
-    if current_names == wanted_names:
+    if not force and current_names == wanted_names:
         return True
 
     ops_for_layer, unsupported_ops = network_mxfp8_lora_ops_for_layer(self, network_layer_name)
@@ -808,9 +870,17 @@ def network_apply_mxfp8_merged_lora(self):
 
 def network_Linear_forward(self, input):
     if getattr(self, 'network_mxfp8_base_weight', None) is not None:
-        if network_apply_mxfp8_merged_lora(self):
-            return originals.Linear_forward(self, input)
-        return network_forward(self, input, originals.Linear_forward)
+        # MXFP8-managed LoRA weights must be prepared once per active config,
+        # outside the sampling hot path. If a caller reaches forward before
+        # ExtraNetworkLora.activate() prepared the model, prepare the whole
+        # model once here; never fall back to per-layer functional LoRA in this
+        # path because that reintroduces LoRA-count-sensitive step time.
+        model = getattr(shared, "sd_model", None)
+        if not network_mxfp8_is_model_prepared(model):
+            if not prepare_mxfp8_active_config():
+                message = getattr(model, "network_mxfp8_prepare_error", "MXFP8 LoRA active config is not prepared")
+                raise RuntimeError(message)
+        return originals.Linear_forward(self, input)
 
     if shared.opts.lora_functional:
         return network_forward(self, input, originals.Linear_forward)
