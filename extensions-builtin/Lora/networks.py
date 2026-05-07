@@ -583,6 +583,86 @@ def network_mxfp8_wanted_names():
     return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
 
 
+def network_mxfp8_active_config_signature():
+    """Return the currently active in-memory MXFP8+LoRA weight signature.
+
+    This intentionally describes only the one active configuration, not a disk
+    cache key for every possible LoRA permutation. If any field that changes
+    effective weights changes, eager preparation invalidates and rebuilds the
+    model's in-memory prepared state.
+    """
+
+    checkpoint_info = getattr(shared.sd_model, "sd_checkpoint_info", None)
+    checkpoint_key = (
+        getattr(checkpoint_info, "filename", None),
+        getattr(checkpoint_info, "hash", None),
+        getattr(checkpoint_info, "sha256", None),
+    )
+    coverage = tuple(sorted(getattr(shared.opts, "mxfp8_linear_coverage", ()) or ()))
+    lora_mode = getattr(shared.opts, "mxfp8_lora_mode", None)
+
+    loras = []
+    for net in loaded_networks:
+        network_on_disk = getattr(net, "network_on_disk", None)
+        filename = getattr(network_on_disk, "filename", None)
+        try:
+            mtime = os.path.getmtime(filename) if filename else None
+        except OSError:
+            mtime = None
+        loras.append((
+            net.name,
+            net.te_multiplier,
+            net.unet_multiplier,
+            net.dyn_dim,
+            filename,
+            getattr(network_on_disk, "shorthash", None),
+            mtime,
+        ))
+
+    return (checkpoint_key, coverage, lora_mode, tuple(loras))
+
+
+def prepare_mxfp8_active_config():
+    """Eagerly prepare the one active in-memory MXFP8+LoRA configuration.
+
+    MXFP8 LoRA application used to happen lazily from Linear.forward(), which
+    pushed merge/requantization work into prompt conditioning and sampler steps.
+    Preparing here makes the first generation after an effective config change
+    pay the cost before sampling starts, while repeated same-config generations
+    reuse the already prepared in-memory module weights.
+    """
+
+    model = getattr(shared, "sd_model", None)
+    if model is None:
+        return
+
+    signature = network_mxfp8_active_config_signature()
+    if getattr(model, "network_mxfp8_active_config_signature", None) == signature:
+        return
+
+    prepared = 0
+    failed = 0
+
+    for _fqn, module in model.named_modules():
+        if getattr(module, "network_mxfp8_base_weight", None) is None:
+            continue
+        if network_apply_mxfp8_merged_lora(module):
+            prepared += 1
+        else:
+            failed += 1
+
+    if failed == 0:
+        model.network_mxfp8_active_config_signature = signature
+    else:
+        try:
+            delattr(model, "network_mxfp8_active_config_signature")
+        except Exception:
+            pass
+
+    if prepared or failed:
+        logging.info("Prepared active MXFP8 LoRA config for %s Linear modules%s", prepared, f"; failed {failed}" if failed else "")
+
+
 def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
     """Return LoRA operations for an MXFP8-managed Linear.
 

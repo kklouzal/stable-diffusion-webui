@@ -43,6 +43,7 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             dyn_dims.append(dyn_dim)
 
         networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+        networks.prepare_mxfp8_active_config()
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):
