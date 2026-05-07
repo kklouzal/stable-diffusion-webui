@@ -61,7 +61,7 @@ Canonical launch path inside the image:
 
 That launch path runs:
 
-- `python launch.py --skip-prepare-environment --skip-python-version-check --listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access`
+- `COMMANDLINE_ARGS="--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access" python launch.py --skip-prepare-environment --skip-python-version-check`
 
 ## Base image and upstream target
 

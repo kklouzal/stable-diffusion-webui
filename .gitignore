@@ -30,7 +30,14 @@ notification.mp3
 /SwinIR
 /textual_inversion
 .vscode
-/extensions
+/extensions/*
+!/extensions/sd-webui-incantations/
+!/extensions/sd-webui-incantations/**
+!/extensions/openclaw-clear-cond-cache/
+!/extensions/openclaw-clear-cond-cache/**
+/extensions/**/__pycache__/
+/extensions/**/*.pyc
+/extensions/**/.DS_Store
 /test/stdout.txt
 /test/stderr.txt
 /cache.json*

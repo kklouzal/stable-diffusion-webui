@@ -146,6 +146,20 @@ Validation from rebuilt image `sha256:3935811b3b43cb9348ada1da14821311fc278fc327
 - A 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully and logged `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1`.
 - Fresh log scan after validation showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or other material exceptions.
 
+## Final end-to-end audit polish — 2026-05-07
+
+A follow-up repo-wide audit found only three more safe cleanups: removal of the unused deprecated Windows Blackwell early-access torch wheel helper from `modules/launch_utils.py`, removal of stale `/data/*` tmpfs mounts from `gb10/run.sh`, and ignore-rule tightening so first-class owned extensions remain trackable in Git but are excluded from the Docker build context. `docs/gb10/README.md` now also shows the accurate `COMMANDLINE_ARGS=... python launch.py --skip-*` launch shape.
+
+Validation from rebuilt image `sha256:11e9e2267eb0efe582632872b22cf153768983481a6f3f9ba3fd9b2cc8871857`:
+
+- full Docker build completed successfully
+- image-local owned extension copies are absent; owned extensions are supplied by the host-mounted `Extensions/` sync path
+- `gb10/run.sh` relaunched `gb10-a1111-latest-mxfp8` without `/data/*` tmpfs mounts
+- `gb10/smoke-test.sh` passed API health, model listing, CUDA/PyTorch visibility, and required import checks
+- 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully
+- logs showed `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1` for the LoRA smoke
+- fresh log scan showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or material exceptions
+
 ## Immediate next validation work
 
 1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
