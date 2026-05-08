@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -478,14 +479,22 @@ class StableDiffusionProcessing:
 
         cached_params = self.cached_params(required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
 
+        stats = getattr(self, "openclaw_cond_cache_stats", None)
+        if stats is None:
+            stats = self.openclaw_cond_cache_stats = {"hits": 0, "misses": 0, "compute_seconds": 0.0}
+
         for cache in caches:
             if cache[0] is not None and cached_params == cache[0]:
+                stats["hits"] += 1
                 return cache[1]
 
         cache = caches[0]
 
+        started = time.perf_counter()
         with devices.autocast():
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
+        stats["misses"] += 1
+        stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started), 3)
 
         cache[0] = cached_params
         return cache[1]
@@ -567,6 +576,7 @@ class Processed:
         self.all_subseeds = all_subseeds or p.all_subseeds or [self.subseed]
         self.infotexts = infotexts or [info] * len(images_list)
         self.version = program_version()
+        self.openclaw_cond_cache_stats = getattr(p, "openclaw_cond_cache_stats", None)
 
     def js(self):
         obj = {
