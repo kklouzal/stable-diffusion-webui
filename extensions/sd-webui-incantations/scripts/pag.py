@@ -224,6 +224,15 @@ def _record_pag_timing(pag_params, hook_name, elapsed):
         hook["calls"] = int(hook.get("calls") or 0) + 1
 
 
+def _record_pag_detail(pag_params, detail_name, elapsed):
+        timings = pag_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        details = timings.setdefault("details", {})
+        detail = details.setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
+        detail["total_seconds"] = round(float(detail.get("total_seconds") or 0.0) + elapsed, 6)
+        detail["calls"] = int(detail.get("calls") or 0) + 1
+
+
 def _merge_pag_timings(p, pag_params):
         if not pag_params.openclaw_extension_timings:
                 return
@@ -231,6 +240,7 @@ def _merge_pag_timings(p, pag_params):
         if timings is None:
                 timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
         ext = timings["extensions"].setdefault("Incantations.PAGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        detail_timings = pag_params.openclaw_extension_timings.pop("details", {})
         for hook_name, hook in pag_params.openclaw_extension_timings.items():
                 elapsed = float(hook.get("total_seconds") or 0.0)
                 calls = int(hook.get("calls") or 0)
@@ -238,6 +248,14 @@ def _merge_pag_timings(p, pag_params):
                 ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
                 ext["calls"] = int(ext.get("calls") or 0) + calls
                 ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        if detail_timings:
+                ext["details"] = ext.get("details", {})
+                for detail_name, detail in detail_timings.items():
+                        elapsed = float(detail.get("total_seconds") or 0.0)
+                        calls = int(detail.get("calls") or 0)
+                        existing = ext["details"].setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
+                        existing["total_seconds"] = round(float(existing.get("total_seconds") or 0.0) + elapsed, 6)
+                        existing["calls"] = int(existing.get("calls") or 0) + calls
         pag_params.openclaw_extension_timings = {}
 
 class PAGExtensionScript(UIWrapper):
@@ -607,16 +625,20 @@ class PAGExtensionScript(UIWrapper):
                 seg_saved_state = _suspend_seg_for_pag_hidden_pass()
                 try:
                         # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
-                        pag_params.pag_x_out = pag_inner_model_x_out(
-                                params.inner_model,
-                                x_in,
-                                sigma_in,
-                                tensor,
-                                uncond,
-                                image_cond_in,
-                                make_condition_dict,
-                                pag_params.batch_size,
-                        )
+                        hidden_started = time.perf_counter()
+                        try:
+                                pag_params.pag_x_out = pag_inner_model_x_out(
+                                        params.inner_model,
+                                        x_in,
+                                        sigma_in,
+                                        tensor,
+                                        uncond,
+                                        image_cond_in,
+                                        make_condition_dict,
+                                        pag_params.batch_size,
+                                )
+                        finally:
+                                _record_pag_detail(pag_params, "pag_hidden_denoise", time.perf_counter() - hidden_started)
                 finally:
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises
