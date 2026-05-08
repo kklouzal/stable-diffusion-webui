@@ -1,4 +1,5 @@
 import logging
+import time
 from os import environ
 import modules.scripts as scripts
 import gradio as gr
@@ -36,6 +37,28 @@ submodules: list[SubmoduleInfo] = [
         SubmoduleInfo(module=CFGCombinerScript()),
 ]
 
+
+
+
+def _record_extension_timing(p, name, hook_name, elapsed):
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+
+        elapsed = float(elapsed)
+        timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+        ext = timings["extensions"].setdefault(name, {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+        ext["calls"] = int(ext.get("calls") or 0) + 1
+        ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+
+
+def _timed_module_call(p, module, hook_name, func, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+                return func(*args, **kwargs)
+        finally:
+                _record_extension_timing(p, f"Incantations.{module.__class__.__name__}", hook_name, time.perf_counter() - started)
 
 class IncantBaseExtensionScript(scripts.Script):
         # Extension title in menu UI
@@ -79,23 +102,23 @@ class IncantBaseExtensionScript(scripts.Script):
                         "pag_params": None,
                 })
                 for m in submodules:
-                        m.module.before_process(p, *self.m_args(m, *args), **kwargs)
+                        _timed_module_call(p, m.module, "before_process", m.module.before_process, p, *self.m_args(m, *args), **kwargs)
 
         def process(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
-                        m.module.process(p, *self.m_args(m, *args), **kwargs)
+                        _timed_module_call(p, m.module, "process", m.module.process, p, *self.m_args(m, *args), **kwargs)
 
         def before_process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
-                        m.module.before_process_batch(p, *self.m_args(m, *args), **kwargs)
+                        _timed_module_call(p, m.module, "before_process_batch", m.module.before_process_batch, p, *self.m_args(m, *args), **kwargs)
         
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
-                        m.module.process_batch(p, *self.m_args(m, *args), **kwargs)
+                        _timed_module_call(p, m.module, "process_batch", m.module.process_batch, p, *self.m_args(m, *args), **kwargs)
 
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
-                        m.module.postprocess_batch(p, *self.m_args(m, *args), **kwargs)
+                        _timed_module_call(p, m.module, "postprocess_batch", m.module.postprocess_batch, p, *self.m_args(m, *args), **kwargs)
 
         def unhook_callbacks(self):
                 for m in submodules:

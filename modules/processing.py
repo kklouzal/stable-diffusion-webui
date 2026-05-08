@@ -577,6 +577,8 @@ class Processed:
         self.infotexts = infotexts or [info] * len(images_list)
         self.version = program_version()
         self.openclaw_cond_cache_stats = getattr(p, "openclaw_cond_cache_stats", None)
+        self.openclaw_script_timings = getattr(p, "openclaw_script_timings", None)
+        self.openclaw_extension_timings = getattr(p, "openclaw_extension_timings", None)
 
     def js(self):
         obj = {

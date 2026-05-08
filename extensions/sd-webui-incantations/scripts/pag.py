@@ -1,4 +1,5 @@
 import logging
+import time
 from os import environ
 import modules.scripts as scripts
 import gradio as gr
@@ -115,6 +116,7 @@ class PAGStateParams:
                 self.crossattn_modules = [] # callable lambda
                 self.pag_x_out = None
                 self.batch_size = -1      # Batch size
+                self.openclaw_extension_timings = {}
 
 
 def cond_crossattn(cond):
@@ -211,6 +213,32 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
         )
         return x_out
 
+
+
+
+def _record_pag_timing(pag_params, hook_name, elapsed):
+        timings = pag_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+
+def _merge_pag_timings(p, pag_params):
+        if not pag_params.openclaw_extension_timings:
+                return
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+        ext = timings["extensions"].setdefault("Incantations.PAGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        for hook_name, hook in pag_params.openclaw_extension_timings.items():
+                elapsed = float(hook.get("total_seconds") or 0.0)
+                calls = int(hook.get("calls") or 0)
+                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["calls"] = int(ext.get("calls") or 0) + calls
+                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        pag_params.openclaw_extension_timings = {}
 
 class PAGExtensionScript(UIWrapper):
         def __init__(self):
@@ -327,6 +355,9 @@ class PAGExtensionScript(UIWrapper):
                 if not hasattr(p, 'incant_cfg_params'):
                         logger.error("No incant_cfg_params found in p")
                 p.incant_cfg_params['pag_params'] = pag_params
+
+                # Preserve any setup timing already recorded before state was attached.
+                _record_pag_timing(pag_params, "create_hook_setup", 0.0)
                 
                 pag_params.pag_active = active 
                 pag_params.pag_sanf = pag_sanf 
@@ -376,6 +407,9 @@ class PAGExtensionScript(UIWrapper):
                 self.pag_postprocess_batch(p, *args, **kwargs)
 
         def pag_postprocess_batch(self, p, active, *args, **kwargs):
+                pag_params = getattr(p, "incant_cfg_params", {}).get("pag_params") if getattr(p, "incant_cfg_params", None) else None
+                if pag_params is not None:
+                        _merge_pag_timings(p, pag_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed PAG hooks and callbacks')
@@ -475,6 +509,13 @@ class PAGExtensionScript(UIWrapper):
                 return self.get_middle_block_modules()
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoiser_callback(params, pag_params)
+                finally:
+                        _record_pag_timing(pag_params, "cfg_denoiser_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
                 # mutable state. Removing hooks here disables the extra PAG pass.
                 pag_params.step = params.sampling_step
@@ -529,6 +570,13 @@ class PAGExtensionScript(UIWrapper):
 
 
         def on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoised_callback(params, pag_params)
+                finally:
+                        _record_pag_timing(pag_params, "cfg_denoised_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
                 """ Callback function for the CFGDenoisedParams 
                 Refer to pg.22 A.2 of the PAG paper for how CFG and PAG combine
                 

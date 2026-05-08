@@ -1,4 +1,5 @@
 import logging
+import time
 from os import environ
 import math
 
@@ -44,7 +45,34 @@ class SEGStateParams:
                 self.seg_start_step: int = 0
                 self.seg_end_step: int = 150 
                 self.crossattn_modules = [] # callable lambda
+                self.openclaw_extension_timings = {}
 
+
+
+
+def _record_seg_timing(seg_params, hook_name, elapsed):
+        timings = seg_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+
+def _merge_seg_timings(p, seg_params):
+        if not seg_params.openclaw_extension_timings:
+                return
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+        ext = timings["extensions"].setdefault("Incantations.SEGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        for hook_name, hook in seg_params.openclaw_extension_timings.items():
+                elapsed = float(hook.get("total_seconds") or 0.0)
+                calls = int(hook.get("calls") or 0)
+                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["calls"] = int(ext.get("calls") or 0) + calls
+                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        seg_params.openclaw_extension_timings = {}
 
 class SEGExtensionScript(UIWrapper):
         def __init__(self):
@@ -146,6 +174,9 @@ class SEGExtensionScript(UIWrapper):
                 self.seg_postprocess_batch(p, *args, **kwargs)
 
         def seg_postprocess_batch(self, p, active, seg_blur_sigma, start_step, end_step, *args, **kwargs):
+                seg_params = getattr(p, "incant_cfg_params", {}).get("seg_params") if getattr(p, "incant_cfg_params", None) else None
+                if seg_params is not None:
+                        _merge_seg_timings(p, seg_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed SEG hooks and callbacks')
@@ -257,6 +288,13 @@ class SEGExtensionScript(UIWrapper):
                 return self.get_middle_block_modules()
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoiser_callback(params, seg_params)
+                finally:
+                        _record_seg_timing(seg_params, "cfg_denoiser_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
                 # Keep SEG hooks installed for the batch; per-step work only toggles
                 # the hook flag. Removing hooks here disables SEG entirely.
                 if not seg_params.seg_active:

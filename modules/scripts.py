@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import inspect
+import time
 from collections import namedtuple
 from dataclasses import dataclass
 
@@ -817,11 +818,40 @@ class ScriptRunner:
     def ordered_scripts(self, method_name):
         return [x.callback for x in self.ordered_callbacks(method_name)]
 
+    @staticmethod
+    def _script_timing_name(script):
+        filename = os.path.relpath(script.filename, paths.script_path) if script.filename else None
+        return f"{script.__class__.__name__}:{filename or script.filename or '<unknown>'}"
+
+    @staticmethod
+    def _record_script_timing(p, hook_name, script, elapsed):
+        timings = getattr(p, "openclaw_script_timings", None)
+        if timings is None:
+            timings = p.openclaw_script_timings = {"total_seconds": 0.0, "hooks": {}, "scripts": {}}
+
+        elapsed = float(elapsed)
+        timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+
+        hook = timings["hooks"].setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+        script_key = ScriptRunner._script_timing_name(script)
+        script_stats = timings["scripts"].setdefault(script_key, {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        script_stats["total_seconds"] = round(float(script_stats.get("total_seconds") or 0.0) + elapsed, 6)
+        script_stats["calls"] = int(script_stats.get("calls") or 0) + 1
+        script_stats["hooks"][hook_name] = round(float(script_stats["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+
+
     def before_process(self, p):
         for script in self.ordered_scripts('before_process'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.before_process(p, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.before_process(p, *script_args)
+                finally:
+                    self._record_script_timing(p, 'before_process', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running before_process: {script.filename}", exc_info=True)
 
@@ -829,7 +859,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('process'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.process(p, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.process(p, *script_args)
+                finally:
+                    self._record_script_timing(p, 'process', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running process: {script.filename}", exc_info=True)
 
@@ -837,7 +871,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('process_before_every_sampling'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.process_before_every_sampling(p, *script_args, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.process_before_every_sampling(p, *script_args, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'process_before_every_sampling', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running process_before_every_sampling: {script.filename}", exc_info=True)
 
@@ -845,7 +883,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('before_process_batch'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.before_process_batch(p, *script_args, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.before_process_batch(p, *script_args, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'before_process_batch', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running before_process_batch: {script.filename}", exc_info=True)
 
@@ -853,7 +895,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('after_extra_networks_activate'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.after_extra_networks_activate(p, *script_args, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.after_extra_networks_activate(p, *script_args, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'after_extra_networks_activate', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running after_extra_networks_activate: {script.filename}", exc_info=True)
 
@@ -861,7 +907,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('process_batch'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.process_batch(p, *script_args, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.process_batch(p, *script_args, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'process_batch', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running process_batch: {script.filename}", exc_info=True)
 
@@ -869,7 +919,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess(p, processed, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.postprocess(p, processed, *script_args)
+                finally:
+                    self._record_script_timing(p, 'postprocess', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess: {script.filename}", exc_info=True)
 
@@ -877,7 +931,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess_batch'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess_batch(p, *script_args, images=images, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.postprocess_batch(p, *script_args, images=images, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'postprocess_batch', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess_batch: {script.filename}", exc_info=True)
 
@@ -885,7 +943,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess_batch_list'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess_batch_list(p, pp, *script_args, **kwargs)
+                started = time.perf_counter()
+                try:
+                    script.postprocess_batch_list(p, pp, *script_args, **kwargs)
+                finally:
+                    self._record_script_timing(p, 'postprocess_batch_list', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess_batch_list: {script.filename}", exc_info=True)
 
@@ -893,7 +955,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('post_sample'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.post_sample(p, ps, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.post_sample(p, ps, *script_args)
+                finally:
+                    self._record_script_timing(p, 'post_sample', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running post_sample: {script.filename}", exc_info=True)
 
@@ -901,7 +967,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('on_mask_blend'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.on_mask_blend(p, mba, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.on_mask_blend(p, mba, *script_args)
+                finally:
+                    self._record_script_timing(p, 'on_mask_blend', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running post_sample: {script.filename}", exc_info=True)
 
@@ -909,7 +979,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess_image'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess_image(p, pp, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.postprocess_image(p, pp, *script_args)
+                finally:
+                    self._record_script_timing(p, 'postprocess_image', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess_image: {script.filename}", exc_info=True)
 
@@ -917,7 +991,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess_maskoverlay'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess_maskoverlay(p, ppmo, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.postprocess_maskoverlay(p, ppmo, *script_args)
+                finally:
+                    self._record_script_timing(p, 'postprocess_maskoverlay', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess_image: {script.filename}", exc_info=True)
 
@@ -925,7 +1003,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('postprocess_image_after_composite'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.postprocess_image_after_composite(p, pp, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.postprocess_image_after_composite(p, pp, *script_args)
+                finally:
+                    self._record_script_timing(p, 'postprocess_image_after_composite', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running postprocess_image_after_composite: {script.filename}", exc_info=True)
 
@@ -980,7 +1062,11 @@ class ScriptRunner:
         for script in self.ordered_scripts('before_hr'):
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.before_hr(p, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.before_hr(p, *script_args)
+                finally:
+                    self._record_script_timing(p, 'before_hr', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running before_hr: {script.filename}", exc_info=True)
 
@@ -991,7 +1077,11 @@ class ScriptRunner:
 
             try:
                 script_args = p.script_args[script.args_from:script.args_to]
-                script.setup(p, *script_args)
+                started = time.perf_counter()
+                try:
+                    script.setup(p, *script_args)
+                finally:
+                    self._record_script_timing(p, 'setup', script, time.perf_counter() - started)
             except Exception:
                 errors.report(f"Error running setup: {script.filename}", exc_info=True)
 

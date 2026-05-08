@@ -104,6 +104,8 @@ def processed_js_with_image_paths(processed, extra: dict | None = None):
     data = json.loads(processed.js())
     data["image_paths"] = [getattr(image, "already_saved_as", None) for image in processed.images]
     data["openclaw_cond_cache_stats"] = getattr(processed, "openclaw_cond_cache_stats", None)
+    data["openclaw_script_timings"] = getattr(processed, "openclaw_script_timings", None)
+    data["openclaw_extension_timings"] = getattr(processed, "openclaw_extension_timings", None)
     if extra:
         data.update(extra)
     return json.dumps(data, default=lambda o: None)
