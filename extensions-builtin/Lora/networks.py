@@ -605,10 +605,7 @@ def network_mxfp8_active_config_signature():
     for net in loaded_networks:
         network_on_disk = getattr(net, "network_on_disk", None)
         filename = getattr(network_on_disk, "filename", None)
-        try:
-            mtime = os.path.getmtime(filename) if filename else None
-        except OSError:
-            mtime = None
+        mtime = getattr(net, "mtime", None)
         loras.append((
             net.name,
             net.te_multiplier,
@@ -630,6 +627,7 @@ def network_mxfp8_mark_model_unprepared(model=None):
         "network_mxfp8_active_config_signature",
         "network_mxfp8_prepare_stats",
         "network_mxfp8_prepare_error",
+        "network_mxfp8_active_config_ready",
     ):
         try:
             delattr(model, attr)
@@ -641,8 +639,11 @@ def network_mxfp8_is_model_prepared(model=None):
     model = model or getattr(shared, "sd_model", None)
     if model is None:
         return False
-    signature = getattr(model, "network_mxfp8_active_config_signature", None)
-    return signature is not None and signature == network_mxfp8_active_config_signature()
+    # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
+    # before sampling. Do not recompute the full signature from every managed
+    # Linear.forward(); that can turn into thousands of Python/filesystem
+    # checks per generation.
+    return bool(getattr(model, "network_mxfp8_active_config_ready", False))
 
 
 network_mxfp8_missing = object()
@@ -699,13 +700,16 @@ def prepare_mxfp8_active_config():
         network_mxfp8_mark_model_unprepared(model)
         return True
 
-    managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_mxfp8_base_weight", None) is not None]
-    if not managed_modules:
-        network_mxfp8_mark_model_unprepared(model)
+    signature = network_mxfp8_active_config_signature()
+    if getattr(model, "network_mxfp8_active_config_signature", None) == signature and getattr(model, "network_mxfp8_active_config_ready", False):
         return True
 
-    signature = network_mxfp8_active_config_signature()
-    if getattr(model, "network_mxfp8_active_config_signature", None) == signature:
+    managed_modules = getattr(model, "network_mxfp8_managed_modules", None)
+    if managed_modules is None:
+        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_mxfp8_base_weight", None) is not None]
+        model.network_mxfp8_managed_modules = managed_modules
+    if not managed_modules:
+        network_mxfp8_mark_model_unprepared(model)
         return True
 
     network_mxfp8_mark_model_unprepared(model)
@@ -750,6 +754,7 @@ def prepare_mxfp8_active_config():
 
     if failed == 0:
         model.network_mxfp8_active_config_signature = signature
+        model.network_mxfp8_active_config_ready = True
         try:
             delattr(model, "network_mxfp8_prepare_error")
         except Exception:
@@ -905,10 +910,7 @@ def network_nvfp4_active_config_signature():
     for net in loaded_networks:
         network_on_disk = getattr(net, "network_on_disk", None)
         filename = getattr(network_on_disk, "filename", None)
-        try:
-            mtime = os.path.getmtime(filename) if filename else None
-        except OSError:
-            mtime = None
+        mtime = getattr(net, "mtime", None)
         loras.append((
             net.name,
             net.te_multiplier,
@@ -930,6 +932,7 @@ def network_nvfp4_mark_model_unprepared(model=None):
         "network_nvfp4_active_config_signature",
         "network_nvfp4_prepare_stats",
         "network_nvfp4_prepare_error",
+        "network_nvfp4_active_config_ready",
     ):
         try:
             delattr(model, attr)
@@ -941,8 +944,11 @@ def network_nvfp4_is_model_prepared(model=None):
     model = model or getattr(shared, "sd_model", None)
     if model is None:
         return False
-    signature = getattr(model, "network_nvfp4_active_config_signature", None)
-    return signature is not None and signature == network_nvfp4_active_config_signature()
+    # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
+    # before sampling. Do not recompute the full signature from every managed
+    # Linear.forward(); that can turn into thousands of Python/filesystem
+    # checks per generation.
+    return bool(getattr(model, "network_nvfp4_active_config_ready", False))
 
 
 network_nvfp4_missing = object()
@@ -999,13 +1005,16 @@ def prepare_nvfp4_active_config():
         network_nvfp4_mark_model_unprepared(model)
         return True
 
-    managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_nvfp4_base_weight", None) is not None]
-    if not managed_modules:
-        network_nvfp4_mark_model_unprepared(model)
+    signature = network_nvfp4_active_config_signature()
+    if getattr(model, "network_nvfp4_active_config_signature", None) == signature and getattr(model, "network_nvfp4_active_config_ready", False):
         return True
 
-    signature = network_nvfp4_active_config_signature()
-    if getattr(model, "network_nvfp4_active_config_signature", None) == signature:
+    managed_modules = getattr(model, "network_nvfp4_managed_modules", None)
+    if managed_modules is None:
+        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_nvfp4_base_weight", None) is not None]
+        model.network_nvfp4_managed_modules = managed_modules
+    if not managed_modules:
+        network_nvfp4_mark_model_unprepared(model)
         return True
 
     network_nvfp4_mark_model_unprepared(model)
@@ -1050,6 +1059,7 @@ def prepare_nvfp4_active_config():
 
     if failed == 0:
         model.network_nvfp4_active_config_signature = signature
+        model.network_nvfp4_active_config_ready = True
         try:
             delattr(model, "network_nvfp4_prepare_error")
         except Exception:

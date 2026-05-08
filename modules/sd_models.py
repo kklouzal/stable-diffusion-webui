@@ -481,6 +481,8 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
     policy_skipped_reasons = {}
     incompatible_reasons = {}
     skipped_names = []
+    managed_modules = []
+    managed_ids = set()
     for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
             technical_reason = mxfp8_config.technical_linear_skip_reason(module)
@@ -496,38 +498,44 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
                 incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
                 reason = technical_reason
             else:
-                reason = None
+                reason = mxfp8_linear_skip_reason(module, fqn)
 
             if reason is None:
                 eligible += 1
+                managed_modules.append((fqn, module))
+                managed_ids.add(id(module))
             else:
                 skipped_linear += 1
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
+    mxfp8_filter = lambda module, fqn: id(module) in managed_ids
     cache_loaded = False
     try:
-        for fqn, module in model.named_modules():
-            if mxfp8_linear_filter(module, fqn):
-                module.network_mxfp8_base_weight = module.weight.detach().to(devices.cpu, copy=True)
-                if module.bias is not None:
-                    module.network_mxfp8_base_bias = module.bias.detach().to(devices.cpu, copy=True)
-                else:
-                    module.network_mxfp8_base_bias = None
+        try:
+            delattr(model, "network_mxfp8_managed_modules")
+        except Exception:
+            pass
+        for _fqn, module in managed_modules:
+            module.network_mxfp8_base_weight = module.weight.detach().to(devices.cpu, copy=True)
+            if module.bias is not None:
+                module.network_mxfp8_base_bias = module.bias.detach().to(devices.cpu, copy=True)
+            else:
+                module.network_mxfp8_base_bias = None
 
-        for attr in ("network_mxfp8_active_config_signature", "network_mxfp8_prepare_stats", "network_mxfp8_prepare_error"):
+        for attr in ("network_mxfp8_active_config_signature", "network_mxfp8_prepare_stats", "network_mxfp8_prepare_error", "network_mxfp8_active_config_ready"):
             try:
                 delattr(model, attr)
             except Exception:
                 pass
 
         selected_coverage = sorted(mxfp8_selected_linear_coverage())
-        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_linear_filter, shared.device, selected_coverage)
+        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_filter, shared.device, selected_coverage)
         if not cache_loaded:
             from torchao.quantization import quantize_
             config = mxfp8_config.get_mxfp8_config()
             mxfp8_config.validate_kernel_preference(config)
-            quantize_(model, config, filter_fn=mxfp8_linear_filter, device=devices.device)
-            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_linear_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
+            quantize_(model, config, filter_fn=mxfp8_filter, device=devices.device)
+            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
         model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
@@ -611,6 +619,8 @@ def apply_nvfp4_weight_quantization(model, timer, source_path=None):
     policy_skipped_reasons = {}
     incompatible_reasons = {}
     skipped_names = []
+    managed_modules = []
+    managed_ids = set()
     for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
             technical_reason = nvfp4_config.technical_linear_skip_reason(module)
@@ -626,38 +636,44 @@ def apply_nvfp4_weight_quantization(model, timer, source_path=None):
                 incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
                 reason = technical_reason
             else:
-                reason = None
+                reason = nvfp4_linear_skip_reason(module, fqn)
 
             if reason is None:
                 eligible += 1
+                managed_modules.append((fqn, module))
+                managed_ids.add(id(module))
             else:
                 skipped_linear += 1
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
+    nvfp4_filter = lambda module, fqn: id(module) in managed_ids
     cache_loaded = False
     try:
-        for fqn, module in model.named_modules():
-            if nvfp4_linear_filter(module, fqn):
-                module.network_nvfp4_base_weight = module.weight.detach().to(devices.cpu, copy=True)
-                if module.bias is not None:
-                    module.network_nvfp4_base_bias = module.bias.detach().to(devices.cpu, copy=True)
-                else:
-                    module.network_nvfp4_base_bias = None
+        try:
+            delattr(model, "network_nvfp4_managed_modules")
+        except Exception:
+            pass
+        for _fqn, module in managed_modules:
+            module.network_nvfp4_base_weight = module.weight.detach().to(devices.cpu, copy=True)
+            if module.bias is not None:
+                module.network_nvfp4_base_bias = module.bias.detach().to(devices.cpu, copy=True)
+            else:
+                module.network_nvfp4_base_bias = None
 
-        for attr in ("network_nvfp4_active_config_signature", "network_nvfp4_prepare_stats", "network_nvfp4_prepare_error"):
+        for attr in ("network_nvfp4_active_config_signature", "network_nvfp4_prepare_stats", "network_nvfp4_prepare_error", "network_nvfp4_active_config_ready"):
             try:
                 delattr(model, attr)
             except Exception:
                 pass
 
         selected_coverage = sorted(nvfp4_selected_linear_coverage())
-        cache_loaded = nvfp4_model_cache.load_into_model(model, source_path, nvfp4_linear_filter, shared.device, selected_coverage)
+        cache_loaded = nvfp4_model_cache.load_into_model(model, source_path, nvfp4_filter, shared.device, selected_coverage)
         if not cache_loaded:
             from torchao.quantization import quantize_
             config = nvfp4_config.get_nvfp4_config()
             nvfp4_config.validate_config(config)
-            quantize_(model, config, filter_fn=nvfp4_linear_filter, device=devices.device)
-            nvfp4_model_cache.save_from_model(model, source_path, nvfp4_linear_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
+            quantize_(model, config, filter_fn=nvfp4_filter, device=devices.device)
+            nvfp4_model_cache.save_from_model(model, source_path, nvfp4_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
         model.nvfp4_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": nvfp4_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
         model.first_stage_model = first_stage
