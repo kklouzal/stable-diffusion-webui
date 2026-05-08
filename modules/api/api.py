@@ -1,4 +1,5 @@
 import base64
+import json
 import io
 import os
 import time
@@ -97,6 +98,12 @@ def decode_base64_to_image(encoding):
         return image
     except Exception as e:
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
+
+
+def processed_js_with_image_paths(processed):
+    data = json.loads(processed.js())
+    data["image_paths"] = [getattr(image, "already_saved_as", None) for image in processed.images]
+    return json.dumps(data, default=lambda o: None)
 
 
 def encode_pil_to_base64(image):
@@ -505,7 +512,7 @@ class Api:
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
-        return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed.js())
+        return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed_js_with_image_paths(processed))
 
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
         task_id = img2imgreq.force_task_id or create_task_id("img2img")
@@ -588,7 +595,7 @@ class Api:
             img2imgreq.init_images = None
             img2imgreq.mask = None
 
-        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed.js())
+        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(processed))
 
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)
