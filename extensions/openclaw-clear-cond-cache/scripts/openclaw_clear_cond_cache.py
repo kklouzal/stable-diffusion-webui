@@ -210,8 +210,20 @@ def _install_backend_status_hooks() -> None:
             def wrapped(model, vae_file=None, vae_source="from unknown source"):
                 detail = os.path.basename(str(vae_file)) if vae_file else str(vae_source)
                 token = _push_backend_activity("vae_load", "Loading VAE", detail=detail)
+                restore_compile = False
                 try:
-                    return original(model, vae_file=vae_file, vae_source=vae_source)
+                    first_stage = getattr(model, "first_stage_model", None)
+                    unwrapped = _unwrap_compiled_module(first_stage)
+                    if first_stage is not None and first_stage is not unwrapped:
+                        model.first_stage_model = unwrapped
+                        if getattr(sd_models.model_data, "sd_model", None) is model:
+                            _compile_slots.pop("vae", None)
+                            _compile_status["vae"] = False
+                            restore_compile = bool(_compile_desired.get("vae"))
+                    result = original(model, vae_file=vae_file, vae_source=vae_source)
+                    if restore_compile:
+                        apply_torch_compile_settings(vae=True)
+                    return result
                 finally:
                     _pop_backend_activity(token)
             return wrapped
