@@ -80,6 +80,7 @@ class SEGExtensionScript(UIWrapper):
                 self.infotext_fields = []
                 self._cfg_denoiser_callback = None
                 self._seg_hook_handles = []
+                self._seg_hooked_modules = []
 
         # Extension title in menu UI
         def title(self) -> str:
@@ -190,20 +191,26 @@ class SEGExtensionScript(UIWrapper):
                         self._cfg_denoiser_callback = None
 
         def remove_all_hooks(self):
+                if not self._seg_hook_handles and not self._seg_hooked_modules:
+                        return
                 for handle in self._seg_hook_handles:
                         handle.remove()
                 self._seg_hook_handles = []
 
-                self_attn_modules = self.get_cross_attn_modules()
-                for module in self_attn_modules:
+                for module in self._seg_hooked_modules:
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
+                self._seg_hooked_modules = []
 
         def unhook_callbacks(self, seg_params: SEGStateParams = None):
                 self.remove_all_hooks()
                 self.remove_callbacks()
 
         def ready_hijack_forward(self, selfattn_modules, seg_blur_sigma, seg_blur_threshold, height, width):
+                self._seg_hooked_modules = list(selfattn_modules)
+                is_inf_blur = seg_blur_sigma > seg_blur_threshold
+                blur_sigma_exp = 2 ** seg_blur_sigma
+                geometry_cache = {}
                 for module in selfattn_modules:
                         module_hooks.modules_add_field(module.to_q, 'seg_enable', False)
                         module_hooks.modules_add_field(module.to_q, 'seg_parent_module', [module])
@@ -217,19 +224,21 @@ class SEGExtensionScript(UIWrapper):
                         h = module.seg_parent_module[0].heads
                         head_dim = inner_dim // h
 
-                        module_attn_size = seq_len
-                        downscale_h = max(1, int((module_attn_size * (height / width)) ** 0.5))
-                        while downscale_h > 1 and module_attn_size % downscale_h != 0:
-                                downscale_h -= 1
-                        downscale_w = module_attn_size // downscale_h
-                        if downscale_h * downscale_w != module_attn_size:
-                                logger.warning("SEG could not derive exact attention shape for seq_len=%s, image=%sx%s; skipping blur", seq_len, height, width)
-                                return
-
-                        # actual sigma value is calculated as 2 ^ sigma
-                        is_inf_blur = seg_blur_sigma > seg_blur_threshold
-                        blur_sigma_exp = 2 ** seg_blur_sigma
-                        kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
+                        cache_key = (seq_len, height, width)
+                        geometry = geometry_cache.get(cache_key)
+                        if geometry is None:
+                                module_attn_size = seq_len
+                                downscale_h = max(1, int((module_attn_size * (height / width)) ** 0.5))
+                                while downscale_h > 1 and module_attn_size % downscale_h != 0:
+                                        downscale_h -= 1
+                                downscale_w = module_attn_size // downscale_h
+                                if downscale_h * downscale_w != module_attn_size:
+                                        logger.warning("SEG could not derive exact attention shape for seq_len=%s, image=%sx%s; skipping blur", seq_len, height, width)
+                                        return
+                                kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
+                                geometry = (downscale_h, downscale_w, kernel_size)
+                                geometry_cache[cache_key] = geometry
+                        downscale_h, downscale_w, kernel_size = geometry
 
                         # SEG mutates only the conditional half of A1111's paired
                         # CFG attention batch. A1111 does not guarantee cond+uncond
