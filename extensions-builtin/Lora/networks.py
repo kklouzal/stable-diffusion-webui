@@ -18,7 +18,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -605,10 +605,7 @@ def network_mxfp8_active_config_signature():
     for net in loaded_networks:
         network_on_disk = getattr(net, "network_on_disk", None)
         filename = getattr(network_on_disk, "filename", None)
-        try:
-            mtime = os.path.getmtime(filename) if filename else None
-        except OSError:
-            mtime = None
+        mtime = getattr(net, "mtime", None)
         loras.append((
             net.name,
             net.te_multiplier,
@@ -630,6 +627,7 @@ def network_mxfp8_mark_model_unprepared(model=None):
         "network_mxfp8_active_config_signature",
         "network_mxfp8_prepare_stats",
         "network_mxfp8_prepare_error",
+        "network_mxfp8_active_config_ready",
     ):
         try:
             delattr(model, attr)
@@ -641,8 +639,11 @@ def network_mxfp8_is_model_prepared(model=None):
     model = model or getattr(shared, "sd_model", None)
     if model is None:
         return False
-    signature = getattr(model, "network_mxfp8_active_config_signature", None)
-    return signature is not None and signature == network_mxfp8_active_config_signature()
+    # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
+    # before sampling. Do not recompute the full signature from every managed
+    # Linear.forward(); that can turn into thousands of Python/filesystem
+    # checks per generation.
+    return bool(getattr(model, "network_mxfp8_active_config_ready", False))
 
 
 network_mxfp8_missing = object()
@@ -699,13 +700,16 @@ def prepare_mxfp8_active_config():
         network_mxfp8_mark_model_unprepared(model)
         return True
 
-    managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_mxfp8_base_weight", None) is not None]
-    if not managed_modules:
-        network_mxfp8_mark_model_unprepared(model)
+    signature = network_mxfp8_active_config_signature()
+    if getattr(model, "network_mxfp8_active_config_signature", None) == signature and getattr(model, "network_mxfp8_active_config_ready", False):
         return True
 
-    signature = network_mxfp8_active_config_signature()
-    if getattr(model, "network_mxfp8_active_config_signature", None) == signature:
+    managed_modules = getattr(model, "network_mxfp8_managed_modules", None)
+    if managed_modules is None:
+        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_mxfp8_base_weight", None) is not None]
+        model.network_mxfp8_managed_modules = managed_modules
+    if not managed_modules:
+        network_mxfp8_mark_model_unprepared(model)
         return True
 
     network_mxfp8_mark_model_unprepared(model)
@@ -750,6 +754,7 @@ def prepare_mxfp8_active_config():
 
     if failed == 0:
         model.network_mxfp8_active_config_signature = signature
+        model.network_mxfp8_active_config_ready = True
         try:
             delattr(model, "network_mxfp8_prepare_error")
         except Exception:
@@ -874,6 +879,311 @@ def network_apply_mxfp8_merged_lora(self, quantize_config=None, quantize_fn=None
             extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
         return False
 
+
+def is_nvfp4_weight(weight):
+    return type(weight).__name__ == "NVFP4Tensor" and type(weight).__module__.startswith("torchao.")
+
+
+def network_nvfp4_wanted_names():
+    return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+
+
+def network_nvfp4_active_config_signature():
+    """Return the currently active in-memory NVFP4+LoRA weight signature.
+
+    This intentionally describes only the one active configuration, not a disk
+    cache key for every possible LoRA permutation. If any field that changes
+    effective weights changes, eager preparation invalidates and rebuilds the
+    model's in-memory prepared state.
+    """
+
+    checkpoint_info = getattr(shared.sd_model, "sd_checkpoint_info", None)
+    checkpoint_key = (
+        getattr(checkpoint_info, "filename", None),
+        getattr(checkpoint_info, "hash", None),
+        getattr(checkpoint_info, "sha256", None),
+    )
+    coverage = tuple(sorted(getattr(shared.opts, "nvfp4_linear_coverage", ()) or ()))
+    config_name = nvfp4_config.CONFIG_NAME
+
+    loras = []
+    for net in loaded_networks:
+        network_on_disk = getattr(net, "network_on_disk", None)
+        filename = getattr(network_on_disk, "filename", None)
+        mtime = getattr(net, "mtime", None)
+        loras.append((
+            net.name,
+            net.te_multiplier,
+            net.unet_multiplier,
+            net.dyn_dim,
+            filename,
+            getattr(network_on_disk, "shorthash", None),
+            mtime,
+        ))
+
+    return (checkpoint_key, coverage, config_name, tuple(loras))
+
+
+def network_nvfp4_mark_model_unprepared(model=None):
+    model = model or getattr(shared, "sd_model", None)
+    if model is None:
+        return
+    for attr in (
+        "network_nvfp4_active_config_signature",
+        "network_nvfp4_prepare_stats",
+        "network_nvfp4_prepare_error",
+        "network_nvfp4_active_config_ready",
+    ):
+        try:
+            delattr(model, attr)
+        except Exception:
+            pass
+
+
+def network_nvfp4_is_model_prepared(model=None):
+    model = model or getattr(shared, "sd_model", None)
+    if model is None:
+        return False
+    # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
+    # before sampling. Do not recompute the full signature from every managed
+    # Linear.forward(); that can turn into thousands of Python/filesystem
+    # checks per generation.
+    return bool(getattr(model, "network_nvfp4_active_config_ready", False))
+
+
+network_nvfp4_missing = object()
+
+
+def network_nvfp4_snapshot_state(module):
+    return (
+        module,
+        module._parameters.get("weight"),
+        module._parameters.get("bias"),
+        getattr(module, "network_current_names", network_nvfp4_missing),
+        getattr(module, "network_nvfp4_merged_lora_applied", network_nvfp4_missing),
+    )
+
+
+def network_nvfp4_restore_attr(module, attr, value):
+    if value is network_nvfp4_missing:
+        try:
+            delattr(module, attr)
+        except Exception:
+            pass
+    else:
+        setattr(module, attr, value)
+
+
+def network_nvfp4_restore_state(snapshot):
+    module, weight, bias, current_names, merged_lora = snapshot
+    if weight is not None:
+        module._parameters["weight"] = weight
+    if bias is not None:
+        module._parameters["bias"] = bias
+    elif "bias" in module._parameters:
+        module._parameters["bias"] = None
+    network_nvfp4_restore_attr(module, "network_current_names", current_names)
+    network_nvfp4_restore_attr(module, "network_nvfp4_merged_lora_applied", merged_lora)
+
+
+def prepare_nvfp4_active_config():
+    """Prepare the one active in-memory NVFP4+LoRA weight configuration.
+
+    This is deliberately a model-level transaction. The hot Linear.forward()
+    path must not merge LoRAs, scan active LoRAs, or quantize weights during
+    sampling. For the current checkpoint + coverage + active LoRA signature,
+    this rebuilds managed Linear layers from immutable BF16 master weights,
+    applies active LoRA deltas once, quantizes the final effective weights to
+    NVFP4 once, and marks the model prepared.
+    """
+
+    model = getattr(shared, "sd_model", None)
+    if model is None:
+        return False
+
+    if not getattr(devices, "nvfp4", False):
+        network_nvfp4_mark_model_unprepared(model)
+        return True
+
+    signature = network_nvfp4_active_config_signature()
+    if getattr(model, "network_nvfp4_active_config_signature", None) == signature and getattr(model, "network_nvfp4_active_config_ready", False):
+        return True
+
+    managed_modules = getattr(model, "network_nvfp4_managed_modules", None)
+    if managed_modules is None:
+        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_nvfp4_base_weight", None) is not None]
+        model.network_nvfp4_managed_modules = managed_modules
+    if not managed_modules:
+        network_nvfp4_mark_model_unprepared(model)
+        return True
+
+    network_nvfp4_mark_model_unprepared(model)
+
+    wanted_names = network_nvfp4_wanted_names()
+    from torchao.quantization import quantize_
+    quantize_config = nvfp4_config.get_nvfp4_config()
+    nvfp4_config.validate_config(quantize_config)
+    quantize_fn = quantize_
+
+    prepared = 0
+    quantized = 0
+    untouched = 0
+    failed = 0
+    failures = []
+    snapshots = []
+
+    for fqn, module in managed_modules:
+        snapshots.append(network_nvfp4_snapshot_state(module))
+        if network_apply_nvfp4_merged_lora(module, quantize_config=quantize_config, quantize_fn=quantize_fn):
+            prepared += 1
+            if is_nvfp4_weight(getattr(module, "weight", None)):
+                quantized += 1
+            else:
+                untouched += 1
+            module.network_current_names = wanted_names
+        else:
+            failed += 1
+            failures.append(getattr(module, "network_layer_name", fqn))
+
+    stats = {
+        "signature": signature,
+        "prepared_linear": prepared,
+        "quantized_linear": quantized,
+        "untouched_linear": untouched,
+        "failed_linear": failed,
+        "failed_layers": failures[:50],
+        "active_lora_count": len(loaded_networks),
+        "nvfp4_linear_coverage": sorted(getattr(shared.opts, "nvfp4_linear_coverage", ()) or ()),
+    }
+    model.network_nvfp4_prepare_stats = stats
+
+    if failed == 0:
+        model.network_nvfp4_active_config_signature = signature
+        model.network_nvfp4_active_config_ready = True
+        try:
+            delattr(model, "network_nvfp4_prepare_error")
+        except Exception:
+            pass
+        if prepared:
+            print(
+                "Prepared active NVFP4 LoRA config: "
+                f"prepared {prepared} Linear, quantized {quantized}, "
+                f"untouched {untouched}, "
+                f"LoRAs {len(loaded_networks)}",
+                flush=True,
+            )
+        return True
+
+    for snapshot in reversed(snapshots):
+        network_nvfp4_restore_state(snapshot)
+
+    message = f"failed to prepare active NVFP4 LoRA config for {failed} Linear modules: {failures[:10]}"
+    model.network_nvfp4_prepare_error = message
+    logging.warning(message)
+    return False
+
+
+def network_nvfp4_lora_ops_for_layer(self, network_layer_name):
+    """Return LoRA operations for an NVFP4-managed Linear.
+
+    This mirrors A1111's normal direct-module and SD3 QkvLinear split q/k/v
+    handling closely enough that NVFP4-managed layers do not silently mark a
+    LoRA set current while skipping a supported split projection mutation.
+    """
+    ops = []
+    unsupported = []
+    for net in loaded_networks:
+        module = net.modules.get(network_layer_name, None)
+        if module is not None:
+            ops.append(("direct", net, module))
+            continue
+
+        module_q = net.modules.get(network_layer_name + "_q_proj", None)
+        module_k = net.modules.get(network_layer_name + "_k_proj", None)
+        module_v = net.modules.get(network_layer_name + "_v_proj", None)
+        module_out = net.modules.get(network_layer_name + "_out_proj", None)
+
+        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v and module_out is None:
+            ops.append(("qkv", net, (module_q, module_k, module_v)))
+            continue
+
+        if module_q or module_k or module_v or module_out:
+            unsupported.append((net, tuple(name for name, value in (("q_proj", module_q), ("k_proj", module_k), ("v_proj", module_v), ("out_proj", module_out)) if value is not None)))
+
+    return ops, unsupported
+
+
+def network_apply_nvfp4_merged_lora(self, quantize_config=None, quantize_fn=None):
+    network_layer_name = getattr(self, 'network_layer_name', None)
+    base_weight = getattr(self, 'network_nvfp4_base_weight', None)
+    if network_layer_name is None or base_weight is None:
+        return False
+
+    wanted_names = network_nvfp4_wanted_names()
+    ops_for_layer, unsupported_ops = network_nvfp4_lora_ops_for_layer(self, network_layer_name)
+
+    original_snapshot = network_nvfp4_snapshot_state(self)
+
+    try:
+        if unsupported_ops:
+            details = ", ".join(f"{net.name}:{'/'.join(parts)}" for net, parts in unsupported_ops)
+            raise RuntimeError(f"unsupported NVFP4 LoRA split projection target(s): {details}")
+
+        with torch.no_grad():
+            weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
+            base_bias = getattr(self, 'network_nvfp4_base_bias', None)
+            bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
+
+            for op_kind, net, payload in ops_for_layer:
+                if op_kind == "direct":
+                    module = payload
+                    updown, ex_bias = module.calc_updown(weight)
+                    if len(weight.shape) == 4 and weight.shape[1] == 9:
+                        updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                    weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
+                    if ex_bias is not None:
+                        bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
+                    continue
+
+                if op_kind == "qkv":
+                    module_q, module_k, module_v = payload
+                    qw, kw, vw = weight.chunk(3, 0)
+                    updown_q, _ = module_q.calc_updown(qw)
+                    updown_k, _ = module_k.calc_updown(kw)
+                    updown_v, _ = module_v.calc_updown(vw)
+                    del qw, kw, vw
+                    updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
+                    weight = (weight.to(dtype=updown_qkv.dtype) + updown_qkv).to(dtype=torch.bfloat16)
+                    continue
+
+                raise RuntimeError(f"unsupported NVFP4 LoRA operation kind: {op_kind}")
+
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
+            if bias is not None:
+                self.bias = torch.nn.Parameter(bias, requires_grad=False)
+            elif self.bias is not None:
+                self.bias = None
+
+            if quantize_config is None or quantize_fn is None:
+                from torchao.quantization import quantize_
+                quantize_config = nvfp4_config.get_nvfp4_config()
+                nvfp4_config.validate_config(quantize_config)
+                quantize_fn = quantize_
+            quantize_fn(self, quantize_config, filter_fn=lambda module, fqn: module is self, device=devices.device)
+            self.network_current_names = wanted_names
+            self.network_nvfp4_merged_lora_applied = bool(ops_for_layer)
+            return True
+    except Exception as e:
+        # Restore the pre-call NVFP4/base state before reporting preparation
+        # failure so callers never see partially merged effective weights.
+        network_nvfp4_restore_state(original_snapshot)
+        logging.debug(f"Network {network_layer_name}: NVFP4 merged LoRA failed: {e}", exc_info=True)
+        for op_kind, net, _payload in ops_for_layer:
+            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        for net, _parts in unsupported_ops:
+            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        return False
+
 def network_Linear_forward(self, input):
     if getattr(self, 'network_mxfp8_base_weight', None) is not None:
         # MXFP8-managed LoRA weights must be prepared once per active config,
@@ -885,6 +1195,17 @@ def network_Linear_forward(self, input):
         if not network_mxfp8_is_model_prepared(model):
             if not prepare_mxfp8_active_config():
                 message = getattr(model, "network_mxfp8_prepare_error", "MXFP8 LoRA active config is not prepared")
+                raise RuntimeError(message)
+        return originals.Linear_forward(self, input)
+
+    if getattr(self, 'network_nvfp4_base_weight', None) is not None:
+        # NVFP4 mirrors the MXFP8 active-config transaction: merge active LoRA
+        # deltas into BF16 master weights once, quantize once, and keep the
+        # sampling hot path free of per-step LoRA merging/quantization.
+        model = getattr(shared, "sd_model", None)
+        if not network_nvfp4_is_model_prepared(model):
+            if not prepare_nvfp4_active_config():
+                message = getattr(model, "network_nvfp4_prepare_error", "NVFP4 LoRA active config is not prepared")
                 raise RuntimeError(message)
         return originals.Linear_forward(self, input)
 
@@ -963,6 +1284,7 @@ def process_network_files(names: list[str] | None = None):
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates = [x for x in candidates if not sd_models.mxfp8_model_cache.is_mxfp8_cache_path(x)]
+    candidates = [x for x in candidates if not sd_models.nvfp4_model_cache.is_nvfp4_cache_path(x)]
     for filename in candidates:
         if os.path.isdir(filename):
             continue

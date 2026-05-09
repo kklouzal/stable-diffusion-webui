@@ -210,8 +210,20 @@ def _install_backend_status_hooks() -> None:
             def wrapped(model, vae_file=None, vae_source="from unknown source"):
                 detail = os.path.basename(str(vae_file)) if vae_file else str(vae_source)
                 token = _push_backend_activity("vae_load", "Loading VAE", detail=detail)
+                restore_compile = False
                 try:
-                    return original(model, vae_file=vae_file, vae_source=vae_source)
+                    first_stage = getattr(model, "first_stage_model", None)
+                    unwrapped = _unwrap_compiled_module(first_stage)
+                    if first_stage is not None and first_stage is not unwrapped:
+                        model.first_stage_model = unwrapped
+                        if getattr(sd_models.model_data, "sd_model", None) is model:
+                            _compile_slots.pop("vae", None)
+                            _compile_status["vae"] = False
+                            restore_compile = bool(_compile_desired.get("vae"))
+                    result = original(model, vae_file=vae_file, vae_source=vae_source)
+                    if restore_compile:
+                        apply_torch_compile_settings(vae=True)
+                    return result
                 finally:
                     _pop_backend_activity(token)
             return wrapped
@@ -248,6 +260,24 @@ def _install_backend_status_hooks() -> None:
                     _pop_backend_activity(token)
             return wrapped
 
+        def _wrap_mxfp8_quantization(original):
+            def wrapped(model, timer, source_path=None):
+                token = _push_backend_activity("quantize_base", "Preparing MXFP8 base weights", detail=os.path.basename(str(source_path)) if source_path else None)
+                try:
+                    return original(model, timer, source_path=source_path)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
+        def _wrap_nvfp4_quantization(original):
+            def wrapped(model, timer, source_path=None):
+                token = _push_backend_activity("quantize_base", "Preparing NVFP4 base weights", detail=os.path.basename(str(source_path)) if source_path else None)
+                try:
+                    return original(model, timer, source_path=source_path)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+
         _wrap_backend_function(_sd_models, "reload_model_weights", _wrap_reload_model_weights)
         _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
         _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
@@ -255,6 +285,8 @@ def _install_backend_status_hooks() -> None:
         _wrap_backend_function(_sd_models, "instantiate_from_config", _wrap_instantiate_from_config)
         _wrap_backend_function(_sd_models, "send_model_to_device", _wrap_send_model_to_device)
         _wrap_backend_function(_sd_models, "get_empty_cond", _wrap_get_empty_cond)
+        _wrap_backend_function(_sd_models, "apply_mxfp8_weight_quantization", _wrap_mxfp8_quantization)
+        _wrap_backend_function(_sd_models, "apply_nvfp4_weight_quantization", _wrap_nvfp4_quantization)
         _wrap_backend_function(_sd_vae, "load_vae", _wrap_load_vae)
 
     if _backend_lora_hooks_installed:
@@ -293,8 +325,22 @@ def _install_backend_status_hooks() -> None:
                 _pop_backend_activity(token)
         return wrapped
 
+    def _wrap_prepare_quant_lora(label: str, phase: str):
+        def factory(original):
+            def wrapped(*args, **kwargs):
+                lora_count = len(getattr(_lora_networks, "loaded_networks", []) or [])
+                token = _push_backend_activity(phase, label, detail=f"{lora_count} active LoRA{'s' if lora_count != 1 else ''}")
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    _pop_backend_activity(token)
+            return wrapped
+        return factory
+
     _wrap_backend_function(_lora_networks, "load_networks", _wrap_load_networks)
     _wrap_backend_function(_lora_networks, "load_network", _wrap_load_network)
+    _wrap_backend_function(_lora_networks, "prepare_mxfp8_active_config", _wrap_prepare_quant_lora("Preparing MXFP8 LoRA weights", "quant_lora_prepare"))
+    _wrap_backend_function(_lora_networks, "prepare_nvfp4_active_config", _wrap_prepare_quant_lora("Preparing NVFP4 LoRA weights", "quant_lora_prepare"))
     _backend_lora_hooks_installed = True
 
 

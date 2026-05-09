@@ -1,4 +1,5 @@
 import logging
+import time
 from os import environ
 import math
 
@@ -44,7 +45,34 @@ class SEGStateParams:
                 self.seg_start_step: int = 0
                 self.seg_end_step: int = 150 
                 self.crossattn_modules = [] # callable lambda
+                self.openclaw_extension_timings = {}
 
+
+
+
+def _record_seg_timing(seg_params, hook_name, elapsed):
+        timings = seg_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+
+def _merge_seg_timings(p, seg_params):
+        if not seg_params.openclaw_extension_timings:
+                return
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+        ext = timings["extensions"].setdefault("Incantations.SEGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        for hook_name, hook in seg_params.openclaw_extension_timings.items():
+                elapsed = float(hook.get("total_seconds") or 0.0)
+                calls = int(hook.get("calls") or 0)
+                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["calls"] = int(ext.get("calls") or 0) + calls
+                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        seg_params.openclaw_extension_timings = {}
 
 class SEGExtensionScript(UIWrapper):
         def __init__(self):
@@ -52,6 +80,7 @@ class SEGExtensionScript(UIWrapper):
                 self.infotext_fields = []
                 self._cfg_denoiser_callback = None
                 self._seg_hook_handles = []
+                self._seg_hooked_modules = []
 
         # Extension title in menu UI
         def title(self) -> str:
@@ -146,6 +175,9 @@ class SEGExtensionScript(UIWrapper):
                 self.seg_postprocess_batch(p, *args, **kwargs)
 
         def seg_postprocess_batch(self, p, active, seg_blur_sigma, start_step, end_step, *args, **kwargs):
+                seg_params = getattr(p, "incant_cfg_params", {}).get("seg_params") if getattr(p, "incant_cfg_params", None) else None
+                if seg_params is not None:
+                        _merge_seg_timings(p, seg_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed SEG hooks and callbacks')
@@ -159,20 +191,26 @@ class SEGExtensionScript(UIWrapper):
                         self._cfg_denoiser_callback = None
 
         def remove_all_hooks(self):
+                if not self._seg_hook_handles and not self._seg_hooked_modules:
+                        return
                 for handle in self._seg_hook_handles:
                         handle.remove()
                 self._seg_hook_handles = []
 
-                self_attn_modules = self.get_cross_attn_modules()
-                for module in self_attn_modules:
+                for module in self._seg_hooked_modules:
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
+                self._seg_hooked_modules = []
 
         def unhook_callbacks(self, seg_params: SEGStateParams = None):
                 self.remove_all_hooks()
                 self.remove_callbacks()
 
         def ready_hijack_forward(self, selfattn_modules, seg_blur_sigma, seg_blur_threshold, height, width):
+                self._seg_hooked_modules = list(selfattn_modules)
+                is_inf_blur = seg_blur_sigma > seg_blur_threshold
+                blur_sigma_exp = 2 ** seg_blur_sigma
+                geometry_cache = {}
                 for module in selfattn_modules:
                         module_hooks.modules_add_field(module.to_q, 'seg_enable', False)
                         module_hooks.modules_add_field(module.to_q, 'seg_parent_module', [module])
@@ -186,19 +224,21 @@ class SEGExtensionScript(UIWrapper):
                         h = module.seg_parent_module[0].heads
                         head_dim = inner_dim // h
 
-                        module_attn_size = seq_len
-                        downscale_h = max(1, int((module_attn_size * (height / width)) ** 0.5))
-                        while downscale_h > 1 and module_attn_size % downscale_h != 0:
-                                downscale_h -= 1
-                        downscale_w = module_attn_size // downscale_h
-                        if downscale_h * downscale_w != module_attn_size:
-                                logger.warning("SEG could not derive exact attention shape for seq_len=%s, image=%sx%s; skipping blur", seq_len, height, width)
-                                return
-
-                        # actual sigma value is calculated as 2 ^ sigma
-                        is_inf_blur = seg_blur_sigma > seg_blur_threshold
-                        blur_sigma_exp = 2 ** seg_blur_sigma
-                        kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
+                        cache_key = (seq_len, height, width)
+                        geometry = geometry_cache.get(cache_key)
+                        if geometry is None:
+                                module_attn_size = seq_len
+                                downscale_h = max(1, int((module_attn_size * (height / width)) ** 0.5))
+                                while downscale_h > 1 and module_attn_size % downscale_h != 0:
+                                        downscale_h -= 1
+                                downscale_w = module_attn_size // downscale_h
+                                if downscale_h * downscale_w != module_attn_size:
+                                        logger.warning("SEG could not derive exact attention shape for seq_len=%s, image=%sx%s; skipping blur", seq_len, height, width)
+                                        return
+                                kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
+                                geometry = (downscale_h, downscale_w, kernel_size)
+                                geometry_cache[cache_key] = geometry
+                        downscale_h, downscale_w, kernel_size = geometry
 
                         # SEG mutates only the conditional half of A1111's paired
                         # CFG attention batch. A1111 does not guarantee cond+uncond
@@ -257,6 +297,13 @@ class SEGExtensionScript(UIWrapper):
                 return self.get_middle_block_modules()
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoiser_callback(params, seg_params)
+                finally:
+                        _record_seg_timing(seg_params, "cfg_denoiser_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
                 # Keep SEG hooks installed for the batch; per-step work only toggles
                 # the hook flag. Removing hooks here disables SEG entirely.
                 if not seg_params.seg_active:

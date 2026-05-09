@@ -1,4 +1,5 @@
 import base64
+import json
 import io
 import os
 import time
@@ -97,6 +98,17 @@ def decode_base64_to_image(encoding):
         return image
     except Exception as e:
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
+
+
+def processed_js_with_image_paths(processed, extra: dict | None = None):
+    data = json.loads(processed.js())
+    data["image_paths"] = [getattr(image, "already_saved_as", None) for image in processed.images]
+    data["openclaw_cond_cache_stats"] = getattr(processed, "openclaw_cond_cache_stats", None)
+    data["openclaw_script_timings"] = getattr(processed, "openclaw_script_timings", None)
+    data["openclaw_extension_timings"] = getattr(processed, "openclaw_extension_timings", None)
+    if extra:
+        data.update(extra)
+    return json.dumps(data, default=lambda o: None)
 
 
 def encode_pil_to_base64(image):
@@ -505,7 +517,7 @@ class Api:
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
-        return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed.js())
+        return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed_js_with_image_paths(processed))
 
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
         task_id = img2imgreq.force_task_id or create_task_id("img2img")
@@ -550,7 +562,9 @@ class Api:
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
 
+        api_timing_start = time.perf_counter()
         decoded_init_images = [decode_base64_to_image(x) for x in init_images]
+        api_after_decode = time.perf_counter()
 
         add_task_to_queue(task_id)
         task_finished = False
@@ -582,13 +596,23 @@ class Api:
             if not task_finished:
                 pending_tasks.pop(task_id, None)
 
+        api_after_process = time.perf_counter()
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
+        api_after_encode = time.perf_counter()
+        openclaw_api_timings = {
+            "openclaw_api_decode_init_seconds": round(api_after_decode - api_timing_start, 3),
+            "openclaw_api_process_seconds": round(api_after_process - api_after_decode, 3),
+            "openclaw_api_encode_response_seconds": round(api_after_encode - api_after_process, 3),
+            "openclaw_api_total_seconds": round(api_after_encode - api_timing_start, 3),
+            "openclaw_api_send_images": send_images,
+            "openclaw_api_save_images": img2imgreq.save_images,
+        }
 
         if not img2imgreq.include_init_images:
             img2imgreq.init_images = None
             img2imgreq.mask = None
 
-        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed.js())
+        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
 
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)

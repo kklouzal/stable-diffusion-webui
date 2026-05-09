@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -478,14 +479,22 @@ class StableDiffusionProcessing:
 
         cached_params = self.cached_params(required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
 
+        stats = getattr(self, "openclaw_cond_cache_stats", None)
+        if stats is None:
+            stats = self.openclaw_cond_cache_stats = {"hits": 0, "misses": 0, "compute_seconds": 0.0}
+
         for cache in caches:
             if cache[0] is not None and cached_params == cache[0]:
+                stats["hits"] += 1
                 return cache[1]
 
         cache = caches[0]
 
+        started = time.perf_counter()
         with devices.autocast():
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
+        stats["misses"] += 1
+        stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started), 3)
 
         cache[0] = cached_params
         return cache[1]
@@ -567,6 +576,9 @@ class Processed:
         self.all_subseeds = all_subseeds or p.all_subseeds or [self.subseed]
         self.infotexts = infotexts or [info] * len(images_list)
         self.version = program_version()
+        self.openclaw_cond_cache_stats = getattr(p, "openclaw_cond_cache_stats", None)
+        self.openclaw_script_timings = getattr(p, "openclaw_script_timings", None)
+        self.openclaw_extension_timings = getattr(p, "openclaw_extension_timings", None)
 
     def js(self):
         obj = {
@@ -814,6 +826,8 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "FP8 weight": opts.fp8_storage if devices.fp8 else None,
         "MXFP8 weight": opts.mxfp8_storage if devices.mxfp8 else None,
         "MXFP8 Linear coverage": ",".join(opts.mxfp8_linear_coverage) if devices.mxfp8 else None,
+        "NVFP4 weight": opts.nvfp4_storage if devices.nvfp4 else None,
+        "NVFP4 Linear coverage": ",".join(opts.nvfp4_linear_coverage or []) if devices.nvfp4 else None,
         "Cache FP16 weight for LoRA": opts.cache_fp16_weight if devices.fp8 else None,
         "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
         "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,

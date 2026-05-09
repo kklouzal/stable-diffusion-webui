@@ -1,4 +1,5 @@
 import logging
+import time
 from os import environ
 import modules.scripts as scripts
 import gradio as gr
@@ -115,6 +116,10 @@ class PAGStateParams:
                 self.crossattn_modules = [] # callable lambda
                 self.pag_x_out = None
                 self.batch_size = -1      # Batch size
+                self.openclaw_extension_timings = {}
+                self.noise_levels = []
+                self.cfg_schedule_values = []
+                self.seg_q_modules = None
 
 
 def cond_crossattn(cond):
@@ -162,9 +167,9 @@ def _seg_to_q_modules():
         return modules
 
 
-def _suspend_seg_for_pag_hidden_pass():
+def _suspend_seg_for_pag_hidden_pass(seg_q_modules=None):
         saved = []
-        for to_q in _seg_to_q_modules():
+        for to_q in (seg_q_modules if seg_q_modules is not None else _seg_to_q_modules()):
                 saved.append((to_q, getattr(to_q, 'seg_enable', False)))
                 setattr(to_q, 'seg_enable', False)
         return saved
@@ -212,11 +217,56 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
         return x_out
 
 
+
+
+def _record_pag_timing(pag_params, hook_name, elapsed):
+        timings = pag_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+
+def _record_pag_detail(pag_params, detail_name, elapsed):
+        timings = pag_params.openclaw_extension_timings
+        elapsed = float(elapsed)
+        details = timings.setdefault("details", {})
+        detail = details.setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
+        detail["total_seconds"] = round(float(detail.get("total_seconds") or 0.0) + elapsed, 6)
+        detail["calls"] = int(detail.get("calls") or 0) + 1
+
+
+def _merge_pag_timings(p, pag_params):
+        if not pag_params.openclaw_extension_timings:
+                return
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+        ext = timings["extensions"].setdefault("Incantations.PAGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        detail_timings = pag_params.openclaw_extension_timings.pop("details", {})
+        for hook_name, hook in pag_params.openclaw_extension_timings.items():
+                elapsed = float(hook.get("total_seconds") or 0.0)
+                calls = int(hook.get("calls") or 0)
+                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["calls"] = int(ext.get("calls") or 0) + calls
+                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        if detail_timings:
+                ext["details"] = ext.get("details", {})
+                for detail_name, detail in detail_timings.items():
+                        elapsed = float(detail.get("total_seconds") or 0.0)
+                        calls = int(detail.get("calls") or 0)
+                        existing = ext["details"].setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
+                        existing["total_seconds"] = round(float(existing.get("total_seconds") or 0.0) + elapsed, 6)
+                        existing["calls"] = int(existing.get("calls") or 0) + calls
+        pag_params.openclaw_extension_timings = {}
+
 class PAGExtensionScript(UIWrapper):
         def __init__(self):
                 self._cfg_denoiser_callback = None
                 self._cfg_denoised_callback = None
                 self._pag_hook_handles = []
+                self._pag_hooked_modules = []
 
         # Extension title in menu UI
         def title(self) -> str:
@@ -327,6 +377,9 @@ class PAGExtensionScript(UIWrapper):
                 if not hasattr(p, 'incant_cfg_params'):
                         logger.error("No incant_cfg_params found in p")
                 p.incant_cfg_params['pag_params'] = pag_params
+
+                # Preserve any setup timing already recorded before state was attached.
+                _record_pag_timing(pag_params, "create_hook_setup", 0.0)
                 
                 pag_params.pag_active = active 
                 pag_params.pag_sanf = pag_sanf 
@@ -341,13 +394,27 @@ class PAGExtensionScript(UIWrapper):
                 pag_params.denoiser = None
                 pag_params.cfg_interval_scheduled_value = p.cfg_scale
 
+                pag_params.noise_levels = [calculate_noise_level(i, pag_params.max_sampling_step) for i in range(pag_params.max_sampling_step + 1)]
                 if pag_params.cfg_interval_enable:
                        # Refer to 3.1 Practice in the paper
                        # We want to round high and low noise levels to the nearest integer index
                        low_index = find_closest_index(cfg_interval_low, pag_params.max_sampling_step)
                        high_index = find_closest_index(cfg_interval_high, pag_params.max_sampling_step)
-                       pag_params.cfg_interval_low = calculate_noise_level(low_index, pag_params.max_sampling_step)
-                       pag_params.cfg_interval_high = calculate_noise_level(high_index, pag_params.max_sampling_step)
+                       pag_params.cfg_interval_low = pag_params.noise_levels[low_index]
+                       pag_params.cfg_interval_high = pag_params.noise_levels[high_index]
+                       begin_range = min(pag_params.cfg_interval_low, pag_params.cfg_interval_high)
+                       end_range = max(pag_params.cfg_interval_low, pag_params.cfg_interval_high)
+                       pag_params.cfg_schedule_values = []
+                       for i, noise_level in enumerate(pag_params.noise_levels):
+                               scheduled_cfg_scale = cfg_scheduler(
+                                       pag_params.cfg_interval_schedule,
+                                       i,
+                                       pag_params.max_sampling_step,
+                                       pag_params.guidance_scale,
+                               )
+                               pag_params.cfg_schedule_values.append(
+                                       scheduled_cfg_scale if begin_range <= noise_level <= end_range else 1.0
+                               )
                        logger.debug(f"Step Aligned CFG Interval (low, high): ({low_index}, {high_index}), Step Aligned CFG Interval: ({round(pag_params.cfg_interval_low, 4)}, {round(pag_params.cfg_interval_high, 4)})")
 
                 # Get all the qv modules
@@ -376,6 +443,9 @@ class PAGExtensionScript(UIWrapper):
                 self.pag_postprocess_batch(p, *args, **kwargs)
 
         def pag_postprocess_batch(self, p, active, *args, **kwargs):
+                pag_params = getattr(p, "incant_cfg_params", {}).get("pag_params") if getattr(p, "incant_cfg_params", None) else None
+                if pag_params is not None:
+                        _merge_pag_timings(p, pag_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed PAG hooks and callbacks')
@@ -392,17 +462,19 @@ class PAGExtensionScript(UIWrapper):
                         self._cfg_denoised_callback = None
 
         def remove_all_hooks(self):
+                if not self._pag_hook_handles and not self._pag_hooked_modules:
+                        return
                 for handle in self._pag_hook_handles:
                         handle.remove()
                 self._pag_hook_handles = []
 
-                cross_attn_modules = self.get_cross_attn_modules()
-                for module in cross_attn_modules:
+                for module in self._pag_hooked_modules:
                         to_v = getattr(module, 'to_v', None)
                         module_hooks.modules_remove_field(module, 'pag_enable')
                         module_hooks.modules_remove_field(module, 'pag_last_to_v')
                         if to_v is not None:
                                 module_hooks.modules_remove_field(to_v, 'pag_parent_module')
+                self._pag_hooked_modules = []
 
         def unhook_callbacks(self, pag_params: PAGStateParams = None):
                 self.remove_all_hooks()
@@ -416,6 +488,7 @@ class PAGExtensionScript(UIWrapper):
                 """
 
                 # add field for last_to_v
+                self._pag_hooked_modules = list(crossattn_modules)
                 for module in crossattn_modules:
                         to_v = getattr(module, 'to_v', None)
                         module_hooks.modules_add_field(module, 'pag_enable', False)
@@ -475,6 +548,13 @@ class PAGExtensionScript(UIWrapper):
                 return self.get_middle_block_modules()
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoiser_callback(params, pag_params)
+                finally:
+                        _record_pag_timing(pag_params, "cfg_denoiser_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
                 # mutable state. Removing hooks here disables the extra PAG pass.
                 pag_params.step = params.sampling_step
@@ -482,28 +562,33 @@ class PAGExtensionScript(UIWrapper):
 
                 # CFG Interval. Keep rho fixed to the upstream/default curve for now;
                 # changing it is quality-affecting and should be a separate tuning pass.
-                pag_params.current_noise_level = calculate_noise_level(
-                        i = pag_params.step,
-                        N = pag_params.max_sampling_step,
-                )
+                if 0 <= pag_params.step < len(pag_params.noise_levels):
+                        pag_params.current_noise_level = pag_params.noise_levels[pag_params.step]
+                else:
+                        pag_params.current_noise_level = calculate_noise_level(
+                                i=pag_params.step,
+                                N=pag_params.max_sampling_step,
+                        )
 
                 if pag_params.cfg_interval_enable:
-                        # Calculate noise interval for every schedule, including Constant.
-                        start = pag_params.cfg_interval_low
-                        end = pag_params.cfg_interval_high
-                        begin_range = start if start <= end else end
-                        end_range = end if start <= end else start
-                        scheduled_cfg_scale = cfg_scheduler(
-                                pag_params.cfg_interval_schedule,
-                                pag_params.step,
-                                pag_params.max_sampling_step,
-                                pag_params.guidance_scale,
-                        )
-                        pag_params.cfg_interval_scheduled_value = (
-                                scheduled_cfg_scale
-                                if begin_range <= pag_params.current_noise_level <= end_range
-                                else 1.0
-                        )
+                        if 0 <= pag_params.step < len(pag_params.cfg_schedule_values):
+                                pag_params.cfg_interval_scheduled_value = pag_params.cfg_schedule_values[pag_params.step]
+                        else:
+                                start = pag_params.cfg_interval_low
+                                end = pag_params.cfg_interval_high
+                                begin_range = start if start <= end else end
+                                end_range = end if start <= end else start
+                                scheduled_cfg_scale = cfg_scheduler(
+                                        pag_params.cfg_interval_schedule,
+                                        pag_params.step,
+                                        pag_params.max_sampling_step,
+                                        pag_params.guidance_scale,
+                                )
+                                pag_params.cfg_interval_scheduled_value = (
+                                        scheduled_cfg_scale
+                                        if begin_range <= pag_params.current_noise_level <= end_range
+                                        else 1.0
+                                )
 
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
@@ -529,6 +614,13 @@ class PAGExtensionScript(UIWrapper):
 
 
         def on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
+                started = time.perf_counter()
+                try:
+                        self._on_cfg_denoised_callback(params, pag_params)
+                finally:
+                        _record_pag_timing(pag_params, "cfg_denoised_callback", time.perf_counter() - started)
+
+        def _on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
                 """ Callback function for the CFGDenoisedParams 
                 Refer to pg.22 A.2 of the PAG paper for how CFG and PAG combine
                 
@@ -556,19 +648,25 @@ class PAGExtensionScript(UIWrapper):
                 for module in pag_params.crossattn_modules:
                         setattr(module, 'pag_enable', True)
 
-                seg_saved_state = _suspend_seg_for_pag_hidden_pass()
+                if pag_params.seg_q_modules is None:
+                        pag_params.seg_q_modules = _seg_to_q_modules()
+                seg_saved_state = _suspend_seg_for_pag_hidden_pass(pag_params.seg_q_modules)
                 try:
                         # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
-                        pag_params.pag_x_out = pag_inner_model_x_out(
-                                params.inner_model,
-                                x_in,
-                                sigma_in,
-                                tensor,
-                                uncond,
-                                image_cond_in,
-                                make_condition_dict,
-                                pag_params.batch_size,
-                        )
+                        hidden_started = time.perf_counter()
+                        try:
+                                pag_params.pag_x_out = pag_inner_model_x_out(
+                                        params.inner_model,
+                                        x_in,
+                                        sigma_in,
+                                        tensor,
+                                        uncond,
+                                        image_cond_in,
+                                        make_condition_dict,
+                                        pag_params.batch_size,
+                                )
+                        finally:
+                                _record_pag_detail(pag_params, "pag_hidden_denoise", time.perf_counter() - hidden_started)
                 finally:
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises

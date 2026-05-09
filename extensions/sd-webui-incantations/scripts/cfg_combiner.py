@@ -1,5 +1,6 @@
 import gradio as gr
 import logging
+import time
 import torch
 import torch.nn.functional as F
 from modules import shared, scripts, script_callbacks
@@ -30,6 +31,31 @@ def sanf_gaussian_blur3(x):
                 _SANF_KERNEL_CACHE[key] = kernel
         x_blur = F.conv2d(F.pad(x_in, (1, 1, 1, 1), mode='reflect'), kernel, groups=channels)
         return x_blur.squeeze(0) if squeeze_batch else x_blur
+
+
+def _record_cfg_timing(cfg_dict, hook_name, elapsed):
+        timings = cfg_dict.setdefault("openclaw_extension_timings", {})
+        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
+        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + float(elapsed), 6)
+        hook["calls"] = int(hook.get("calls") or 0) + 1
+
+
+def _merge_cfg_timings(p, cfg_dict):
+        cfg_timings = (cfg_dict or {}).get("openclaw_extension_timings") or {}
+        if not cfg_timings:
+                return
+        timings = getattr(p, "openclaw_extension_timings", None)
+        if timings is None:
+                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
+        ext = timings["extensions"].setdefault("Incantations.CFGCombinerScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
+        for hook_name, hook in cfg_timings.items():
+                elapsed = float(hook.get("total_seconds") or 0.0)
+                calls = int(hook.get("calls") or 0)
+                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
+                ext["calls"] = int(ext.get("calls") or 0) + calls
+                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
+        cfg_dict["openclaw_extension_timings"] = {}
 
 
 class CFGCombinerScript(UIWrapper):
@@ -97,7 +123,9 @@ class CFGCombinerScript(UIWrapper):
 
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
             logger.debug("CFGCombinerScript postprocess_batch")
-            self.restore_cfg_denoiser(getattr(p, 'incant_cfg_params', None))
+            cfg_dict = getattr(p, 'incant_cfg_params', None)
+            _merge_cfg_timings(p, cfg_dict)
+            self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
 
         def unhook_callbacks(self, cfg_dict = None):
@@ -228,7 +256,11 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                 # as Dynamic Thresholding / CFG-Fix, which wrap combine_denoised to rescale
                 # the CFG result. Older local code recomputed CFG here and accidentally
                 # bypassed those wrappers whenever PAG was active.
-                denoised = original_func(x_out, conds_list, uncond, cfg_scale)
+                original_started = time.perf_counter()
+                try:
+                        denoised = original_func(x_out, conds_list, uncond, cfg_scale)
+                finally:
+                        _record_cfg_timing(cfg_dict, "combine_original", time.perf_counter() - original_started)
 
                 # 2. PAG
                 pag_x_out = None
@@ -272,22 +304,30 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                                         pag_x = pag_delta * (weight * pag_scale)
 
                                         if not use_saliency_map:
-                                                denoised[i] += pag_x
+                                                pag_blend_started = time.perf_counter()
+                                                try:
+                                                        denoised[i] += pag_x
+                                                finally:
+                                                        _record_cfg_timing(cfg_dict, "combine_pag_blend", time.perf_counter() - pag_blend_started)
                                                 continue
 
                                         # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
-                                        model_delta = x_out[cond_index] - denoised_uncond[i]
-                                        cfg_x = model_delta * (weight * cfg_scale)
-                                        omega_rt = sanf_gaussian_blur3(cfg_x.abs()).float()
-                                        omega_rs = sanf_gaussian_blur3(pag_x.abs()).float()
-                                        soft_rt = torch.softmax(omega_rt, dim=0)
-                                        soft_rs = torch.softmax(omega_rs, dim=0)
+                                        sanf_started = time.perf_counter()
+                                        try:
+                                                model_delta = x_out[cond_index] - denoised_uncond[i]
+                                                cfg_x = model_delta * (weight * cfg_scale)
+                                                omega_rt = sanf_gaussian_blur3(cfg_x.abs()).float()
+                                                omega_rs = sanf_gaussian_blur3(pag_x.abs()).float()
+                                                soft_rt = torch.softmax(omega_rt, dim=0)
+                                                soft_rs = torch.softmax(omega_rs, dim=0)
 
-                                        m = torch.stack([soft_rt, soft_rs], dim=0) # 2 c h w
-                                        _, argmax_indices = torch.max(m, dim=0)
-                                        m1 = (argmax_indices == 0).to(dtype=cfg_x.dtype)
-                                        sal_cfg = cfg_x * m1 + pag_x * (1 - m1)
-                                        denoised[i] += sal_cfg
+                                                m = torch.stack([soft_rt, soft_rs], dim=0) # 2 c h w
+                                                _, argmax_indices = torch.max(m, dim=0)
+                                                m1 = (argmax_indices == 0).to(dtype=cfg_x.dtype)
+                                                sal_cfg = cfg_x * m1 + pag_x * (1 - m1)
+                                                denoised[i] += sal_cfg
+                                        finally:
+                                                _record_cfg_timing(cfg_dict, "combine_sanf_blend", time.perf_counter() - sanf_started)
                                 except Exception as e:
                                         logger.exception("Exception in combine_denoised_pass_conds_list - %s", e)
 
