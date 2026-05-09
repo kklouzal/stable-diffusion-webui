@@ -53,6 +53,7 @@ sudo touch "${HOST_ROOT}/config/config.json" \
 OWNED_EXTENSIONS=(
   sd-webui-incantations
   openclaw-clear-cond-cache
+  sd-webui-model-converter
 )
 SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
 
