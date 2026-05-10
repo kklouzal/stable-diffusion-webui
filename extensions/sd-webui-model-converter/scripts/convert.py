@@ -73,13 +73,27 @@ def load_model(path: str) -> dict[str, Any]:
     return loaded.get("state_dict", loaded) if isinstance(loaded, dict) else loaded
 
 
+def position_id_keys(model: dict[str, Any]) -> list[str]:
+    return [str(key) for key in model.keys() if str(key).endswith("position_ids")]
+
+
+def standard_position_ids_like(tensor: Tensor | None = None) -> Tensor:
+    length = int(tensor.shape[-1]) if isinstance(tensor, Tensor) and tensor.ndim > 0 else 77
+    ids = torch.arange(length, dtype=torch.int64).unsqueeze(0)
+    if isinstance(tensor, Tensor) and tensor.shape == ids.shape:
+        return ids
+    if isinstance(tensor, Tensor) and tensor.numel() == ids.numel():
+        return ids.reshape(tensor.shape)
+    return ids
+
+
 def fix_model(model: dict[str, Any], fix_clip: bool = False, force_position_id: bool = False) -> dict[str, Any]:
     nai_keys = {
         "cond_stage_model.transformer.embeddings.": "cond_stage_model.transformer.text_model.embeddings.",
         "cond_stage_model.transformer.encoder.": "cond_stage_model.transformer.text_model.encoder.",
         "cond_stage_model.transformer.final_layer_norm.": "cond_stage_model.transformer.text_model.final_layer_norm.",
     }
-    position_id_key = "cond_stage_model.transformer.text_model.embeddings.position_ids"
+    fallback_position_id_key = "cond_stage_model.transformer.text_model.embeddings.position_ids"
     for key in list(model.keys()):
         for prefix, replacement in nai_keys.items():
             if isinstance(key, str) and key.startswith(prefix):
@@ -89,23 +103,26 @@ def fix_model(model: dict[str, Any], fix_clip: bool = False, force_position_id: 
                 print(f"[OpenClaw Model Converter] Fixed NovelAI CLIP key {key}")
                 break
 
-    if force_position_id and position_id_key in model:
-        model[position_id_key] = model[position_id_key].to(torch.int64)
+    keys = position_id_keys(model)
+
+    if force_position_id:
+        for key in keys:
+            model[key] = model[key].to(torch.int64)
 
     if fix_clip:
-        correct = torch.Tensor([list(range(77))]).to(torch.int64)
-        if position_id_key in model:
-            now = model[position_id_key].to(torch.int64)
-            broken = correct.ne(now)
-            broken_indexes = [i for i in range(77) if broken[0][i]]
-            if broken_indexes:
-                model[position_id_key] = correct
-                print(f"[OpenClaw Model Converter] Fixed broken CLIP position_ids: {broken_indexes}")
-            else:
-                print("[OpenClaw Model Converter] CLIP position_ids already look correct")
+        if keys:
+            for key in keys:
+                correct = standard_position_ids_like(model[key])
+                now = model[key].to(torch.int64)
+                if now.shape == correct.shape and torch.equal(now, correct):
+                    print(f"[OpenClaw Model Converter] CLIP position_ids already look correct: {key}")
+                    model[key] = now
+                    continue
+                model[key] = correct
+                print(f"[OpenClaw Model Converter] Fixed broken CLIP position_ids: {key}")
         else:
             print("[OpenClaw Model Converter] Missing CLIP position_ids; adding standard 0..76 tensor")
-            model[position_id_key] = correct
+            model[fallback_position_id_key] = standard_position_ids_like()
     return model
 
 
@@ -205,19 +222,28 @@ def do_convert(
 
         ok = {}
         state_dict = load_model(model_info.filepath)
-        if not is_sdxl_model(state_dict):
-            fix_model(state_dict, fix_clip=fix_clip, force_position_id=force_position_id)
+        fix_model(state_dict, fix_clip=fix_clip, force_position_id=force_position_id)
 
         conv_func = PRECISION_FUNCS[precision]
+
+        def should_preserve_int64(weight_key: str, tensor: Tensor) -> bool:
+            # CLIP position_ids are token indices, not learned floating weights. They must not
+            # be converted to fp16/bf16/float8. SDXL uses conditioner.embedders.* names.
+            return force_position_id and str(weight_key).endswith("position_ids")
 
         def handle_weight(weight_key: str, tensor: Tensor) -> None:
             if not isinstance(tensor, Tensor):
                 return
             action = extra_opt[check_weight_type(weight_key)]
             if action == "convert":
-                ok[weight_key] = conv_func(tensor)
+                if should_preserve_int64(weight_key, tensor):
+                    ok[weight_key] = tensor.to(torch.int64)
+                elif not torch.is_floating_point(tensor):
+                    ok[weight_key] = tensor
+                else:
+                    ok[weight_key] = conv_func(tensor)
             elif action == "copy":
-                ok[weight_key] = tensor
+                ok[weight_key] = tensor.to(torch.int64) if should_preserve_int64(weight_key, tensor) else tensor
 
         print("[OpenClaw Model Converter] Converting model...")
         if conv_type == "ema-only":
