@@ -22,6 +22,10 @@ class ConvertRequest(BaseModel):
     clip: str = "convert"
     vae: str = "convert"
     other: str = "convert"
+    unet_precision: str = "inherit"
+    clip_precision: str = "inherit"
+    vae_precision: str = "inherit"
+    other_precision: str = "inherit"
     fix_clip: bool = False
     force_position_id: bool = True
     delete_known_junk_data: bool = False
@@ -56,7 +60,7 @@ def add_tab():
                 with gr.Row():
                     force_position_id = gr.Checkbox(label="Force CLIP position_id to int64 before convert", value=True)
                     fix_clip = gr.Checkbox(label="Fix CLIP", value=False)
-                    delete_known_junk_data = gr.Checkbox(label="Delete known junk data", value=False)
+                    delete_known_junk_data = gr.Checkbox(label="Cleanup known junk", value=False)
 
                 with gr.Row(visible=False) as extra_options:
                     specific_part_conv = ["copy", "convert", "delete"]
@@ -65,15 +69,22 @@ def add_tab():
                     vae_conv = gr.Dropdown(specific_part_conv, value="convert", label="VAE")
                     others_conv = gr.Dropdown(specific_part_conv, value="convert", label="Other weights")
 
+                with gr.Row(visible=False) as precision_options:
+                    specific_precision = ["inherit", "fp32", "fp16", "bf16", "float8_e4m3fn", "float8_e5m2"]
+                    unet_precision = gr.Dropdown(specific_precision, value="inherit", label="UNet precision")
+                    clip_precision = gr.Dropdown(specific_precision, value="inherit", label="CLIP precision")
+                    vae_precision = gr.Dropdown(specific_precision, value="inherit", label="VAE precision")
+                    other_precision = gr.Dropdown(specific_precision, value="inherit", label="Other precision")
+
                 model_converter_convert = gr.Button(value="Convert model", elem_id="model_converter_convert", variant="primary")
 
             with gr.Column(variant="panel"):
                 submit_result = gr.Textbox(elem_id="model_converter_result", show_label=False)
 
-            show_extra_options.change(fn=lambda x: gr_show(x), inputs=[show_extra_options], outputs=[extra_options])
+            show_extra_options.change(fn=lambda x: (gr_show(x), gr_show(x)), inputs=[show_extra_options], outputs=[extra_options, precision_options])
 
             model_converter_convert.click(
-                fn=lambda model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, fix_clip, force_position_id, delete_known_junk_data: convert.convert_single({
+                fn=lambda model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data: convert.convert_single({
                     "model": model_name,
                     "formats": checkpoint_formats,
                     "precision": precision,
@@ -84,11 +95,15 @@ def add_tab():
                     "clip": text_encoder_conv,
                     "vae": vae_conv,
                     "other": others_conv,
+                    "unet_precision": unet_precision,
+                    "clip_precision": clip_precision,
+                    "vae_precision": vae_precision,
+                    "other_precision": other_precision,
                     "fix_clip": fix_clip,
                     "force_position_id": force_position_id,
                     "delete_known_junk_data": delete_known_junk_data,
                 }),
-                inputs=[model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, fix_clip, force_position_id, delete_known_junk_data],
+                inputs=[model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data],
                 outputs=[submit_result],
             )
 
