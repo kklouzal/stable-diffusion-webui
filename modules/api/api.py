@@ -381,7 +381,10 @@ class Api:
                 if "args" in request.alwayson_scripts[alwayson_script_name]:
                     # min between arg length in scriptrunner and arg length in the request
                     for idx in range(0, min((alwayson_script.args_to - alwayson_script.args_from), len(request.alwayson_scripts[alwayson_script_name]["args"]))):
-                        script_args[alwayson_script.args_from + idx] = request.alwayson_scripts[alwayson_script_name]["args"][idx]
+                        target_index = alwayson_script.args_from + idx
+                        if target_index >= len(script_args):
+                            script_args.extend([None] * (target_index + 1 - len(script_args)))
+                        script_args[target_index] = request.alwayson_scripts[alwayson_script_name]["args"][idx]
         return script_args
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
