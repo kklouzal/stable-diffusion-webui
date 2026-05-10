@@ -41,6 +41,10 @@ def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tenso
     if t_enc <= 1:
         return sigmas
 
+    # A1111 img2img uses sigmas[steps - t_enc - 1:]. Keep the exact same
+    # start/end points and step count, and only bend spacing inside that tail.
+    # This avoids the earlier bad behavior where a per-step absolute-strength
+    # remap could leave the final image under-denoised/noisy.
     start = max(0, total_transitions - t_enc - 1)
     tail_len = sigmas.shape[0] - start
     if tail_len <= 2:
@@ -48,34 +52,22 @@ def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tenso
 
     device = sigmas.device
     dtype = sigmas.dtype
-    j = torch.arange(tail_len, device=device, dtype=torch.float32)
+    progress = torch.linspace(0.0, 1.0, tail_len, device=device)
 
-    strengths = torch.clamp(torch.tensor(base_strength, device=device) + torch.tensor(delta, device=device) * j, 0.001, 0.999)
-    desired_positions = (1.0 - strengths) * float(total_transitions)
-    base_positions = torch.linspace(float(start), float(sigmas.shape[0] - 1), tail_len, device=device)
-
-    if delta > 0:
-        # Stronger-per-step means linger closer to the noisier/high-sigma side,
-        # but never reverse the sigma direction.
-        positions = torch.minimum(desired_positions, base_positions)
-    else:
-        # Negative values move down the schedule faster/more conservatively.
-        positions = torch.maximum(desired_positions, base_positions)
-
-    fixed = [float(positions[0].item())]
-    eps = 1e-4
-    last_index = float(sigmas.shape[0] - 1)
-    for idx in range(1, tail_len - 1):
-        fixed.append(min(last_index - eps * (tail_len - idx), max(float(positions[idx].item()), fixed[-1] + eps)))
-    fixed.append(last_index)
-    positions = torch.tensor(fixed, device=device, dtype=torch.float32)
+    # Small, bounded curvature: + values linger higher/noisier a little longer
+    # then catch up; - values drop noise a little faster. Endpoints are fixed.
+    gamma = max(0.75, min(1.3333333333, 1.0 + float(delta) * 5.0))
+    curved = torch.pow(progress, gamma)
+    positions = float(start) + curved * float(tail_len - 1)
 
     ramped_tail = _interp_sigmas(sigmas, positions).to(dtype)
+    ramped_tail[0] = sigmas[start]
     ramped_tail[-1] = sigmas[-1]
 
     out = sigmas.clone()
     out[start:] = ramped_tail
     p.extra_generation_params["Denoise step delta"] = f"{delta:+.3f}"
+    p.extra_generation_params["Denoise ramp gamma"] = f"{gamma:.3f}"
     return out
 
 
