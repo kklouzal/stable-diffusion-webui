@@ -56,7 +56,7 @@ def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tenso
 
     # Small, bounded curvature: + values linger higher/noisier a little longer
     # then catch up; - values drop noise a little faster. Endpoints are fixed.
-    gamma = max(0.75, min(1.3333333333, 1.0 + float(delta) * 5.0))
+    gamma = max(0.5, min(1.5, 1.0 + float(delta) * 5.0))
     curved = torch.pow(progress, gamma)
     positions = float(start) + curved * float(tail_len - 1)
 
@@ -91,4 +91,4 @@ class OpenClawDenoiseRampScript(scripts.Script):
         return [delta]
 
     def process(self, p, delta=0.0):
-        p.openclaw_denoise_step_delta = max(-0.05, min(0.05, _safe_float(delta, 0.0)))
+        p.openclaw_denoise_step_delta = max(-0.1, min(0.1, _safe_float(delta, 0.0)))
