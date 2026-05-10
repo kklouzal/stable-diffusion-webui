@@ -7,13 +7,15 @@ import traceback
 from collections import Counter
 from typing import Any
 
+import safetensors
+import safetensors
 import safetensors.torch
 import torch
 from torch import Tensor
 
-from modules import sd_models, sd_vae, shared
+from modules import paths, sd_models, sd_vae, shared
 
-OPENCLAW_CONVERTER_VERSION = '2026-05-10.2'
+OPENCLAW_CONVERTER_VERSION = '2026-05-10.3'
 DTYPES_TO_FP16 = {torch.float32, torch.float64, torch.bfloat16}
 DTYPES_TO_BF16 = {torch.float32, torch.float64, torch.float16}
 DTYPES_TO_FLOAT8 = {torch.float32, torch.float64, torch.bfloat16, torch.float16}
@@ -21,6 +23,8 @@ PART_ACTIONS = {'copy', 'convert', 'delete'}
 PRECISIONS = {'full', 'fp32', 'fp16', 'bf16', 'float8_e4m3fn', 'float8_e5m2'}
 COMPONENT_PRECISIONS = {'inherit', *PRECISIONS}
 FORMATS = {'ckpt', 'safetensors'}
+LORA_PRECISIONS = {'fp32', 'fp16', 'bf16'}
+LORA_PRECISIONS = {'fp32', 'fp16', 'bf16'}
 KNOWN_JUNK_PREFIXES = (
     'embedding_manager.embedder.', 'lora_te_text_model', 'lora_unet', 'lycoris_',
     'control_model.', 'optimizer.', 'optimizers.', 'lr_schedulers.', 'callbacks.', 'loops.',
@@ -134,6 +138,14 @@ def normalize_precision(value: str, default: str = 'inherit') -> str:
 def is_known_junk_key(key: str) -> bool:
     return key in KNOWN_JUNK_EXACT or any(key.startswith(prefix) for prefix in KNOWN_JUNK_PREFIXES)
 
+
+
+def is_known_lora_junk_key(key: str) -> bool:
+    # In a LoRA file, lora_unet/lora_te keys are the payload, not junk. Keep cleanup to
+    # obvious training/runtime residue.
+    lora_safe_prefixes = ("optimizer.", "optimizers.", "lr_schedulers.", "callbacks.", "loops.", "embedding_manager.embedder.", "control_model.")
+    return key in KNOWN_JUNK_EXACT or any(key.startswith(prefix) for prefix in lora_safe_prefixes)
+
 def dtype_name(tensor: Tensor) -> str:
     return str(tensor.dtype).replace('torch.', '')
 
@@ -190,12 +202,213 @@ def checkpoint_doctor(model: dict[str, Any], model_info: MockModelInfo) -> dict[
         'content_scan': 'metadata-only; NaN/Inf full tensor scan intentionally skipped during conversion for speed',
     }
 
+
+
+def scan_and_repair_nonfinite(model: dict[str, Any], *, repair: bool = True) -> dict[str, Any]:
+    total_tensors = 0
+    affected_tensors = 0
+    total_values = 0
+    nan_values = 0
+    posinf_values = 0
+    neginf_values = 0
+    examples = []
+    for key, tensor in list(model.items()):
+        if not isinstance(tensor, Tensor) or not torch.is_floating_point(tensor):
+            continue
+        total_tensors += 1
+        nan_count = int(torch.isnan(tensor).sum().item())
+        posinf_count = int(torch.isposinf(tensor).sum().item())
+        neginf_count = int(torch.isneginf(tensor).sum().item())
+        bad_count = nan_count + posinf_count + neginf_count
+        if bad_count:
+            affected_tensors += 1
+            nan_values += nan_count
+            posinf_values += posinf_count
+            neginf_values += neginf_count
+            total_values += bad_count
+            if len(examples) < 25:
+                examples.append({'key': str(key), 'nan': nan_count, '+inf': posinf_count, '-inf': neginf_count, 'dtype': dtype_name(tensor), 'shape': list(tensor.shape)})
+            if repair:
+                model[key] = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    return {
+        'scanned_float_tensors': total_tensors,
+        'affected_tensors': affected_tensors,
+        'total_nonfinite_values': total_values,
+        'nan_values': nan_values,
+        'posinf_values': posinf_values,
+        'neginf_values': neginf_values,
+        'repaired': bool(repair and total_values),
+        'examples': examples,
+    }
+
+
+def safetensors_metadata(path: str) -> dict[str, str]:
+    if not str(path).endswith('.safetensors'):
+        return {}
+    try:
+        with safetensors.safe_open(path, framework='pt', device='cpu') as f:
+            return {str(k): str(v) for k, v in (f.metadata() or {}).items()}
+    except Exception:
+        return {}
+
+
+def lora_dir() -> str:
+    return os.path.join(paths.models_path, 'Lora')
+
+
+def list_loras() -> list[dict[str, str]]:
+    root = lora_dir()
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if not filename.lower().endswith(('.safetensors', '.ckpt', '.pt')):
+                continue
+            path = os.path.join(dirpath, filename)
+            rel = os.path.relpath(path, root)
+            name = os.path.splitext(rel)[0].replace(os.sep, '/')
+            out.append({'name': name, 'title': name, 'filename': filename, 'path': path})
+    return sorted(out, key=lambda item: item['title'].lower())
+
+
+def resolve_lora_info(name: str) -> MockModelInfo | None:
+    if name and os.path.exists(name):
+        return MockModelInfo(name)
+    for item in list_loras():
+        candidates = {item['name'], item['title'], item['filename'], item['path'], os.path.basename(item['path'])}
+        if name in candidates:
+            return MockModelInfo(item['path'])
+    return None
+
+
+def lora_component(key: str) -> str:
+    lowered = key.lower()
+    if 'lora_unet' in lowered or lowered.startswith('unet') or '.unet.' in lowered:
+        return 'unet'
+    if 'lora_te' in lowered or 'text_encoder' in lowered or 'clip' in lowered or 'transformer_text_model' in lowered:
+        return 'clip'
+    return 'other'
+
+
+def lora_family(model: dict[str, Any], metadata: dict[str, str]) -> str:
+    module = (metadata.get('ss_network_module') or metadata.get('modelspec.architecture') or '').lower()
+    keys = ' '.join(list(map(str, model.keys()))[:200]).lower()
+    if 'dora' in module or 'dora' in keys:
+        return 'DoRA-like'
+    if 'loha' in module or 'hada_' in keys or 'lora_down' in keys and 'hada' in keys:
+        return 'LoHa/LyCORIS-like'
+    if 'locon' in module or 'conv' in keys and 'lora_down' in keys:
+        return 'LoCon-like'
+    if 'oft' in module or 'oft_' in keys:
+        return 'OFT-like'
+    if 'lora' in module or 'lora_down' in keys or 'lora_up' in keys:
+        return 'LoRA-like'
+    return 'unknown'
+
+
+def lora_doctor(model: dict[str, Any], model_info: MockModelInfo, metadata: dict[str, str], nonfinite: dict[str, Any] | None = None) -> dict[str, Any]:
+    dtype_counts: Counter[str] = Counter(); component_counts: Counter[str] = Counter(); rank_examples = []
+    keys = set(map(str, model.keys()))
+    up_bases = {k.rsplit('.', 1)[0] for k in keys if k.endswith('.lora_up.weight')}
+    down_bases = {k.rsplit('.', 1)[0] for k in keys if k.endswith('.lora_down.weight')}
+    alpha_keys = sorted(k for k in keys if k.endswith('.alpha'))
+    for key, value in model.items():
+        if not isinstance(value, Tensor):
+            continue
+        dtype_counts[dtype_name(value)] += 1
+        component_counts[lora_component(str(key))] += 1
+        if len(rank_examples) < 25 and str(key).endswith('.lora_down.weight') and value.ndim >= 2:
+            base = str(key).rsplit('.', 1)[0]
+            rank_examples.append({'base': base, 'rank': int(value.shape[0]), 'shape': list(value.shape)})
+    warnings = []
+    missing_up = sorted(down_bases - up_bases)
+    missing_down = sorted(up_bases - down_bases)
+    if missing_up: warnings.append(f'{len(missing_up)} lora_down tensors missing matching lora_up')
+    if missing_down: warnings.append(f'{len(missing_down)} lora_up tensors missing matching lora_down')
+    if nonfinite and nonfinite.get('total_nonfinite_values'):
+        warnings.append(f"{nonfinite.get('total_nonfinite_values')} NaN/Inf value(s) detected and repaired")
+    return {
+        'source': {'path': model_info.filepath, 'filename': model_info.filename},
+        'family': lora_family(model, metadata),
+        'tensor_count': sum(dtype_counts.values()),
+        'dtype_counts': dict(sorted(dtype_counts.items())),
+        'component_counts': dict(sorted(component_counts.items())),
+        'metadata_key_count': len(metadata),
+        'network_module': metadata.get('ss_network_module') or '',
+        'base_model_version': metadata.get('ss_base_model_version') or metadata.get('modelspec.architecture') or '',
+        'rank_examples': rank_examples,
+        'alpha_key_count': len(alpha_keys),
+        'missing_up_examples': missing_up[:25],
+        'missing_down_examples': missing_down[:25],
+        'known_junk_count': len([k for k in keys if is_known_junk_key(k)]),
+        'nonfinite': nonfinite or {},
+        'warnings': warnings,
+    }
+
+
+def lora_metadata(model_info: MockModelInfo, original: dict[str, str], *, precision: str, doctor: dict[str, Any], cleanup: bool, nonfinite: dict[str, Any]) -> dict[str, str]:
+    metadata = dict(original)
+    metadata.update({
+        'openclaw_lora_converter_version': OPENCLAW_CONVERTER_VERSION,
+        'openclaw_lora_converter_source': model_info.filename,
+        'openclaw_lora_converter_precision': precision,
+        'openclaw_lora_converter_family': str(doctor.get('family') or 'unknown'),
+        'openclaw_lora_converter_cleanup_known_junk': str(bool(cleanup)),
+        'openclaw_lora_converter_nonfinite_repair': json.dumps(nonfinite, sort_keys=True),
+        'openclaw_lora_converter_created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'openclaw_lora_converter_doctor_summary': json.dumps({'family': doctor.get('family'), 'tensor_count': doctor.get('tensor_count'), 'dtype_counts': doctor.get('dtype_counts'), 'component_counts': doctor.get('component_counts'), 'warnings': doctor.get('warnings')}, sort_keys=True),
+    })
+    return {str(k): str(v) for k, v in metadata.items()}
+
+
+def convert_lora(payload: dict[str, Any]) -> str:
+    model_info = resolve_lora_info(str(payload.get('lora') or payload.get('model') or ''))
+    if not model_info:
+        raise ValueError('selected LoRA was not found')
+    precision = str(payload.get('lora_precision') or payload.get('precision') or 'bf16')
+    if precision not in LORA_PRECISIONS:
+        raise ValueError(f'unsupported LoRA precision: {precision}')
+    custom_name = str(payload.get('custom_name') or '').strip()
+    cleanup = bool(payload.get('delete_known_junk_data'))
+    shared.state.begin()
+    try:
+        shared.state.job = 'lora-convert'; shared.state.textinfo = f'Loading LoRA {model_info.filename}...'
+        model = load_model(model_info.filepath)
+        original_metadata = safetensors_metadata(model_info.filepath)
+        source_nonfinite = scan_and_repair_nonfinite(model, repair=True)
+        before_doctor = lora_doctor(model, model_info, original_metadata, source_nonfinite)
+        ok: dict[str, Tensor] = {}
+        for key, tensor in model.items():
+            if not isinstance(tensor, Tensor):
+                continue
+            if cleanup and is_known_lora_junk_key(str(key)):
+                continue
+            if torch.is_floating_point(tensor):
+                ok[key] = PRECISION_FUNCS[precision](tensor)
+            else:
+                ok[key] = tensor
+        output_nonfinite = scan_and_repair_nonfinite(ok, repair=True)
+        after_doctor = lora_doctor(ok, model_info, original_metadata, output_nonfinite)
+        metadata = lora_metadata(model_info, original_metadata, precision=precision, doctor=after_doctor, cleanup=cleanup, nonfinite={'source': source_nonfinite, 'output': output_nonfinite})
+        save_name = custom_name or f'{model_info.model_name}-{precision}'
+        save_path = os.path.join(os.path.dirname(model_info.filepath), save_name + '.safetensors')
+        safetensors.torch.save_file(ok, save_path, metadata=metadata)
+        report = {'source_doctor': before_doctor, 'output_doctor': after_doctor, 'metadata_added': {k: v for k, v in metadata.items() if k.startswith('openclaw_lora_converter_')}}
+        return f'LoRA saved to {save_path}\nOpenClaw LoRA doctor report:\n' + json.dumps(report, indent=2, sort_keys=True)
+    except Exception:
+        traceback.print_exc(); raise
+    finally:
+        shared.state.end()
+
 def converter_options() -> dict[str, Any]:
     sd_vae.refresh_vae_list(); sd_models.list_models()
     return {
         'models': [{'title': title, 'model_name': info.model_name, 'filename': info.filename} for title, info in sorted(sd_models.checkpoints_list.items(), key=lambda item: item[0].lower())],
+        'loras': list_loras(),
         'vaes': ['None', *sorted(sd_vae.vae_dict.keys(), key=str.lower)],
         'precisions': ['fp32', 'fp16', 'bf16', 'float8_e4m3fn', 'float8_e5m2'],
+        'lora_precisions': ['fp32', 'fp16', 'bf16'],
         'component_precisions': ['inherit', 'fp32', 'fp16', 'bf16', 'float8_e4m3fn', 'float8_e5m2'],
         'pruning_methods': ['disabled', 'no-ema', 'ema-only'], 'formats': ['safetensors', 'ckpt'], 'part_actions': ['convert', 'copy', 'delete'],
     }
@@ -234,7 +447,7 @@ def conversion_metadata(model_info: MockModelInfo, *, precision: str, component_
         'openclaw_converter_baked_vae': bake_in_vae or 'None', 'openclaw_converter_fix_clip_position_ids': str(bool(fix_clip)),
         'openclaw_converter_force_position_ids_int64': str(bool(force_position_id)), 'openclaw_converter_cleanup_known_junk': str(bool(delete_known_junk_data)),
         'openclaw_converter_created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-        'openclaw_converter_doctor_summary': json.dumps({'family': doctor.get('family'), 'tensor_count': doctor.get('tensor_count'), 'dtype_counts': doctor.get('dtype_counts'), 'component_counts': doctor.get('component_counts'), 'known_junk_count': doctor.get('known_junk_count'), 'warnings': doctor.get('warnings')}, sort_keys=True),
+        'openclaw_converter_doctor_summary': json.dumps({'family': doctor.get('family'), 'tensor_count': doctor.get('tensor_count'), 'dtype_counts': doctor.get('dtype_counts'), 'component_counts': doctor.get('component_counts'), 'known_junk_count': doctor.get('known_junk_count'), 'nonfinite': doctor.get('nonfinite'), 'warnings': doctor.get('warnings')}, sort_keys=True),
     }
     return {str(k): str(v) for k, v in data.items()}
 
@@ -249,7 +462,9 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
         shared.state.job = 'model-convert'; shared.state.textinfo = f'Loading {model_info.filename}...'
         print(f'[OpenClaw Model Converter] Loading {model_info.filepath}...')
         ok: dict[str, Tensor] = {}; state_dict = load_model(model_info.filepath)
+        source_nonfinite = scan_and_repair_nonfinite(state_dict, repair=True)
         before_doctor = checkpoint_doctor(state_dict, model_info)
+        before_doctor['nonfinite'] = source_nonfinite
         fix_model(state_dict, fix_clip=fix_clip, force_position_id=force_position_id)
         def precision_for(weight_key: str) -> str:
             selected = component_precisions.get(check_weight_type(weight_key), 'inherit')
@@ -284,7 +499,9 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
             vae_dict = sd_vae.load_vae_dict(bake_in_vae_filename, map_location='cpu')
             for key, value in vae_dict.items(): handle_weight(key, value)
             del vae_dict
+        output_nonfinite = scan_and_repair_nonfinite(ok, repair=True)
         after_doctor = checkpoint_doctor(ok, model_info)
+        after_doctor['nonfinite'] = output_nonfinite
         metadata = conversion_metadata(model_info, precision=precision, component_precisions=component_precisions, extra_opt=extra_opt, conv_type=conv_type, bake_in_vae=bake_in_vae, fix_clip=fix_clip, force_position_id=force_position_id, delete_known_junk_data=delete_known_junk_data, doctor=after_doctor)
         ckpt_dir = os.path.dirname(model_info.filepath); save_name = custom_name.strip() if custom_name else f'{model_info.model_name}-{precision}'
         if conv_type != 'disabled' and not custom_name: save_name += f'-{conv_type}'
@@ -296,7 +513,7 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
             if fmt == 'safetensors': safetensors.torch.save_file(ok, save_path, metadata=metadata)
             else: torch.save({'state_dict': ok, 'openclaw_metadata': metadata}, save_path)
             output += f'Checkpoint saved to {save_path}\n'
-        report = {'source_doctor': before_doctor, 'output_doctor': after_doctor, 'removed_known_junk': {'count': len(removed_junk), 'examples': removed_junk[:50]}, 'metadata': metadata}
+        report = {'source_doctor': before_doctor, 'output_doctor': after_doctor, 'removed_known_junk': {'count': len(removed_junk), 'examples': removed_junk[:50]}, 'nonfinite_repair': {'source': source_nonfinite, 'output': output_nonfinite}, 'metadata': metadata}
         output += 'OpenClaw checkpoint doctor report:\n' + json.dumps(report, indent=2, sort_keys=True)
         return output.rstrip()
     except Exception:
@@ -305,6 +522,8 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
         shared.state.end()
 
 def convert_single(payload: dict[str, Any]) -> str:
+    if str(payload.get('mode') or 'checkpoint').lower() == 'lora':
+        return convert_lora(payload)
     model_info = resolve_model_info(str(payload.get('model') or ''))
     if not model_info: raise ValueError('selected model was not found')
     return do_convert(

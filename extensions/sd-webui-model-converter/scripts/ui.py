@@ -12,7 +12,10 @@ from scripts import convert
 
 
 class ConvertRequest(BaseModel):
-    model: str
+    mode: str = "checkpoint"
+    model: str = ""
+    lora: str = ""
+    lora_precision: str = "bf16"
     formats: list[str] = Field(default_factory=lambda: ["safetensors"])
     precision: str = "fp16"
     pruning: str = "disabled"
@@ -39,10 +42,13 @@ def add_tab():
     with gr.Blocks(analytics_enabled=False) as ui:
         with gr.Row(equal_height=True):
             with gr.Column(variant="panel"):
-                gr.HTML(value="<p>OpenClaw-owned single-model converter. Converted checkpoints are saved in the source checkpoint directory.</p>")
+                gr.HTML(value="<p>OpenClaw-owned converter for checkpoints and LoRAs. Outputs are saved next to the source file.</p>")
+                mode = gr.Radio(choices=["checkpoint", "lora"], value="checkpoint", label="Mode")
                 with gr.Row():
-                    model_name = gr.Dropdown(sd_models.checkpoint_tiles(), elem_id="model_converter_model_name", label="Model")
+                    model_name = gr.Dropdown(sd_models.checkpoint_tiles(), elem_id="model_converter_model_name", label="Checkpoint")
                     create_refresh_button(model_name, sd_models.list_models, lambda: {"choices": sd_models.checkpoint_tiles()}, "refresh_checkpoint_Z")
+                lora_name = gr.Dropdown([item["title"] for item in convert.list_loras()], label="LoRA")
+                lora_precision = gr.Radio(choices=["fp32", "fp16", "bf16"], value="bf16", label="LoRA precision")
                 custom_name = gr.Textbox(label="Custom Name (Optional)")
 
                 with gr.Row():
@@ -84,8 +90,11 @@ def add_tab():
             show_extra_options.change(fn=lambda x: (gr_show(x), gr_show(x)), inputs=[show_extra_options], outputs=[extra_options, precision_options])
 
             model_converter_convert.click(
-                fn=lambda model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data: convert.convert_single({
+                fn=lambda mode, model_name, lora_name, lora_precision, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data: convert.convert_single({
+                    "mode": mode,
                     "model": model_name,
+                    "lora": lora_name,
+                    "lora_precision": lora_precision,
                     "formats": checkpoint_formats,
                     "precision": precision,
                     "pruning": m_type,
@@ -103,7 +112,7 @@ def add_tab():
                     "force_position_id": force_position_id,
                     "delete_known_junk_data": delete_known_junk_data,
                 }),
-                inputs=[model_name, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data],
+                inputs=[mode, model_name, lora_name, lora_precision, checkpoint_formats, precision, m_type, custom_name, bake_in_vae, unet_conv, text_encoder_conv, vae_conv, others_conv, unet_precision, clip_precision, vae_precision, other_precision, fix_clip, force_position_id, delete_known_junk_data],
                 outputs=[submit_result],
             )
 
