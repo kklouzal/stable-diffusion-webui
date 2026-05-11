@@ -19,6 +19,10 @@ import k_diffusion.sampling
 from modules import devices, script_callbacks, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
+try:
+    from openclaw_denoise_ramp import ramp_sigmas_for_img2img
+except Exception:
+    ramp_sigmas_for_img2img = None
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EXT_ROOT / "data"
@@ -155,12 +159,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         if "n" in params:
             kwargs["n"] = stage_steps
         if "sigma_min" in params:
-            if is_img2img:
-                kwargs["sigma_min"] = sigmas[-2] if len(sigmas) > 1 else sigmas[-1]
-                kwargs["sigma_max"] = sigmas[0]
-            else:
-                kwargs["sigma_min"] = self.model_wrap.sigmas[0].item()
-                kwargs["sigma_max"] = self.model_wrap.sigmas[-1].item()
+            positive_sigmas = sigmas[sigmas > 0]
+            kwargs["sigma_min"] = positive_sigmas[-1] if len(positive_sigmas) else sigmas[-1]
+            kwargs["sigma_max"] = sigmas[0]
         if "sigma_sched" in params:
             kwargs["sigma_sched"] = sigmas
         if "sigmas" in params:
@@ -247,6 +248,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             "s_min_uncond": self.s_min_uncond,
         }
         p.extra_generation_params["Sampler chain"] = "{}@{} -> {}@{}".format(self.definition["sampler_1"], switch_at, self.definition["sampler_2"], steps - switch_at)
+        scheduler = _sampler_data_for(self.definition).options.get("scheduler")
+        if scheduler:
+            p.extra_generation_params["Sampler chain scheduler"] = scheduler
         try:
             for sampler_name, stage_sigmas, offset in stages:
                 stage_steps = max(0, len(stage_sigmas) - 1)
@@ -295,6 +299,8 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
         sigmas = self.get_sigmas(p, steps)
+        if ramp_sigmas_for_img2img is not None:
+            sigmas = ramp_sigmas_for_img2img(p, sigmas, steps, t_enc)
         sigma_sched = sigmas[steps - t_enc - 1:]
         if hasattr(shared.sd_model, "add_noise_to_latent"):
             xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
@@ -320,7 +326,8 @@ def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerD
     chain = dict(definition)
     first = _k_sampler_config(chain["sampler_1"])
     second = _k_sampler_config(chain["sampler_2"])
-    opts_union = {"scheduler": first.options.get("scheduler") or second.options.get("scheduler") or "karras"}
+    scheduler = first.options.get("scheduler") or second.options.get("scheduler") or "karras"
+    opts_union = {"scheduler": scheduler}
     if first.options.get("uses_ensd") or second.options.get("uses_ensd"):
         opts_union["uses_ensd"] = True
     if first.options.get("second_order") or second.options.get("second_order"):

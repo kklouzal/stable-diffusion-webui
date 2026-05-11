@@ -2,6 +2,10 @@ from modules import extra_networks, shared
 import networks
 
 
+class FatalLoraPreparationError(RuntimeError):
+    """Raised when proceeding would generate with unsupported/stale quantized LoRA state."""
+
+
 class ExtraNetworkLora(extra_networks.ExtraNetwork):
     def __init__(self):
         super().__init__('lora')
@@ -46,11 +50,11 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         if not networks.prepare_mxfp8_active_config():
             error = getattr(shared.sd_model, "network_mxfp8_prepare_error", "MXFP8 LoRA preparation failed")
             p.comment(f"MXFP8 LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
-            raise RuntimeError(error)
+            raise FatalLoraPreparationError(error)
         if not networks.prepare_nvfp4_active_config():
             error = getattr(shared.sd_model, "network_nvfp4_prepare_error", "NVFP4 LoRA preparation failed")
             p.comment(f"NVFP4 LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
-            raise RuntimeError(error)
+            raise FatalLoraPreparationError(error)
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):

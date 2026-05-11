@@ -110,6 +110,15 @@ def _load_sidecar(cache_path: str) -> Optional[dict]:
         return None
 
 
+def _expected_cache_metadata(filename: str, coverage=None) -> dict:
+    return {
+        "cache_version": CACHE_VERSION,
+        "config": CONFIG_NAME,
+        "source": _stat_source(filename),
+        "coverage": sorted(coverage) if coverage is not None else None,
+    }
+
+
 def _sidecar_matches(filename: str, cache_path: str, coverage=None) -> bool:
     if not os.path.exists(cache_path):
         return False
@@ -118,11 +127,14 @@ def _sidecar_matches(filename: str, cache_path: str, coverage=None) -> bool:
     if not sidecar:
         return False
 
+    expected = _expected_cache_metadata(filename, coverage)
+    coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected["coverage"])
     return (
-        sidecar.get("cache_version") == CACHE_VERSION
-        and sidecar.get("config") == CONFIG_NAME
-        and sidecar.get("source") == _stat_source(filename)
-        and (coverage is None or sidecar.get("coverage") in (None, sorted(coverage)))
+        sidecar.get("cache_version") == expected["cache_version"]
+        and sidecar.get("config") == expected["config"]
+        and sidecar.get("source") == expected["source"]
+        and coverage_matches
+        and sidecar.get("cache") == _stat_source(cache_path)
     )
 
 
@@ -183,6 +195,17 @@ def load_into_model(model, source_path: Optional[str], filter_fn: Callable, devi
 
     if not isinstance(payload, dict):
         print(f"Ignoring unreadable NVFP4 cache {cache_path}: payload is not a dict")
+        return False
+
+    expected = _expected_cache_metadata(source_path, coverage)
+    payload_coverage_matches = coverage is None or payload.get("coverage") in (None, expected["coverage"])
+    if not (
+        payload.get("cache_version") == expected["cache_version"]
+        and payload.get("config") == expected["config"]
+        and payload.get("source") == expected["source"]
+        and payload_coverage_matches
+    ):
+        print(f"Ignoring stale NVFP4 cache {cache_path}: payload metadata does not match requested source/config/coverage")
         return False
 
     tensors = payload.get("tensors", {})

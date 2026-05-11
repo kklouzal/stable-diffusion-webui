@@ -473,6 +473,9 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
     if precision not in PRECISIONS: return f'Error: unsupported precision {precision}'
     extra_opt = {'unet': normalize_part_action(unet_conv), 'clip': normalize_part_action(text_encoder_conv), 'vae': normalize_part_action(vae_conv), 'other': normalize_part_action(others_conv)}
     component_precisions = {'unet': normalize_precision(unet_precision), 'clip': normalize_precision(clip_precision), 'vae': normalize_precision(vae_precision), 'other': normalize_precision(other_precision)}
+    float8_components = {component for component in ('unet', 'clip', 'vae', 'other') if (component_precisions[component] if component_precisions[component] != 'inherit' else precision).startswith('float8_')}
+    if float8_components and (float8_components - {'unet'} or extra_opt.get('unet') != 'convert'):
+        return 'Error: float8 checkpoint export is experimental and currently limited to explicit UNet-only conversion; use MXFP8/NVFP4 runtime quantization for generation instead.'
     shared.state.begin()
     try:
         shared.state.job = 'model-convert'; shared.state.textinfo = f'Loading {model_info.filename}...'

@@ -135,6 +135,8 @@ def activate(p, extra_network_data):
             extra_network.activate(p, extra_network_args)
             activated.append(extra_network)
         except Exception as e:
+            if type(e).__name__ == "FatalLoraPreparationError":
+                raise
             errors.display(e, f"activating extra network {extra_network.name} with arguments {extra_network_args}")
 
     for extra_network_name, extra_network in extra_network_registry.items():
@@ -144,6 +146,8 @@ def activate(p, extra_network_data):
         try:
             extra_network.activate(p, [])
         except Exception as e:
+            if type(e).__name__ == "FatalLoraPreparationError":
+                raise
             errors.display(e, f"activating extra network {extra_network_name}")
 
     if p.scripts is not None:

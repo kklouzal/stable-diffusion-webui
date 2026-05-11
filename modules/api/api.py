@@ -394,6 +394,7 @@ class Api:
                         if target_index >= len(script_args):
                             script_args.extend([None] * (target_index + 1 - len(script_args)))
                         script_args[target_index] = value
+                    alwayson_script.args_to = max(alwayson_script.args_to, alwayson_script.args_from + len(requested_args))
         return script_args
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):

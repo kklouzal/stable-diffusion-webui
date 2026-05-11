@@ -447,7 +447,9 @@ class StableDiffusionProcessing:
             hires_steps,
             use_old_scheduling,
             opts.CLIP_stop_at_last_layers,
+            opts.sdxl_clip_l_skip,
             shared.sd_model.sd_checkpoint_info,
+            self.active_lora_cond_signature(),
             extra_network_data,
             opts.sdxl_crop_left,
             opts.sdxl_crop_top,
@@ -456,6 +458,29 @@ class StableDiffusionProcessing:
             opts.fp8_storage,
             opts.cache_fp16_weight,
             opts.emphasis,
+        )
+
+    def active_lora_cond_signature(self):
+        try:
+            import networks
+        except Exception:
+            return None
+
+        loras = []
+        for net in getattr(networks, "loaded_networks", []):
+            network_on_disk = getattr(net, "network_on_disk", None)
+            loras.append((
+                getattr(net, "name", None),
+                getattr(net, "mentioned_name", None),
+                getattr(net, "te_multiplier", None),
+                getattr(net, "unet_multiplier", None),
+                getattr(net, "dyn_dim", None),
+                networks.network_lora_source_signature(network_on_disk, net) if hasattr(networks, "network_lora_source_signature") else None,
+            ))
+        return (
+            getattr(opts, "sd_lora", None),
+            getattr(opts, "extra_networks_default_multiplier", None),
+            tuple(loras),
         )
 
     def get_conds_with_caching(self, function, required_prompts, steps, caches, extra_network_data, hires_steps=None):
@@ -837,6 +862,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Denoising strength": p.extra_generation_params.get("Denoising strength"),
         "Conditional mask weight": getattr(p, "inpainting_mask_weight", shared.opts.inpainting_mask_weight) if p.is_using_inpainting_conditioning else None,
         "Clip skip": None if clip_skip <= 1 else clip_skip,
+        "SDXL CLIP-L skip": opts.sdxl_clip_l_skip if getattr(shared.sd_model, "is_sdxl", False) and opts.sdxl_clip_l_skip else None,
         "ENSD": opts.eta_noise_seed_delta if uses_ensd else None,
         "Token merging ratio": None if token_merging_ratio == 0 else token_merging_ratio,
         "Token merging ratio hr": None if not enable_hr or token_merging_ratio_hr == 0 else token_merging_ratio_hr,

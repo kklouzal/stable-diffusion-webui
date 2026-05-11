@@ -407,6 +407,25 @@ def check_weight_quantization_mutual_exclusion(model):
         raise RuntimeError(f"Weight quantization modes are mutually exclusive; disable all but one: {', '.join(enabled)}")
 
 
+def torchao_quant_policy_signature(model):
+    """Return the active TorchAO quantization policy that affects loaded weights."""
+    if model is None:
+        return None
+    return (
+        bool(check_mxfp8(model)),
+        tuple(sorted(mxfp8_selected_linear_coverage())) if check_mxfp8(model) else (),
+        mxfp8_config.CONFIG_NAME if check_mxfp8(model) else None,
+        bool(check_nvfp4(model)),
+        tuple(sorted(nvfp4_selected_linear_coverage())) if check_nvfp4(model) else (),
+        nvfp4_config.CONFIG_NAME if check_nvfp4(model) else None,
+        devices.dtype,
+    )
+
+
+def model_matches_torchao_quant_policy(model):
+    return getattr(model, "openclaw_torchao_quant_policy_signature", None) == torchao_quant_policy_signature(model)
+
+
 def mxfp8_selected_linear_coverage():
     selected = getattr(shared.opts, "mxfp8_linear_coverage", None)
     if selected is None:
@@ -858,16 +877,22 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         devices.fp8 = False
 
     if check_mxfp8(model):
+        if lowvram.is_needed(model):
+            raise RuntimeError("MXFP8 weight is not supported with --lowvram/--medvram; TorchAO tensor subclasses cannot use lowvram's generic module.to() shuttling safely")
         devices.mxfp8 = True
         apply_mxfp8_weight_quantization(model, timer, checkpoint_info.filename)
     else:
         devices.mxfp8 = False
 
     if check_nvfp4(model):
+        if lowvram.is_needed(model):
+            raise RuntimeError("NVFP4 weight is not supported with --lowvram/--medvram; TorchAO tensor subclasses cannot use lowvram's generic module.to() shuttling safely")
         devices.nvfp4 = True
         apply_nvfp4_weight_quantization(model, timer, checkpoint_info.filename)
     else:
         devices.nvfp4 = False
+
+    model.openclaw_torchao_quant_policy_signature = torchao_quant_policy_signature(model)
 
     devices.unet_needs_upcast = shared.cmd_opts.upcast_sampling and devices.dtype_unet in (torch.float16, torch.bfloat16)
 
@@ -1362,7 +1387,14 @@ def reuse_model_from_already_loaded(sd_model, checkpoint_info, timer):
     for i in reversed(range(len(model_data.loaded_sd_models))):
         loaded_model = model_data.loaded_sd_models[i]
         if loaded_model.sd_checkpoint_info.filename == checkpoint_info.filename:
-            already_loaded = loaded_model
+            if model_matches_torchao_quant_policy(loaded_model):
+                already_loaded = loaded_model
+                continue
+
+            print(f"Unloading cached model with stale TorchAO quantization policy: {loaded_model.sd_checkpoint_info.title}")
+            del model_data.loaded_sd_models[i]
+            send_model_to_trash(loaded_model)
+            timer.record("send stale quant-policy model to trash")
             continue
 
         if len(model_data.loaded_sd_models) > shared.opts.sd_checkpoints_limit > 0:

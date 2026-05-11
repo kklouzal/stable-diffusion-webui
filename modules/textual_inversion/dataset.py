@@ -67,7 +67,7 @@ class PersonalizedBase(Dataset):
                     alpha_channel = image.getchannel('A')
                 image = image.convert('RGB')
                 if not varsize:
-                    image = image.resize((width, height), PIL.Image.BICUBIC)
+                    image = image.resize((width, height), getattr(PIL.Image, "Resampling", PIL.Image).BICUBIC)
             except Exception:
                 continue
 

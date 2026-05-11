@@ -3,13 +3,17 @@ from __future__ import annotations
 import gradio as gr
 import torch
 
-from modules import scripts, sd_samplers_kdiffusion
-from modules.shared import opts
+from modules import scripts, sd_samplers_common, sd_samplers_kdiffusion
 
 _ORIGINAL_GET_SIGMAS = getattr(sd_samplers_kdiffusion.KDiffusionSampler, "_openclaw_original_get_sigmas", None)
 if _ORIGINAL_GET_SIGMAS is None:
     _ORIGINAL_GET_SIGMAS = sd_samplers_kdiffusion.KDiffusionSampler.get_sigmas
     sd_samplers_kdiffusion.KDiffusionSampler._openclaw_original_get_sigmas = _ORIGINAL_GET_SIGMAS
+
+_ORIGINAL_SAMPLE_IMG2IMG = getattr(sd_samplers_kdiffusion.KDiffusionSampler, "_openclaw_original_sample_img2img", None)
+if _ORIGINAL_SAMPLE_IMG2IMG is None:
+    _ORIGINAL_SAMPLE_IMG2IMG = sd_samplers_kdiffusion.KDiffusionSampler.sample_img2img
+    sd_samplers_kdiffusion.KDiffusionSampler._openclaw_original_sample_img2img = _ORIGINAL_SAMPLE_IMG2IMG
 
 
 def _safe_float(value, default=0.0):
@@ -28,24 +32,13 @@ def _interp_sigmas(sigmas: torch.Tensor, positions: torch.Tensor) -> torch.Tenso
     return sigmas[left] * (1.0 - frac) + sigmas[right] * frac
 
 
-def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tensor:
+def ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int, t_enc: int | None = None) -> torch.Tensor:
     delta = _safe_float(getattr(p, "openclaw_denoise_step_delta", 0.0), 0.0)
-    if abs(delta) < 1e-9 or not hasattr(p, "denoising_strength"):
-        return sigmas
-
-    base_strength = max(0.0, min(_safe_float(getattr(p, "denoising_strength", 0.0), 0.0), 0.999))
-    if base_strength <= 0.0:
+    if abs(delta) < 1e-9 or t_enc is None:
         return sigmas
 
     total_transitions = max(1, min(steps, sigmas.shape[0] - 1))
-    if opts.img2img_fix_steps:
-        # setup_img2img_steps() expands the internal sigma count while keeping
-        # the user-requested step count as the denoised tail length. Recompute
-        # that tail from p.steps rather than bending nearly the whole expanded
-        # schedule.
-        t_enc = max(0, min(int(getattr(p, "steps", total_transitions)) - 1, total_transitions))
-    else:
-        t_enc = int(base_strength * total_transitions)
+    t_enc = max(0, min(int(t_enc), total_transitions))
     if t_enc <= 1:
         return sigmas
 
@@ -81,10 +74,26 @@ def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tenso
 
 def _patched_get_sigmas(self, p, steps):
     sigmas = _ORIGINAL_GET_SIGMAS(self, p, steps)
-    return _ramp_sigmas_for_img2img(p, sigmas, steps)
+    if not getattr(p, "openclaw_denoise_ramp_active", False):
+        return sigmas
+    return ramp_sigmas_for_img2img(p, sigmas, steps, getattr(p, "openclaw_denoise_ramp_t_enc", None))
+
+
+def _patched_sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
+    internal_steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
+    previous_active = getattr(p, "openclaw_denoise_ramp_active", False)
+    previous_t_enc = getattr(p, "openclaw_denoise_ramp_t_enc", None)
+    p.openclaw_denoise_ramp_active = True
+    p.openclaw_denoise_ramp_t_enc = t_enc
+    try:
+        return _ORIGINAL_SAMPLE_IMG2IMG(self, p, x, noise, conditioning, unconditional_conditioning, steps=steps, image_conditioning=image_conditioning)
+    finally:
+        p.openclaw_denoise_ramp_active = previous_active
+        p.openclaw_denoise_ramp_t_enc = previous_t_enc
 
 
 sd_samplers_kdiffusion.KDiffusionSampler.get_sigmas = _patched_get_sigmas
+sd_samplers_kdiffusion.KDiffusionSampler.sample_img2img = _patched_sample_img2img
 
 
 class OpenClawDenoiseRampScript(scripts.Script):
