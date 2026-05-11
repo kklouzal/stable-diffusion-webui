@@ -50,13 +50,22 @@ sudo touch "${HOST_ROOT}/config/config.json" \
            "${HOST_ROOT}/config/ui-config.json" \
            "${HOST_ROOT}/config/styles.csv"
 
-OWNED_EXTENSIONS=(
-  sd-webui-incantations
-  openclaw-clear-cond-cache
-  openclaw-denoise-ramp
-  openclaw-multi-sampler
-  sd-webui-model-converter
-)
+OWNED_EXTENSIONS=()
+if [[ -d "${PROJECT_ROOT}/extensions" ]]; then
+  while IFS= read -r -d "" extension_path; do
+    OWNED_EXTENSIONS+=("$(basename "${extension_path}")")
+  done < <(find "${PROJECT_ROOT}/extensions" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+fi
+
+if [[ ${#OWNED_EXTENSIONS[@]} -eq 0 ]]; then
+  echo "ERROR: no owned extensions discovered under ${PROJECT_ROOT}/extensions" >&2
+  exit 1
+fi
+
+printf "Discovered owned extensions:"
+printf " %s" "${OWNED_EXTENSIONS[@]}"
+printf "\n"
+
 SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
 
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do
