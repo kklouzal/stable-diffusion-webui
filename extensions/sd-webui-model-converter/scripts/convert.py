@@ -394,12 +394,27 @@ def convert_lora(payload: dict[str, Any]) -> str:
         save_name = custom_name or f'{model_info.model_name}-{precision}'
         save_path = os.path.join(os.path.dirname(model_info.filepath), save_name + '.safetensors')
         safetensors.torch.save_file(ok, save_path, metadata=metadata)
+        refresh_after_convert('lora')
         report = {'source_doctor': before_doctor, 'output_doctor': after_doctor, 'metadata_added': {k: v for k, v in metadata.items() if k.startswith('openclaw_lora_converter_')}}
         return f'LoRA saved to {save_path}\nOpenClaw LoRA doctor report:\n' + json.dumps(report, indent=2, sort_keys=True)
     except Exception:
         traceback.print_exc(); raise
     finally:
         shared.state.end()
+
+def refresh_after_convert(kind: str = "checkpoint") -> None:
+    try:
+        sd_models.list_models()
+    except Exception as exc:
+        print(f"[OpenClaw Model Converter] Checkpoint refresh after conversion failed: {exc}")
+    if kind == "lora":
+        try:
+            import networks  # type: ignore
+            if hasattr(networks, "list_available_networks"):
+                networks.list_available_networks()
+        except Exception as exc:
+            print(f"[OpenClaw Model Converter] LoRA refresh after conversion failed: {exc}")
+
 
 def converter_options() -> dict[str, Any]:
     sd_vae.refresh_vae_list(); sd_models.list_models()
@@ -513,6 +528,7 @@ def do_convert(model_info: MockModelInfo, checkpoint_formats, precision, conv_ty
             if fmt == 'safetensors': safetensors.torch.save_file(ok, save_path, metadata=metadata)
             else: torch.save({'state_dict': ok, 'openclaw_metadata': metadata}, save_path)
             output += f'Checkpoint saved to {save_path}\n'
+        refresh_after_convert('checkpoint')
         report = {'source_doctor': before_doctor, 'output_doctor': after_doctor, 'removed_known_junk': {'count': len(removed_junk), 'examples': removed_junk[:50]}, 'nonfinite_repair': {'source': source_nonfinite, 'output': output_nonfinite}, 'metadata': metadata}
         output += 'OpenClaw checkpoint doctor report:\n' + json.dumps(report, indent=2, sort_keys=True)
         return output.rstrip()
