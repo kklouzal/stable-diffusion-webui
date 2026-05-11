@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,12 +14,20 @@ from modules import mxfp8_config
 
 CACHE_DIR_NAME = "mxfp8"
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CONFIG_NAME = mxfp8_config.CONFIG_NAME
 
 
 def _is_safetensors(filename: str) -> bool:
     return os.path.splitext(filename)[1].lower() == ".safetensors"
+
+
+def _sha256_file(filename: str) -> str:
+    h = hashlib.sha256()
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _stat_source(filename: str) -> dict:
@@ -27,7 +36,34 @@ def _stat_source(filename: str) -> dict:
         "path": os.path.abspath(filename),
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
+        "sha256": _sha256_file(filename),
     }
+
+
+def _tensor_meta(tensor) -> dict:
+    return {
+        "shape": list(getattr(tensor, "shape", []) or []),
+        "dtype": str(getattr(tensor, "dtype", None)),
+        "device": str(getattr(tensor, "device", None)),
+        "tensor_type": type(tensor).__module__ + "." + type(tensor).__name__,
+    }
+
+
+def _device_matches(actual, expected) -> bool:
+    actual_device = torch.device(str(actual))
+    expected_device = torch.device(expected)
+    if expected_device.index is None:
+        return actual_device.type == expected_device.type
+    return actual_device == expected_device
+
+
+def _metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
+    if metadata:
+        actual = _tensor_meta(tensor)
+        for key in ("shape", "dtype", "tensor_type"):
+            if actual.get(key) != metadata.get(key):
+                return False
+    return _device_matches(getattr(tensor, "device", None), expected_device)
 
 
 def is_mxfp8_cache_path(filename: str) -> bool:
@@ -150,17 +186,33 @@ def load_into_model(model, source_path: Optional[str], filter_fn: Callable, devi
         return False
 
     tensors = payload.get("tensors", {})
+    metadata = payload.get("metadata", {})
     eligible_modules = list(_iter_eligible_linear_modules(model, filter_fn))
     print(f"Validating MXFP8 cache for {source_path}: expected {len(eligible_modules)} Linear modules", flush=True)
     missing = []
+    incompatible = []
     for fqn, module in eligible_modules:
         entry = tensors.get(fqn)
         weight = entry.get("weight") if entry is not None else None
         if not _is_mxfp8_tensor(weight):
             missing.append(fqn)
+            continue
+        expected_shape = list(module.weight.shape) if module.weight is not None else []
+        weight_meta = metadata.get(fqn, {}).get("weight", {})
+        cached_shape = list(getattr(weight, "shape", []) or weight_meta.get("shape", []))
+        if cached_shape != expected_shape or not _metadata_matches(weight, weight_meta, device):
+            incompatible.append({"name": fqn, "expected": expected_shape, "cached": _tensor_meta(weight)})
+        bias = entry.get("bias")
+        bias_meta = metadata.get(fqn, {}).get("bias")
+        if bias is not None and (module.bias is None or list(bias.shape) != list(module.bias.shape) or not _metadata_matches(bias, bias_meta, device)):
+            expected_bias = None if module.bias is None else list(module.bias.shape)
+            incompatible.append({"name": fqn + ".bias", "expected": expected_bias, "cached": _tensor_meta(bias)})
 
     if missing:
         print(f"Ignoring incomplete MXFP8 cache {cache_path}: expected {len(eligible_modules)}, missing {len(missing)}")
+        return False
+    if incompatible:
+        print(f"Ignoring incompatible MXFP8 cache {cache_path}: {incompatible[:5]}")
         return False
 
     print(f"Assigning MXFP8 cache for {source_path}: {len(eligible_modules)} Linear modules", flush=True)
@@ -184,12 +236,17 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         return None
 
     tensors = {}
+    metadata = {}
     for fqn, module in _iter_eligible_linear_modules(model, filter_fn):
         if not _is_mxfp8_tensor(module.weight):
             return None
         tensors[fqn] = {
             "weight": module.weight.detach(),
             "bias": module.bias.detach() if module.bias is not None else None,
+        }
+        metadata[fqn] = {
+            "weight": _tensor_meta(module.weight),
+            "bias": _tensor_meta(module.bias) if module.bias is not None else None,
         }
 
     source_stat = _stat_source(source_path)
@@ -201,6 +258,7 @@ def save_from_model(model, source_path: Optional[str], filter_fn: Callable, elig
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,
         "skipped_reasons": skipped_reasons,
+        "metadata": metadata,
         "tensors": tensors,
     }
 

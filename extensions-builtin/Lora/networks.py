@@ -155,9 +155,18 @@ class BundledTIHash(str):
         return self.hash if shared.opts.lora_bundled_ti_to_infotext else ''
 
 
+def network_file_signature(filename):
+    try:
+        stat = os.stat(filename)
+        return (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
+    net.source_signature = network_file_signature(network_on_disk.filename)
 
     sd = sd_models.read_state_dict(network_on_disk.filename)
 
@@ -316,7 +325,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
             if net is None:
                 net = networks_in_memory.get(name)
 
-            if net is None or os.path.getmtime(network_on_disk.filename) > net.mtime:
+            if net is None or network_file_signature(network_on_disk.filename) != getattr(net, "source_signature", None):
                 try:
                     net = load_network(name, network_on_disk)
 
@@ -583,6 +592,22 @@ def network_mxfp8_wanted_names():
     return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
 
 
+def network_lora_source_signature(network_on_disk, net=None):
+    filename = getattr(network_on_disk, "filename", None)
+    stat_sig = None
+    if filename:
+        try:
+            stat_sig = network_file_signature(filename)
+        except OSError:
+            stat_sig = "missing"
+    return (
+        filename,
+        getattr(network_on_disk, "shorthash", None),
+        getattr(net, "mtime", None),
+        stat_sig,
+    )
+
+
 def network_mxfp8_active_config_signature():
     """Return the currently active in-memory MXFP8+LoRA weight signature.
 
@@ -604,16 +629,12 @@ def network_mxfp8_active_config_signature():
     loras = []
     for net in loaded_networks:
         network_on_disk = getattr(net, "network_on_disk", None)
-        filename = getattr(network_on_disk, "filename", None)
-        mtime = getattr(net, "mtime", None)
         loras.append((
             net.name,
             net.te_multiplier,
             net.unet_multiplier,
             net.dyn_dim,
-            filename,
-            getattr(network_on_disk, "shorthash", None),
-            mtime,
+            network_lora_source_signature(network_on_disk, net),
         ))
 
     return (checkpoint_key, coverage, config_name, tuple(loras))
@@ -909,16 +930,12 @@ def network_nvfp4_active_config_signature():
     loras = []
     for net in loaded_networks:
         network_on_disk = getattr(net, "network_on_disk", None)
-        filename = getattr(network_on_disk, "filename", None)
-        mtime = getattr(net, "mtime", None)
         loras.append((
             net.name,
             net.te_multiplier,
             net.unet_multiplier,
             net.dyn_dim,
-            filename,
-            getattr(network_on_disk, "shorthash", None),
-            mtime,
+            network_lora_source_signature(network_on_disk, net),
         ))
 
     return (checkpoint_key, coverage, config_name, tuple(loras))

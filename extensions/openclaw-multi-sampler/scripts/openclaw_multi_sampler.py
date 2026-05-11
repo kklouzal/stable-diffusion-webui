@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
 from modules import devices, script_callbacks, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
+from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +224,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                 self._save_snapshot(p, denoised, step=global_step + 1)
         return inner
 
+    def _stage_total_steps(self, sampler_name: str, stage_steps: int) -> int:
+        return _k_sampler_config(sampler_name).total_steps(stage_steps)
+
     def _run_chain(self, p, x, conditioning, unconditional_conditioning, sigmas: torch.Tensor, steps: int, *, is_img2img: bool, image_conditioning=None):
         self._initialize_chain(p)
         first_sigmas, second_sigmas, switch_at = self._split_sigmas(sigmas, steps)
@@ -231,7 +235,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             (self.definition["sampler_2"], second_sigmas, switch_at),
         ]
         self.model_wrap_cfg.steps = steps
-        self.model_wrap_cfg.total_steps = steps
+        self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, len(stage_sigmas) - 1)) for name, stage_sigmas, _offset in stages)
         state.sampling_steps = steps
         state.sampling_step = 0
         self.last_latent = x
@@ -263,6 +267,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                     s_in = x.new_ones([x.shape[0]])
                     denoised = self.model_wrap_cfg(x, stage_sigmas[0] * s_in, **self.sampler_extra_args)
                     self._callback(p, offset=offset)({"x": x, "i": 0, "sigma": stage_sigmas[0], "sigma_hat": stage_sigmas[0], "denoised": denoised})
+                    self.last_latent = denoised
                     x = denoised
                 else:
                     x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=False, callback=self._callback(p, offset=offset), **kwargs)
@@ -295,6 +300,14 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
         else:
             xi = x + noise * sigma_sched[0]
+
+        if opts.img2img_extra_noise > 0:
+            p.extra_generation_params["Extra noise"] = opts.img2img_extra_noise
+            extra_noise_params = ExtraNoiseParams(noise, x, xi)
+            extra_noise_callback(extra_noise_params)
+            noise = extra_noise_params.noise
+            xi += noise * opts.img2img_extra_noise
+
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x
         samples = self._run_chain(p, xi, conditioning, unconditional_conditioning, sigma_sched, t_enc, is_img2img=True, image_conditioning=image_conditioning)

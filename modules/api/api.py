@@ -379,12 +379,21 @@ class Api:
                     raise HTTPException(status_code=422, detail="Cannot have a selectable script in the always on scripts params")
                 # always on script with no arg should always run so you don't really need to add them to the requests
                 if "args" in request.alwayson_scripts[alwayson_script_name]:
-                    # min between arg length in scriptrunner and arg length in the request
-                    for idx in range(0, min((alwayson_script.args_to - alwayson_script.args_from), len(request.alwayson_scripts[alwayson_script_name]["args"]))):
+                    requested_args = request.alwayson_scripts[alwayson_script_name]["args"]
+                    if not isinstance(requested_args, list):
+                        raise HTTPException(status_code=422, detail=f"always on script {alwayson_script_name} args must be a list")
+
+                    # Some composite extensions build additional controls after
+                    # args_to is captured by the API default-args bootstrap. Do
+                    # not silently truncate a valid caller payload; extend the
+                    # backing script_args vector when the requested always-on
+                    # payload legitimately reaches past the current default
+                    # length.
+                    for idx, value in enumerate(requested_args):
                         target_index = alwayson_script.args_from + idx
                         if target_index >= len(script_args):
                             script_args.extend([None] * (target_index + 1 - len(script_args)))
-                        script_args[target_index] = request.alwayson_scripts[alwayson_script_name]["args"][idx]
+                        script_args[target_index] = value
         return script_args
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):

@@ -4,6 +4,7 @@ import gradio as gr
 import torch
 
 from modules import scripts, sd_samplers_kdiffusion
+from modules.shared import opts
 
 _ORIGINAL_GET_SIGMAS = getattr(sd_samplers_kdiffusion.KDiffusionSampler, "_openclaw_original_get_sigmas", None)
 if _ORIGINAL_GET_SIGMAS is None:
@@ -37,7 +38,14 @@ def _ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int) -> torch.Tenso
         return sigmas
 
     total_transitions = max(1, min(steps, sigmas.shape[0] - 1))
-    t_enc = int(base_strength * total_transitions)
+    if opts.img2img_fix_steps:
+        # setup_img2img_steps() expands the internal sigma count while keeping
+        # the user-requested step count as the denoised tail length. Recompute
+        # that tail from p.steps rather than bending nearly the whole expanded
+        # schedule.
+        t_enc = max(0, min(int(getattr(p, "steps", total_transitions)) - 1, total_transitions))
+    else:
+        t_enc = int(base_strength * total_transitions)
     if t_enc <= 1:
         return sigmas
 

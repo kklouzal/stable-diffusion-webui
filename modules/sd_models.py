@@ -779,6 +779,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     if hasattr(model, "before_load_weights"):
         model.before_load_weights(state_dict)
 
+    restore_torchao_quantized_linears_for_reload(model)
     model.load_state_dict(state_dict, strict=False)
     timer.record("apply weights to model")
 
@@ -1089,11 +1090,27 @@ def get_empty_cond(sd_model):
     return d
 
 
+def model_has_torchao_quantization(m):
+    return bool(
+        m is not None
+        and (
+            devices.mxfp8
+            or devices.nvfp4
+            or bool(getattr(m, "mxfp8_quantization_stats", None))
+            or bool(getattr(m, "nvfp4_quantization_stats", None))
+            or check_mxfp8(m)
+            or check_nvfp4(m)
+        )
+    )
+
+
 def send_model_to_cpu(m):
     if m is not None:
         if m.lowvram:
             lowvram.send_everything_to_cpu()
         else:
+            if model_has_torchao_quantization(m):
+                restore_torchao_quantized_linears_for_reload(m, target_device=devices.cpu, target_dtype=devices.dtype)
             m.to(devices.cpu)
 
     devices.torch_gc()
@@ -1121,6 +1138,49 @@ def torchao_quant_tensor_types():
     return tuple(types)
 
 
+def is_torchao_quant_tensor(tensor):
+    tensor_types = torchao_quant_tensor_types()
+    return bool(tensor_types) and isinstance(tensor, tensor_types)
+
+
+def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, target_dtype=None):
+    """Replace TorchAO-quantized Linear params with BF16 backups before generic reload/move paths."""
+    if model is None:
+        return 0
+
+    target_device = target_device or devices.device
+    target_dtype = target_dtype or devices.dtype
+    restored = 0
+    missing_backup = []
+    with torch.no_grad():
+        for fqn, module in model.named_modules():
+            if not isinstance(module, torch.nn.Linear) or not is_torchao_quant_tensor(getattr(module, "weight", None)):
+                continue
+
+            base_weight = getattr(module, "network_mxfp8_base_weight", None)
+            base_bias = getattr(module, "network_mxfp8_base_bias", None)
+            if base_weight is None:
+                base_weight = getattr(module, "network_nvfp4_base_weight", None)
+                base_bias = getattr(module, "network_nvfp4_base_bias", None)
+
+            if base_weight is None:
+                missing_backup.append(fqn)
+                continue
+
+            module._parameters["weight"] = torch.nn.Parameter(base_weight.to(device=target_device, dtype=target_dtype), requires_grad=False)
+            if base_bias is not None:
+                module._parameters["bias"] = torch.nn.Parameter(base_bias.to(device=target_device, dtype=target_dtype), requires_grad=False)
+            elif module.bias is not None:
+                module._parameters["bias"] = None
+            restored += 1
+
+    if missing_backup:
+        raise RuntimeError(f"Cannot safely reload TorchAO-quantized model; missing BF16 backup weights for {len(missing_backup)} Linear modules, first={missing_backup[:5]}")
+    if restored:
+        print(f"Restored {restored} TorchAO-quantized Linear modules to BF16 before checkpoint reload", flush=True)
+    return restored
+
+
 def send_torchao_quant_model_to_device(m):
     torchao_tensor_types = torchao_quant_tensor_types()
     target = shared.device
@@ -1142,7 +1202,7 @@ def send_model_to_device(m):
     lowvram.apply(m)
 
     if not m.lowvram:
-        if devices.mxfp8 or devices.nvfp4:
+        if model_has_torchao_quantization(m):
             # TorchAO tensor subclasses do not implement all tensor-moving /
             # aliasing ops that nn.Module.to() may call. Move ordinary
             # parameters/buffers around quantized leaves instead so skipped
@@ -1153,6 +1213,12 @@ def send_model_to_device(m):
 
 
 def send_model_to_trash(m):
+    if model_has_torchao_quantization(m):
+        # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
+        # trash path. The caller is discarding the tree, so just drop references
+        # and let GC reclaim it.
+        devices.torch_gc()
+        return
     m.to(device="meta")
     devices.torch_gc()
 
