@@ -53,6 +53,8 @@ sudo touch "${HOST_ROOT}/config/config.json" \
 OWNED_EXTENSIONS=(
   sd-webui-incantations
   openclaw-clear-cond-cache
+  openclaw-denoise-ramp
+  openclaw-multi-sampler
   sd-webui-model-converter
 )
 SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
