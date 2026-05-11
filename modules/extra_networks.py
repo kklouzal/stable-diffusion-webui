@@ -195,15 +195,25 @@ def parse_prompt(prompt):
     return prompt, res
 
 
+def extra_data_equal(a, b):
+    return dict(a or {}) == dict(b or {})
+
+
 def parse_prompts(prompts):
     res = []
     extra_data = None
 
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts):
         updated_prompt, parsed_extra_data = parse_prompt(prompt)
 
         if extra_data is None:
             extra_data = parsed_extra_data
+        elif not extra_data_equal(extra_data, parsed_extra_data):
+            raise ValueError(
+                "Different extra networks in the same batch are not supported; "
+                "use batch size 1 or keep LoRA/extra-network tags identical across batched prompts "
+                f"(first mismatch at prompt index {index})."
+            )
 
         res.append(updated_prompt)
 

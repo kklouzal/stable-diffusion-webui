@@ -824,6 +824,11 @@ class ScriptRunner:
         return f"{script.__class__.__name__}:{filename or script.filename or '<unknown>'}"
 
     @staticmethod
+    def _script_args_for(p, script):
+        args_to = getattr(p, "openclaw_script_args_to_overrides", {}).get(id(script), script.args_to)
+        return p.script_args[script.args_from:args_to]
+
+    @staticmethod
     def _record_script_timing(p, hook_name, script, elapsed):
         timings = getattr(p, "openclaw_script_timings", None)
         if timings is None:
@@ -846,7 +851,7 @@ class ScriptRunner:
     def before_process(self, p):
         for script in self.ordered_scripts('before_process'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.before_process(p, *script_args)
@@ -858,7 +863,7 @@ class ScriptRunner:
     def process(self, p):
         for script in self.ordered_scripts('process'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.process(p, *script_args)
@@ -870,7 +875,7 @@ class ScriptRunner:
     def process_before_every_sampling(self, p, **kwargs):
         for script in self.ordered_scripts('process_before_every_sampling'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.process_before_every_sampling(p, *script_args, **kwargs)
@@ -882,7 +887,7 @@ class ScriptRunner:
     def before_process_batch(self, p, **kwargs):
         for script in self.ordered_scripts('before_process_batch'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.before_process_batch(p, *script_args, **kwargs)
@@ -894,7 +899,7 @@ class ScriptRunner:
     def after_extra_networks_activate(self, p, **kwargs):
         for script in self.ordered_scripts('after_extra_networks_activate'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.after_extra_networks_activate(p, *script_args, **kwargs)
@@ -906,7 +911,7 @@ class ScriptRunner:
     def process_batch(self, p, **kwargs):
         for script in self.ordered_scripts('process_batch'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.process_batch(p, *script_args, **kwargs)
@@ -918,7 +923,7 @@ class ScriptRunner:
     def postprocess(self, p, processed):
         for script in self.ordered_scripts('postprocess'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess(p, processed, *script_args)
@@ -930,7 +935,7 @@ class ScriptRunner:
     def postprocess_batch(self, p, images, **kwargs):
         for script in self.ordered_scripts('postprocess_batch'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess_batch(p, *script_args, images=images, **kwargs)
@@ -942,7 +947,7 @@ class ScriptRunner:
     def postprocess_batch_list(self, p, pp: PostprocessBatchListArgs, **kwargs):
         for script in self.ordered_scripts('postprocess_batch_list'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess_batch_list(p, pp, *script_args, **kwargs)
@@ -954,7 +959,7 @@ class ScriptRunner:
     def post_sample(self, p, ps: PostSampleArgs):
         for script in self.ordered_scripts('post_sample'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.post_sample(p, ps, *script_args)
@@ -966,7 +971,7 @@ class ScriptRunner:
     def on_mask_blend(self, p, mba: MaskBlendArgs):
         for script in self.ordered_scripts('on_mask_blend'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.on_mask_blend(p, mba, *script_args)
@@ -978,7 +983,7 @@ class ScriptRunner:
     def postprocess_image(self, p, pp: PostprocessImageArgs):
         for script in self.ordered_scripts('postprocess_image'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess_image(p, pp, *script_args)
@@ -990,7 +995,7 @@ class ScriptRunner:
     def postprocess_maskoverlay(self, p, ppmo: PostProcessMaskOverlayArgs):
         for script in self.ordered_scripts('postprocess_maskoverlay'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess_maskoverlay(p, ppmo, *script_args)
@@ -1002,7 +1007,7 @@ class ScriptRunner:
     def postprocess_image_after_composite(self, p, pp: PostprocessImageArgs):
         for script in self.ordered_scripts('postprocess_image_after_composite'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.postprocess_image_after_composite(p, pp, *script_args)
@@ -1061,7 +1066,7 @@ class ScriptRunner:
     def before_hr(self, p):
         for script in self.ordered_scripts('before_hr'):
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.before_hr(p, *script_args)
@@ -1076,7 +1081,7 @@ class ScriptRunner:
                 continue
 
             try:
-                script_args = p.script_args[script.args_from:script.args_to]
+                script_args = self._script_args_for(p, script)
                 started = time.perf_counter()
                 try:
                     script.setup(p, *script_args)

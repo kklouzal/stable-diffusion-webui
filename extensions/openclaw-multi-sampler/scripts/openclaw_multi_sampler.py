@@ -321,20 +321,29 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         return samples
 
 
+class MultiSamplerData(sd_samplers_common.SamplerData):
+    def total_steps(self, steps):
+        chain = self.options.get("openclaw_chain") or {}
+        switch_at = max(0, min(_safe_int(chain.get("switch_at"), 0), steps))
+        first_steps = switch_at
+        second_steps = max(0, steps - switch_at)
+        first = _k_sampler_config(chain["sampler_1"])
+        second = _k_sampler_config(chain["sampler_2"])
+        return first.total_steps(first_steps) + second.total_steps(second_steps)
+
+
 def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerData:
     name = definition["name"]
     chain = dict(definition)
     first = _k_sampler_config(chain["sampler_1"])
     second = _k_sampler_config(chain["sampler_2"])
     scheduler = first.options.get("scheduler") or second.options.get("scheduler") or "karras"
-    opts_union = {"scheduler": scheduler}
+    opts_union = {"scheduler": scheduler, "openclaw_chain": chain}
     if first.options.get("uses_ensd") or second.options.get("uses_ensd"):
         opts_union["uses_ensd"] = True
-    if first.options.get("second_order") or second.options.get("second_order"):
-        opts_union["second_order"] = True
     if first.options.get("brownian_noise") or second.options.get("brownian_noise"):
         opts_union["brownian_noise"] = True
-    return sd_samplers_common.SamplerData(name, lambda model, chain=chain: MultiKDiffusionSampler(model, chain), [], opts_union)
+    return MultiSamplerData(name, lambda model, chain=chain: MultiKDiffusionSampler(model, chain), [], opts_union)
 
 
 def _register_definitions() -> None:

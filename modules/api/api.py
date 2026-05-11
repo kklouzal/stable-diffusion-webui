@@ -34,6 +34,11 @@ import piexif.helper
 from contextlib import closing
 from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
 
+
+class ScriptArgsList(list):
+    pass
+
+
 def script_name_to_index(name, scripts):
     try:
         return [script.title().lower() for script in scripts].index(name.lower())
@@ -357,7 +362,8 @@ class Api:
         return script_args
 
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
-        script_args = default_script_args.copy()
+        script_args = ScriptArgsList(default_script_args.copy())
+        script_args.openclaw_script_args_to_overrides = {}
 
         if input_script_args is not None:
             for index, value in input_script_args.items():
@@ -389,12 +395,14 @@ class Api:
                     # backing script_args vector when the requested always-on
                     # payload legitimately reaches past the current default
                     # length.
+                    request_args_to = alwayson_script.args_from + len(requested_args)
+                    if request_args_to > alwayson_script.args_to:
+                        script_args.openclaw_script_args_to_overrides[id(alwayson_script)] = request_args_to
                     for idx, value in enumerate(requested_args):
                         target_index = alwayson_script.args_from + idx
                         if target_index >= len(script_args):
                             script_args.extend([None] * (target_index + 1 - len(script_args)))
                         script_args[target_index] = value
-                    alwayson_script.args_to = max(alwayson_script.args_to, alwayson_script.args_from + len(requested_args))
         return script_args
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
@@ -495,6 +503,7 @@ class Api:
         args.pop('infotext', None)
 
         script_args = self.init_script_args(txt2imgreq, self.default_script_arg_txt2img, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
+        script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
 
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
@@ -507,6 +516,7 @@ class Api:
                 with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
                     p.is_api = True
                     p.scripts = script_runner
+                    p.openclaw_script_args_to_overrides = script_args_to_overrides
                     p.outpath_grids = opts.outdir_txt2img_grids
                     p.outpath_samples = opts.outdir_txt2img_samples
 
@@ -571,6 +581,7 @@ class Api:
         args.pop('infotext', None)
 
         script_args = self.init_script_args(img2imgreq, self.default_script_arg_img2img, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
+        script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
 
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
@@ -588,6 +599,7 @@ class Api:
                     p.init_images = decoded_init_images
                     p.is_api = True
                     p.scripts = script_runner
+                    p.openclaw_script_args_to_overrides = script_args_to_overrides
                     p.outpath_grids = opts.outdir_img2img_grids
                     p.outpath_samples = opts.outdir_img2img_samples
 
