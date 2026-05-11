@@ -8,14 +8,13 @@ from collections import Counter
 from typing import Any
 
 import safetensors
-import safetensors
 import safetensors.torch
 import torch
 from torch import Tensor
 
 from modules import paths, sd_models, sd_vae, shared
 
-OPENCLAW_CONVERTER_VERSION = '2026-05-10.3'
+OPENCLAW_CONVERTER_VERSION = '2026-05-10.4'
 DTYPES_TO_FP16 = {torch.float32, torch.float64, torch.bfloat16}
 DTYPES_TO_BF16 = {torch.float32, torch.float64, torch.float16}
 DTYPES_TO_FLOAT8 = {torch.float32, torch.float64, torch.bfloat16, torch.float16}
@@ -23,7 +22,6 @@ PART_ACTIONS = {'copy', 'convert', 'delete'}
 PRECISIONS = {'full', 'fp32', 'fp16', 'bf16', 'float8_e4m3fn', 'float8_e5m2'}
 COMPONENT_PRECISIONS = {'inherit', *PRECISIONS}
 FORMATS = {'ckpt', 'safetensors'}
-LORA_PRECISIONS = {'fp32', 'fp16', 'bf16'}
 LORA_PRECISIONS = {'fp32', 'fp16', 'bf16'}
 KNOWN_JUNK_PREFIXES = (
     'embedding_manager.embedder.', 'lora_te_text_model', 'lora_unet', 'lycoris_',
@@ -38,7 +36,10 @@ class MockModelInfo:
         self.model_name = os.path.splitext(self.filename)[0]
 
 def conv_full(t: Tensor) -> Tensor:
-    return t.float() if t.dtype == torch.float64 else t
+    return t.float() if torch.is_floating_point(t) and t.dtype != torch.float32 else t
+
+def conv_fp32(t: Tensor) -> Tensor:
+    return t.float() if torch.is_floating_point(t) and t.dtype != torch.float32 else t
 
 def conv_fp16(t: Tensor) -> Tensor:
     return t.half() if t.dtype in DTYPES_TO_FP16 else t
@@ -53,7 +54,7 @@ def conv_float8_e5m2(t: Tensor) -> Tensor:
     return t.to(torch.float8_e5m2) if t.dtype in DTYPES_TO_FLOAT8 else t
 
 PRECISION_FUNCS = {
-    'full': conv_full, 'fp32': conv_full, 'fp16': conv_fp16, 'bf16': conv_bf16,
+    'full': conv_full, 'fp32': conv_fp32, 'fp16': conv_fp16, 'bf16': conv_bf16,
     'float8_e4m3fn': conv_float8_e4m3fn, 'float8_e5m2': conv_float8_e5m2,
 }
 
