@@ -8,8 +8,9 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
-from modules import call_queue, extra_networks, prompt_parser, script_callbacks, sd_models, shared
+from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, shared
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img
+from modules.textual_inversion import textual_inversion
 
 _last_cleared_at = 0.0
 _compile_slots: dict[str, dict[str, Any]] = {}
@@ -430,6 +431,76 @@ def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "desired": dict(_compile_desired), "status": dict(_compile_status), "results": results}
 
 
+
+def _model_merge_config_source_value(value: Any) -> str:
+    choices = ["A, B or C", "B", "C", "Don't"]
+    if isinstance(value, int) and 0 <= value < len(choices):
+        return choices[value]
+    text = str(value or "A, B or C").strip()
+    return text if text in choices else "A, B or C"
+
+
+def _run_openclaw_model_merge(payload: dict[str, Any]) -> dict[str, Any]:
+    method = str(payload.get("interp_method") or "Weighted sum").strip()
+    if method not in {"No interpolation", "Weighted sum", "Add difference"}:
+        return {"ok": False, "error": f"Unsupported interpolation method: {method}"}
+
+    primary = str(payload.get("primary_model_name") or "").strip()
+    secondary = str(payload.get("secondary_model_name") or "").strip()
+    tertiary = str(payload.get("tertiary_model_name") or "").strip()
+    if not primary:
+        return {"ok": False, "error": "Primary model A is required"}
+    if method in {"Weighted sum", "Add difference"} and not secondary:
+        return {"ok": False, "error": "Secondary model B is required for this merge method"}
+    if method == "Add difference" and not tertiary:
+        return {"ok": False, "error": "Tertiary model C is required for Add difference"}
+
+    checkpoint_format = str(payload.get("checkpoint_format") or "safetensors").strip()
+    if checkpoint_format not in {"ckpt", "safetensors"}:
+        return {"ok": False, "error": "Checkpoint format must be ckpt or safetensors"}
+
+    metadata_json = str(payload.get("metadata_json") or "{}").strip() or "{}"
+    try:
+        import json
+        json.loads(metadata_json)
+    except Exception as exc:
+        return {"ok": False, "error": f"Metadata JSON is invalid: {exc}"}
+
+    try:
+        with call_queue.queue_lock:
+            outputs = extras.run_modelmerger(
+                None,
+                primary,
+                secondary,
+                tertiary,
+                method,
+                float(payload.get("multiplier") if payload.get("multiplier") is not None else 0.3),
+                bool(payload.get("save_as_half", False)),
+                str(payload.get("custom_name") or "").strip(),
+                checkpoint_format,
+                _model_merge_config_source_value(payload.get("config_source")),
+                str(payload.get("bake_in_vae") or "None").strip() or "None",
+                str(payload.get("discard_weights") or ""),
+                bool(payload.get("save_metadata", True)),
+                bool(payload.get("add_merge_recipe", True)),
+                bool(payload.get("copy_metadata_fields", True)),
+                metadata_json,
+            )
+        message = str((outputs or [""])[-1] or "")
+        if message.lower().startswith(("failed:", "error")):
+            return {"ok": False, "error": message}
+        return {"ok": True, "message": message}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _training_templates() -> dict[str, Any]:
+    try:
+        templates = textual_inversion.list_textual_inversion_templates()
+        return {"ok": True, "templates": sorted(str(name) for name in templates)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "templates": []}
+
 def on_model_loaded(_: Any) -> None:
     global _startup_model_load_token
     if _startup_model_load_token is not None:
@@ -531,6 +602,15 @@ def on_app_started(_: object, app: FastAPI) -> None:
             return {"ok": True, "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
+
+    @app.post("/sdapi/v1/openclaw/model-merge")
+    async def _model_merge(request: Request):
+        data = await request.json()
+        return _run_openclaw_model_merge(data if isinstance(data, dict) else {})
+
+    @app.get("/sdapi/v1/openclaw/training-templates")
+    async def _training_template_choices():
+        return _training_templates()
 
     @app.get("/sdapi/v1/openclaw/cond-cache")
     async def _cond_cache_status():
