@@ -1,5 +1,5 @@
 from modules import scripts_postprocessing, ui_components, deepbooru, shared
-import gradio as gr
+from modules import gradio_compat as gr
 
 
 class ScriptPostprocessingCeption(scripts_postprocessing.ScriptPostprocessing):

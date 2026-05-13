@@ -12,7 +12,7 @@
 
 import logging
 
-import gradio as gr
+from modules import gradio_compat as gr
 import torch
 import dynthres_core
 from modules import scripts, script_callbacks, sd_samplers, sd_samplers_compvis, sd_samplers_common

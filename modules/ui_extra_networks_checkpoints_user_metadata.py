@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import ui_extra_networks_user_metadata, sd_vae, shared
 from modules.ui_common import create_refresh_button

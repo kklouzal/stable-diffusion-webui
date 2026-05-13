@@ -6,7 +6,7 @@ import os
 import re
 import sys
 
-import gradio as gr
+from modules import gradio_compat as gr
 from modules.paths import data_path
 from modules import shared, ui_tempdir, script_callbacks, processing, infotext_versions, images, prompt_parser, errors
 from PIL import Image

@@ -2,7 +2,7 @@ from PIL import Image
 import numpy as np
 
 from modules import scripts_postprocessing, codeformer_model, ui_components
-import gradio as gr
+from modules import gradio_compat as gr
 
 
 class ScriptPostprocessingCodeFormer(scripts_postprocessing.ScriptPostprocessing):

@@ -1,5 +1,5 @@
 
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import sd_models, sd_vae, errors, extras, call_queue
 from modules.ui_components import FormRow

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from modules import shared, ui_extra_networks_user_metadata, errors, extra_networks, util
 from modules.images import read_info_from_image, save_image_with_geninfo
-import gradio as gr
+from modules import gradio_compat as gr
 import json
 import html
 from fastapi.exceptions import HTTPException

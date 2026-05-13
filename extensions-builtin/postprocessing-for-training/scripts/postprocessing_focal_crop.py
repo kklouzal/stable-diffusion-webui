@@ -1,6 +1,6 @@
 
 from modules import scripts_postprocessing, ui_components, errors
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules.textual_inversion import autocrop
 

@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 
 
 class FormComponent:

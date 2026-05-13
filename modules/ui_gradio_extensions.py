@@ -1,5 +1,5 @@
 import os
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import localization, shared, scripts, util
 from modules.paths import script_path, data_path

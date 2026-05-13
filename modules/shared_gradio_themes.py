@@ -1,6 +1,6 @@
 import os
 
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import errors, shared
 from modules.paths_internal import script_path

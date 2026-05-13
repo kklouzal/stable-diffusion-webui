@@ -1,5 +1,5 @@
 from __future__ import annotations
-import gradio as gr
+from modules import gradio_compat as gr
 import logging
 import os
 import re

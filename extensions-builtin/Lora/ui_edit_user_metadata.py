@@ -2,7 +2,7 @@ import datetime
 import html
 import random
 
-import gradio as gr
+from modules import gradio_compat as gr
 import re
 
 from modules import ui_extra_networks_user_metadata

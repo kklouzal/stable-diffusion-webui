@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import gradio as gr
+from modules import gradio_compat as gr
 import torch
 
 from modules import scripts, sd_samplers_common, sd_samplers_kdiffusion

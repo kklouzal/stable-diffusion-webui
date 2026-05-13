@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 
 from modules import scripts_postprocessing, shared
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules.ui_components import FormRow, ToolButton, InputAccordion
 from modules.ui import switch_values_symbol

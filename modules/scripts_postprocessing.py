@@ -1,9 +1,7 @@
 import re
 import dataclasses
 import os
-import gradio as gr
-
-from modules import errors, shared
+from modules import gradio_compat as gr
 
 
 @dataclasses.dataclass
@@ -254,3 +252,7 @@ class ScriptPostprocessingRunner:
         for script in self.scripts_in_preferred_order():
             script.image_changed()
 
+
+
+# Late imports to avoid a scripts <-> scripts_postprocessing cycle during headless import smokes.
+from modules import errors, shared

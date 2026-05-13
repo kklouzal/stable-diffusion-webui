@@ -1,6 +1,6 @@
 import re
 
-import gradio as gr
+from modules import gradio_compat as gr
 from fastapi import FastAPI
 
 import network

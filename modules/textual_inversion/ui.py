@@ -1,6 +1,6 @@
 import html
 
-import gradio as gr
+from modules import gradio_compat as gr
 
 import modules.textual_inversion.textual_inversion
 from modules import sd_hijack, shared

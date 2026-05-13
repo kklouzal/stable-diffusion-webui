@@ -9,7 +9,7 @@ from PIL import Image
 import numpy as np
 
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import images, sd_samplers, processing, sd_models, sd_vae, sd_schedulers, errors
 from modules.processing import process_images, Processed, StableDiffusionProcessingTxt2Img

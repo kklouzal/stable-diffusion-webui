@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import git
 
-import gradio as gr
+from modules import gradio_compat as gr
 import html
 import shutil
 import errno

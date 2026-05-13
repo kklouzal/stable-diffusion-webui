@@ -3,7 +3,7 @@ import tempfile
 from collections import namedtuple
 from pathlib import Path
 
-import gradio.components
+from modules import gradio_compat as gr
 
 from PIL import PngImagePlugin
 
@@ -58,7 +58,7 @@ def save_pil_to_file(self, pil_image, dir=None, format="png"):
 
 def install_ui_tempdir_override():
     """override save to file function so that it also writes PNG info"""
-    gradio.components.IOComponent.pil_to_temp_file = save_pil_to_file
+    gr.components.IOComponent.pil_to_temp_file = save_pil_to_file
 
 
 def on_tmpdir_changed():

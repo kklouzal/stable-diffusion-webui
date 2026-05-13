@@ -1,0 +1,4 @@
+# Optional legacy Gradio UI dependency lane.
+# The API/headless runtime must not depend on this file. Install it only when
+# running the legacy Gradio web UI while the replacement frontend lands.
+gradio==3.41.2

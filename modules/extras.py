@@ -9,7 +9,7 @@ import tqdm
 
 from modules import shared, images, sd_models, sd_vae, sd_models_config, errors
 from modules.ui_common import plaintext_to_html
-import gradio as gr
+from modules import gradio_compat as gr
 import safetensors.torch
 
 

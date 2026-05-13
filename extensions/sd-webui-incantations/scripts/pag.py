@@ -2,7 +2,7 @@ import logging
 import time
 from os import environ
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 from scripts.ui_wrapper import UIWrapper
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
@@ -23,7 +23,7 @@ logger.setLevel(environ.get("SD_WEBUI_LOG_LEVEL", logging.INFO))
 An unofficial implementation of "Self-Rectifying Diffusion Sampling with Perturbed-Attention Guidance" for Automatic1111 WebUI.
 
 @misc{ahn2024selfrectifying,
-      title={Self-Rectifying Diffusion Sampling with Perturbed-Attention Guidance}, 
+      title={Self-Rectifying Diffusion Sampling with Perturbed-Attention Guidance},
       author={Donghoon Ahn and Hyoungwon Cho and Jaewon Min and Wooseok Jang and Jungwoo Kim and SeonHwa Kim and Hyun Hee Park and Kyong Hwan Jin and Seungryong Kim},
       year={2024},
       eprint={2403.17377},
@@ -35,7 +35,7 @@ Include noise interval for CFG and PAG guidance in the sampling process from "Ap
 Sample and Distribution Quality in Diffusion Models"
 
 @misc{kynkäänniemi2024applying,
-      title={Applying Guidance in a Limited Interval Improves Sample and Distribution Quality in Diffusion Models}, 
+      title={Applying Guidance in a Limited Interval Improves Sample and Distribution Quality in Diffusion Models},
       author={Tuomas Kynkäänniemi and Miika Aittala and Tero Karras and Samuli Laine and Timo Aila and Jaakko Lehtinen},
       year={2024},
       eprint={2404.07724},
@@ -46,7 +46,7 @@ Sample and Distribution Quality in Diffusion Models"
 Include CFG schedulers from "Analysis of Classifier-Free Guidance Weight Schedulers"
 
 @misc{wang2024analysis,
-      title={Analysis of Classifier-Free Guidance Weight Schedulers}, 
+      title={Analysis of Classifier-Free Guidance Weight Schedulers},
       author={Xi Wang and Nicolas Dufour and Nefeli Andreou and Marie-Paule Cani and Victoria Fernandez Abrevaya and David Picard and Vicky Kalogeiton},
       year={2024},
       eprint={2404.13040},
@@ -56,7 +56,7 @@ Include CFG schedulers from "Analysis of Classifier-Free Guidance Weight Schedul
 
 Saliency-adaptive noise fusion from arXiv:2311.10329 "High-fidelity Person-centric Subject-to-Image Synthesis"
 @misc{wang2024highfidelity,
-      title={High-fidelity Person-centric Subject-to-Image Synthesis}, 
+      title={High-fidelity Person-centric Subject-to-Image Synthesis},
       author={Yibin Wang and Weizhong Zhang and Jianwei Zheng and Cheng Jin},
       year={2024},
       eprint={2311.10329},
@@ -97,14 +97,14 @@ class PAGStateParams:
                 self.pag_sanf: bool = False # saliency-adaptive noise fusion, handled in cfg_combiner
                 self.pag_scale: int = -1      # PAG guidance scale
                 self.pag_start_step: int = 0
-                self.pag_end_step: int = 150 
+                self.pag_end_step: int = 150
                 self.cfg_interval_enable: bool = False
                 self.cfg_interval_schedule: str = 'Constant'
                 self.cfg_interval_low: float = 0
                 self.cfg_interval_high: float = 50.0
                 self.cfg_interval_scheduled_value: float = 7.0
-                self.step : int = 0 
-                self.max_sampling_step : int = 1 
+                self.step : int = 0
+                self.max_sampling_step : int = 1
                 self.guidance_scale: int = -1 # CFG
                 self.current_noise_level: float = 100.0
                 self.x_in = None
@@ -293,12 +293,12 @@ class PAGExtensionScript(UIWrapper):
                                 cfg_schedule = gr.Dropdown(
                                         value='Constant',
                                         choices= SCHEDULES,
-                                        label="CFG Schedule Type", 
-                                        elem_id='cfg_interval_schedule', 
+                                        label="CFG Schedule Type",
+                                        elem_id='cfg_interval_schedule',
                                 )
                                 cfg_interval_low = gr.Slider(value = 0, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval Low", elem_id = 'cfg_interval_low', info="")
                                 cfg_interval_high = gr.Slider(value = 100, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval High", elem_id = 'cfg_interval_high', info="")
-                                
+
                 active.do_not_save_to_config = True
                 pag_sanf.do_not_save_to_config = True
                 pag_scale.do_not_save_to_config = True
@@ -380,9 +380,9 @@ class PAGExtensionScript(UIWrapper):
 
                 # Preserve any setup timing already recorded before state was attached.
                 _record_pag_timing(pag_params, "create_hook_setup", 0.0)
-                
-                pag_params.pag_active = active 
-                pag_params.pag_sanf = pag_sanf 
+
+                pag_params.pag_active = active
+                pag_params.pag_sanf = pag_sanf
                 pag_params.pag_scale = pag_scale
                 pag_params.pag_start_step = start_step
                 pag_params.pag_end_step = end_step
@@ -527,9 +527,9 @@ class PAGExtensionScript(UIWrapper):
                                 self._pag_hook_handles.append(module_hooks.module_add_forward_hook(to_v, to_v_pre_hook, hook_type="forward", with_kwargs=True))
 
         def get_middle_block_modules(self):
-                """ Get all attention modules from the middle block 
+                """ Get all attention modules from the middle block
                 Refere to page 22 of the PAG paper, Appendix A.2
-                
+
                 """
                 try:
                         m = shared.sd_model
@@ -621,9 +621,9 @@ class PAGExtensionScript(UIWrapper):
                         _record_pag_timing(pag_params, "cfg_denoised_callback", time.perf_counter() - started)
 
         def _on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
-                """ Callback function for the CFGDenoisedParams 
+                """ Callback function for the CFGDenoisedParams
                 Refer to pg.22 A.2 of the PAG paper for how CFG and PAG combine
-                
+
                 """
                 # Run only within interval
                 # Run PAG only if active and within interval
@@ -641,7 +641,7 @@ class PAGExtensionScript(UIWrapper):
                 uncond = pag_params.text_uncond
                 image_cond_in = pag_params.image_cond
                 sigma_in = pag_params.sigma
-                
+
                 make_condition_dict = pag_params.make_condition_dict or get_make_condition_dict_fn(uncond)
 
                 # set pag_enable to True for the hooked cross attention modules
@@ -677,7 +677,7 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.text_uncond = None
                         pag_params.image_cond = None
                         pag_params.sigma = None
-        
+
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
                 extra_axis_options = {
@@ -754,7 +754,7 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
     if noise_level >= sigma_max:
         return 0
         #return N - 1
-    
+
     low, high = 0, N - 1
     while low <= high:
         mid = (low + high) // 2
@@ -765,7 +765,7 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
             high = mid - 1
         else:
             low = mid + 1
-    
+
     # If exact match not found, return the index with noise level closest to the target
     return low if abs(calculate_noise_level(low, N) - noise_level) < abs(calculate_noise_level(high, N) - noise_level) else high
 
@@ -860,7 +860,7 @@ def clamp_cosine_schedule(step: int, max_steps: int, w0: float, c: float):
 
 
 def invlinear_schedule(step: int, max_steps: int, w0: float):
-        """ 
+        """
         Normalized inverse linear scheduler for CFG guidance weight.
         """
         # return w0 * (step / max_steps)
@@ -885,7 +885,7 @@ def sine_schedule(step: int, max_steps: int, w0: float):
         """
         Normalized sine scheduler for CFG guidance weight.
         """
-        return w0 * (math.sin((math.pi * step / max_steps) - (math.pi / 2)) + 1) 
+        return w0 * (math.sin((math.pi * step / max_steps) - (math.pi / 2)) + 1)
 
 
 def v_shape_schedule(step: int, max_steps: int, w0: float):

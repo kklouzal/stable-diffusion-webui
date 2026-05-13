@@ -6,8 +6,8 @@ from functools import reduce
 import warnings
 from contextlib import ExitStack
 
-import gradio as gr
-import gradio.utils
+from modules import gradio_compat as gr
+from modules.gradio_compat import utils as gradio_utils
 import numpy as np
 from PIL import Image, PngImagePlugin  # noqa: F401
 from modules.call_queue import wrap_gradio_gpu_call, wrap_queued_call, wrap_gradio_call, wrap_gradio_call_no_job # noqa: F401
@@ -49,8 +49,8 @@ mimetypes.add_type('text/css', '.css')
 
 if not cmd_opts.share and not cmd_opts.listen:
     # fix gradio phoning home
-    gradio.utils.version_check = lambda: None
-    gradio.utils.get_local_ip_address = lambda: '127.0.0.1'
+    gradio_utils.version_check = lambda: None
+    gradio_utils.get_local_ip_address = lambda: '127.0.0.1'
 
 if cmd_opts.ngrok is not None:
     import modules.ngrok as ngrok

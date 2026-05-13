@@ -7,7 +7,7 @@ import datetime
 import uvicorn
 import ipaddress
 import requests
-import gradio as gr
+from modules import gradio_compat as gr
 from threading import Lock
 from io import BytesIO
 from fastapi import APIRouter, Depends, FastAPI, Request, Response

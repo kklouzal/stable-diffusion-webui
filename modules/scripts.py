@@ -6,7 +6,7 @@ import time
 from collections import namedtuple
 from dataclasses import dataclass
 
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import shared, paths, script_callbacks, extensions, script_loading, scripts_postprocessing, errors, timer, util
 

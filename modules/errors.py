@@ -105,7 +105,8 @@ def check_versions():
     from modules import shared
 
     import torch
-    import gradio
+
+    from modules import gradio_compat as gr
 
     expected_torch_version = "2.1.2"
     expected_xformers_version = "0.0.23.post1"
@@ -134,9 +135,10 @@ To reinstall the desired version, run with commandline flag --reinstall-xformers
 Use --skip-version-check commandline argument to disable this check.
             """.strip())
 
-    if gradio.__version__ != expected_gradio_version:
+    gradio_version = gr.version()
+    if gradio_version is not None and gradio_version != expected_gradio_version:
         print_error_explanation(f"""
-You are running gradio {gradio.__version__}.
+You are running gradio {gradio_version}.
 The program is designed to work with gradio {expected_gradio_version}.
 Using a different version of gradio is extremely likely to break the program.
 

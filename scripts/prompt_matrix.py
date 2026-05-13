@@ -1,7 +1,7 @@
 import math
 
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import images
 from modules.processing import process_images

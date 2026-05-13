@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import ui_common, shared, script_callbacks, scripts, sd_models, sysinfo, timer, shared_items
 from modules.call_queue import wrap_gradio_call_no_job

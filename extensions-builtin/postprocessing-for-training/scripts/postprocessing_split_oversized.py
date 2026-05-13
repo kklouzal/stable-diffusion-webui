@@ -1,7 +1,7 @@
 import math
 
 from modules import scripts_postprocessing, ui_components
-import gradio as gr
+from modules import gradio_compat as gr
 
 
 def split_pic(image, inverse_xy, width, height, overlap_ratio):

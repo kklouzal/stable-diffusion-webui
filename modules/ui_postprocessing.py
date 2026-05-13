@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 from modules import scripts, shared, ui_common, postprocessing, call_queue, ui_toprow
 import modules.infotext_utils as parameters_copypaste
 from modules.ui_components import ResizeHandleRow

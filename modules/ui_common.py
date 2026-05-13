@@ -5,7 +5,7 @@ import html
 import os
 from contextlib import nullcontext
 
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import call_queue, shared, ui_tempdir, util
 from modules.infotext_utils import image_from_url_text

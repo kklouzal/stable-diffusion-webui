@@ -1,6 +1,6 @@
 import logging
 
-import gradio as gr
+from modules import gradio_compat as gr
 import torch
 import math
 from modules import shared

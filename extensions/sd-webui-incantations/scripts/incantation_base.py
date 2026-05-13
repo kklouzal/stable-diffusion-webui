@@ -2,7 +2,7 @@ import logging
 import time
 from os import environ
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 from modules import script_callbacks
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper
@@ -91,7 +91,7 @@ class IncantBaseExtensionScript(scripts.Script):
                         self.infotext_fields.extend(module.get_infotext_fields())
                         self.paste_field_names.extend(module.get_paste_field_names())
                 return out
-        
+
         def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
                 # Parent-owned CFG composition state. Submodules populate their
                 # own entries; CFGCombiner owns only wrapper installation/restore.
@@ -111,7 +111,7 @@ class IncantBaseExtensionScript(scripts.Script):
         def before_process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
                         _timed_module_call(p, m.module, "before_process_batch", m.module.before_process_batch, p, *self.m_args(m, *args), **kwargs)
-        
+
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
                         _timed_module_call(p, m.module, "process_batch", m.module.process_batch, p, *self.m_args(m, *args), **kwargs)
@@ -123,7 +123,7 @@ class IncantBaseExtensionScript(scripts.Script):
         def unhook_callbacks(self):
                 for m in submodules:
                         m.module.unhook_callbacks()
-        
+
         def m_args(self, module: SubmoduleInfo, *args):
                 return args[module.arg_idx:module.arg_idx + module.num_args]
 

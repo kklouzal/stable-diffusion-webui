@@ -63,9 +63,13 @@ def warning_if_invalid_install_dir():
     """
     from packaging.version import parse
     from pathlib import Path
-    import gradio
+    from modules import gradio_compat as gr
 
-    if parse('3.32.0') <= parse(gradio.__version__) < parse('4'):
+    gradio_version = gr.version()
+    if gradio_version is None:
+        return
+
+    if parse('3.32.0') <= parse(gradio_version) < parse('4'):
 
         def abspath(path):
             """modified from Gradio 3.41.2 gradio.utils.abspath()"""

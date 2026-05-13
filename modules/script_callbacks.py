@@ -6,7 +6,7 @@ import os
 from typing import Optional, Any
 
 from fastapi import FastAPI
-from gradio import Blocks
+from modules.gradio_compat import Blocks
 
 from modules import errors, timer, extensions, shared, util
 

@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
+from modules import gradio_compat as gr
 import numpy as np
 from PIL import Image
 import torch

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps, ImageFilter, ImageEnhance, UnidentifiedImageError
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import images
 from modules.infotext_utils import create_override_settings_dict, parse_generation_parameters

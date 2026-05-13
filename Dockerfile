@@ -223,11 +223,9 @@ COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
 # - prebuild wheels for the full resolved closure in this throwaway stage
 # - tokenizers follows the current Transformers-compatible range, but must not fall
 #   below the known-good GB10 floor or fall back to an sdist/Rust build
-# - local resolver compatibility concession: Gradio 3.41.2 still advertises stale
-#   `numpy~=1.0` wheel metadata even though this stack runs on numpy 2.x, so the resolver
-#   input patches that metadata to `numpy>=1.0` before generating the dry-run report used
-#   to build the wheel closure. This should disappear when the UI stack can move past
-#   the Gradio 3.x compatibility lane.
+# - the legacy Gradio UI dependency has been moved out of the base image
+#   requirements. API/headless builds must resolve and run without Gradio.
+#   Use requirements-gradio.txt only for temporary legacy-UI compatibility.
 RUN rustc --version \
     && cargo --version \
     && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
@@ -345,6 +343,13 @@ RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements \
     && python - <<'PY'
 import importlib.metadata as md
 import json
+
+def version(name):
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return None
+
 print(json.dumps({
     'after_runtime_install': {
         'torch': md.version('torch'),
@@ -352,7 +357,7 @@ print(json.dumps({
         'torchaudio': md.version('torchaudio'),
         'torchao': md.version('torchao'),
         'mslk': md.version('mslk'),
-        'gradio': md.version('gradio'),
+        'gradio': version('gradio'),
         'transformers': md.version('transformers'),
         'clip': md.version('clip'),
         'sageattention': md.version('sageattention'),

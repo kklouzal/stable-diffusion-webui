@@ -4,7 +4,7 @@ from os import environ
 import math
 
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams
@@ -43,7 +43,7 @@ class SEGStateParams:
                 self.seg_blur_sigma: float = 1.0
                 self.seg_blur_threshold: float = 15.0 # 2^13 ~= 8192
                 self.seg_start_step: int = 0
-                self.seg_end_step: int = 150 
+                self.seg_end_step: int = 150
                 self.crossattn_modules = [] # callable lambda
                 self.openclaw_extension_timings = {}
 
@@ -101,7 +101,7 @@ class SEGExtensionScript(UIWrapper):
                                 end_step = gr.Slider(value = 150, minimum = 0, maximum = 150, step = 1, label="SEG End Step", elem_id = 'seg_end_step', info="")
 
                 params = [active, seg_blur_sigma, start_step, end_step]
-                                
+
                 self.infotext_fields = [
                         (active, lambda d: gr.Checkbox.update(value='SEG Active' in d)),
                         (seg_blur_sigma, 'SEG Blur Sigma'),
@@ -148,8 +148,8 @@ class SEGExtensionScript(UIWrapper):
                 if not hasattr(p, 'incant_cfg_params'):
                         logger.error("No incant_cfg_params found in p")
                 p.incant_cfg_params['seg_params'] = seg_params
-                
-                seg_params.seg_active = active 
+
+                seg_params.seg_active = active
                 seg_params.seg_blur_sigma = seg_blur_sigma
                 seg_params.seg_blur_threshold = 10.5
                 seg_params.seg_start_step = start_step
@@ -281,9 +281,9 @@ class SEGExtensionScript(UIWrapper):
                         self._seg_hook_handles.append(module_hooks.module_add_forward_hook(module.to_q, seg_to_q_hook, hook_type="forward", with_kwargs=True))
 
         def get_middle_block_modules(self):
-                """ Get all attention modules from the middle block 
+                """ Get all attention modules from the middle block
                 Refere to page 22 of the SEG paper, Appendix A.2
-                
+
                 """
                 middle_block_modules = module_hooks.get_modules(
                         network_layer_name_filter = 'middle_block_',

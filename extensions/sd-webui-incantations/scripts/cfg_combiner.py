@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 import logging
 import time
 import torch
@@ -91,7 +91,7 @@ class CFGCombinerScript(UIWrapper):
             self.infotext_fields = []
             self.paste_field_names = []
             return []
-        
+
         def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
             logger.debug("CFGCombinerScript before_process")
             if not hasattr(p, 'incant_cfg_params'):
@@ -102,7 +102,7 @@ class CFGCombinerScript(UIWrapper):
 
         def before_process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
             pass
-        
+
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
             """Register only when PAG/CFG interval state exists for this batch.
 

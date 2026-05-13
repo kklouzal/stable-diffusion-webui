@@ -4,7 +4,7 @@ import numpy as np
 import skimage
 
 import modules.scripts as scripts
-import gradio as gr
+from modules import gradio_compat as gr
 from PIL import Image, ImageDraw
 
 from modules import images

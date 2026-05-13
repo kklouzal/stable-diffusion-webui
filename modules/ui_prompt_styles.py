@@ -1,4 +1,4 @@
-import gradio as gr
+from modules import gradio_compat as gr
 
 from modules import shared, ui_common, ui_components, styles
 
