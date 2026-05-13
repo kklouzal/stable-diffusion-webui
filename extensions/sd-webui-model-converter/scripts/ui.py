@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import traceback
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 

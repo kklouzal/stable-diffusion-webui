@@ -1,5 +1,5 @@
 import os
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import localization, shared, scripts, util
 from modules.paths import script_path, data_path
@@ -41,7 +41,7 @@ def css_html():
     if os.path.exists(user_css):
         head += stylesheet(user_css)
 
-    from modules.shared_gradio_themes import resolve_var
+    from modules.shared_ui_themes import resolve_var
     light = resolve_var('background_fill_primary')
     dark = resolve_var('background_fill_primary_dark')
     head += f'<style>html {{ background-color: {light}; }} @media (prefers-color-scheme: dark) {{ html {{background-color:  {dark}; }} }}</style>'
@@ -54,7 +54,7 @@ def reload_javascript():
     css = css_html()
 
     def template_response(*args, **kwargs):
-        res = shared.GradioTemplateResponseOriginal(*args, **kwargs)
+        res = shared.UITemplateResponseOriginal(*args, **kwargs)
         res.body = res.body.replace(b'</head>', f'{js}<meta name="referrer" content="no-referrer"/></head>'.encode("utf8"))
         res.body = res.body.replace(b'</body>', f'{css}</body>'.encode("utf8"))
         res.init_headers()
@@ -63,5 +63,5 @@ def reload_javascript():
     gr.routes.templates.TemplateResponse = template_response
 
 
-if not hasattr(shared, 'GradioTemplateResponseOriginal'):
-    shared.GradioTemplateResponseOriginal = gr.routes.templates.TemplateResponse
+if not hasattr(shared, 'UITemplateResponseOriginal'):
+    shared.UITemplateResponseOriginal = gr.routes.templates.TemplateResponse

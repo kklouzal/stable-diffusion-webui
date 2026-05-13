@@ -1,7 +1,7 @@
 from PIL import ImageOps, Image
 
 from modules import scripts_postprocessing, ui_components
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 class ScriptPostprocessingCreateFlippedCopies(scripts_postprocessing.ScriptPostprocessing):

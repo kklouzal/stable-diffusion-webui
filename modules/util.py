@@ -182,7 +182,7 @@ def topological_sort(dependencies):
 def open_folder(path):
     """Open a folder in the file manager of the respect OS."""
     # import at function level to avoid potential issues
-    from modules import gradio_compat as gr
+    from modules import headless_ui as gr
     import platform
     import sys
     import subprocess

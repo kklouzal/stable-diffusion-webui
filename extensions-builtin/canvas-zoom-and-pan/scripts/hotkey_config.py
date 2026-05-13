@@ -1,4 +1,4 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from modules import shared
 
 shared.options_templates.update(shared.options_section(('canvas_hotkey', "Canvas Hotkeys"), {

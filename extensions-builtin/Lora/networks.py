@@ -1,5 +1,5 @@
 from __future__ import annotations
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import logging
 import os
 import re

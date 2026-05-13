@@ -4,7 +4,7 @@ import numpy as np
 import skimage
 
 import modules.scripts as scripts
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from PIL import Image, ImageDraw
 
 from modules import images

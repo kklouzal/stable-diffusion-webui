@@ -1,9 +1,9 @@
 import os
 import sys
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
-from modules import shared_cmd_options, shared_gradio_themes, options, shared_items, sd_models_types
+from modules import shared_cmd_options, shared_ui_themes, options, shared_items, sd_models_types
 from modules.paths_internal import models_path, script_path, data_path, sd_configs_path, sd_default_config, sd_model_file, default_sd_model_file, extensions_dir, extensions_builtin_dir  # noqa: F401
 from modules import util
 from typing import TYPE_CHECKING
@@ -47,7 +47,7 @@ restricted_opts: set[str] = None
 sd_model: sd_models_types.WebuiSdModel = None
 
 settings_components: dict = None
-"""assigned from ui.py, a mapping on setting names to gradio components responsible for those settings"""
+"""assigned from ui.py, a mapping on setting names to UI components responsible for those settings"""
 
 tab_names = []
 
@@ -84,7 +84,7 @@ html = util.html
 walk_files = util.walk_files
 ldm_print = util.ldm_print
 
-reload_gradio_theme = shared_gradio_themes.reload_gradio_theme
+reload_ui_theme = shared_ui_themes.reload_ui_theme
 
 list_checkpoint_tiles = shared_items.list_checkpoint_tiles
 refresh_checkpoints = shared_items.refresh_checkpoints

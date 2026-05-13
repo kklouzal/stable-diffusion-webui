@@ -7,7 +7,7 @@ import datetime
 import uvicorn
 import ipaddress
 import requests
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from threading import Lock
 from io import BytesIO
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
@@ -433,7 +433,7 @@ class Api:
             if target_type == type(None):
                 return None
 
-            if isinstance(value, dict) and value.get('__type__') == 'generic_update':  # this is a gradio.update rather than a value
+            if isinstance(value, dict) and value.get('__type__') == 'generic_update':  # this is an update payload rather than a value
                 value = value.get('value')
 
             if value is not None and not isinstance(value, target_type):

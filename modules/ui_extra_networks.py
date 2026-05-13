@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from modules import shared, ui_extra_networks_user_metadata, errors, extra_networks, util
 from modules.images import read_info_from_image, save_image_with_geninfo
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import json
 import html
 from fastapi.exceptions import HTTPException
@@ -701,7 +701,7 @@ def register_default_pages():
 class ExtraNetworksUi:
     def __init__(self):
         self.pages = None
-        """gradio HTML components related to extra networks' pages"""
+        """HTML components related to extra networks' pages"""
 
         self.page_contents = None
         """HTML content of the above; empty initially, filled when extra pages have to be shown"""

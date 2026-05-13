@@ -47,7 +47,7 @@ missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit(f'missing required modules: {", ".join(missing)}')
 
-optional_absent = [name for name in ['gradio', 'xformers'] if importlib.util.find_spec(name) is None]
+optional_absent = [name for name in ['xformers'] if importlib.util.find_spec(name) is None]
 if optional_absent:
     print(f'optional absent: {", ".join(optional_absent)}')
 

@@ -2,7 +2,7 @@ import logging
 import time
 from os import environ
 import modules.scripts as scripts
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from modules import script_callbacks
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper

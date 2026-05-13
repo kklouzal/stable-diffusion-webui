@@ -6,7 +6,7 @@ import time
 from collections import namedtuple
 from dataclasses import dataclass
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import shared, paths, script_callbacks, extensions, script_loading, scripts_postprocessing, errors, timer, util
 
@@ -73,7 +73,7 @@ class Script:
     """If False, for alwayson scripts, a group component will not be created."""
 
     infotext_fields = None
-    """if set in ui(), this is a list of pairs of gradio component + text; the text will be used when
+    """if set in ui(), this is a list of pairs of UI component + text; the text will be used when
     parsing infotext to set the value for the component; see ui.py's txt2img_paste_fields for an example
     """
 
@@ -92,7 +92,7 @@ class Script:
     """list of callbacks to be called after a component with an elem_id is created"""
 
     setup_for_ui_only = False
-    """If true, the script setup will only be run in Gradio UI, not in API"""
+    """If true, the script setup will only be run in browser UI setup, not in API"""
 
     controls = None
     """A list of controls returned by the ui()."""
@@ -103,7 +103,7 @@ class Script:
         raise NotImplementedError()
 
     def ui(self, is_img2img):
-        """this function should create gradio UI elements. See https://gradio.app/docs/#components
+        """this function should create UI component elements for script argument metadata.
         The return value should be an array of all components that are used in processing.
         Values of those returned components will be passed to run() and process() functions.
         """
@@ -665,7 +665,7 @@ class ScriptRunner:
                 if v is not None:
                     setattr(arg_info, field, v)
 
-            choices = getattr(control, 'choices', None)  # as of gradio 3.41, some items in choices are strings, and some are tuples where the first elem is the string
+            choices = getattr(control, 'choices', None)  # legacy component choices may be strings or tuples where the first item is the string
             if choices is not None:
                 arg_info.choices = [x[0] if isinstance(x, tuple) else x for x in choices]
 

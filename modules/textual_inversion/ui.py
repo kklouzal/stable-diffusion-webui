@@ -1,6 +1,6 @@
 import html
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 import modules.textual_inversion.textual_inversion
 from modules import sd_hijack, shared

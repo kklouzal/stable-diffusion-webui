@@ -223,9 +223,8 @@ COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
 # - prebuild wheels for the full resolved closure in this throwaway stage
 # - tokenizers follows the current Transformers-compatible range, but must not fall
 #   below the known-good GB10 floor or fall back to an sdist/Rust build
-# - the legacy Gradio UI dependency has been moved out of the base image
-#   requirements. API/headless builds must resolve and run without Gradio.
-#   Use requirements-gradio.txt only for temporary legacy-UI compatibility.
+# - the legacy browser UI dependency has been moved out of the base image.
+#   API/headless builds must resolve and run without the browser UI package.
 RUN rustc --version \
     && cargo --version \
     && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
@@ -329,7 +328,7 @@ print(json.dumps({
         'torchaudio': version('torchaudio'),
         'torchao': version('torchao'),
         'mslk': version('mslk'),
-        'gradio': version('gradio'),
+        'browser_ui': None,
         'transformers': version('transformers'),
         'clip': version('clip'),
     }
@@ -357,7 +356,7 @@ print(json.dumps({
         'torchaudio': md.version('torchaudio'),
         'torchao': md.version('torchao'),
         'mslk': md.version('mslk'),
-        'gradio': version('gradio'),
+        'browser_ui': None,
         'transformers': md.version('transformers'),
         'clip': md.version('clip'),
         'sageattention': md.version('sageattention'),

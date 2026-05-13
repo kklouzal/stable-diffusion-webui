@@ -4,7 +4,7 @@ from os import environ
 import math
 
 import modules.scripts as scripts
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams

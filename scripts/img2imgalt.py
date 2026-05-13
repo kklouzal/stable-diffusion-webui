@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import trange
 
 import modules.scripts as scripts
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import processing, shared, sd_samplers, sd_samplers_common
 

@@ -1,5 +1,5 @@
 from modules import scripts_postprocessing, ui_components, deepbooru, shared
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 class ScriptPostprocessingCeption(scripts_postprocessing.ScriptPostprocessing):

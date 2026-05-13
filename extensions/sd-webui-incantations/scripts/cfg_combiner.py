@@ -1,4 +1,4 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import logging
 import time
 import torch

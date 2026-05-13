@@ -6,7 +6,7 @@ import os
 from typing import Optional, Any
 
 from fastapi import FastAPI
-from modules.gradio_compat import Blocks
+from modules.headless_ui import Blocks
 
 from modules import errors, timer, extensions, shared, util
 
@@ -454,7 +454,7 @@ def remove_callbacks_for_function(callback_func):
 
 
 def on_app_started(callback, *, name=None):
-    """register a function to be called when the webui started, the gradio `Block` component and
+    """register a function to be called when the webui started, the UI `Block` component and
     fastapi `FastAPI` object are passed as the arguments"""
     add_callback(callback_map['callbacks_app_started'], callback, name=name, category='app_started')
 
@@ -474,9 +474,9 @@ def on_ui_tabs(callback, *, name=None):
     """register a function to be called when the UI is creating new tabs.
     The function must either return a None, which means no new tabs to be added, or a list, where
     each element is a tuple:
-        (gradio_component, title, elem_id)
+        (ui_component, title, elem_id)
 
-    gradio_component is a gradio component to be used for contents of the tab (usually gr.Blocks)
+    ui_component is a UI component to be used for contents of the tab (usually gr.Blocks)
     title is tab text displayed to user in the UI
     elem_id is HTML id for the tab
     """
@@ -547,8 +547,8 @@ def on_cfg_after_cfg(callback, *, name=None):
 def on_before_component(callback, *, name=None):
     """register a function to be called before a component is created.
     The callback is called with arguments:
-        - component - gradio component that is about to be created.
-        - **kwargs - args to gradio.components.IOComponent.__init__ function
+        - component - UI component that is about to be created.
+        - **kwargs - args to the component IO initializer
 
     Use elem_id/label fields of kwargs to figure out which component it is.
     This can be useful to inject your own components somewhere in the middle of vanilla UI.

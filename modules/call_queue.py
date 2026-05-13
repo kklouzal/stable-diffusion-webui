@@ -18,7 +18,7 @@ def wrap_queued_call(func):
     return f
 
 
-def wrap_gradio_gpu_call(func, extra_outputs=None):
+def wrap_ui_gpu_call(func, extra_outputs=None):
     @wraps(func)
     def f(*args, **kwargs):
 
@@ -43,10 +43,10 @@ def wrap_gradio_gpu_call(func, extra_outputs=None):
 
         return res
 
-    return wrap_gradio_call(f, extra_outputs=extra_outputs, add_stats=True)
+    return wrap_ui_call(f, extra_outputs=extra_outputs, add_stats=True)
 
 
-def wrap_gradio_call(func, extra_outputs=None, add_stats=False):
+def wrap_ui_call(func, extra_outputs=None, add_stats=False):
     @wraps(func)
     def f(*args, **kwargs):
         try:
@@ -59,10 +59,10 @@ def wrap_gradio_call(func, extra_outputs=None, add_stats=False):
             shared.state.job = ""
         return res
 
-    return wrap_gradio_call_no_job(f, extra_outputs, add_stats)
+    return wrap_ui_call_no_job(f, extra_outputs, add_stats)
 
 
-def wrap_gradio_call_no_job(func, extra_outputs=None, add_stats=False):
+def wrap_ui_call_no_job(func, extra_outputs=None, add_stats=False):
     @wraps(func)
     def f(*args, extra_outputs_array=extra_outputs, **kwargs):
         run_memmon = shared.opts.memmon_poll_rate > 0 and not shared.mem_mon.disabled and add_stats

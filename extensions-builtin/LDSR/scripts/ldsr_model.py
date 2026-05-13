@@ -59,7 +59,7 @@ class UpscalerLDSR(Upscaler):
 
 
 def on_ui_settings():
-    from modules import gradio_compat as gr
+    from modules import headless_ui as gr
 
     shared.opts.add_option("ldsr_steps", shared.OptionInfo(100, "LDSR processing steps. Lower = faster", gr.Slider, {"minimum": 1, "maximum": 200, "step": 1}, section=('upscaling', "Upscaling")))
     shared.opts.add_option("ldsr_cached", shared.OptionInfo(False, "Cache LDSR model in memory", gr.Checkbox, {"interactive": True}, section=('upscaling', "Upscaling")))

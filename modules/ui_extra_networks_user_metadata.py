@@ -3,7 +3,7 @@ import html
 import json
 import os.path
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import infotext_utils, images, sysinfo, errors, ui_extra_networks
 

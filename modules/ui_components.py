@@ -1,4 +1,4 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 class FormComponent:
@@ -10,7 +10,7 @@ gr.Dropdown.get_expected_parent = FormComponent.get_expected_parent
 
 
 class ToolButton(FormComponent, gr.Button):
-    """Small button with single emoji as text, fits inside gradio forms"""
+    """Small button with single emoji as text, fits inside UI forms"""
 
     def __init__(self, *args, **kwargs):
         classes = kwargs.pop("elem_classes", [])
@@ -21,7 +21,7 @@ class ToolButton(FormComponent, gr.Button):
 
 
 class ResizeHandleRow(gr.Row):
-    """Same as gr.Row but fits inside gradio forms"""
+    """Same as gr.Row but fits inside UI forms"""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -33,35 +33,35 @@ class ResizeHandleRow(gr.Row):
 
 
 class FormRow(FormComponent, gr.Row):
-    """Same as gr.Row but fits inside gradio forms"""
+    """Same as gr.Row but fits inside UI forms"""
 
     def get_block_name(self):
         return "row"
 
 
 class FormColumn(FormComponent, gr.Column):
-    """Same as gr.Column but fits inside gradio forms"""
+    """Same as gr.Column but fits inside UI forms"""
 
     def get_block_name(self):
         return "column"
 
 
 class FormGroup(FormComponent, gr.Group):
-    """Same as gr.Group but fits inside gradio forms"""
+    """Same as gr.Group but fits inside UI forms"""
 
     def get_block_name(self):
         return "group"
 
 
 class FormHTML(FormComponent, gr.HTML):
-    """Same as gr.HTML but fits inside gradio forms"""
+    """Same as gr.HTML but fits inside UI forms"""
 
     def get_block_name(self):
         return "html"
 
 
 class FormColorPicker(FormComponent, gr.ColorPicker):
-    """Same as gr.ColorPicker but fits inside gradio forms"""
+    """Same as gr.ColorPicker but fits inside UI forms"""
 
     def get_block_name(self):
         return "colorpicker"

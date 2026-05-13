@@ -1,4 +1,4 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import shared, ui_common, ui_components, styles
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import threading
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from fastapi import FastAPI
 
 from modules import script_callbacks

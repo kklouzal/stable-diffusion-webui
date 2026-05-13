@@ -1,5 +1,5 @@
 import numpy as np
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import math
 from modules.ui_components import InputAccordion
 import modules.scripts as scripts

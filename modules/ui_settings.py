@@ -1,11 +1,11 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import ui_common, shared, script_callbacks, scripts, sd_models, sysinfo, timer, shared_items
-from modules.call_queue import wrap_gradio_call_no_job
+from modules.call_queue import wrap_ui_call_no_job
 from modules.options import options_section
 from modules.shared import opts
 from modules.ui_components import FormRow
-from modules.ui_gradio_extensions import reload_javascript
+from modules.ui_html_extensions import reload_javascript
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -121,7 +121,7 @@ class UiSettings:
                 with gr.Column(scale=6):
                     self.submit = gr.Button(value="Apply settings", variant='primary', elem_id="settings_submit")
                 with gr.Column():
-                    restart_gradio = gr.Button(value='Reload UI', variant='primary', elem_id="settings_restart_gradio")
+                    restart_ui = gr.Button(value='Reload UI', variant='primary', elem_id="settings_restart_gradio")
 
             self.result = gr.HTML(elem_id="settings_result")
 
@@ -248,7 +248,7 @@ class UiSettings:
                 outputs=[]
             )
 
-            restart_gradio.click(
+            restart_ui.click(
                 fn=shared.state.request_restart,
                 _js='restart_reload',
                 inputs=[],
@@ -295,7 +295,7 @@ class UiSettings:
 
     def add_functionality(self, demo):
         self.submit.click(
-            fn=wrap_gradio_call_no_job(lambda *args: self.run_settings(*args), extra_outputs=[gr.update()]),
+            fn=wrap_ui_call_no_job(lambda *args: self.run_settings(*args), extra_outputs=[gr.update()]),
             inputs=self.components,
             outputs=[self.text_settings, self.result],
         )

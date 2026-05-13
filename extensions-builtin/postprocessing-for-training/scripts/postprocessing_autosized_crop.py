@@ -1,7 +1,7 @@
 from PIL import Image
 
 from modules import scripts_postprocessing, ui_components
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 def center_crop(image: Image, w: int, h: int):

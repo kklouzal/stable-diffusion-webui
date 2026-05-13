@@ -3,7 +3,7 @@ import tempfile
 from collections import namedtuple
 from pathlib import Path
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from PIL import PngImagePlugin
 
@@ -13,20 +13,20 @@ from modules import shared
 Savedfile = namedtuple("Savedfile", ["name"])
 
 
-def register_tmp_file(gradio, filename):
-    if hasattr(gradio, 'temp_file_sets'):  # gradio 3.15
-        gradio.temp_file_sets[0] = gradio.temp_file_sets[0] | {os.path.abspath(filename)}
+def register_tmp_file(ui_app, filename):
+    if hasattr(ui_app, 'temp_file_sets'):  # legacy UI 3.15
+        ui_app.temp_file_sets[0] = ui_app.temp_file_sets[0] | {os.path.abspath(filename)}
 
-    if hasattr(gradio, 'temp_dirs'):  # gradio 3.9
-        gradio.temp_dirs = gradio.temp_dirs | {os.path.abspath(os.path.dirname(filename))}
+    if hasattr(ui_app, 'temp_dirs'):  # legacy UI 3.9
+        ui_app.temp_dirs = ui_app.temp_dirs | {os.path.abspath(os.path.dirname(filename))}
 
 
-def check_tmp_file(gradio, filename):
-    if hasattr(gradio, 'temp_file_sets'):
-        return any(filename in fileset for fileset in gradio.temp_file_sets)
+def check_tmp_file(ui_app, filename):
+    if hasattr(ui_app, 'temp_file_sets'):
+        return any(filename in fileset for fileset in ui_app.temp_file_sets)
 
-    if hasattr(gradio, 'temp_dirs'):
-        return any(Path(temp_dir).resolve() in Path(filename).resolve().parents for temp_dir in gradio.temp_dirs)
+    if hasattr(ui_app, 'temp_dirs'):
+        return any(Path(temp_dir).resolve() in Path(filename).resolve().parents for temp_dir in ui_app.temp_dirs)
 
     return False
 
@@ -85,15 +85,15 @@ def cleanup_tmpdr():
             os.remove(filename)
 
 
-def is_gradio_temp_path(path):
+def is_ui_temp_path(path):
     """
-    Check if the path is a temp dir used by gradio
+    Check if the path is a temp dir used by the UI layer
     """
     path = Path(path)
     if shared.opts.temp_dir and path.is_relative_to(shared.opts.temp_dir):
         return True
-    if gradio_temp_dir := os.environ.get("GRADIO_TEMP_DIR"):
-        if path.is_relative_to(gradio_temp_dir):
+    if ui_temp_dir := os.environ.get("GRADIO_TEMP_DIR"):
+        if path.is_relative_to(ui_temp_dir):
             return True
     if path.is_relative_to(Path(tempfile.gettempdir()) / "gradio"):
         return True

@@ -1,4 +1,4 @@
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from modules import scripts, shared, ui_common, postprocessing, call_queue, ui_toprow
 import modules.infotext_utils as parameters_copypaste
 from modules.ui_components import ResizeHandleRow
@@ -36,7 +36,7 @@ def create_ui():
     tab_batch_dir.select(fn=lambda: 2, inputs=[], outputs=[tab_index])
 
     submit.click(
-        fn=call_queue.wrap_gradio_gpu_call(postprocessing.run_postprocessing_webui, extra_outputs=[None, '']),
+        fn=call_queue.wrap_ui_gpu_call(postprocessing.run_postprocessing_webui, extra_outputs=[None, '']),
         _js="submit_extras",
         inputs=[
             dummy_component,

@@ -1,5 +1,5 @@
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import sd_models, sd_vae, errors, extras, call_queue
 from modules.ui_components import FormRow
@@ -90,7 +90,7 @@ class UiCheckpointMerger:
 
         self.modelmerger_merge.click(fn=lambda: '', inputs=[], outputs=[self.modelmerger_result])
         self.modelmerger_merge.click(
-            fn=call_queue.wrap_gradio_gpu_call(modelmerger, extra_outputs=lambda: [gr.update() for _ in range(4)]),
+            fn=call_queue.wrap_ui_gpu_call(modelmerger, extra_outputs=lambda: [gr.update() for _ in range(4)]),
             _js='modelmerger',
             inputs=[
                 dummy_component,

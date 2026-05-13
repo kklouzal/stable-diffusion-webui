@@ -5,7 +5,7 @@ import html
 import os
 from contextlib import nullcontext
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import call_queue, shared, ui_tempdir, util
 from modules.infotext_utils import image_from_url_text
@@ -171,7 +171,7 @@ def create_output_panel(tabname, outdir, toprow=None):
         try:
             if 'Sub' in shared.opts.open_dir_button_choice:
                 image_dir = os.path.split(images[index]["name"].rsplit('?', 1)[0])[0]
-                if 'temp' in shared.opts.open_dir_button_choice or not ui_tempdir.is_gradio_temp_path(image_dir):
+                if 'temp' in shared.opts.open_dir_button_choice or not ui_tempdir.is_ui_temp_path(image_dir):
                     f = image_dir
         except Exception:
             pass
@@ -231,7 +231,7 @@ def create_output_panel(tabname, outdir, toprow=None):
                         )
 
                     save.click(
-                        fn=call_queue.wrap_gradio_call_no_job(save_files),
+                        fn=call_queue.wrap_ui_call_no_job(save_files),
                         _js="(x, y, z, w) => [x, y, false, selected_gallery_index()]",
                         inputs=[
                             res.generation_info,
@@ -247,7 +247,7 @@ def create_output_panel(tabname, outdir, toprow=None):
                     )
 
                     save_zip.click(
-                        fn=call_queue.wrap_gradio_call_no_job(save_files),
+                        fn=call_queue.wrap_ui_call_no_job(save_files),
                         _js="(x, y, z, w) => [x, y, true, selected_gallery_index()]",
                         inputs=[
                             res.generation_info,

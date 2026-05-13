@@ -1,30 +1,24 @@
-"""Compatibility boundary for Gradio.
+"""Inert UI component surface used by API/headless startup.
 
-Import this module as gr from code that only needs Gradio component
-metadata or UI construction helpers. When Gradio is installed, attributes are
-proxied to the real package. When it is not installed, a minimal inert surface
-is provided so API/headless code can import option/script metadata without
-pulling Gradio in as a hard dependency.
+A1111 scripts historically describe their controls by constructing component
+objects during startup. The GB10 fork no longer ships or launches a browser UI,
+but API endpoints still need those script defaults and metadata. This module
+provides the tiny component/event surface needed for that bookkeeping without
+pulling in a browser-UI framework.
 """
 from __future__ import annotations
 
-from types import ModuleType, SimpleNamespace
 import sys
-import warnings
+from types import ModuleType, SimpleNamespace
 from typing import Any
-
-try:  # pragma: no cover - exercised in the real UI environment
-    import gradio as _gradio
-except Exception:  # keep API/headless imports independent from gradio
-    _gradio = None
 
 
 def is_available() -> bool:
-    return _gradio is not None
+    return True
 
 
 def version() -> str | None:
-    return getattr(_gradio, "__version__", None) if _gradio is not None else None
+    return None
 
 
 class _FallbackUpdate(dict):
@@ -41,8 +35,17 @@ class _FallbackComponent:
         self.label = kwargs.get("label")
         self.elem_id = kwargs.get("elem_id")
         self.visible = kwargs.get("visible", True)
-        self.choices = kwargs.get("choices")
+        self.choices = kwargs.get("choices") or []
         self.elem_classes = kwargs.get("elem_classes") or []
+        self.children = kwargs.get("children") or []
+        self.id = kwargs.get("id", self.elem_id)
+        self.selected = kwargs.get("selected")
+        self.minimum = kwargs.get("minimum")
+        self.maximum = kwargs.get("maximum")
+        self.step = kwargs.get("step")
+        self.multiselect = kwargs.get("multiselect", False)
+        self.open = kwargs.get("open", self.value)
+        self.do_not_save_to_config = kwargs.get("do_not_save_to_config", False)
 
     def __enter__(self):
         return self
@@ -91,7 +94,7 @@ class Blocks(_FallbackComponent):
         return self
 
     def launch(self, *args: Any, **kwargs: Any):
-        raise RuntimeError("Gradio UI launch requested but gradio is not installed")
+        raise RuntimeError("Browser UI launch requested in headless-only build")
 
     def close(self):
         pass
@@ -105,14 +108,10 @@ class Request:
 
 
 def update(**kwargs: Any):
-    if _gradio is not None:
-        return _gradio.update(**kwargs)
     return _FallbackUpdate(**kwargs)
 
 
 def Warning(message: str):
-    if _gradio is not None:
-        return _gradio.Warning(message)
     print(f"Warning: {message}")
 
 
@@ -125,13 +124,15 @@ _COMPONENT_NAMES = {
 }
 
 
+for _component_name in _COMPONENT_NAMES:
+    globals()[_component_name] = type(_component_name, (_FallbackComponent,), {})
+
+
 def __getattr__(name: str) -> Any:
-    if _gradio is not None:
-        return getattr(_gradio, name)
     if name == "__version__":
         return None
     if name in _COMPONENT_NAMES:
-        return type(name, (_FallbackComponent,), {})
+        return globals()[name]
     if name == "themes":
         class ThemeClass(_FallbackComponent):
             @classmethod
@@ -151,54 +152,36 @@ def __getattr__(name: str) -> Any:
             ThemeClass=ThemeClass,
         )
     if name == "deprecation":
-        return SimpleNamespace(GradioDeprecationWarning=DeprecationWarning)
+        return SimpleNamespace(UIDeprecationWarning=DeprecationWarning)
     if name == "utils":
         return SimpleNamespace(version_check=lambda: None, get_local_ip_address=lambda: "127.0.0.1")
     if name == "components":
-        return SimpleNamespace(IOComponent=IOComponent, Component=_FallbackComponent)
+        return components
     if name == "blocks":
-        return SimpleNamespace(Block=Block, BlockContext=BlockContext, Blocks=Blocks)
+        return blocks
     if name == "routes":
         return SimpleNamespace(templates=SimpleNamespace(TemplateResponse=lambda *args, **kwargs: None))
     raise AttributeError(name)
 
 
-def _fallback_module(name: str, **attrs: Any) -> ModuleType:
-    module = ModuleType(name)
-    module.__dict__.update(attrs)
-    return module
+# Third-party extensions may still import the historical UI package name while
+# declaring API script controls. Route those imports to this inert headless
+# surface instead of requiring the real browser UI dependency.
+components = ModuleType("gradio.components")
+components.IOComponent = IOComponent
+components.Component = _FallbackComponent
+for _component_name in _COMPONENT_NAMES:
+    setattr(components, _component_name, globals()[_component_name])
 
+blocks = ModuleType("gradio.blocks")
+blocks.Block = Block
+blocks.BlockContext = BlockContext
+blocks.Blocks = Blocks
 
-def _install_fallback_import_modules() -> None:
-    """Expose enough Gradio-shaped modules for legacy extensions.
+routes = ModuleType("gradio.routes")
+routes.templates = SimpleNamespace(TemplateResponse=lambda *args, **kwargs: None)
 
-    Repo-owned code imports this compatibility boundary directly, but installed
-    third-party extensions may still use imports such as
-    ``from gradio.components import Component``. These modules are inert and are
-    intended only for API/headless startup without the real Gradio package.
-    """
-    current = sys.modules[__name__]
-    sys.modules.setdefault("gradio", current)
-    sys.modules.setdefault(
-        "gradio.components",
-        _fallback_module("gradio.components", IOComponent=IOComponent, Component=_FallbackComponent),
-    )
-    sys.modules.setdefault(
-        "gradio.blocks",
-        _fallback_module("gradio.blocks", Block=Block, BlockContext=BlockContext, Blocks=Blocks),
-    )
-    sys.modules.setdefault(
-        "gradio.routes",
-        _fallback_module("gradio.routes", templates=SimpleNamespace(TemplateResponse=lambda *args, **kwargs: None)),
-    )
-    sys.modules.setdefault(
-        "gradio.deprecation",
-        _fallback_module("gradio.deprecation", GradioDeprecationWarning=DeprecationWarning),
-    )
-
-
-# Let legacy/third-party extensions that still use import gradio as gr keep
-# importing in Gradio-free API/headless mode. Repo-owned code should import this
-# boundary explicitly as from modules import gradio_compat as gr.
-if _gradio is None:
-    _install_fallback_import_modules()
+sys.modules.setdefault("gradio", sys.modules[__name__])
+sys.modules.setdefault("gradio.components", components)
+sys.modules.setdefault("gradio.blocks", blocks)
+sys.modules.setdefault("gradio.routes", routes)

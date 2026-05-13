@@ -78,7 +78,7 @@ def configure_hypertile(width, height, enable_unet=True):
 
 
 def on_ui_settings():
-    from modules import gradio_compat as gr
+    from modules import headless_ui as gr
 
     options = {
         "hypertile_explanation": shared.OptionHTML("""

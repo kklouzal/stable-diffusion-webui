@@ -8,7 +8,7 @@ from modules.shared import opts
 import modules.shared as shared
 from modules.ui import plaintext_to_html
 from PIL import Image
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 def txt2img_create_processing(id_task: str, request: gr.Request, prompt: str, negative_prompt: str, prompt_styles, n_iter: int, batch_size: int, cfg_scale: float, height: int, width: int, enable_hr: bool, denoising_strength: float, hr_scale: float, hr_upscaler: str, hr_second_pass_steps: int, hr_resize_x: int, hr_resize_y: int, hr_checkpoint_name: str, hr_sampler_name: str, hr_scheduler: str, hr_prompt: str, hr_negative_prompt, override_settings_texts, *args, force_enable_hr=False):

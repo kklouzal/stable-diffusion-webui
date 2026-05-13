@@ -3,7 +3,7 @@ import json
 import sys
 from dataclasses import dataclass
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import errors
 from modules.shared_cmd_options import cmd_opts

@@ -6,18 +6,18 @@ from functools import reduce
 import warnings
 from contextlib import ExitStack
 
-from modules import gradio_compat as gr
-from modules.gradio_compat import utils as gradio_utils
+from modules import headless_ui as gr
+from modules.headless_ui import utils as ui_runtime_utils
 import numpy as np
 from PIL import Image, PngImagePlugin  # noqa: F401
-from modules.call_queue import wrap_gradio_gpu_call, wrap_queued_call, wrap_gradio_call, wrap_gradio_call_no_job # noqa: F401
+from modules.call_queue import wrap_ui_gpu_call, wrap_queued_call, wrap_ui_call, wrap_ui_call_no_job # noqa: F401
 
-from modules import gradio_extensons, sd_schedulers  # noqa: F401
+from modules import ui_component_patches, sd_schedulers  # noqa: F401
 from modules import sd_hijack, sd_models, script_callbacks, ui_extensions, deepbooru, extra_networks, ui_common, ui_postprocessing, progress, ui_loadsave, shared_items, ui_settings, timer, sysinfo, ui_checkpoint_merger, scripts, sd_samplers, processing, ui_extra_networks, ui_toprow, launch_utils
 from modules.ui_components import FormRow, FormGroup, ToolButton, FormHTML, InputAccordion, ResizeHandleRow
 from modules.paths import script_path
 from modules.ui_common import create_refresh_button
-from modules.ui_gradio_extensions import reload_javascript
+from modules.ui_html_extensions import reload_javascript
 
 from modules.shared import opts, cmd_opts
 
@@ -33,7 +33,7 @@ from modules.infotext_utils import image_from_url_text, PasteField
 create_setting_component = ui_settings.create_setting_component
 
 warnings.filterwarnings("default" if opts.show_warnings else "ignore", category=UserWarning)
-warnings.filterwarnings("default" if opts.show_gradio_deprecation_warnings else "ignore", category=gr.deprecation.GradioDeprecationWarning)
+warnings.filterwarnings("default" if opts.show_gradio_deprecation_warnings else "ignore", category=DeprecationWarning)
 
 # this is a fix for Windows users. Without it, javascript files will be served with text/html content-type and the browser will not show any UI
 mimetypes.init()
@@ -48,9 +48,9 @@ mimetypes.add_type('image/avif', '.avif')
 mimetypes.add_type('text/css', '.css')
 
 if not cmd_opts.share and not cmd_opts.listen:
-    # fix gradio phoning home
-    gradio_utils.version_check = lambda: None
-    gradio_utils.get_local_ip_address = lambda: '127.0.0.1'
+    # keep headless UI helpers offline
+    ui_runtime_utils.version_check = lambda: None
+    ui_runtime_utils.get_local_ip_address = lambda: '127.0.0.1'
 
 if cmd_opts.ngrok is not None:
     import modules.ngrok as ngrok
@@ -87,7 +87,7 @@ detect_image_size_symbol = '\U0001F4D0'  # 📐
 plaintext_to_html = ui_common.plaintext_to_html
 
 
-def send_gradio_gallery_to_image(x):
+def send_gallery_to_image(x):
     if len(x) == 0:
         return None
     return image_from_url_text(x[0])
@@ -414,7 +414,7 @@ def create_ui():
             ]
 
             txt2img_args = dict(
-                fn=wrap_gradio_gpu_call(modules.txt2img.txt2img, extra_outputs=[None, '', '']),
+                fn=wrap_ui_gpu_call(modules.txt2img.txt2img, extra_outputs=[None, '', '']),
                 _js="submit",
                 inputs=txt2img_inputs,
                 outputs=txt2img_outputs,
@@ -425,7 +425,7 @@ def create_ui():
             toprow.submit.click(**txt2img_args)
 
             output_panel.button_upscale.click(
-                fn=wrap_gradio_gpu_call(modules.txt2img.txt2img_upscale, extra_outputs=[None, '', '']),
+                fn=wrap_ui_gpu_call(modules.txt2img.txt2img_upscale, extra_outputs=[None, '', '']),
                 _js="submit_txt2img_upscale",
                 inputs=txt2img_inputs[0:1] + [output_panel.gallery, dummy_component, output_panel.generation_info] + txt2img_inputs[1:],
                 outputs=txt2img_outputs,
@@ -716,7 +716,7 @@ def create_ui():
 
             # the code below is meant to update the resolution label after the image in the image selection UI has changed.
             # as it is now the event keeps firing continuously for inpaint edits, which ruins the page with constant requests.
-            # I assume this must be a gradio bug and for now we'll just do it for non-inpaint inputs.
+            # I assume this must be a legacy UI event bug and for now we'll just do it for non-inpaint inputs.
             for component in [init_img, sketch]:
                 component.change(fn=lambda: None, _js="updateImg2imgResizeToTextAfterChangingImage", inputs=[], outputs=[], show_progress=False)
 
@@ -733,7 +733,7 @@ def create_ui():
             output_panel = create_output_panel("img2img", opts.outdir_img2img_samples, toprow)
 
             img2img_args = dict(
-                fn=wrap_gradio_gpu_call(modules.img2img.img2img, extra_outputs=[None, '', '']),
+                fn=wrap_ui_gpu_call(modules.img2img.img2img, extra_outputs=[None, '', '']),
                 _js="submit_img2img",
                 inputs=[
                     dummy_component,
@@ -892,7 +892,7 @@ def create_ui():
                     ))
 
         image.change(
-            fn=wrap_gradio_call_no_job(modules.extras.run_pnginfo),
+            fn=wrap_ui_call_no_job(modules.extras.run_pnginfo),
             inputs=[image],
             outputs=[html, generation_info, html2],
         )
@@ -1038,7 +1038,7 @@ def create_ui():
         )
 
         train_embedding.click(
-            fn=wrap_gradio_gpu_call(textual_inversion_ui.train_embedding, extra_outputs=[gr.update()]),
+            fn=wrap_ui_gpu_call(textual_inversion_ui.train_embedding, extra_outputs=[gr.update()]),
             _js="start_training_textual_inversion",
             inputs=[
                 dummy_component,
@@ -1072,7 +1072,7 @@ def create_ui():
         )
 
         train_hypernetwork.click(
-            fn=wrap_gradio_gpu_call(hypernetworks_ui.train_hypernetwork, extra_outputs=[gr.update()]),
+            fn=wrap_ui_gpu_call(hypernetworks_ui.train_hypernetwork, extra_outputs=[gr.update()]),
             _js="start_training_textual_inversion",
             inputs=[
                 dummy_component,
@@ -1201,7 +1201,7 @@ torch: {getattr(torch, '__long_version__',torch.__version__)}
 &#x2000;•&#x2000;
 xformers: {xformers_version}
 &#x2000;•&#x2000;
-gradio: {gr.__version__}
+ui runtime: {gr.__version__}
 &#x2000;•&#x2000;
 checkpoint: <a id="sd_checkpoint_hash">N/A</a>
 """

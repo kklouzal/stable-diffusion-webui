@@ -3,7 +3,7 @@ set -euo pipefail
 
 A1111_HOME="${A1111_HOME:-/opt/stable-diffusion-webui}"
 A1111_PORT="${A1111_PORT:-7860}"
-COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${A1111_PORT} --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access}"
+COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${A1111_PORT} --no-hashing --disable-console-progressbars --api --nowebui --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access}"
 
 cd "$A1111_HOME"
 export COMMANDLINE_ARGS

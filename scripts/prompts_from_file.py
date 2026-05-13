@@ -3,7 +3,7 @@ import random
 import shlex
 
 import modules.scripts as scripts
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import sd_samplers, errors, sd_models
 from modules.processing import Processed, process_images

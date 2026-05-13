@@ -1,6 +1,6 @@
 import re
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from fastapi import FastAPI
 
 import network
@@ -41,7 +41,7 @@ shared.options_templates.update(shared.options_section(('extra_networks', "Extra
     "lora_hide_unknown_for_versions": shared.OptionInfo([], "Hide networks of unknown versions for model versions", gr.CheckboxGroup, {"choices": ["SD1", "SD2", "SDXL"]}),
     "lora_in_memory_limit": shared.OptionInfo(0, "Number of Lora networks to keep cached in memory", gr.Number, {"precision": 0}),
     "lora_not_found_warning_console": shared.OptionInfo(False, "Lora not found warning in console"),
-    "lora_not_found_gradio_warning": shared.OptionInfo(False, "Lora not found warning popup in webui"),
+    "lora_not_found_gradio_warning": shared.OptionInfo(False, "Lora not found warning popup in UI"),
 }))
 
 

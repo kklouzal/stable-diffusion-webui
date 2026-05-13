@@ -1,7 +1,7 @@
 import re
 import dataclasses
 import os
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 
 @dataclasses.dataclass
@@ -73,7 +73,7 @@ class ScriptPostprocessing:
 
     def ui(self):
         """
-        This function should create gradio UI elements. See https://gradio.app/docs/#components
+        This function should create UI component elements for postprocessing script metadata.
         The return value should be a dictionary that maps parameter names to components used in processing.
         Values of those components will be passed to process() function.
         """

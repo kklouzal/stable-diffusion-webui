@@ -2,7 +2,7 @@ import datetime
 import html
 import random
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import re
 
 from modules import ui_extra_networks_user_metadata
@@ -122,12 +122,12 @@ class LoraUserMetadataEditor(ui_extra_networks_user_metadata.UserMetadataEditor)
         metadata = item.get("metadata") or {}
 
         tags = build_tags(metadata)
-        gradio_tags = [(tag, str(count)) for tag, count in tags[0:24]]
+        highlighted_tags = [(tag, str(count)) for tag, count in tags[0:24]]
 
         return [
             *values[0:5],
             item.get("sd_version", "Unknown"),
-            gr.HighlightedText.update(value=gradio_tags, visible=True if tags else False),
+            gr.HighlightedText.update(value=highlighted_tags, visible=True if tags else False),
             user_metadata.get('activation text', ''),
             float(user_metadata.get('preferred weight', 0.0)),
             user_metadata.get('negative text', ''),

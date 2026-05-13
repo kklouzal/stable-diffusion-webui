@@ -1696,7 +1696,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         image_mask = self.image_mask
 
         if image_mask is not None:
-            # image_mask is passed in as RGBA by Gradio to support alpha masks,
+            # image_mask is passed in as RGBA by the legacy UI layer to support alpha masks,
             # but we still want to support binary masks.
             image_mask = create_binary_mask(image_mask, round=self.mask_round)
 

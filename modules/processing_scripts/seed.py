@@ -1,6 +1,6 @@
 import json
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import scripts, ui, errors
 from modules.infotext_utils import PasteField

@@ -6,7 +6,7 @@ import os
 import re
 import sys
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 from modules.paths import data_path
 from modules import shared, ui_tempdir, script_callbacks, processing, infotext_versions, images, prompt_parser, errors
 from PIL import Image
@@ -408,7 +408,7 @@ infotext_to_setting_name_mapping = [
 
 
 def create_override_settings_dict(text_pairs):
-    """creates processing's override_settings parameters from gradio's multiselect
+    """creates processing's override_settings parameters from a UI multiselect
 
     Example input:
         ['Clip skip: 2', 'Model hash: e6e99610c4', 'ENSD: 31337']

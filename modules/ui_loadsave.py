@@ -1,18 +1,18 @@
 import json
 import os
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 
 from modules import errors
 from modules.ui_components import ToolButton, InputAccordion
 
 
-def radio_choices(comp):  # gradio 3.41 changes choices from list of values to list of pairs
+def radio_choices(comp):  # legacy UI choices may be a list of values or a list of pairs
     return [x[0] if isinstance(x, tuple) else x for x in getattr(comp, 'choices', [])]
 
 
 class UiLoadsave:
-    """allows saving and restoring default values for gradio components"""
+    """allows saving and restoring default values for UI components"""
 
     def __init__(self, filename):
         self.filename = filename
@@ -125,7 +125,7 @@ class UiLoadsave:
             apply_field(x, 'selected', check_tab_id)
 
     def add_block(self, x, path=""):
-        """adds all components inside a gradio block x to the registry of tracked components"""
+        """adds all components inside a UI block x to the registry of tracked components"""
 
         if hasattr(x, 'children'):
             if isinstance(x, gr.Tabs) and x.elem_id is not None:
@@ -156,7 +156,7 @@ class UiLoadsave:
 
     def iter_changes(self, current_ui_settings, values):
         """
-        given a dictionary with defaults from a file and current values from gradio elements, returns
+        given a dictionary with defaults from a file and current values from UI elements, returns
         an iterator over tuples of values that are not the same between the file and the current;
         tuple contents are: path, old value, new value
         """

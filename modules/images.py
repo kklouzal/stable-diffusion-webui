@@ -819,7 +819,7 @@ Steps: {json_info["steps"]}, Sampler: {sampler}, CFG scale: {json_info["scale"]}
 
 
 def image_data(data):
-    from modules import gradio_compat as gr
+    from modules import headless_ui as gr
 
     try:
         image = read(io.BytesIO(data))

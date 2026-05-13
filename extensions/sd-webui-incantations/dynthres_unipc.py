@@ -1,6 +1,6 @@
 import logging
 
-from modules import gradio_compat as gr
+from modules import headless_ui as gr
 import torch
 import math
 from modules import shared
