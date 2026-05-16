@@ -58,25 +58,99 @@ def _k_sampler_config(name: str):
     return config
 
 
+def _chain_sampler_names(definition: dict[str, Any]) -> list[str]:
+    raw = definition.get("samplers")
+    if isinstance(raw, (list, tuple)):
+        names = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        names = []
+        for index in range(1, 4):
+            value = definition.get(f"sampler_{index}")
+            if value is None:
+                value = definition.get(f"sampler{index}")
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value:
+                names.append(value)
+    if len(names) < 2:
+        raise ValueError("At least two sampler stages are required")
+    for name in names:
+        _k_sampler_config(name)
+    return names
+
+
+def _chain_switch_points(definition: dict[str, Any], stage_count: int) -> list[int]:
+    raw = definition.get("switch_ats")
+    if isinstance(raw, (list, tuple)):
+        points = [_safe_int(item, 0) for item in raw]
+    else:
+        points = []
+        for index in range(1, stage_count):
+            if index == 1:
+                value = definition.get("switch_at")
+                if value is None:
+                    value = 10
+            else:
+                value = definition.get(f"switch_at_{index}")
+                if value is None:
+                    value = definition.get(f"switch_at{index}")
+            if value is None:
+                raise ValueError(f"Switch point {index} is required for a {stage_count}-stage sampler chain")
+            points.append(_safe_int(value, 0))
+    if len(points) != stage_count - 1:
+        raise ValueError(f"Expected {stage_count - 1} switch point(s) for a {stage_count}-stage sampler chain")
+    prev = 0
+    for point in points:
+        if point < prev:
+            raise ValueError("Switch points must be in nondecreasing order")
+        prev = point
+    return points
+
+
+def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str], list[int]]:
+    samplers = _chain_sampler_names(definition)
+    switch_ats = _chain_switch_points(definition, len(samplers))
+    boundaries = [0]
+    for point in switch_ats:
+        boundaries.append(max(boundaries[-1], min(_safe_int(point, 0), steps)))
+    boundaries.append(steps)
+    return samplers, boundaries
+
+
+def _definition_stages(definition: dict[str, Any], sigmas: torch.Tensor, steps: int) -> list[tuple[str, torch.Tensor, int, int]]:
+    samplers, boundaries = _chain_boundaries(definition, steps)
+    return [
+        (sampler_name, sigmas[boundaries[index] : boundaries[index + 1] + 1], boundaries[index], boundaries[index + 1])
+        for index, sampler_name in enumerate(samplers)
+    ]
+
+
+def _format_chain_metadata(stages: list[tuple[str, torch.Tensor, int, int]]) -> str:
+    return " -> ".join(f"{sampler_name}@{start}-{end}" for sampler_name, _stage_sigmas, start, end in stages)
+
+
 def _normalize_definition(data: dict[str, Any], *, require_name: bool = True) -> dict[str, Any]:
     name = str(data.get("name") or "").strip()
     if require_name and not name:
         raise ValueError("Custom sampler name is required")
     if name and not name.startswith(CUSTOM_PREFIX):
         name = f"{CUSTOM_PREFIX}{name}"
-    sampler_1 = str(data.get("sampler_1") or data.get("sampler1") or "Euler a").strip()
-    sampler_2 = str(data.get("sampler_2") or data.get("sampler2") or "DPM++ 2M SDE").strip()
-    _k_sampler_config(sampler_1)
-    _k_sampler_config(sampler_2)
-    switch_at = max(0, _safe_int(data.get("switch_at"), 10))
-    return {
+    sampler_names = _chain_sampler_names(data)
+    switch_ats = _chain_switch_points(data, len(sampler_names))
+    definition = {
         "name": name,
-        "sampler_1": sampler_1,
-        "sampler_2": sampler_2,
-        "switch_at": switch_at,
+        "samplers": sampler_names,
+        "switch_ats": switch_ats,
         "created_at": float(data.get("created_at") or time.time()),
         "updated_at": time.time(),
     }
+    for index, sampler_name in enumerate(sampler_names, start=1):
+        definition[f"sampler_{index}"] = sampler_name
+    for index, switch_at in enumerate(switch_ats, start=1):
+        key = "switch_at" if index == 1 else f"switch_at_{index}"
+        definition[key] = switch_at
+    return definition
 
 
 def _load_custom_defs() -> list[dict[str, Any]]:
@@ -111,7 +185,7 @@ def _stage_extra_params(funcname: str) -> list[str]:
 
 
 class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
-    """Run two k-diffusion sampler functions over one continuous sigma schedule."""
+    """Run a multi-stage k-diffusion sampler chain over one continuous sigma schedule."""
 
     def __init__(self, sd_model, definition: dict[str, Any]):
         # Use Euler as a harmless base function; sample/sample_img2img are overridden.
@@ -119,13 +193,8 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.definition = dict(definition)
         self.extra_params = []
 
-    def _split_sigmas(self, sigmas: torch.Tensor, steps: int) -> tuple[torch.Tensor, torch.Tensor, int]:
-        switch_at = max(0, min(_safe_int(self.definition.get("switch_at"), 0), steps))
-        # If switch_at is 10, stage 1 performs transitions 0..9 on sigmas[0:11];
-        # stage 2 resumes from the shared boundary sigma at sigmas[10].
-        first = sigmas[: switch_at + 1]
-        second = sigmas[switch_at:]
-        return first, second, switch_at
+    def _split_sigmas(self, sigmas: torch.Tensor, steps: int) -> list[tuple[str, torch.Tensor, int, int]]:
+        return _definition_stages(self.definition, sigmas, steps)
 
     def _initialize_chain(self, p) -> None:
         self.p = p
@@ -230,13 +299,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
     def _run_chain(self, p, x, conditioning, unconditional_conditioning, sigmas: torch.Tensor, steps: int, *, is_img2img: bool, image_conditioning=None):
         self._initialize_chain(p)
-        first_sigmas, second_sigmas, switch_at = self._split_sigmas(sigmas, steps)
-        stages = [
-            (self.definition["sampler_1"], first_sigmas, 0),
-            (self.definition["sampler_2"], second_sigmas, switch_at),
-        ]
+        stages = self._split_sigmas(sigmas, steps)
         self.model_wrap_cfg.steps = steps
-        self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, len(stage_sigmas) - 1)) for name, stage_sigmas, _offset in stages)
+        self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, end - start)) for name, _stage_sigmas, start, end in stages)
         state.sampling_steps = steps
         state.sampling_step = 0
         self.last_latent = x
@@ -247,13 +312,13 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             "cond_scale": p.cfg_scale,
             "s_min_uncond": self.s_min_uncond,
         }
-        p.extra_generation_params["Sampler chain"] = "{}@{} -> {}@{}".format(self.definition["sampler_1"], switch_at, self.definition["sampler_2"], steps - switch_at)
+        p.extra_generation_params["Sampler chain"] = _format_chain_metadata(stages)
         scheduler = _sampler_data_for(self.definition).options.get("scheduler")
         if scheduler:
             p.extra_generation_params["Sampler chain scheduler"] = scheduler
         try:
-            for sampler_name, stage_sigmas, offset in stages:
-                stage_steps = max(0, len(stage_sigmas) - 1)
+            for sampler_name, stage_sigmas, offset, end in stages:
+                stage_steps = max(0, end - offset)
                 if stage_steps <= 0:
                     continue
                 config = _k_sampler_config(sampler_name)
@@ -324,24 +389,22 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 class MultiSamplerData(sd_samplers_common.SamplerData):
     def total_steps(self, steps):
         chain = self.options.get("openclaw_chain") or {}
-        switch_at = max(0, min(_safe_int(chain.get("switch_at"), 0), steps))
-        first_steps = switch_at
-        second_steps = max(0, steps - switch_at)
-        first = _k_sampler_config(chain["sampler_1"])
-        second = _k_sampler_config(chain["sampler_2"])
-        return first.total_steps(first_steps) + second.total_steps(second_steps)
+        samplers, boundaries = _chain_boundaries(chain, steps)
+        total = 0
+        for index, sampler_name in enumerate(samplers):
+            total += _k_sampler_config(sampler_name).total_steps(max(0, boundaries[index + 1] - boundaries[index]))
+        return total
 
 
 def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerData:
     name = definition["name"]
     chain = dict(definition)
-    first = _k_sampler_config(chain["sampler_1"])
-    second = _k_sampler_config(chain["sampler_2"])
-    scheduler = first.options.get("scheduler") or second.options.get("scheduler") or "karras"
+    configs = [_k_sampler_config(sampler_name) for sampler_name in _chain_sampler_names(chain)]
+    scheduler = next((config.options.get("scheduler") for config in configs if config.options.get("scheduler")), "karras")
     opts_union = {"scheduler": scheduler, "openclaw_chain": chain}
-    if first.options.get("uses_ensd") or second.options.get("uses_ensd"):
+    if any(config.options.get("uses_ensd") for config in configs):
         opts_union["uses_ensd"] = True
-    if first.options.get("brownian_noise") or second.options.get("brownian_noise"):
+    if any(config.options.get("brownian_noise") for config in configs):
         opts_union["brownian_noise"] = True
     return MultiSamplerData(name, lambda model, chain=chain: MultiKDiffusionSampler(model, chain), [], opts_union)
 
