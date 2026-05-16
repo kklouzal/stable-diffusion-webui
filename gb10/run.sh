@@ -9,6 +9,7 @@ HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
 PORT="${PORT:-7860}"
 OUTPUTS_TARGET="${OUTPUTS_TARGET:-/mnt/nas-warehouse/StableDiffusion/Outputs}"
 DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
+CPUSET_CPUS="${CPUSET_CPUS:-5-9,15-19}"
 
 LOCAL_DIRS=(
   BLIP
@@ -124,6 +125,7 @@ DOCKER_ARGS=(
   -d
   --init
   --name "${CONTAINER_NAME}"
+  --cpuset-cpus "${CPUSET_CPUS}"
   --restart unless-stopped
   --gpus all
   --network host
@@ -157,6 +159,7 @@ sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
   "${IMAGE_TAG}"
 
 echo "Started ${CONTAINER_NAME} from ${IMAGE_TAG}"
+echo "CPU set: ${CPUSET_CPUS}"
 echo "Host data root: ${HOST_ROOT}"
 echo "Outputs symlink target: ${OUTPUTS_TARGET}"
 echo "API expectation: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
