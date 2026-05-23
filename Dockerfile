@@ -68,6 +68,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
     && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python
 
+COPY docker/patch-torchao.py /opt/build/patch-torchao.py
+
 RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1
 
 # CUDA-base doctrine:
@@ -82,6 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       torch torchvision torchaudio \
       --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG} \
     && python -m pip install --break-system-packages --no-cache-dir --pre ${TORCHAO_PACKAGE} \
+    && python /opt/build/patch-torchao.py \
     && python -m pip install --break-system-packages --no-cache-dir \
       scikit-build cmake ninja setuptools-git-versioning tabulate wheel build
 
@@ -217,6 +220,7 @@ COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requireme
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
 COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
+COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 # Builder-stage wheel doctrine:
 # - resolve the full dependency closure once against the CUDA-base + explicit torch lane

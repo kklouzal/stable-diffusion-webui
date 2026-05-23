@@ -389,6 +389,8 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 class MultiSamplerData(sd_samplers_common.SamplerData):
     def total_steps(self, steps):
         chain = self.options.get("openclaw_chain") or {}
+        if isinstance(chain, str):
+            chain = json.loads(chain)
         samplers, boundaries = _chain_boundaries(chain, steps)
         total = 0
         for index, sampler_name in enumerate(samplers):
@@ -401,7 +403,7 @@ def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerD
     chain = dict(definition)
     configs = [_k_sampler_config(sampler_name) for sampler_name in _chain_sampler_names(chain)]
     scheduler = next((config.options.get("scheduler") for config in configs if config.options.get("scheduler")), "karras")
-    opts_union = {"scheduler": scheduler, "openclaw_chain": chain}
+    opts_union = {"scheduler": scheduler, "openclaw_chain": json.dumps(chain, sort_keys=True, separators=(",", ":"))}
     if any(config.options.get("uses_ensd") for config in configs):
         opts_union["uses_ensd"] = True
     if any(config.options.get("brownian_noise") for config in configs):

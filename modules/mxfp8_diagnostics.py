@@ -274,7 +274,7 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
         from torchao.prototype.mx_formats.mx_tensor import MXTensor
     except Exception as e:
         return {"ok": False, "error": repr(e)}
-    model = getattr(getattr(sd_models, "model_data", None), "sd_model", None)
+    model = getattr(getattr(sd_models, "model_data", None), "sd_model", None) or getattr(shared, "sd_model", None)
     if model is None:
         return {"ok": False, "error": "sd_model is not loaded"}
     rows = []
@@ -290,7 +290,7 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
         reason = sd_models.mxfp8_linear_skip_reason(module, fqn) if hasattr(sd_models, "mxfp8_linear_skip_reason") else None
         weight = getattr(module, "weight", None)
         shape = tuple(weight.shape) if weight is not None else None
-        is_mx = isinstance(weight, MXTensor)
+        is_mx = isinstance(weight, MXTensor) or type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
         is_managed_bf16 = getattr(module, "network_mxfp8_base_weight", None) is not None and not is_mx
         if is_managed_bf16:
             managed_bf16_active_lora += 1
