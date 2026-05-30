@@ -1,6 +1,5 @@
 from collections import namedtuple
 
-import numpy as np
 from tqdm import trange
 
 import modules.scripts as scripts
@@ -170,13 +169,13 @@ class Script(scripts.Script):
             p.denoising_strength = 1.0
 
         def sample_extra(conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
-            lat = (p.init_latent.cpu().numpy() * 10).astype(int)
+            lat = (p.init_latent.detach() * 10).to(torch.int64)
 
             same_params = self.cache is not None and self.cache.cfg_scale == cfg and self.cache.steps == st \
                                 and self.cache.original_prompt == original_prompt \
                                 and self.cache.original_negative_prompt == original_negative_prompt \
                                 and self.cache.sigma_adjustment == sigma_adjustment
-            same_everything = same_params and self.cache.latent.shape == lat.shape and np.abs(self.cache.latent-lat).sum() < 100
+            same_everything = same_params and self.cache.latent.shape == lat.shape and torch.abs(self.cache.latent - lat).sum().item() < 100
 
             if same_everything:
                 rec_noise = self.cache.noise
@@ -188,7 +187,7 @@ class Script(scripts.Script):
                     rec_noise = find_noise_for_image_sigma_adjustment(p, cond, uncond, cfg, st)
                 else:
                     rec_noise = find_noise_for_image(p, cond, uncond, cfg, st)
-                self.cache = Cached(rec_noise, cfg, st, lat, original_prompt, original_negative_prompt, sigma_adjustment)
+                self.cache = Cached(rec_noise, cfg, st, lat.clone(), original_prompt, original_negative_prompt, sigma_adjustment)
 
             rand_noise = processing.create_random_tensors(p.init_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, seed_resize_from_h=p.seed_resize_from_h, seed_resize_from_w=p.seed_resize_from_w, p=p)
 
