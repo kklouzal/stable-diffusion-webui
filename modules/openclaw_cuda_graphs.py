@@ -13,6 +13,10 @@ _STATS = {"captures": 0, "replays": 0, "fallbacks": 0, "failures": 0, "last_erro
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 
 
+def _reset_stats() -> None:
+    _STATS.update({"captures": 0, "replays": 0, "fallbacks": 0, "failures": 0, "last_error": None, "last_key": None})
+
+
 def status() -> dict[str, Any]:
     with _LOCK:
         return {"enabled": _ENABLED, "cache_size": len(_CACHE), **_STATS}
@@ -25,6 +29,7 @@ def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
         if clear or not _ENABLED:
             _CACHE.clear()
             _FAILED_KEYS.clear()
+            _reset_stats()
         return status()
 
 
@@ -32,6 +37,7 @@ def clear() -> dict[str, Any]:
     with _LOCK:
         _CACHE.clear()
         _FAILED_KEYS.clear()
+        _reset_stats()
         return status()
 
 
@@ -121,7 +127,9 @@ def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any) -> tupl
 
 
 def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any):
-    if not _ENABLED or not torch.cuda.is_available() or not torch.is_tensor(x) or x.device.type != "cuda" or torch.is_grad_enabled():
+    if not _ENABLED:
+        return fn(x, sigma, cond=cond)
+    if not torch.cuda.is_available() or not torch.is_tensor(x) or x.device.type != "cuda" or torch.is_grad_enabled():
         with _LOCK:
             _STATS["fallbacks"] += 1
         return fn(x, sigma, cond=cond)

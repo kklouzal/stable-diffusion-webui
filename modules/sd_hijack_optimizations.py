@@ -538,7 +538,7 @@ def xformers_attention_forward(self, x, context=None, mask=None, **kwargs):
 
 # Based on Diffusers usage of scaled dot product attention from https://github.com/huggingface/diffusers/blob/c7da8fd23359a22d0df2741688b5b4f33c26df21/src/diffusers/models/cross_attention.py
 # The scaled_dot_product_attention_forward function contains parts of code under Apache-2.0 license listed under Scaled Dot Product Attention in the Licenses section of the web UI interface
-def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwargs):
+def scaled_dot_product_attention_forward(self, x, context=None, mask=None, sdpa_backend_override=None, **kwargs):
     batch_size, sequence_length, inner_dim = x.shape
 
     if mask is not None:
@@ -565,7 +565,7 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwa
         q, k, v = q.float(), k.float(), v.float()
 
     # the output of sdp = (batch, num_heads, seq_len, head_dim)
-    hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False)
+    hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False, sdpa_backend_override=sdpa_backend_override)
 
     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, h * head_dim)
     hidden_states = hidden_states.to(dtype)
@@ -578,12 +578,7 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwa
 
 
 def scaled_dot_product_no_mem_attention_forward(self, x, context=None, mask=None, **kwargs):
-    previous = _active_sdpa_backend
-    try:
-        set_attention_backend("sdpa", "flash,math")
-        return scaled_dot_product_attention_forward(self, x, context, mask)
-    finally:
-        set_attention_backend("sdpa", previous)
+    return scaled_dot_product_attention_forward(self, x, context, mask, sdpa_backend_override="flash,math")
 
 
 _active_attention_backend = "sdpa"
@@ -644,8 +639,11 @@ def _selected_sdpa_backends() -> list[SDPBackend] | None:
     return backends
 
 
-def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, backend_override: list[SDPBackend] | None = None):
-    backends = backend_override if backend_override is not None else _selected_sdpa_backends()
+def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, backend_override: list[SDPBackend] | None = None, sdpa_backend_override: str | None = None):
+    if sdpa_backend_override is not None:
+        backends, _ = _normalize_sdpa_backend_choice(sdpa_backend_override)
+    else:
+        backends = backend_override if backend_override is not None else _selected_sdpa_backends()
     if backends is None:
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
     with sdpa_kernel(backends):
@@ -928,12 +926,24 @@ def sdp_attnblock_forward(self, x):
 
 
 def sdp_no_mem_attnblock_forward(self, x):
-    previous = _active_sdpa_backend
-    try:
-        set_attention_backend("sdpa", "flash,math")
-        return sdp_attnblock_forward(self, x)
-    finally:
-        set_attention_backend("sdpa", previous)
+    h_ = x
+    h_ = self.norm(h_)
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    dtype = q.dtype
+    if shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
+    out = out.to(dtype)
+    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = self.proj_out(out)
+    return x + out
 
 
 def sub_quad_attnblock_forward(self, x):
