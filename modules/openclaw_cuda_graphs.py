@@ -130,16 +130,23 @@ def _graph_safe_denoiser_context(denoiser: Any | None) -> bool:
     if denoiser is None:
         return True
 
-    # Img2img/inpaint denoising carries extra mutable state outside the UNet input
-    # tensors. Keep graph replay limited to txt2img until that path is proven safe.
-    if getattr(denoiser, "init_latent", None) is not None:
-        return False
+    # Inpaint/masked blending depends on mutable latent-mask state outside the
+    # wrapped UNet call. Keep that path eager unless it is audited separately.
     if getattr(denoiser, "mask", None) is not None or getattr(denoiser, "nmask", None) is not None:
         return False
 
     p = getattr(denoiser, "p", None)
-    if p is not None and getattr(p, "init_latent", None) is not None:
-        return False
+    if p is not None:
+        if getattr(p, "mask", None) is not None or getattr(p, "nmask", None) is not None:
+            return False
+
+        incant_cfg = getattr(p, "incant_cfg_params", None)
+        if isinstance(incant_cfg, dict):
+            seg_params = incant_cfg.get("seg_params")
+            # SEG uses Python forward hooks in the UNet attention path. CUDA graph
+            # replay replays captured kernels and does not re-enter those hooks.
+            if bool(getattr(seg_params, "seg_active", False)):
+                return False
 
     return True
 
