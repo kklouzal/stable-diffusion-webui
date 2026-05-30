@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
 import json
 import re
+import sys
 import threading
 import time
 import traceback
@@ -16,13 +18,9 @@ import torch
 from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
-from modules import devices, script_callbacks, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
+from modules import devices, script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
-try:
-    from openclaw_denoise_ramp import ramp_sigmas_for_img2img
-except Exception:
-    ramp_sigmas_for_img2img = None
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EXT_ROOT / "data"
@@ -33,6 +31,26 @@ PREVIEW_NAME = f"{CUSTOM_PREFIX}Controller Preview"
 _LOCK = threading.RLock()
 _REGISTERED_NAMES: set[str] = set()
 _TRANSIENT_DEFS: dict[str, dict[str, Any]] = {}
+
+
+def _load_denoise_ramp_func():
+    target = (EXT_ROOT.parent / "openclaw-denoise-ramp" / "scripts" / "openclaw_denoise_ramp.py").resolve()
+    for path, module in getattr(script_loading, "loaded_scripts", {}).items():
+        if Path(path).resolve() == target:
+            return getattr(module, "ramp_sigmas_for_img2img", None)
+    if not target.exists():
+        return None
+
+    module_name = "_openclaw_denoise_ramp_for_multi_sampler"
+    module = sys.modules.get(module_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(module_name, target)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    return getattr(module, "ramp_sigmas_for_img2img", None)
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -364,6 +382,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
         sigmas = self.get_sigmas(p, steps)
+        ramp_sigmas_for_img2img = _load_denoise_ramp_func()
         if ramp_sigmas_for_img2img is not None:
             sigmas = ramp_sigmas_for_img2img(p, sigmas, steps, t_enc)
         sigma_sched = sigmas[steps - t_enc - 1:]
