@@ -138,28 +138,12 @@ class DynThresh:
             actual_res = actual_res * self.interpolate_phi + cfg_target * (1.0 - self.interpolate_phi)
 
         if self.experiment_mode == 1:
-            num = actual_res.cpu().numpy()
-            for y in range(0, 64):
-                for x in range (0, 64):
-                    if num[0][0][y][x] > 1.0:
-                        num[0][1][y][x] *= 0.5
-                    if num[0][1][y][x] > 1.0:
-                        num[0][1][y][x] *= 0.5
-                    if num[0][2][y][x] > 1.5:
-                        num[0][2][y][x] *= 0.5
-            actual_res = torch.from_numpy(num).to(device=uncond.device, dtype=stats_dtype)
+            actual_res[:, 1].mul_(torch.where(actual_res[:, 0] > 1.0, 0.5, 1.0))
+            actual_res[:, 1].mul_(torch.where(actual_res[:, 1] > 1.0, 0.5, 1.0))
+            actual_res[:, 2].mul_(torch.where(actual_res[:, 2] > 1.5, 0.5, 1.0))
         elif self.experiment_mode == 2:
-            num = actual_res.cpu().numpy()
-            for y in range(0, 64):
-                for x in range (0, 64):
-                    over_scale = False
-                    for z in range(0, 4):
-                        if abs(num[0][z][y][x]) > 1.5:
-                            over_scale = True
-                    if over_scale:
-                        for z in range(0, 4):
-                            num[0][z][y][x] *= 0.7
-            actual_res = torch.from_numpy(num).to(device=uncond.device, dtype=stats_dtype)
+            over_scale = actual_res.abs().amax(dim=1, keepdim=True) > 1.5
+            actual_res = actual_res * torch.where(over_scale, 0.7, 1.0)
         elif self.experiment_mode == 3:
             coefs = torch.tensor([
                 [0.298,   0.207,  0.208, 0.0],
