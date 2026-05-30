@@ -1,0 +1,69 @@
+diff -ruN old/models/autoencoder.py new/models/autoencoder.py
+--- a/sgm/models/autoencoder.py	2026-05-30 12:29:19.000000000 -0700
++++ b/sgm/models/autoencoder.py	2026-05-30 12:36:09.623808272 -0700
+@@ -163,7 +163,7 @@
+ 
+         if ckpt_path is not None:
+             assert ckpt_engine is None, "Can't set ckpt_engine and ckpt_path"
+-            logpy.warn("Checkpoint path is deprecated, use `checkpoint_egnine` instead")
++            logpy.warning("Checkpoint path is deprecated, use `checkpoint_egnine` instead")
+         self.apply_ckpt(default(ckpt_path, ckpt_engine))
+         self.additional_decode_keys = set(default(additional_decode_keys, []))
+ 
+@@ -355,7 +355,7 @@
+                         pattern_params.append(param)
+                         num_params += param.numel()
+                 if len(pattern_params) == 0:
+-                    logpy.warn(f"Did not find parameters for pattern {pattern_}")
++                    logpy.warning(f"Did not find parameters for pattern {pattern_}")
+                 params.extend(pattern_params)
+             groups.append({"params": params, **args})
+         return groups, num_params
+@@ -529,7 +529,7 @@
+         **kwargs,
+     ):
+         if "lossconfig" in kwargs:
+-            logpy.warn(f"Parameter `lossconfig` is deprecated, use `loss_config`.")
++            logpy.warning(f"Parameter `lossconfig` is deprecated, use `loss_config`.")
+             kwargs["loss_config"] = kwargs.pop("lossconfig")
+         super().__init__(
+             regularizer_config={
+diff -ruN old/modules/attention.py new/modules/attention.py
+--- a/sgm/modules/attention.py	2026-05-30 12:29:24.000000000 -0700
++++ b/sgm/modules/attention.py	2026-05-30 12:36:09.624045921 -0700
+@@ -28,7 +28,7 @@
+     SDP_IS_AVAILABLE = False
+     sdpa_kernel = nullcontext
+     BACKEND_MAP = {}
+-    logpy.warn(
++    logpy.warning(
+         f"No SDP backend available, likely because you are running in pytorch "
+         f"versions < 2.0. In fact, you are using PyTorch {torch.__version__}. "
+         f"You might want to consider upgrading."
+@@ -463,7 +463,7 @@
+         super().__init__()
+         assert attn_mode in self.ATTENTION_MODES
+         if attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE:
+-            logpy.warn(
++            logpy.warning(
+                 f"Attention mode '{attn_mode}' is not available. Falling "
+                 f"back to native attention. This is not a problem in "
+                 f"Pytorch >= 2.0. FYI, you are running with PyTorch "
+@@ -471,7 +471,7 @@
+             )
+             attn_mode = "softmax"
+         elif attn_mode == "softmax" and not SDP_IS_AVAILABLE:
+-            logpy.warn(
++            logpy.warning(
+                 "We do not support vanilla attention anymore, as it is too "
+                 "expensive. Sorry."
+             )
+@@ -639,7 +639,7 @@
+             context_dim = [context_dim]
+         if exists(context_dim) and isinstance(context_dim, list):
+             if depth != len(context_dim):
+-                logpy.warn(
++                logpy.warning(
+                     f"{self.__class__.__name__}: Found context dims "
+                     f"{context_dim} of depth {len(context_dim)}, which does not "
+                     f"match the specified 'depth' of {depth}. Setting context_dim "
