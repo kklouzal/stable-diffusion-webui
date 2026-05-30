@@ -205,14 +205,14 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
                 x_out[a:b] = inner_model(
                         x_in[a:b],
                         sigma_in[a:b],
-                        cond=make_condition_dict(subscript_cond(tensor, a, b), image_cond_in[a:b]),
+                        cond=make_condition_dict(subscript_cond(tensor, a, b), image_cond_in[a:b] if image_cond_in is not None else None),
                 )
 
         uncond_count = cond_batch_size(uncond)
         x_out[-uncond_count:] = inner_model(
                 x_in[-uncond_count:],
                 sigma_in[-uncond_count:],
-                cond=make_condition_dict(uncond, image_cond_in[-uncond_count:]),
+                cond=make_condition_dict(uncond, image_cond_in[-uncond_count:] if image_cond_in is not None else None),
         )
         return x_out
 

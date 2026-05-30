@@ -252,6 +252,28 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual(calls, [torch.Size([3, 77, 8])])
 
 
+    def test_pag_extra_pass_split_allows_missing_image_conditioning(self):
+        calls = []
+
+        def inner_model(x_in, sigma_in, cond):
+            calls.append((cond["crossattn"].shape[1], cond["c_concat"][0]))
+            return torch.ones_like(x_in)
+
+        def make_condition_dict(c_crossattn, c_concat):
+            return {**c_crossattn, "c_concat": [c_concat]}
+
+        x_in = torch.zeros(3, 4, 2, 2)
+        sigma_in = torch.zeros(3)
+        tensor = {"crossattn": torch.randn(2, 847, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.randn(1, 770, 8), "vector": torch.randn(1, 4)}
+
+        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, None, make_condition_dict, 1)
+
+        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
+        self.assertEqual([call[0] for call in calls], [847, 847, 770])
+        self.assertTrue(all(call[1] is None for call in calls))
+
+
 class ModuleHookTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
