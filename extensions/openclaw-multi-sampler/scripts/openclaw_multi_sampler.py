@@ -18,7 +18,7 @@ import torch
 from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
-from modules import devices, script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
+from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
 
@@ -31,14 +31,23 @@ PREVIEW_NAME = f"{CUSTOM_PREFIX}Controller Preview"
 _LOCK = threading.RLock()
 _REGISTERED_NAMES: set[str] = set()
 _TRANSIENT_DEFS: dict[str, dict[str, Any]] = {}
+_DENOISE_RAMP_FUNC = None
+_DENOISE_RAMP_FUNC_LOADED = False
 
 
 def _load_denoise_ramp_func():
+    global _DENOISE_RAMP_FUNC, _DENOISE_RAMP_FUNC_LOADED
+    if _DENOISE_RAMP_FUNC_LOADED:
+        return _DENOISE_RAMP_FUNC
+
     target = (EXT_ROOT.parent / "openclaw-denoise-ramp" / "scripts" / "openclaw_denoise_ramp.py").resolve()
     for path, module in getattr(script_loading, "loaded_scripts", {}).items():
         if Path(path).resolve() == target:
-            return getattr(module, "ramp_sigmas_for_img2img", None)
+            _DENOISE_RAMP_FUNC = getattr(module, "ramp_sigmas_for_img2img", None)
+            _DENOISE_RAMP_FUNC_LOADED = True
+            return _DENOISE_RAMP_FUNC
     if not target.exists():
+        _DENOISE_RAMP_FUNC_LOADED = True
         return None
 
     module_name = "_openclaw_denoise_ramp_for_multi_sampler"
@@ -46,11 +55,14 @@ def _load_denoise_ramp_func():
     if module is None:
         spec = importlib.util.spec_from_file_location(module_name, target)
         if spec is None or spec.loader is None:
+            _DENOISE_RAMP_FUNC_LOADED = True
             return None
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-    return getattr(module, "ramp_sigmas_for_img2img", None)
+    _DENOISE_RAMP_FUNC = getattr(module, "ramp_sigmas_for_img2img", None)
+    _DENOISE_RAMP_FUNC_LOADED = True
+    return _DENOISE_RAMP_FUNC
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
