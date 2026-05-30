@@ -309,6 +309,7 @@ COPY requirements_versions.txt /opt/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
+COPY docker/patch-torch-mkldnn-deprecation.py /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation
 COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 
 # Container-owned environment doctrine:
@@ -341,7 +342,8 @@ print(json.dumps({
     }
 }, indent=2))
 PY
-RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements \
+RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
+    && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
     && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
