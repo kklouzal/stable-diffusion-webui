@@ -9,12 +9,12 @@ import torch
 _ENABLED = False
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _LOCK = threading.RLock()
-_STATS = {"captures": 0, "replays": 0, "fallbacks": 0, "failures": 0, "last_error": None, "last_key": None}
+_STATS = {"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures": 0, "last_error": None, "last_key": None}
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 
 
 def _reset_stats() -> None:
-    _STATS.update({"captures": 0, "replays": 0, "fallbacks": 0, "failures": 0, "last_error": None, "last_key": None})
+    _STATS.update({"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures": 0, "last_error": None, "last_key": None})
 
 
 def status() -> dict[str, Any]:
@@ -126,8 +126,30 @@ def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any) -> tupl
     return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), attention_key)
 
 
-def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any):
+def _graph_safe_denoiser_context(denoiser: Any | None) -> bool:
+    if denoiser is None:
+        return True
+
+    # Img2img/inpaint denoising carries extra mutable state outside the UNet input
+    # tensors. Keep graph replay limited to txt2img until that path is proven safe.
+    if getattr(denoiser, "init_latent", None) is not None:
+        return False
+    if getattr(denoiser, "mask", None) is not None or getattr(denoiser, "nmask", None) is not None:
+        return False
+
+    p = getattr(denoiser, "p", None)
+    if p is not None and getattr(p, "init_latent", None) is not None:
+        return False
+
+    return True
+
+
+def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: Any | None = None):
     if not _ENABLED:
+        return fn(x, sigma, cond=cond)
+    if not _graph_safe_denoiser_context(denoiser):
+        with _LOCK:
+            _STATS["bypasses"] += 1
         return fn(x, sigma, cond=cond)
     if not torch.cuda.is_available() or not torch.is_tensor(x) or x.device.type != "cuda" or torch.is_grad_enabled():
         with _LOCK:

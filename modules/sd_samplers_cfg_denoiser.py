@@ -99,7 +99,7 @@ class CFGDenoiser(torch.nn.Module):
 
     def run_inner_model(self, x, sigma, cond):
         from modules import openclaw_cuda_graphs
-        return openclaw_cuda_graphs.run(self.inner_model, x, sigma, cond)
+        return openclaw_cuda_graphs.run(self.inner_model, x, sigma, cond, denoiser=self)
 
     def pad_cond_uncond(self, cond, uncond):
         empty = shared.sd_model.cond_stage_model_empty_prompt
