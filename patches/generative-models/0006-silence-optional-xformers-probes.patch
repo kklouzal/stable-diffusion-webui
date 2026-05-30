@@ -1,22 +1,26 @@
 diff --git a/sgm/modules/attention.py b/sgm/modules/attention.py
+index fe021d0..5aefe55 100644
 --- a/sgm/modules/attention.py
 +++ b/sgm/modules/attention.py
-@@ -33,7 +33,6 @@ try:
+@@ -41,7 +41,7 @@ try:
      XFORMERS_IS_AVAILABLE = True
  except:
      XFORMERS_IS_AVAILABLE = False
--    print("no module 'xformers'. Processing without...")
+-    logpy.warn("no module 'xformers'. Processing without...")
++    logpy.debug("no module 'xformers'. Processing without...")
  
- from .diffusionmodules.util import checkpoint
+ # from .diffusionmodules.util import mixed_checkpoint as checkpoint
  
 diff --git a/sgm/modules/diffusionmodules/model.py b/sgm/modules/diffusionmodules/model.py
+index 4cf9d92..ae4798c 100644
 --- a/sgm/modules/diffusionmodules/model.py
 +++ b/sgm/modules/diffusionmodules/model.py
-@@ -12,7 +12,6 @@ try:
+@@ -18,7 +18,7 @@ try:
      XFORMERS_IS_AVAILABLE = True
  except:
      XFORMERS_IS_AVAILABLE = False
--    print("no module 'xformers'. Processing without...")
+-    logpy.warning("no module 'xformers'. Processing without...")
++    logpy.debug("no module 'xformers'. Processing without...")
  
  from ...modules.attention import LinearAttention, MemoryEfficientCrossAttention
  
