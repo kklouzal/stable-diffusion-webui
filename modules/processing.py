@@ -1705,19 +1705,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 image_mask = ImageOps.invert(image_mask)
                 self.extra_generation_params["Mask mode"] = "Inpaint not masked"
 
-            if self.mask_blur_x > 0:
-                np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_x + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur_x)
-                image_mask = Image.fromarray(np_mask)
-
-            if self.mask_blur_y > 0:
-                np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_y + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur_y)
-                image_mask = Image.fromarray(np_mask)
-
             if self.mask_blur_x > 0 or self.mask_blur_y > 0:
+                np_mask = np.asarray(image_mask)
+                if self.mask_blur_x > 0:
+                    kernel_size = 2 * int(2.5 * self.mask_blur_x + 0.5) + 1
+                    np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur_x)
+                if self.mask_blur_y > 0:
+                    kernel_size = 2 * int(2.5 * self.mask_blur_y + 0.5) + 1
+                    np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur_y)
+                image_mask = Image.fromarray(np_mask)
                 self.extra_generation_params["Mask blur"] = self.mask_blur
 
             if self.inpaint_full_res:
@@ -1742,8 +1738,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     logging.info(massage)
             else:
                 image_mask = images.resize_image(self.resize_mode, image_mask, self.width, self.height)
-                np_mask = np.array(image_mask)
-                np_mask = np.clip((np_mask.astype(np.float32)) * 2, 0, 255).astype(np.uint8)
+                np_mask = np.asarray(image_mask, dtype=np.float32)
+                np_mask = np.clip(np_mask * 2, 0, 255).astype(np.uint8)
                 self.mask_for_overlay = Image.fromarray(np_mask)
 
             self.overlay_images = []
@@ -1795,7 +1791,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             imgs.append(image)
 
         if len(imgs) == 1:
-            batch_images = np.expand_dims(imgs[0], axis=0).repeat(self.batch_size, axis=0)
+            batch_images = np.expand_dims(imgs[0], axis=0)
+            repeat_init_latent = self.batch_size > 1
             if self.overlay_images is not None:
                 self.overlay_images = self.overlay_images * self.batch_size
 
@@ -1805,6 +1802,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         elif len(imgs) <= self.batch_size:
             self.batch_size = len(imgs)
             batch_images = np.array(imgs)
+            repeat_init_latent = False
         else:
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
 
@@ -1820,15 +1818,18 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if self.resize_mode == 3:
             self.init_latent = torch.nn.functional.interpolate(self.init_latent, size=(self.height // opt_f, self.width // opt_f), mode="bilinear")
 
+        if repeat_init_latent:
+            self.init_latent = self.init_latent.repeat(self.batch_size, 1, 1, 1)
+            image = image.repeat(self.batch_size, 1, 1, 1)
+
         if image_mask is not None:
             init_mask = latent_mask
-            latmask = init_mask.convert('RGB').resize((self.init_latent.shape[3], self.init_latent.shape[2]))
-            latmask = np.moveaxis(np.array(latmask, dtype=np.float32), 2, 0) / 255
-            latmask = latmask[0]
+            latmask = init_mask.convert('L').resize((self.init_latent.shape[3], self.init_latent.shape[2]))
+            latmask = np.asarray(latmask, dtype=np.float32) / 255.0
             if self.mask_round:
                 latmask = np.around(latmask)
-            latmask = np.tile(latmask[None], (self.init_latent.shape[1], 1, 1))
             latmask = torch.from_numpy(latmask).to(device=shared.device, dtype=devices.dtype)
+            latmask = latmask.unsqueeze(0).expand(self.init_latent.shape[1], -1, -1)
 
             self.mask = 1.0 - latmask
             self.nmask = latmask

@@ -285,9 +285,10 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             return
         if max_count and not final and step // every > max_count:
             return
-        out_dir = Path(str(cfg.get("dir") or "")).expanduser()
-        if not out_dir:
+        out_dir_value = str(cfg.get("dir") or "").strip()
+        if not out_dir_value:
             return
+        out_dir = Path(out_dir_value).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
         approximation = cfg.get("approximation")
         if approximation in ("Full", "full", 0, "0"):
@@ -301,9 +302,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         else:
             approx = 2
         try:
-            tensor = sd_samplers_common.samples_to_images_tensor(latent.detach().float(), approximation=approx)[0] * 0.5 + 0.5
-            tensor = torch.clamp(tensor, min=0.0, max=1.0).float()
-            array = (255.0 * np.moveaxis(tensor.cpu().numpy(), 0, 2)).astype(np.uint8)
+            tensor = sd_samplers_common.samples_to_images_tensor(latent.detach().float(), approximation=approx)[0]
+            tensor = tensor.add(1.0).mul(127.5).clamp_(0, 255).to(dtype=torch.uint8)
+            array = np.moveaxis(tensor.cpu().numpy(), 0, 2)
             image = Image.fromarray(array)
             name = "final.png" if final else f"step-{step:03d}.png"
             image.save(out_dir / name)
@@ -327,12 +328,13 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     def _stage_total_steps(self, sampler_name: str, stage_steps: int) -> int:
         return _k_sampler_config(sampler_name).total_steps(stage_steps)
 
-    def _run_chain(self, p, x, conditioning, unconditional_conditioning, sigmas: torch.Tensor, steps: int, *, is_img2img: bool, image_conditioning=None):
+    def _run_chain(self, p, x, conditioning, unconditional_conditioning, sigmas: torch.Tensor, steps: int, *, is_img2img: bool, launch_steps: int | None = None, image_conditioning=None):
         self._initialize_chain(p)
         stages = self._split_sigmas(sigmas, steps)
-        self.model_wrap_cfg.steps = steps
+        launch_steps = steps if launch_steps is None else launch_steps
+        self.model_wrap_cfg.steps = launch_steps
         self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, end - start)) for name, _stage_sigmas, start, end in stages)
-        state.sampling_steps = steps
+        state.sampling_steps = launch_steps
         state.sampling_step = 0
         self.last_latent = x
         self.sampler_extra_args = {
@@ -412,7 +414,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x
-        samples = self._run_chain(p, xi, conditioning, unconditional_conditioning, sigma_sched, t_enc, is_img2img=True, image_conditioning=image_conditioning)
+        samples = self._run_chain(p, xi, conditioning, unconditional_conditioning, sigma_sched, t_enc, is_img2img=True, launch_steps=t_enc + 1, image_conditioning=image_conditioning)
         self.add_infotext(p)
         return samples
 
