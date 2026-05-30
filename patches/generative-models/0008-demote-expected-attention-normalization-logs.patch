@@ -1,0 +1,21 @@
+diff --git a/sgm/modules/attention.py b/sgm/modules/attention.py
+--- a/sgm/modules/attention.py
++++ b/sgm/modules/attention.py
+@@ -463,7 +463,7 @@ class BasicTransformerBlock(nn.Module):
+         super().__init__()
+         assert attn_mode in self.ATTENTION_MODES
+         if attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE:
+-            logpy.warning(
++            logpy.debug(
+                 f"Attention mode '{attn_mode}' is not available. Falling "
+                 f"back to native attention. This is not a problem in "
+                 f"Pytorch >= 2.0. FYI, you are running with PyTorch "
+@@ -639,7 +639,7 @@ class SpatialTransformer(nn.Module):
+             context_dim = [context_dim]
+         if exists(context_dim) and isinstance(context_dim, list):
+             if depth != len(context_dim):
+-                logpy.warning(
++                logpy.debug(
+                     f"{self.__class__.__name__}: Found context dims "
+                     f"{context_dim} of depth {len(context_dim)}, which does not "
+                     f"match the specified 'depth' of {depth}. Setting context_dim "
