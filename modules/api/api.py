@@ -238,6 +238,8 @@ class Api:
         self.add_api_route("/sdapi/v1/options", self.set_config, methods=["POST"])
         self.add_api_route("/sdapi/v1/attention-backend", self.get_attention_backend, methods=["GET"])
         self.add_api_route("/sdapi/v1/attention-backend", self.set_attention_backend, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/cmd-flags", self.get_cmd_flags, methods=["GET"], response_model=models.FlagsModel)
         self.add_api_route("/sdapi/v1/samplers", self.get_samplers, methods=["GET"], response_model=list[models.SamplerItem])
         self.add_api_route("/sdapi/v1/schedulers", self.get_schedulers, methods=["GET"], response_model=list[models.SchedulerItem])
@@ -300,10 +302,21 @@ class Api:
 
     def set_attention_backend(self, req: dict[str, Any]):
         backend = req.get("backend") if isinstance(req, dict) else None
+        sdpa_backend = req.get("sdpa_backend") if isinstance(req, dict) else None
         try:
-            return sd_hijack_optimizations.set_attention_backend(backend)
+            return sd_hijack_optimizations.set_attention_backend(backend, sdpa_backend)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def get_cuda_graphs(self):
+        from modules import openclaw_cuda_graphs
+        return openclaw_cuda_graphs.status()
+
+    def set_cuda_graphs(self, req: dict[str, Any]):
+        from modules import openclaw_cuda_graphs
+        enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
+        clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
+        return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
 
     def auth(self, credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         if credentials.username in self.credentials:

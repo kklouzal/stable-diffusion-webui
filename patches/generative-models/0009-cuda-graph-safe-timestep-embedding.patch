@@ -1,0 +1,19 @@
+diff --git a/sgm/modules/diffusionmodules/util.py b/sgm/modules/diffusionmodules/util.py
+index 33cb65f..d9741c7 100644
+--- a/sgm/modules/diffusionmodules/util.py
++++ b/sgm/modules/diffusionmodules/util.py
+@@ -246,10 +246,12 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
+     if not repeat_only:
+         half = dim // 2
+         freqs = torch.exp(
+             -math.log(max_period)
+-            * torch.arange(start=0, end=half, dtype=torch.float32)
++            * torch.arange(
++                start=0, end=half, dtype=torch.float32, device=timesteps.device
++            )
+             / half
+-        ).to(device=timesteps.device)
++        )
+         args = timesteps[:, None].float() * freqs[None]
+         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+         if dim % 2:

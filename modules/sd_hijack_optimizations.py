@@ -565,9 +565,7 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwa
         q, k, v = q.float(), k.float(), v.float()
 
     # the output of sdp = (batch, num_heads, seq_len, head_dim)
-    hidden_states = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
-    )
+    hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False)
 
     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, h * head_dim)
     hidden_states = hidden_states.to(dtype)
@@ -580,13 +578,78 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, **kwa
 
 
 def scaled_dot_product_no_mem_attention_forward(self, x, context=None, mask=None, **kwargs):
-    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+    previous = _active_sdpa_backend
+    try:
+        set_attention_backend("sdpa", "flash,math")
         return scaled_dot_product_attention_forward(self, x, context, mask)
+    finally:
+        set_attention_backend("sdpa", previous)
 
 
 _active_attention_backend = "sdpa"
+_active_sdpa_backend = "auto"
 _sage2_fn = None
 _sage3_fn = None
+
+
+_SDPA_BACKEND_ALIASES = {
+    "flash": "FLASH_ATTENTION",
+    "efficient": "EFFICIENT_ATTENTION",
+    "mem_efficient": "EFFICIENT_ATTENTION",
+    "memory_efficient": "EFFICIENT_ATTENTION",
+    "math": "MATH",
+    "cudnn": "CUDNN_ATTENTION",
+}
+_SDPA_BACKEND_CHOICES = [
+    "auto",
+    "flash",
+    "efficient",
+    "math",
+    "cudnn",
+    "flash,math",
+    "efficient,math",
+    "cudnn,flash,efficient,math",
+]
+
+
+def _sdpa_backend_available(name: str) -> bool:
+    attr = _SDPA_BACKEND_ALIASES.get(name)
+    return bool(attr and hasattr(SDPBackend, attr))
+
+
+def _sdpa_backend_availability() -> dict[str, bool]:
+    return {choice: True if choice == "auto" else _normalize_sdpa_backend_choice(choice)[0] is not None for choice in _SDPA_BACKEND_CHOICES}
+
+
+def _normalize_sdpa_backend_choice(value: str | None) -> tuple[list[SDPBackend] | None, str]:
+    raw = str(value or "auto").strip().lower().replace("+", ",").replace(" ", ",")
+    if raw in {"", "auto"}:
+        return None, "auto"
+    names = [part for part in raw.split(",") if part]
+    backends = []
+    labels = []
+    for name in names:
+        attr = _SDPA_BACKEND_ALIASES.get(name)
+        if attr is None or not hasattr(SDPBackend, attr):
+            raise ValueError(f"Unsupported SDPA backend: {name}")
+        backends.append(getattr(SDPBackend, attr))
+        labels.append(name)
+    if not backends:
+        return None, "auto"
+    return backends, ",".join(labels)
+
+
+def _selected_sdpa_backends() -> list[SDPBackend] | None:
+    backends, _ = _normalize_sdpa_backend_choice(_active_sdpa_backend)
+    return backends
+
+
+def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, backend_override: list[SDPBackend] | None = None):
+    backends = backend_override if backend_override is not None else _selected_sdpa_backends()
+    if backends is None:
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+    with sdpa_kernel(backends):
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
 
 
 def attention_backend_status():
@@ -598,6 +661,9 @@ def attention_backend_status():
             "sage2": sageattention2_available(),
             "sage3": sageattention3_available(),
         },
+        "sdpa_backend": _active_sdpa_backend,
+        "sdpa_backend_choices": _SDPA_BACKEND_CHOICES,
+        "sdpa_backend_available": _sdpa_backend_availability(),
     }
 
 
@@ -633,11 +699,14 @@ def get_sage3_attention():
     return _sage3_fn
 
 
-def set_attention_backend(backend: str):
-    global _active_attention_backend
+def set_attention_backend(backend: str, sdpa_backend: str | None = None):
+    global _active_attention_backend, _active_sdpa_backend
     backend = (backend or "sdpa").strip().lower()
     if backend not in {"sdpa", "sage2", "sage3"}:
         raise ValueError(f"Unsupported attention backend: {backend}")
+
+    _, normalized_sdpa_backend = _normalize_sdpa_backend_choice(sdpa_backend or _active_sdpa_backend)
+    _active_sdpa_backend = normalized_sdpa_backend
 
     if backend == "sage2":
         SdOptimizationSageAttention2().apply()
@@ -664,23 +733,23 @@ def sage_attention_supported(q, k, v, mask=None):
 
 def sage2_sdpa(q, k, v, *, mask=None, is_causal=False):
     if not sage_attention_supported(q, k, v, mask):
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
     try:
         return get_sage2_attention()(q.contiguous(), k.contiguous(), v.contiguous(), tensor_layout="HND", is_causal=is_causal)
     except Exception as exc:
         print(f"SageAttention2++ failed; falling back to SDPA: {exc}")
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
 
 
 def sage3_sdpa(q, k, v, *, mask=None, is_causal=False):
     if not sage_attention_supported(q, k, v, mask):
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
     try:
         # SageAttention3 preprocess mutates K in-place, so isolate K without extra Q/V copies.
         return get_sage3_attention()(q.contiguous(), k.contiguous().clone(), v.contiguous(), is_causal=is_causal)
     except Exception as exc:
         print(f"SageAttention3 failed; falling back to SDPA: {exc}")
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
 
 
 def sage2_attention_forward(self, x, context=None, mask=None, **kwargs):
@@ -851,7 +920,7 @@ def sdp_attnblock_forward(self, x):
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+    out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
     out = out.to(dtype)
     out = rearrange(out, 'b (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
@@ -859,8 +928,12 @@ def sdp_attnblock_forward(self, x):
 
 
 def sdp_no_mem_attnblock_forward(self, x):
-    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+    previous = _active_sdpa_backend
+    try:
+        set_attention_backend("sdpa", "flash,math")
         return sdp_attnblock_forward(self, x)
+    finally:
+        set_attention_backend("sdpa", previous)
 
 
 def sub_quad_attnblock_forward(self, x):
