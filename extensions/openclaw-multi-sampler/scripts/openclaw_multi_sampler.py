@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
+from modules import headless_ui as gr
 import numpy as np
 from PIL import Image
 import torch
