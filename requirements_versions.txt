@@ -41,7 +41,6 @@ tomesd
 torch
 torchdiffeq
 torchsde
-dctorch
 transformers
 tokenizers
 pillow-avif-plugin

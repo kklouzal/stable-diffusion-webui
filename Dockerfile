@@ -17,6 +17,7 @@ ARG BLIP_REPO=https://github.com/salesforce/BLIP.git
 ARG BLIP_COMMIT=056a169437371659074aa2732649d5de3bffb4a8
 ARG ASSETS_REPO=https://github.com/AUTOMATIC1111/stable-diffusion-webui-assets.git
 ARG ASSETS_COMMIT=6f7db241d2f8ba7457bac5ca9753331f0c266917
+ARG DCTORCH_VERSION=0.1.2
 ARG CLIP_PACKAGE_URL=https://github.com/openai/CLIP/archive/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6.zip
 ARG SAGEATTENTION_REPO=https://github.com/thu-ml/SageAttention.git
 ARG SAGEATTENTION_COMMIT=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
@@ -185,6 +186,7 @@ FROM torch-base AS wheelbuilder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CLIP_PACKAGE_URL
+ARG DCTORCH_VERSION
 ARG SAGEATTENTION_REPO
 ARG SAGEATTENTION_COMMIT
 ARG CUTLASS_REPO
@@ -249,7 +251,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
     && test -n "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
-    && ls -1 /opt/wheels/clip-*.whl \
+    && python -m pip wheel --no-deps --wheel-dir /opt/wheels "dctorch==${DCTORCH_VERSION}" \
+    && ls -1 /opt/wheels/clip-*.whl /opt/wheels/dctorch-*.whl \
     && ccache --show-stats
 
 # SageAttention build doctrine:
@@ -342,7 +345,7 @@ RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
     && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl sageattention sageattn3 \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl dctorch sageattention sageattn3 \
     && python - <<'PY'
 import importlib.metadata as md
 import json
