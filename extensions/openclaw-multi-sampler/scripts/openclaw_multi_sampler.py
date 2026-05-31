@@ -33,6 +33,8 @@ _REGISTERED_NAMES: set[str] = set()
 _TRANSIENT_DEFS: dict[str, dict[str, Any]] = {}
 _DENOISE_RAMP_FUNC = None
 _DENOISE_RAMP_FUNC_LOADED = False
+_SIGNATURE_PARAM_CACHE: dict[int, set[str]] = {}
+_SAMPLER_FUNC_CACHE: dict[str, tuple[Any, str]] = {}
 
 
 def _load_denoise_ramp_func():
@@ -214,6 +216,28 @@ def _stage_extra_params(funcname: str) -> list[str]:
     return sd_samplers_kdiffusion.sampler_extra_params.get(funcname, [])
 
 
+def _signature_param_names(func) -> set[str]:
+    cache_key = id(func)
+    params = _SIGNATURE_PARAM_CACHE.get(cache_key)
+    if params is None:
+        params = set(inspect.signature(func).parameters)
+        _SIGNATURE_PARAM_CACHE[cache_key] = params
+    return params
+
+
+def _sampler_func_for(sampler_name: str) -> tuple[Any, str]:
+    cached = _SAMPLER_FUNC_CACHE.get(sampler_name)
+    if cached is not None:
+        return cached
+    # SamplerData constructors are lambdas, so map via the source table instead.
+    funcname = next(item[1] for item in sd_samplers_kdiffusion.samplers_k_diffusion if item[0] == sampler_name)
+    func = funcname if callable(funcname) else getattr(k_diffusion.sampling, funcname)
+    stage_funcname = funcname if isinstance(funcname, str) else getattr(funcname, "__name__", "")
+    cached = (func, stage_funcname)
+    _SAMPLER_FUNC_CACHE[sampler_name] = cached
+    return cached
+
+
 class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     """Run a multi-stage k-diffusion sampler chain over one continuous sigma schedule."""
 
@@ -238,7 +262,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         k_diffusion.sampling.torch = sd_samplers_common.TorchHijack(p)
 
     def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, full_sigmas: torch.Tensor, stage_steps: int, is_img2img: bool) -> dict[str, Any]:
-        params = inspect.signature(func).parameters
+        params = _signature_param_names(func)
         kwargs: dict[str, Any] = {}
         for param_name in _stage_extra_params(funcname):
             if param_name not in params:
@@ -354,17 +378,13 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                 if stage_steps <= 0:
                     continue
                 config = _k_sampler_config(sampler_name)
-                funcname = config.constructor.keywords.get("funcname") if hasattr(config.constructor, "keywords") else None
-                # SamplerData constructors are lambdas, so map via the source table instead.
-                funcname = next(item[1] for item in sd_samplers_kdiffusion.samplers_k_diffusion if item[0] == sampler_name)
-                func = funcname if callable(funcname) else getattr(k_diffusion.sampling, funcname)
-                stage_funcname = funcname if isinstance(funcname, str) else getattr(funcname, "__name__", "")
+                func, stage_funcname = _sampler_func_for(sampler_name)
                 kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, full_sigmas=sigmas, stage_steps=stage_steps, is_img2img=is_img2img)
                 # k-diffusion's sample_dpmpp_2m_sde has an h_last bookkeeping bug when
                 # it is asked to do only the final denoise transition [sigma, 0].
                 # A mid-chain split can naturally create that one-step stage, so handle
                 # it explicitly instead of rejecting useful takeover points.
-                if stage_funcname == "sample_dpmpp_2m_sde" and stage_steps == 1 and float(stage_sigmas[-1]) == 0.0:
+                if stage_funcname == "sample_dpmpp_2m_sde" and stage_steps == 1 and end == steps:
                     s_in = x.new_ones([x.shape[0]])
                     denoised = self.model_wrap_cfg(x, stage_sigmas[0] * s_in, **self.sampler_extra_args)
                     self._callback(p, offset=offset)({"x": x, "i": 0, "sigma": stage_sigmas[0], "sigma_hat": stage_sigmas[0], "denoised": denoised})
