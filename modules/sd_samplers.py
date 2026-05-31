@@ -126,7 +126,12 @@ def fix_p_invalid_sampler_and_scheduler(p):
     i_sampler_name, i_scheduler = p.sampler_name, p.scheduler
     p.sampler_name, p.scheduler = get_sampler_and_scheduler(p.sampler_name, p.scheduler, convert_automatic=False)
     if p.sampler_name != i_sampler_name or i_scheduler != p.scheduler:
-        logging.warning(f'Sampler Scheduler autocorrection: "{i_sampler_name}" -> "{p.sampler_name}", "{i_scheduler}" -> "{p.scheduler}"')
+        message = f'Sampler Scheduler autocorrection: "{i_sampler_name}" -> "{p.sampler_name}", "{i_scheduler}" -> "{p.scheduler}"'
+        filled_default_scheduler = p.sampler_name == i_sampler_name and str(i_scheduler or "").strip().lower() in {"", "none"} and p.scheduler == "Automatic"
+        if filled_default_scheduler:
+            logging.debug(message)
+        else:
+            logging.warning(message)
 
 
 set_samplers()

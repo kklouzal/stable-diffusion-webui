@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import math
 import psutil
 import platform
@@ -21,6 +22,8 @@ import sgm.modules.diffusionmodules.model
 
 diffusionmodules_model_AttnBlock_forward = ldm.modules.diffusionmodules.model.AttnBlock.forward
 sgm_diffusionmodules_model_AttnBlock_forward = sgm.modules.diffusionmodules.model.AttnBlock.forward
+
+logger = logging.getLogger(__name__)
 
 
 class SdOptimization:
@@ -735,7 +738,7 @@ def sage2_sdpa(q, k, v, *, mask=None, is_causal=False):
     try:
         return get_sage2_attention()(q.contiguous(), k.contiguous(), v.contiguous(), tensor_layout="HND", is_causal=is_causal)
     except Exception as exc:
-        print(f"SageAttention2++ failed; falling back to SDPA: {exc}")
+        logger.warning("SageAttention2++ failed; falling back to SDPA: %s", exc)
         return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
 
 
@@ -746,7 +749,7 @@ def sage3_sdpa(q, k, v, *, mask=None, is_causal=False):
         # SageAttention3 preprocess mutates K in-place, so isolate K without extra Q/V copies.
         return get_sage3_attention()(q.contiguous(), k.contiguous().clone(), v.contiguous(), is_causal=is_causal)
     except Exception as exc:
-        print(f"SageAttention3 failed; falling back to SDPA: {exc}")
+        logger.warning("SageAttention3 failed; falling back to SDPA: %s", exc)
         return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
 
 

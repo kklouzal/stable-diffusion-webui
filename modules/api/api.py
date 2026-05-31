@@ -238,6 +238,8 @@ class Api:
         self.add_api_route("/sdapi/v1/options", self.set_config, methods=["POST"])
         self.add_api_route("/sdapi/v1/attention-backend", self.get_attention_backend, methods=["GET"])
         self.add_api_route("/sdapi/v1/attention-backend", self.set_attention_backend, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/attention-backend", self.get_attention_backend, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/attention-backend", self.set_attention_backend, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/cmd-flags", self.get_cmd_flags, methods=["GET"], response_model=models.FlagsModel)

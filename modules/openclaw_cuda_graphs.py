@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import traceback
 from typing import Any
@@ -13,13 +14,23 @@ _STATS = {"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures"
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 
 
+def _read_max_cache_size() -> int:
+    try:
+        return max(0, int(os.environ.get("OPENCLAW_CUDA_GRAPH_CACHE_MAX", "8") or 0))
+    except ValueError:
+        return 8
+
+
+_MAX_CACHE_SIZE = _read_max_cache_size()
+
+
 def _reset_stats() -> None:
     _STATS.update({"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures": 0, "last_error": None, "last_key": None})
 
 
 def status() -> dict[str, Any]:
     with _LOCK:
-        return {"enabled": _ENABLED, "cache_size": len(_CACHE), **_STATS}
+        return {"enabled": _ENABLED, "cache_size": len(_CACHE), "max_cache_size": _MAX_CACHE_SIZE, **_STATS}
 
 
 def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
@@ -79,6 +90,13 @@ def _copy_into_static(static: Any, current: Any) -> None:
     elif isinstance(static, tuple) and isinstance(current, tuple):
         for dst, src in zip(static, current):
             _copy_into_static(dst, src)
+
+
+def _evict_if_needed_locked() -> None:
+    if _MAX_CACHE_SIZE <= 0:
+        return
+    while len(_CACHE) >= _MAX_CACHE_SIZE:
+        _CACHE.pop(next(iter(_CACHE)))
 
 
 def _model_signature(fn: Any) -> tuple[Any, ...]:
@@ -197,6 +215,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
             static_out = fn(static_x, static_sigma, cond=static_cond)
         entry = {"graph": graph, "x": static_x, "sigma": static_sigma, "cond": static_cond, "out": static_out}
         with _LOCK:
+            _evict_if_needed_locked()
             _CACHE[key] = entry
             _STATS["captures"] += 1
             _STATS["last_error"] = None
