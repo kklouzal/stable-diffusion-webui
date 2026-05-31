@@ -292,7 +292,32 @@ class Api:
         if not self.default_script_arg_img2img:
             self.default_script_arg_img2img = self.init_default_script_args(img2img_script_runner)
 
+        self.apply_openclaw_runtime_defaults()
 
+
+    @staticmethod
+    def _env_flag(name: str) -> bool | None:
+        value = os.environ.get(name)
+        if value is None:
+            return None
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def apply_openclaw_runtime_defaults(self):
+        attention_backend = os.environ.get("OPENCLAW_ATTENTION_BACKEND")
+        sdpa_backend = os.environ.get("OPENCLAW_SDPA_BACKEND")
+        if attention_backend or sdpa_backend:
+            try:
+                sd_hijack_optimizations.set_attention_backend(attention_backend or "sdpa", sdpa_backend)
+            except Exception:
+                errors.report("Failed to apply OpenClaw attention defaults from environment", exc_info=True)
+
+        cuda_graphs_enabled = self._env_flag("OPENCLAW_CUDA_GRAPHS")
+        if cuda_graphs_enabled is not None:
+            try:
+                from modules import openclaw_cuda_graphs
+                openclaw_cuda_graphs.set_enabled(cuda_graphs_enabled, clear=True)
+            except Exception:
+                errors.report("Failed to apply OpenClaw CUDA graph default from environment", exc_info=True)
 
     def add_api_route(self, path: str, endpoint, **kwargs):
         if shared.cmd_opts.api_auth:
@@ -1015,4 +1040,3 @@ class Api:
     def stop_webui(request):
         shared.state.server_command = "stop"
         return Response("Stopping.")
-
