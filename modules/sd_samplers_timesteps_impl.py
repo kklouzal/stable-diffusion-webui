@@ -1,11 +1,30 @@
 import torch
 import tqdm
 import k_diffusion.sampling
-import numpy as np
 
 from modules import shared
 from modules.models.diffusion.uni_pc import uni_pc
 from modules.torch_utils import float64
+
+
+def _step_value(values, index, like):
+    return values[index].to(device=like.device, dtype=like.dtype) * like
+
+
+def _model_timestep(timesteps, index, s_in):
+    return timesteps[index].to(device=s_in.device, dtype=s_in.dtype) * s_in
+
+
+def _ddim_sigmas(eta, alphas, alphas_prev):
+    if eta == 0:
+        return torch.zeros_like(alphas_prev)
+
+    alphas_for_sigmas = alphas.to(dtype=alphas_prev.dtype)
+    return eta * torch.sqrt(
+        (1 - alphas_prev)
+        / (1 - alphas_for_sigmas)
+        * (1 - alphas_for_sigmas / alphas_prev)
+    )
 
 
 @torch.no_grad()
@@ -14,7 +33,7 @@ def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=
     alphas = alphas_cumprod[timesteps]
     alphas_prev = alphas_cumprod[torch.nn.functional.pad(timesteps[:-1], pad=(1, 0))].to(float64(x))
     sqrt_one_minus_alphas = torch.sqrt(1 - alphas)
-    sigmas = eta * np.sqrt((1 - alphas_prev.cpu().numpy()) / (1 - alphas.cpu()) * (1 - alphas.cpu() / alphas_prev.cpu().numpy()))
+    sigmas = _ddim_sigmas(eta, alphas, alphas_prev)
 
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones((x.shape[0]))
@@ -22,12 +41,12 @@ def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=
     for i in tqdm.trange(len(timesteps) - 1, disable=disable):
         index = len(timesteps) - 1 - i
 
-        e_t = model(x, timesteps[index].item() * s_in, **extra_args)
+        e_t = model(x, _model_timestep(timesteps, index, s_in), **extra_args)
 
-        a_t = alphas[index].item() * s_x
-        a_prev = alphas_prev[index].item() * s_x
-        sigma_t = sigmas[index].item() * s_x
-        sqrt_one_minus_at = sqrt_one_minus_alphas[index].item() * s_x
+        a_t = _step_value(alphas, index, s_x)
+        a_prev = _step_value(alphas_prev, index, s_x)
+        sigma_t = _step_value(sigmas, index, s_x)
+        sqrt_one_minus_at = _step_value(sqrt_one_minus_alphas, index, s_x)
 
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
         dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * e_t
@@ -50,7 +69,7 @@ def ddim_cfgpp(model, x, timesteps, extra_args=None, callback=None, disable=None
     alphas = alphas_cumprod[timesteps]
     alphas_prev = alphas_cumprod[torch.nn.functional.pad(timesteps[:-1], pad=(1, 0))].to(float64(x))
     sqrt_one_minus_alphas = torch.sqrt(1 - alphas)
-    sigmas = eta * np.sqrt((1 - alphas_prev.cpu().numpy()) / (1 - alphas.cpu()) * (1 - alphas.cpu() / alphas_prev.cpu().numpy()))
+    sigmas = _ddim_sigmas(eta, alphas, alphas_prev)
 
     model.cond_scale_miltiplier = 1 / 12.5
     model.need_last_noise_uncond = True
@@ -61,13 +80,13 @@ def ddim_cfgpp(model, x, timesteps, extra_args=None, callback=None, disable=None
     for i in tqdm.trange(len(timesteps) - 1, disable=disable):
         index = len(timesteps) - 1 - i
 
-        e_t = model(x, timesteps[index].item() * s_in, **extra_args)
+        e_t = model(x, _model_timestep(timesteps, index, s_in), **extra_args)
         last_noise_uncond = model.last_noise_uncond
 
-        a_t = alphas[index].item() * s_x
-        a_prev = alphas_prev[index].item() * s_x
-        sigma_t = sigmas[index].item() * s_x
-        sqrt_one_minus_at = sqrt_one_minus_alphas[index].item() * s_x
+        a_t = _step_value(alphas, index, s_x)
+        a_prev = _step_value(alphas_prev, index, s_x)
+        sigma_t = _step_value(sigmas, index, s_x)
+        sqrt_one_minus_at = _step_value(sqrt_one_minus_alphas, index, s_x)
 
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
         dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * last_noise_uncond
@@ -94,9 +113,9 @@ def plms(model, x, timesteps, extra_args=None, callback=None, disable=None):
 
     def get_x_prev_and_pred_x0(e_t, index):
         # select parameters corresponding to the currently considered timestep
-        a_t = alphas[index].item() * s_x
-        a_prev = alphas_prev[index].item() * s_x
-        sqrt_one_minus_at = sqrt_one_minus_alphas[index].item() * s_x
+        a_t = _step_value(alphas, index, s_x)
+        a_prev = _step_value(alphas_prev, index, s_x)
+        sqrt_one_minus_at = _step_value(sqrt_one_minus_alphas, index, s_x)
 
         # current prediction for x_0
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
@@ -108,8 +127,8 @@ def plms(model, x, timesteps, extra_args=None, callback=None, disable=None):
 
     for i in tqdm.trange(len(timesteps) - 1, disable=disable):
         index = len(timesteps) - 1 - i
-        ts = timesteps[index].item() * s_in
-        t_next = timesteps[max(index - 1, 0)].item() * s_in
+        ts = _model_timestep(timesteps, index, s_in)
+        t_next = _model_timestep(timesteps, max(index - 1, 0), s_in)
 
         e_t = model(x, ts, **extra_args)
 
