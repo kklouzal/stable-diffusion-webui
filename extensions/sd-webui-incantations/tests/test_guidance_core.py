@@ -12,6 +12,7 @@ sys.path.insert(0, str(EXT_ROOT))
 
 def install_a1111_stubs():
     modules_pkg = types.ModuleType("modules")
+    headless_ui_mod = types.ModuleType("modules.headless_ui")
     scripts_mod = types.ModuleType("modules.scripts")
     scripts_mod.AlwaysVisible = object()
     script_callbacks_mod = types.ModuleType("modules.script_callbacks")
@@ -59,11 +60,13 @@ def install_a1111_stubs():
     samplers_mod.subscript_cond = subscript_cond
 
     modules_pkg.scripts = scripts_mod
+    modules_pkg.headless_ui = headless_ui_mod
     modules_pkg.script_callbacks = script_callbacks_mod
     modules_pkg.processing = processing_mod
     modules_pkg.shared = shared_mod
     sys.modules.update({
         "modules": modules_pkg,
+        "modules.headless_ui": headless_ui_mod,
         "modules.scripts": scripts_mod,
         "modules.script_callbacks": script_callbacks_mod,
         "modules.processing": processing_mod,
@@ -73,6 +76,26 @@ def install_a1111_stubs():
 
 
 class DynamicThresholdingTests(unittest.TestCase):
+    @staticmethod
+    def _reference_experiment_mode3(actual_res, step, max_steps):
+        coefs = torch.tensor([
+            [0.298,   0.207,  0.208, 0.0],
+            [0.187,   0.286,  0.173, 0.0],
+            [-0.158,  0.189,  0.264, 0.0],
+            [-0.184, -0.271, -0.473, 1.0],
+        ], device=actual_res.device, dtype=actual_res.dtype)
+        res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
+        max_r, max_g, max_b = res_rgb[0][0].max(), res_rgb[0][1].max(), res_rgb[0][2].max()
+        max_w = res_rgb[0][3].max()
+        max_rgb = torch.maximum(max_r, torch.maximum(max_g, max_b))
+        if step / max(max_steps - 1, 1) > 0.2:
+            if bool((max_rgb < 2.0) & (max_w < 3.0)):
+                res_rgb /= max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps)
+        else:
+            if bool((max_rgb > 2.4) & (max_w > 3.0)):
+                res_rgb /= max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps)
+        return torch.einsum("laxy,ab -> lbxy", res_rgb, coefs.inverse())
+
     def test_relative_path_preserves_dtype_and_finiteness(self):
         from dynthres_core import DynThresh
 
@@ -100,6 +123,34 @@ class DynamicThresholdingTests(unittest.TestCase):
         out = dt.dynthresh_from_relative(relative, uncond, 9.0)
         self.assertEqual(out.shape, uncond.shape)
         self.assertTrue(torch.isfinite(out).all())
+
+    def test_experiment_mode3_matches_reference_float32(self):
+        from dynthres_core import DynThresh
+
+        torch.manual_seed(1234)
+        base = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 0, 10, True, "MEAN", "AD", 1.0)
+        exp3 = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 3, 10, True, "MEAN", "AD", 1.0)
+        base.step = exp3.step = 3
+        uncond = torch.randn(2, 4, 8, 8)
+        relative = torch.randn_like(uncond) * 0.1
+
+        expected = self._reference_experiment_mode3(base.dynthresh_from_relative(relative, uncond, 12.0), 3, 10)
+        actual = exp3.dynthresh_from_relative(relative, uncond, 12.0)
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+    def test_experiment_mode3_preserves_dtype_and_handles_single_step(self):
+        from dynthres_core import DynThresh
+
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            dt = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 3, 1, True, "MEAN", "AD", 1.0)
+            dt.step = 0
+            uncond = torch.randn(2, 4, 8, 8, dtype=dtype)
+            relative = torch.randn_like(uncond) * 0.1
+            out = dt.dynthresh_from_relative(relative, uncond, 12.0)
+            self.assertEqual(out.dtype, dtype)
+            self.assertEqual(out.shape, uncond.shape)
+            self.assertTrue(torch.isfinite(out.float()).all())
 
 
 class CFGCombinerTests(unittest.TestCase):
