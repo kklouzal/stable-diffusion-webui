@@ -236,10 +236,8 @@ class Api:
         self.add_api_route("/sdapi/v1/skip", self.skip, methods=["POST"])
         self.add_api_route("/sdapi/v1/options", self.get_config, methods=["GET"], response_model=models.OptionsModel)
         self.add_api_route("/sdapi/v1/options", self.set_config, methods=["POST"])
-        self.add_api_route("/sdapi/v1/attention-backend", self.get_attention_backend, methods=["GET"])
-        self.add_api_route("/sdapi/v1/attention-backend", self.set_attention_backend, methods=["POST"])
-        self.add_api_route("/sdapi/v1/openclaw/attention-backend", self.get_attention_backend, methods=["GET"])
-        self.add_api_route("/sdapi/v1/openclaw/attention-backend", self.set_attention_backend, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.get_sdpa_backend, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.set_sdpa_backend, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/cmd-flags", self.get_cmd_flags, methods=["GET"], response_model=models.FlagsModel)
@@ -303,13 +301,12 @@ class Api:
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
     def apply_openclaw_runtime_defaults(self):
-        attention_backend = os.environ.get("OPENCLAW_ATTENTION_BACKEND")
         sdpa_backend = os.environ.get("OPENCLAW_SDPA_BACKEND")
-        if attention_backend or sdpa_backend:
+        if sdpa_backend:
             try:
-                sd_hijack_optimizations.set_attention_backend(attention_backend or "sdpa", sdpa_backend)
+                sd_hijack_optimizations.set_sdpa_backend(sdpa_backend)
             except Exception:
-                errors.report("Failed to apply OpenClaw attention defaults from environment", exc_info=True)
+                errors.report("Failed to apply OpenClaw SDPA backend default from environment", exc_info=True)
 
         cuda_graphs_enabled = self._env_flag("OPENCLAW_CUDA_GRAPHS")
         if cuda_graphs_enabled is not None:
@@ -324,14 +321,13 @@ class Api:
             return self.app.add_api_route(path, endpoint, dependencies=[Depends(self.auth)], **kwargs)
         return self.app.add_api_route(path, endpoint, **kwargs)
 
-    def get_attention_backend(self):
-        return sd_hijack_optimizations.attention_backend_status()
+    def get_sdpa_backend(self):
+        return sd_hijack_optimizations.sdpa_backend_status()
 
-    def set_attention_backend(self, req: dict[str, Any]):
-        backend = req.get("backend") if isinstance(req, dict) else None
+    def set_sdpa_backend(self, req: dict[str, Any]):
         sdpa_backend = req.get("sdpa_backend") if isinstance(req, dict) else None
         try:
-            return sd_hijack_optimizations.set_attention_backend(backend, sdpa_backend)
+            return sd_hijack_optimizations.set_sdpa_backend(sdpa_backend)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

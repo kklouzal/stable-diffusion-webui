@@ -42,7 +42,7 @@ print(f'torch: {torch.__version__} cuda={torch.cuda.is_available()}')
 if torch.cuda.is_available():
     print(f'cuda device: {torch.cuda.get_device_name(0)}')
 
-required = ['sageattention', 'triton', 'transformers', 'torchao', 'mslk']
+required = ['triton', 'transformers', 'torchao', 'mslk']
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit(f'missing required modules: {", ".join(missing)}')

@@ -92,7 +92,7 @@ Current runtime flow:
 
 `gb10/run.sh` is the canonical relaunch path for this appliance. It owns the default image/container names, persistent mounts, extension synchronization, and runtime `COMMANDLINE_ARGS`.
 
-xformers is intentionally not part of the GB10 runtime path. The launcher does not auto-install it; use SageAttention where supported and PyTorch SDPA otherwise.
+xformers is intentionally not part of the GB10 runtime path. The launcher uses PyTorch SDPA for attention.
 
 Actual launch command shape inside the container:
 

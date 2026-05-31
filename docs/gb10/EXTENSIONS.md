@@ -107,7 +107,7 @@ Decision: **keep**.
 Reason:
 
 - A1111-Controller uses tiled diffusion / tiled VAE / large-image functionality from it.
-- It already has GB10-specific xformers/SageAttention/SDPA compatibility handling.
+- It already has GB10-specific xformers/SDPA compatibility handling.
 
 Future ownership:
 

@@ -97,8 +97,8 @@ This pre-MXFP8 CUDA-base runtime remains a useful dependency baseline, but it is
 - tokenizers build guard: Docker build fails if Transformers, tokenizers, or Hugging Face Hub resolve below the validated floors, and tokenizers must resolve from a `.whl` artifact rather than an sdist/Rust source build
 - A1111 API health after extension quarantine: `GET /sdapi/v1/progress`, `GET /sdapi/v1/sd-models`, and `GET /sdapi/v1/options` return JSON on `127.0.0.1:7860`; latest smoke saw `10` models and checkpoint `test2.safetensors`
 - `BUILD_MANIFEST.json` summary: `base=31`, `direct=52`, `indirect=87`
-- `sageattention`, `triton`, `gradio`, and `transformers` import in the live container
-- `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses SDP/SageAttention paths instead
+- `triton`, `gradio`, and `transformers` import in the live container
+- `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses PyTorch SDPA instead
 - repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
 - `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, first-class extension sync, container replacement, and `COMMANDLINE_ARGS`
 - external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; approved removals were purged from `/opt/gb10/stable-diffusion/Extensions` and the quarantine tree was deleted after validation

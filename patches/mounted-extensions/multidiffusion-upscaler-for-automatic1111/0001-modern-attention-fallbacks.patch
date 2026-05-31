@@ -25,8 +25,8 @@ index 5a74a36..6efd8ab 100644
      # The method should be one of the following:
 -    # ['none', 'sdp-no-mem', 'sdp', 'xformers', ''sub-quadratic', 'v1', 'invokeai', 'doggettx']
 -    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
-+    # ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']
-+    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
++    # ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']
++    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
          print(f"[Tiled VAE] Warning: Unknown attention optimization method {method}. Please try to update the extension.")
          return attn_forward
      
@@ -40,8 +40,7 @@ index 5a74a36..6efd8ab 100644
      elif method == 'sdp-no-mem':
          return sdp_no_mem_attnblock_forward
 -    elif method == 'sdp':
-+    elif method in {'sdp', 'sage2', 'sage3'}:
-+        # SageAttention A1111 backends do not expose a Tiled VAE AttnBlock path; SDP is the safest fast decode fallback.
++    elif method == 'sdp':
          return sdp_attnblock_forward
      elif method == 'sub-quadratic':
          return sub_quad_attnblock_forward

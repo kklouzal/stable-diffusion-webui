@@ -175,8 +175,8 @@ def _model_signature(fn: Any) -> tuple[Any, ...]:
 def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, denoiser: Any | None = None) -> tuple[Any, ...]:
     try:
         from modules import sd_hijack_optimizations
-        attention = sd_hijack_optimizations.attention_backend_status()
-        attention_key = (attention.get("active"), attention.get("sdpa_backend"))
+        attention = sd_hijack_optimizations.sdpa_backend_status()
+        attention_key = attention.get("sdpa_backend")
     except Exception:
         attention_key = None
     return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), attention_key, _denoiser_graph_key(denoiser))

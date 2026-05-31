@@ -19,10 +19,6 @@ ARG ASSETS_REPO=https://github.com/AUTOMATIC1111/stable-diffusion-webui-assets.g
 ARG ASSETS_COMMIT=6f7db241d2f8ba7457bac5ca9753331f0c266917
 ARG DCTORCH_VERSION=0.1.2
 ARG CLIP_PACKAGE_URL=https://github.com/openai/CLIP/archive/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6.zip
-ARG SAGEATTENTION_REPO=https://github.com/thu-ml/SageAttention.git
-ARG SAGEATTENTION_COMMIT=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
-ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
-ARG CUTLASS_COMMIT=7a9fe055cb69ab2de605a0cf7dbb33f27833f7f3
 
 FROM ${BASE_IMAGE} AS torch-base
 
@@ -187,10 +183,6 @@ FROM torch-base AS wheelbuilder
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CLIP_PACKAGE_URL
 ARG DCTORCH_VERSION
-ARG SAGEATTENTION_REPO
-ARG SAGEATTENTION_COMMIT
-ARG CUTLASS_REPO
-ARG CUTLASS_COMMIT
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/build/stable-diffusion-webui
@@ -221,7 +213,6 @@ COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requireme
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
 COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
-COPY docker/patch-sageattention.py /opt/build/patch-sageattention.py
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 # Builder-stage wheel doctrine:
@@ -255,30 +246,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && ls -1 /opt/wheels/clip-*.whl /opt/wheels/dctorch-*.whl \
     && ccache --show-stats
 
-# SageAttention build doctrine:
-# - build both SageAttention2++ and SageAttention3 Blackwell wheels into the image so
-#   attention backends can be toggled at runtime without reinstalling packages
-# - target the GB10 Blackwell lane explicitly as sm_121a for the current CUDA/PyTorch stack
-# - keep this isolated in the wheelbuilder stage; runtime installs the prebuilt wheels only
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
-    export CCACHE_DIR=/root/.cache/ccache \
-    && export EXT_PARALLEL=2 \
-    && export MAX_JOBS=8 \
-    && export TORCH_CUDA_ARCH_LIST="12.1a" \
-    && export CC=gcc \
-    && export CXX=g++ \
-    && python -m pip install --break-system-packages --no-cache-dir packaging \
-    && rm -rf /opt/build/SageAttention \
-    && git clone --filter=blob:none "${SAGEATTENTION_REPO}" /opt/build/SageAttention \
-    && git -c advice.detachedHead=false -C /opt/build/SageAttention checkout "${SAGEATTENTION_COMMIT}" \
-    && git clone --filter=blob:none "${CUTLASS_REPO}" /opt/build/SageAttention/sageattention3_blackwell/csrc/cutlass \
-    && git -c advice.detachedHead=false -C /opt/build/SageAttention/sageattention3_blackwell/csrc/cutlass checkout "${CUTLASS_COMMIT}" \
-    && python /opt/build/patch-sageattention.py \
-    && export SAGEATTN3_CUDA_ARCH="12.1" \
-    && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention \
-    && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels /opt/build/SageAttention/sageattention3_blackwell \
-    && ls -1 /opt/wheels/sageattention-*.whl /opt/wheels/sageattn3-*.whl
 
 
 FROM torch-base AS runtime
@@ -347,7 +314,7 @@ RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
     && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl dctorch sageattention sageattn3 \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl dctorch \
     && python - <<'PY'
 import importlib.metadata as md
 import json
@@ -368,8 +335,6 @@ print(json.dumps({
         'browser_ui': None,
         'transformers': md.version('transformers'),
         'clip': md.version('clip'),
-        'sageattention': md.version('sageattention'),
-        'sageattn3': md.version('sageattn3'),
     }
 }, indent=2))
 PY

@@ -96,36 +96,6 @@ class SdOptimizationSdp(SdOptimizationSdpNoMem):
         sgm.modules.diffusionmodules.model.AttnBlock.forward = sdp_attnblock_forward
 
 
-class SdOptimizationSageAttention2(SdOptimization):
-    name = "sage2"
-    label = "SageAttention2++"
-    priority = 0
-
-    def is_available(self):
-        return sageattention2_available()
-
-    def apply(self):
-        ldm.modules.attention.CrossAttention.forward = sage2_attention_forward
-        ldm.modules.diffusionmodules.model.AttnBlock.forward = sage2_attnblock_forward
-        sgm.modules.attention.CrossAttention.forward = sage2_attention_forward
-        sgm.modules.diffusionmodules.model.AttnBlock.forward = sage2_attnblock_forward
-
-
-class SdOptimizationSageAttention3(SdOptimization):
-    name = "sage3"
-    label = "SageAttention3 Blackwell"
-    priority = 0
-
-    def is_available(self):
-        return sageattention3_available()
-
-    def apply(self):
-        ldm.modules.attention.CrossAttention.forward = sage3_attention_forward
-        ldm.modules.diffusionmodules.model.AttnBlock.forward = sage3_attnblock_forward
-        sgm.modules.attention.CrossAttention.forward = sage3_attention_forward
-        sgm.modules.diffusionmodules.model.AttnBlock.forward = sage3_attnblock_forward
-
-
 class SdOptimizationSubQuad(SdOptimization):
     name = "sub-quadratic"
     cmd_opt = "opt_sub_quad_attention"
@@ -182,8 +152,6 @@ def list_optimizers(res):
         SdOptimizationXformers(),
         SdOptimizationSdpNoMem(),
         SdOptimizationSdp(),
-        SdOptimizationSageAttention2(),
-        SdOptimizationSageAttention3(),
         SdOptimizationSubQuad(),
         SdOptimizationV1(),
         SdOptimizationInvokeAI(),
@@ -584,10 +552,7 @@ def scaled_dot_product_no_mem_attention_forward(self, x, context=None, mask=None
     return scaled_dot_product_attention_forward(self, x, context, mask, sdpa_backend_override="flash,math")
 
 
-_active_attention_backend = "sdpa"
 _active_sdpa_backend = "auto"
-_sage2_fn = None
-_sage3_fn = None
 
 
 _SDPA_BACKEND_ALIASES = {
@@ -653,14 +618,12 @@ def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, bac
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
 
 
-def attention_backend_status():
+def sdpa_backend_status():
     return {
-        "active": _active_attention_backend,
-        "choices": ["sdpa", "sage2", "sage3"],
+        "active": "sdpa",
+        "choices": ["sdpa"],
         "available": {
             "sdpa": hasattr(torch.nn.functional, "scaled_dot_product_attention"),
-            "sage2": sageattention2_available(),
-            "sage3": sageattention3_available(),
         },
         "sdpa_backend": _active_sdpa_backend,
         "sdpa_backend_choices": _SDPA_BACKEND_CHOICES,
@@ -668,160 +631,23 @@ def attention_backend_status():
     }
 
 
-def sageattention2_available():
-    try:
-        get_sage2_attention()
-        return True
-    except Exception:
-        return False
-
-
-def sageattention3_available():
-    try:
-        get_sage3_attention()
-        return True
-    except Exception:
-        return False
-
-
-def get_sage2_attention():
-    global _sage2_fn
-    if _sage2_fn is None:
-        from sageattention import sageattn
-        _sage2_fn = sageattn
-    return _sage2_fn
-
-
-def get_sage3_attention():
-    global _sage3_fn
-    if _sage3_fn is None:
-        from sageattn3 import sageattn3_blackwell
-        _sage3_fn = sageattn3_blackwell
-    return _sage3_fn
-
-
-def set_attention_backend(backend: str, sdpa_backend: str | None = None):
-    global _active_attention_backend, _active_sdpa_backend
-    backend = (backend or "sdpa").strip().lower()
-    if backend not in {"sdpa", "sage2", "sage3"}:
-        raise ValueError(f"Unsupported attention backend: {backend}")
-
+def set_sdpa_backend(sdpa_backend: str | None = None):
+    global _active_sdpa_backend
     _, normalized_sdpa_backend = _normalize_sdpa_backend_choice(sdpa_backend or _active_sdpa_backend)
     _active_sdpa_backend = normalized_sdpa_backend
-
-    if backend == "sage2":
-        SdOptimizationSageAttention2().apply()
-    elif backend == "sage3":
-        SdOptimizationSageAttention3().apply()
-    else:
-        SdOptimizationSdp().apply()
-
-    _active_attention_backend = backend
-    return attention_backend_status()
+    SdOptimizationSdp().apply()
+    return sdpa_backend_status()
 
 
-def sage_attention_supported(q, k, v, mask=None):
-    if mask is not None:
-        return False
-    if not (torch.cuda.is_available() and q.device.type == "cuda"):
-        return False
-    if q.dtype not in (torch.float16, torch.bfloat16):
-        return False
-    if q.shape[-1] >= 256:
-        return False
-    return q.ndim == 4 and k.ndim == 4 and v.ndim == 4
+def attention_backend_status():
+    return sdpa_backend_status()
 
 
-def sage2_sdpa(q, k, v, *, mask=None, is_causal=False):
-    if not sage_attention_supported(q, k, v, mask):
-        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
-    try:
-        return get_sage2_attention()(q.contiguous(), k.contiguous(), v.contiguous(), tensor_layout="HND", is_causal=is_causal)
-    except Exception as exc:
-        logger.warning("SageAttention2++ failed; falling back to SDPA: %s", exc)
-        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
-
-
-def sage3_sdpa(q, k, v, *, mask=None, is_causal=False):
-    if not sage_attention_supported(q, k, v, mask):
-        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
-    try:
-        # SageAttention3 preprocess mutates K in-place, so isolate K without extra Q/V copies.
-        return get_sage3_attention()(q.contiguous(), k.contiguous().clone(), v.contiguous(), is_causal=is_causal)
-    except Exception as exc:
-        logger.warning("SageAttention3 failed; falling back to SDPA: %s", exc)
-        return run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=is_causal)
-
-
-def sage2_attention_forward(self, x, context=None, mask=None, **kwargs):
-    return sage_attention_forward_impl(self, x, context, mask, sage2_sdpa)
-
-
-def sage3_attention_forward(self, x, context=None, mask=None, **kwargs):
-    return sage_attention_forward_impl(self, x, context, mask, sage3_sdpa)
-
-
-def sage_attention_forward_impl(self, x, context, mask, attention_fn):
-    batch_size, sequence_length, inner_dim = x.shape
-
-    if mask is not None:
-        mask = self.prepare_attention_mask(mask, sequence_length, batch_size)
-        mask = mask.view(batch_size, self.heads, -1, mask.shape[-1])
-
-    h = self.heads
-    q_in = self.to_q(x)
-    context = default(context, x)
-
-    context_k, context_v = hypernetwork.apply_hypernetworks(shared.loaded_hypernetworks, context)
-    k_in = self.to_k(context_k)
-    v_in = self.to_v(context_v)
-
-    head_dim = inner_dim // h
-    q = q_in.view(batch_size, -1, h, head_dim).transpose(1, 2)
-    k = k_in.view(batch_size, -1, h, head_dim).transpose(1, 2)
-    v = v_in.view(batch_size, -1, h, head_dim).transpose(1, 2)
-
-    del q_in, k_in, v_in
-
-    dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-
-    hidden_states = attention_fn(q, k, v, mask=mask, is_causal=False)
-    hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, h * head_dim)
-    hidden_states = hidden_states.to(dtype)
-    hidden_states = self.to_out[0](hidden_states)
-    hidden_states = self.to_out[1](hidden_states)
-    return hidden_states
-
-
-def sage2_attnblock_forward(self, x):
-    return sage_attnblock_forward_impl(self, x, sage2_sdpa)
-
-
-def sage3_attnblock_forward(self, x):
-    return sage_attnblock_forward_impl(self, x, sage3_sdpa)
-
-
-def sage_attnblock_forward_impl(self, x, attention_fn):
-    h_ = x
-    h_ = self.norm(h_)
-    q = self.q(h_)
-    k = self.k(h_)
-    v = self.v(h_)
-    b, c, h, w = q.shape
-    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
-    dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-    q = q.contiguous().unsqueeze(1)
-    k = k.contiguous().unsqueeze(1)
-    v = v.contiguous().unsqueeze(1)
-    out = attention_fn(q, k, v, is_causal=False).squeeze(1)
-    out = out.to(dtype)
-    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
-    out = self.proj_out(out)
-    return x + out
+def set_attention_backend(backend: str | None = None, sdpa_backend: str | None = None):
+    backend = (backend or "sdpa").strip().lower()
+    if backend != "sdpa":
+        raise ValueError(f"Unsupported attention backend: {backend}")
+    return set_sdpa_backend(sdpa_backend)
 
 
 def cross_attention_attnblock_forward(self, x):

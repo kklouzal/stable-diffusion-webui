@@ -22,7 +22,7 @@ Smoke evidence from the current image:
 - `/sdapi/v1/sd-models`: OK, `10` models
 - `/sdapi/v1/options`: OK, checkpoint `test2.safetensors`
 - CUDA visible in-container on `NVIDIA GB10`
-- required imports pass for `sageattention`, `triton`, `gradio`, and `transformers`
+- required imports pass for `triton`, `gradio`, and `transformers`
 - `xformers` is intentionally absent
 
 The only current startup warning we accept as non-actionable is the unauthenticated Hugging Face Hub rate-limit warning. Do not add an HF token just to silence it.
@@ -48,7 +48,7 @@ These rules are part of the working baseline and should not be broken casually:
 - the base package set is frozen/protected after PyTorch install
 - app dependency resolution must not replace or shadow torch/torchvision/torchaudio/triton/CUDA packages
 - runtime app package install uses the resolved wheel set with `--no-deps`
-- `xformers` remains absent on GB10; use PyTorch SDPA and SageAttention paths instead
+- `xformers` remains absent on GB10; use PyTorch SDPA instead
 
 ## Current proven runtime apt packages
 
