@@ -14,6 +14,7 @@ OPENCLAW_ATTENTION_BACKEND="${OPENCLAW_ATTENTION_BACKEND:-sdpa}"
 OPENCLAW_SDPA_BACKEND="${OPENCLAW_SDPA_BACKEND:-cudnn,flash,efficient,math}"
 OPENCLAW_CUDA_GRAPHS="${OPENCLAW_CUDA_GRAPHS:-1}"
 OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX:-8}"
+OPENCLAW_CUDA_GRAPH_ALLOW_SEG="${OPENCLAW_CUDA_GRAPH_ALLOW_SEG:-1}"
 
 LOCAL_DIRS=(
   BLIP
@@ -142,6 +143,7 @@ DOCKER_ARGS=(
   -e OPENCLAW_SDPA_BACKEND="${OPENCLAW_SDPA_BACKEND}"
   -e OPENCLAW_CUDA_GRAPHS="${OPENCLAW_CUDA_GRAPHS}"
   -e OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
+  -e OPENCLAW_CUDA_GRAPH_ALLOW_SEG="${OPENCLAW_CUDA_GRAPH_ALLOW_SEG}"
   -v "${HOST_ROOT}/BLIP:/opt/stable-diffusion-webui/models/BLIP"
   -v "${HOST_ROOT}/CLIP:/opt/stable-diffusion-webui/models/CLIP"
   -v "${HOST_ROOT}/Codeformer:/opt/stable-diffusion-webui/models/Codeformer"
@@ -171,6 +173,6 @@ echo "CPU set: ${CPUSET_CPUS}"
 echo "Host data root: ${HOST_ROOT}"
 echo "Outputs symlink target: ${OUTPUTS_TARGET}"
 echo "OpenClaw attention: ${OPENCLAW_ATTENTION_BACKEND} (${OPENCLAW_SDPA_BACKEND})"
-echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
+echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX} allow_seg=${OPENCLAW_CUDA_GRAPH_ALLOW_SEG}"
 echo "API expectation: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
 echo "Browser UI has been removed; this image is API/headless only."

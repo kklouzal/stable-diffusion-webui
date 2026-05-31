@@ -10,7 +10,17 @@ import torch
 _ENABLED = False
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _LOCK = threading.RLock()
-_STATS = {"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures": 0, "last_error": None, "last_key": None}
+_STATS = {
+    "captures": 0,
+    "replays": 0,
+    "fallbacks": 0,
+    "bypasses": 0,
+    "bypass_reasons": {},
+    "last_bypass_reason": None,
+    "failures": 0,
+    "last_error": None,
+    "last_key": None,
+}
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 
 
@@ -25,12 +35,40 @@ _MAX_CACHE_SIZE = _read_max_cache_size()
 
 
 def _reset_stats() -> None:
-    _STATS.update({"captures": 0, "replays": 0, "fallbacks": 0, "bypasses": 0, "failures": 0, "last_error": None, "last_key": None})
+    _STATS.update({
+        "captures": 0,
+        "replays": 0,
+        "fallbacks": 0,
+        "bypasses": 0,
+        "bypass_reasons": {},
+        "last_bypass_reason": None,
+        "failures": 0,
+        "last_error": None,
+        "last_key": None,
+    })
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _allow_seg_graphs() -> bool:
+    return _env_flag("OPENCLAW_CUDA_GRAPH_ALLOW_SEG", False)
 
 
 def status() -> dict[str, Any]:
     with _LOCK:
-        return {"enabled": _ENABLED, "cache_size": len(_CACHE), "max_cache_size": _MAX_CACHE_SIZE, **_STATS}
+        return {
+            "enabled": _ENABLED,
+            "cache_size": len(_CACHE),
+            "max_cache_size": _MAX_CACHE_SIZE,
+            "allow_seg": _allow_seg_graphs(),
+            **_STATS,
+        }
 
 
 def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
@@ -134,54 +172,115 @@ def _model_signature(fn: Any) -> tuple[Any, ...]:
     return (type(fn).__module__, type(fn).__qualname__, checkpoint_key, lora_key)
 
 
-def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any) -> tuple[Any, ...]:
+def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, denoiser: Any | None = None) -> tuple[Any, ...]:
     try:
         from modules import sd_hijack_optimizations
         attention = sd_hijack_optimizations.attention_backend_status()
         attention_key = (attention.get("active"), attention.get("sdpa_backend"))
     except Exception:
         attention_key = None
-    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), attention_key)
+    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), attention_key, _denoiser_graph_key(denoiser))
 
 
-def _graph_safe_denoiser_context(denoiser: Any | None) -> bool:
+def _seg_params(denoiser: Any | None) -> Any | None:
+    p = getattr(denoiser, "p", None) if denoiser is not None else None
+    incant_cfg = getattr(p, "incant_cfg_params", None)
+    return incant_cfg.get("seg_params") if isinstance(incant_cfg, dict) else None
+
+
+def _seg_active_for_all_graph_steps(denoiser: Any, seg_params: Any) -> bool:
+    # SEG toggles Python attention hooks per step. Replay is allowed only when
+    # SEG is active for the whole sampling window, so the captured hook path
+    # does not need to change between denoiser calls.
+    total_steps = getattr(denoiser, "total_steps", None) or getattr(denoiser, "steps", None)
+    if total_steps is None:
+        try:
+            from modules.shared import state
+
+            total_steps = state.sampling_steps
+        except Exception:
+            total_steps = None
+    if not total_steps:
+        return False
+
+    start_step = int(getattr(seg_params, "seg_start_step", 0) or 0)
+    end_step = int(getattr(seg_params, "seg_end_step", -1) or -1)
+    return start_step <= 0 and end_step >= int(total_steps) - 1
+
+
+def _denoiser_graph_key(denoiser: Any | None) -> Any:
+    seg_params = _seg_params(denoiser)
+    if seg_params is None or not bool(getattr(seg_params, "seg_active", False)):
+        return None
+
+    p = getattr(denoiser, "p", None)
+    try:
+        import modules.shared as shared
+
+        batch_cond_uncond = bool(getattr(shared.opts, "batch_cond_uncond", False))
+    except Exception:
+        batch_cond_uncond = None
+
+    return (
+        "seg",
+        _allow_seg_graphs(),
+        bool(getattr(seg_params, "seg_active", False)),
+        float(getattr(seg_params, "seg_blur_sigma", 0.0) or 0.0),
+        float(getattr(seg_params, "seg_blur_threshold", 0.0) or 0.0),
+        int(getattr(seg_params, "seg_start_step", 0) or 0),
+        int(getattr(seg_params, "seg_end_step", 0) or 0),
+        int(getattr(p, "height", 0) or 0),
+        int(getattr(p, "width", 0) or 0),
+        batch_cond_uncond,
+    )
+
+
+def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
     if denoiser is None:
-        return True
+        return None
 
     # Inpaint/masked blending depends on mutable latent-mask state outside the
     # wrapped UNet call. Keep that path eager unless it is audited separately.
     if getattr(denoiser, "mask", None) is not None or getattr(denoiser, "nmask", None) is not None:
-        return False
+        return "denoiser_mask"
 
     p = getattr(denoiser, "p", None)
     if p is not None:
         if getattr(p, "mask", None) is not None or getattr(p, "nmask", None) is not None:
-            return False
+            return "processing_mask"
 
-        incant_cfg = getattr(p, "incant_cfg_params", None)
-        if isinstance(incant_cfg, dict):
-            seg_params = incant_cfg.get("seg_params")
-            # SEG uses Python forward hooks in the UNet attention path. CUDA graph
-            # replay replays captured kernels and does not re-enter those hooks.
-            if bool(getattr(seg_params, "seg_active", False)):
-                return False
+        seg_params = _seg_params(denoiser)
+        if bool(getattr(seg_params, "seg_active", False)):
+            if not _allow_seg_graphs():
+                return "seg_not_allowed"
+            if not _seg_active_for_all_graph_steps(denoiser, seg_params):
+                return "seg_partial_interval"
 
-    return True
+    return None
+
+
+def _record_bypass(reason: str) -> None:
+    with _LOCK:
+        _STATS["bypasses"] += 1
+        reasons = dict(_STATS.get("bypass_reasons") or {})
+        reasons[reason] = reasons.get(reason, 0) + 1
+        _STATS["bypass_reasons"] = reasons
+        _STATS["last_bypass_reason"] = reason
 
 
 def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: Any | None = None):
     if not _ENABLED:
         return fn(x, sigma, cond=cond)
-    if not _graph_safe_denoiser_context(denoiser):
-        with _LOCK:
-            _STATS["bypasses"] += 1
+    bypass_reason = _graph_denoiser_bypass_reason(denoiser)
+    if bypass_reason is not None:
+        _record_bypass(bypass_reason)
         return fn(x, sigma, cond=cond)
     if not torch.cuda.is_available() or not torch.is_tensor(x) or x.device.type != "cuda" or torch.is_grad_enabled():
         with _LOCK:
             _STATS["fallbacks"] += 1
         return fn(x, sigma, cond=cond)
 
-    key = _cache_key(fn, x, sigma, cond)
+    key = _cache_key(fn, x, sigma, cond, denoiser)
     with _LOCK:
         entry = _CACHE.get(key)
         failed_before = key in _FAILED_KEYS
