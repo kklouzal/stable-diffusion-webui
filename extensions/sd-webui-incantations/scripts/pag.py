@@ -1,5 +1,6 @@
 import logging
 import time
+from contextlib import suppress
 from os import environ
 import modules.scripts as scripts
 from modules import headless_ui as gr
@@ -13,7 +14,6 @@ from scripts.incant_utils import module_hooks
 
 import math
 import torch
-from torch.nn import functional as F
 
 
 logger = logging.getLogger(__name__)
@@ -171,16 +171,14 @@ def _suspend_seg_for_pag_hidden_pass(seg_q_modules=None):
         saved = []
         for to_q in (seg_q_modules if seg_q_modules is not None else _seg_to_q_modules()):
                 saved.append((to_q, getattr(to_q, 'seg_enable', False)))
-                setattr(to_q, 'seg_enable', False)
+                to_q.seg_enable = False
         return saved
 
 
 def _restore_seg_after_pag_hidden_pass(saved):
         for to_q, enabled in saved:
-                try:
-                        setattr(to_q, 'seg_enable', enabled)
-                except Exception:
-                        pass
+                with suppress(Exception):
+                        to_q.seg_enable = enabled
 
 
 def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond_in, make_condition_dict, batch_size):
@@ -500,7 +498,7 @@ class PAGExtensionScript(UIWrapper):
                         """ Copy the output of the to_v module to the parent module """
                         parent_module = getattr(module, 'pag_parent_module', None)
                         # copy the output of the to_v module to the parent module
-                        setattr(parent_module[0], 'pag_last_to_v', output.detach())
+                        parent_module[0].pag_last_to_v = output.detach()
 
                 def pag_pre_hook(module, input, kwargs, output):
                         if hasattr(module, 'pag_enable') and getattr(module, 'pag_enable', False) is False:
@@ -511,7 +509,7 @@ class PAGExtensionScript(UIWrapper):
                         # get the last to_v output and save it
                         last_to_v = getattr(module, 'pag_last_to_v', None)
 
-                        batch_size, seq_len, inner_dim = output.shape
+                        _, seq_len, _ = output.shape
                         if last_to_v is not None:
                                 # Multiplication by an expanded identity matrix is exactly this slice.
                                 # Avoid allocating the identity tensor and launching an einsum per attention call.
@@ -646,7 +644,7 @@ class PAGExtensionScript(UIWrapper):
 
                 # set pag_enable to True for the hooked cross attention modules
                 for module in pag_params.crossattn_modules:
-                        setattr(module, 'pag_enable', True)
+                        module.pag_enable = True
 
                 if pag_params.seg_q_modules is None:
                         pag_params.seg_q_modules = _seg_to_q_modules()
@@ -671,7 +669,7 @@ class PAGExtensionScript(UIWrapper):
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises
                         for module in pag_params.crossattn_modules:
-                                setattr(module, 'pag_enable', False)
+                                module.pag_enable = False
                         pag_params.x_in = None
                         pag_params.text_cond = None
                         pag_params.text_uncond = None
@@ -679,7 +677,7 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.sigma = None
 
         def get_xyz_axis_options(self) -> dict:
-                xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
+                xyz_grid = next(x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")).module
                 extra_axis_options = {
                         xyz_grid.AxisOption("[PAG] Active", str, pag_apply_override('pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[PAG] SANF", str, pag_apply_override('pag_sanf', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
@@ -785,48 +783,11 @@ def cfg_scheduler(schedule: str, step: int, max_steps: int, w0: float) -> float:
         Returns:
         float: Scheduled guidance weight value.
         """
-        match schedule:
-                case 'Constant':
-                        return constant_schedule(step, max_steps, w0)
-                case 'Linear':
-                        return linear_schedule(step, max_steps, w0)
-                case 'Clamp-Linear (c=4.0)':
-                        return clamp_linear_schedule(step, max_steps, w0, 4.0)
-                case 'Clamp-Linear (c=2.0)':
-                        return clamp_linear_schedule(step, max_steps, w0, 2.0)
-                case 'Clamp-Linear (c=1.0)':
-                        return clamp_linear_schedule(step, max_steps, w0, 1.0)
-                case 'Inverse-Linear':
-                        return invlinear_schedule(step, max_steps, w0)
-                case 'PCS (s=0.01)':
-                        return powered_cosine_schedule(step, max_steps, w0, 0.01)
-                case 'PCS (s=0.1)':
-                        return powered_cosine_schedule(step, max_steps, w0, 0.1)
-                case 'PCS (s=1.0)':
-                        return powered_cosine_schedule(step, max_steps, w0, 1.0)
-                case 'PCS (s=2.0)':
-                        return powered_cosine_schedule(step, max_steps, w0, 2.0)
-                case 'PCS (s=4.0)':
-                        return powered_cosine_schedule(step, max_steps, w0, 4.0)
-                case 'Clamp-Cosine (c=4.0)':
-                        return clamp_cosine_schedule(step, max_steps, w0, 4.0)
-                case 'Clamp-Cosine (c=2.0)':
-                        return clamp_cosine_schedule(step, max_steps, w0, 2.0)
-                case 'Clamp-Cosine (c=1.0)':
-                        return clamp_cosine_schedule(step, max_steps, w0, 1.0)
-                case 'Cosine':
-                        return cosine_schedule(step, max_steps, w0)
-                case 'Sine':
-                        return sine_schedule(step, max_steps, w0)
-                case 'V-Shape':
-                        return v_shape_schedule(step, max_steps, w0)
-                case 'A-Shape':
-                        return a_shape_schedule(step, max_steps, w0)
-                case 'Interval':
-                        return interval_schedule(step, max_steps, w0, 0.25, 5.42)
-                case _:
-                        logger.error(f"Invalid CFG schedule: {schedule}")
-                        return constant_schedule(step, max_steps, w0)
+        scheduler = _CFG_SCHEDULE_DISPATCH.get(schedule)
+        if scheduler is None:
+                logger.error("Invalid CFG schedule: %s", schedule)
+                scheduler = constant_schedule
+        return scheduler(step, max_steps, w0)
 
 
 def constant_schedule(step: int, max_steps: int, w0: float):
@@ -915,24 +876,48 @@ def interval_schedule(step: int, max_steps: int, w0: float, low: float, high: fl
         return 1.0
 
 
+_CFG_SCHEDULE_DISPATCH = {
+        'Constant': constant_schedule,
+        'Linear': linear_schedule,
+        'Clamp-Linear (c=4.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 4.0),
+        'Clamp-Linear (c=2.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 2.0),
+        'Clamp-Linear (c=1.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 1.0),
+        'Inverse-Linear': invlinear_schedule,
+        'PCS (s=0.01)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 0.01),
+        'PCS (s=0.1)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 0.1),
+        'PCS (s=1.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 1.0),
+        'PCS (s=2.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 2.0),
+        'PCS (s=4.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 4.0),
+        'Clamp-Cosine (c=4.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 4.0),
+        'Clamp-Cosine (c=2.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 2.0),
+        'Clamp-Cosine (c=1.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 1.0),
+        'Cosine': cosine_schedule,
+        'Sine': sine_schedule,
+        'V-Shape': v_shape_schedule,
+        'A-Shape': a_shape_schedule,
+        # Interval bounds are already applied from the user's selected noise range;
+        # this schedule should not add a second hard-coded step interval.
+        'Interval': constant_schedule,
+}
+
 
 # XYZ Plot
 # Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
 def pag_apply_override(field, boolean: bool = False):
     def fun(p, x, xs):
         if boolean:
-            x = True if x.lower() == "true" else False
+            x = x.lower() == "true"
         setattr(p, field, x)
         if not hasattr(p, "pag_active"):
-                setattr(p, "pag_active", True)
+                p.pag_active = True
         if 'cfg_interval_' in field and not hasattr(p, "cfg_interval_enable"):
-            setattr(p, "cfg_interval_enable", True)
+            p.cfg_interval_enable = True
     return fun
 
 
 def pag_apply_field(field):
     def fun(p, x, xs):
         if not hasattr(p, "pag_active"):
-                setattr(p, "pag_active", True)
+                p.pag_active = True
         setattr(p, field, x)
     return fun

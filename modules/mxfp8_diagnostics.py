@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import platform
 import threading
 import time
@@ -155,13 +154,17 @@ def _mx_weight_summary(weight: Any) -> dict[str, Any]:
         except Exception:
             continue
         if callable(value) and attr == "is_contiguous":
-            try: value = value()
-            except Exception as e: value = repr(e)
+            try:
+                value = value()
+            except Exception as e:
+                value = repr(e)
         if isinstance(value, torch.Tensor):
             summary[attr] = {"dtype": str(value.dtype), "shape": tuple(value.shape), "is_contiguous": value.is_contiguous()}
             if attr == "qdata":
-                try: summary["qdata_t_is_contiguous"] = value.t().is_contiguous()
-                except Exception as e: summary["qdata_t_is_contiguous_error"] = repr(e)
+                try:
+                    summary["qdata_t_is_contiguous"] = value.t().is_contiguous()
+                except Exception as e:
+                    summary["qdata_t_is_contiguous_error"] = repr(e)
         else:
             summary[attr] = value
     return summary
@@ -235,7 +238,7 @@ def native_vs_emulated_detection() -> dict[str, Any]:
     for pref in ("AUTO", "EMULATED"):
         try:
             _, q, x, _, _ = _quantize_linear(2048, 2048, 128, kernel_preference=pref)
-            result[pref.lower()] = _timed_cuda(lambda: q(x), warmup=5, iters=20)
+            result[pref.lower()] = _timed_cuda(lambda q=q, x=x: q(x), warmup=5, iters=20)
             result[pref.lower()]["weight"] = _mx_weight_summary(q.weight)
         except Exception as e:
             result[pref.lower()] = {"error": repr(e)}

@@ -5,7 +5,7 @@ class UIWrapper:
 
     def title(self) -> str:
         raise NotImplementedError
-    
+
     def setup_ui(self, is_img2img) -> list:
         raise NotImplementedError
 
@@ -14,7 +14,7 @@ class UIWrapper:
 
     def get_paste_field_names(self) -> list:
         return self.paste_field_names
-    
+
     def before_process(self, p, *args, **kwargs):
         pass
 
@@ -29,7 +29,7 @@ class UIWrapper:
 
     def postprocess_batch(self, p, *args, **kwargs):
         pass
-    
+
     def unhook_callbacks(self) -> None:
         pass
 

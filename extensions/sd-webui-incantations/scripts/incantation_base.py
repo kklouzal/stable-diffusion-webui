@@ -95,12 +95,12 @@ class IncantBaseExtensionScript(scripts.Script):
         def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
                 # Parent-owned CFG composition state. Submodules populate their
                 # own entries; CFGCombiner owns only wrapper installation/restore.
-                setattr(p, 'incant_cfg_params', {
+                p.incant_cfg_params = {
                         "denoiser": None,
                         "original_combine_denoised": None,
                         "wrapped_combine_denoised": None,
                         "pag_params": None,
-                })
+                }
                 for m in submodules:
                         _timed_module_call(p, m.module, "before_process", m.module.before_process, p, *self.m_args(m, *args), **kwargs)
 
@@ -131,7 +131,7 @@ class IncantBaseExtensionScript(scripts.Script):
 # XYZ Plot
 # Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
 def make_axis_options(extra_axis_options):
-        xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
+        xyz_grid = next(x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")).module
         current_opts = {x.label for x in xyz_grid.axis_options}
         for opt in extra_axis_options:
                 if opt.label not in current_opts:

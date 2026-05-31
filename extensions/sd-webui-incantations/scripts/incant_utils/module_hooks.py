@@ -1,6 +1,5 @@
 from typing import Optional
 import logging
-import torch
 
 
 from modules import shared

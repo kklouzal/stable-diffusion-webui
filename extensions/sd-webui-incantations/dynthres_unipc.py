@@ -1,8 +1,6 @@
 import logging
 
-from modules import headless_ui as gr
 import torch
-import math
 from modules import shared
 
 logger = logging.getLogger(__name__)
@@ -33,8 +31,9 @@ class CustomUniPCSampler(uni_pc.sampler.UniPCSampler):
                unconditional_conditioning=None, **kwargs):
         if conditioning is not None:
             if isinstance(conditioning, dict):
-                ctmp = conditioning[list(conditioning.keys())[0]]
-                while isinstance(ctmp, list): ctmp = ctmp[0]
+                ctmp = next(iter(conditioning.values()))
+                while isinstance(ctmp, list):
+                    ctmp = ctmp[0]
                 cbs = ctmp.shape[0]
                 if cbs != batch_size:
                     logger.warning("Got %s conditionings but batch-size is %s", ctmp.shape[0], batch_size)
@@ -49,10 +48,7 @@ class CustomUniPCSampler(uni_pc.sampler.UniPCSampler):
         C, H, W = shape
         size = (batch_size, C, H, W)
         device = self.model.betas.device
-        if x_T is None:
-            img = torch.randn(size, device=device)
-        else:
-            img = x_T
+        img = torch.randn(size, device=device) if x_T is None else x_T
         ns = uni_pc.uni_pc.NoiseScheduleVP('discrete', alphas_cumprod=self.alphas_cumprod)
         model_type = "v" if self.model.parameterization == "v" else "noise"
         model_fn = CustomUniPC_model_wrapper(lambda x, t, c: self.model.apply_model(x, t, c), ns, model_type=model_type, guidance_scale=unconditional_guidance_scale, dt_data=self.main_class)
@@ -64,14 +60,16 @@ class CustomUniPCSampler(uni_pc.sampler.UniPCSampler):
         x = uni_pc_inst.sample(img, steps=S, skip_type=shared.opts.uni_pc_skip_type, method="multistep", order=shared.opts.uni_pc_order, lower_order_final=shared.opts.uni_pc_lower_order_final)
         return x.to(device), None
 
-def CustomUniPC_model_wrapper(model, noise_schedule, model_type="noise", model_kwargs={}, guidance_scale=1.0, dt_data=None):
+
+def CustomUniPC_model_wrapper(model, noise_schedule, model_type="noise", model_kwargs=None, guidance_scale=1.0, dt_data=None):
+    model_kwargs = {} if model_kwargs is None else model_kwargs
     def expand_dims(v, dims):
         return v[(...,) + (None,)*(dims - 1)]
     def get_model_input_time(t_continuous):
         return (t_continuous - 1. / noise_schedule.total_N) * 1000.
     def noise_pred_fn(x, t_continuous, cond=None):
         if t_continuous.reshape((-1,)).shape[0] == 1:
-            t_continuous = t_continuous.expand((x.shape[0]))
+            t_continuous = t_continuous.expand(x.shape[0])
         t_input = get_model_input_time(t_continuous)
         if cond is None:
             output = model(x, t_input, None, **model_kwargs)
@@ -85,7 +83,7 @@ def CustomUniPC_model_wrapper(model, noise_schedule, model_type="noise", model_k
             return expand_dims(alpha_t, dims) * output + expand_dims(sigma_t, dims) * x
     def model_fn(x, t_continuous, condition, unconditional_condition):
         if t_continuous.reshape((-1,)).shape[0] == 1:
-            t_continuous = t_continuous.expand((x.shape[0]))
+            t_continuous = t_continuous.expand(x.shape[0])
         if guidance_scale == 1. or unconditional_condition is None:
             return noise_pred_fn(x, t_continuous, cond=condition)
         else:

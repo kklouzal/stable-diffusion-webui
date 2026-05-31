@@ -32,7 +32,7 @@ def parse_req_name(line: str) -> str | None:
     line = line.strip()
     if not line or line.startswith('#') or line.startswith('-'):
         return None
-    name = re.split(r'[<>=!~ ;\[]', line, 1)[0].strip()
+    name = re.split(r'[<>=!~ ;\[]', line, maxsplit=1)[0].strip()
     return normalize(name) if name else None
 
 

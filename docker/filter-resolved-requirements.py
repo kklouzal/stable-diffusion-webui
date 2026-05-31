@@ -37,7 +37,7 @@ for raw in SOURCE.read_text().splitlines():
     lower = line.lower()
     if lower.startswith(DROP_PREFIXES):
         continue
-    name = normalize_name(re.split(r'[<>=!~ \[;]', line, 1)[0])
+    name = normalize_name(re.split(r'[<>=!~ \[;]', line, maxsplit=1)[0])
     if name in protected:
         continue
     lines.append(line)

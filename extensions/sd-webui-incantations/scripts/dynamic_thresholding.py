@@ -55,7 +55,7 @@ class Script(scripts.Script):
             with gr.Row():
                 enabled = gr.Checkbox(value=False, label="Enable Dynamic Thresholding (CFG Scale Fix)", elem_classes=["dynthres-enabled"], elem_id='dynthres_enabled')
             with gr.Group():
-                gr.HTML(value=f"View <a style=\"border-bottom: 1px #00ffff dotted;\" href=\"https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/wiki/Usage-Tips\">the wiki for usage tips.</a><br><br>", elem_id='dynthres_wiki_link')
+                gr.HTML(value="View <a style=\"border-bottom: 1px #00ffff dotted;\" href=\"https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/wiki/Usage-Tips\">the wiki for usage tips.</a><br><br>", elem_id='dynthres_wiki_link')
                 mimic_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label='Mimic CFG Scale', value=7.0, elem_id='dynthres_mimic_scale')
                 with gr.Accordion("Advanced Options", open=False, elem_id='dynthres_advanced_opts'):
                     with gr.Row():
@@ -109,7 +109,7 @@ class Script(scripts.Script):
         if orig_latent_sampler_name in ["DDIM", "PLMS"]:
             raise RuntimeError(f"Cannot use secondary sampler {orig_latent_sampler_name} with Dynamic Thresholding")
         if 'UniPC' in (orig_sampler_name, orig_latent_sampler_name) and p.enable_hr:
-            raise RuntimeError(f"UniPC does not support Hires Fix. Auto WebUI silently swaps to DDIM for this, which DynThresh does not support. Please swap to a sampler capable of img2img processing for HR Fix to work.")
+            raise RuntimeError("UniPC does not support Hires Fix. Auto WebUI silently swaps to DDIM for this, which DynThresh does not support. Please swap to a sampler capable of img2img processing for HR Fix to work.")
         mimic_scale = getattr(p, 'dynthres_mimic_scale', mimic_scale)
         separate_feature_channels = getattr(p, 'dynthres_separate_feature_channels', separate_feature_channels)
         scaling_startpoint = getattr(p, 'dynthres_scaling_startpoint', scaling_startpoint)
@@ -239,13 +239,13 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
 ######################### XYZ Plot Script Support logic #########################
 
 def make_axis_options():
-    xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
+    xyz_grid = next(x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")).module
     def apply_mimic_scale(p, x, xs):
         if x != 0:
-            setattr(p, "dynthres_enabled", True)
-            setattr(p, "dynthres_mimic_scale", x)
+            p.dynthres_enabled = True
+            p.dynthres_mimic_scale = x
         else:
-            setattr(p, "dynthres_enabled", False)
+            p.dynthres_enabled = False
     def confirm_scheduler(p, xs):
         for x in xs:
             if x not in dynthres_core.DynThresh.Modes:

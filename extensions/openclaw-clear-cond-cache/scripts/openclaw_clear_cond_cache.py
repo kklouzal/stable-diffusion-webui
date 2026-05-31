@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import threading
 import time
@@ -8,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
-from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, shared
+from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img
 from modules.textual_inversion import textual_inversion
 
@@ -40,11 +41,7 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
         except Exception:
             prompt_schedules = [[[steps, text or ""]]]
 
-        try:
-            from modules_forge import forge_version  # noqa: F401
-            forge = True
-        except Exception:
-            forge = False
+        forge = importlib.util.find_spec("modules_forge") is not None
 
         flat_prompts = reduce(lambda list1, list2: list1 + list2, prompt_schedules, [])
         prompts = [prompt_text for _step, prompt_text in flat_prompts] or [text or ""]

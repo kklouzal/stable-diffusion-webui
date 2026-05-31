@@ -322,7 +322,7 @@ class SEGExtensionScript(UIWrapper):
                                 module.to_q.seg_enable = should_enable
 
         def get_xyz_axis_options(self) -> dict:
-                xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")][0].module
+                xyz_grid = next(x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")).module
                 extra_axis_options = {
                         xyz_grid.AxisOption("[SEG] Active", str, seg_apply_override('seg_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[SEG] SEG Blur Sigma", float, seg_apply_field("seg_blur_sigma")),
@@ -338,19 +338,19 @@ class SEGExtensionScript(UIWrapper):
 def seg_apply_override(field, boolean: bool = False):
     def fun(p, x, xs):
         if boolean:
-            x = True if x.lower() == "true" else False
+            x = x.lower() == "true"
         setattr(p, field, x)
         if not hasattr(p, "seg_active"):
-                setattr(p, "seg_active", True)
+                p.seg_active = True
         if 'cfg_interval_' in field and not hasattr(p, "cfg_interval_enable"):
-            setattr(p, "cfg_interval_enable", True)
+            p.cfg_interval_enable = True
     return fun
 
 
 def seg_apply_field(field):
     def fun(p, x, xs):
         if not hasattr(p, "seg_active"):
-                setattr(p, "seg_active", True)
+                p.seg_active = True
         setattr(p, field, x)
     return fun
 

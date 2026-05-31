@@ -9,16 +9,16 @@ logger = logging.getLogger(__name__)
 
 class DynThresh:
 
-    Modes = ["Constant", "Linear Down", "Cosine Down", "Half Cosine Down", "Linear Up", "Cosine Up", "Half Cosine Up", "Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth"]
-    Startpoints = ["MEAN", "ZERO"]
-    Variabilities = ["AD", "STD"]
+    Modes = ("Constant", "Linear Down", "Cosine Down", "Half Cosine Down", "Linear Up", "Cosine Up", "Half Cosine Up", "Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth")
+    Startpoints = ("MEAN", "ZERO")
+    Variabilities = ("AD", "STD")
     _EXPERIMENT_MODE3_COEFS = (
         (0.298, 0.207, 0.208, 0.0),
         (0.187, 0.286, 0.173, 0.0),
         (-0.158, 0.189, 0.264, 0.0),
         (-0.184, -0.271, -0.473, 1.0),
     )
-    _experiment_mode3_matrix_cache = {}
+    _experiment_mode3_matrix_cache = {}  # noqa: RUF012 - shared tensor cache keyed by device/dtype.
 
     def __init__(self, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, experiment_mode, max_steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi):
         self.mimic_scale = mimic_scale
@@ -195,7 +195,7 @@ class DynThresh:
         # uncond shape is (batch, 4, height, width)
         conds_per_batch = cond.shape[0] / uncond.shape[0]
         assert conds_per_batch == int(conds_per_batch), "Expected # of conds per batch to be constant across batches"
-        cond_stacked = cond.reshape((-1, int(conds_per_batch)) + uncond.shape[1:])
+        cond_stacked = cond.reshape((-1, int(conds_per_batch), *uncond.shape[1:]))
         diff = cond_stacked - uncond.unsqueeze(1)
         if weights is not None:
             diff = diff * weights.to(device=diff.device, dtype=diff.dtype)

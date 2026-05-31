@@ -29,6 +29,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "webui.py" = ["E402"]  # Module level import not at top of file
+"extensions-builtin/Lora/networks.py" = ["B007"]  # LoRA merge loops keep tuple shape aligned with paired error handling.
+"modules/processing.py" = ["F811"]  # Dataclass constructor compatibility fields are backed by same-name properties.
+"modules/scripts_postprocessing.py" = ["E402"]  # Late import avoids a scripts <-> scripts_postprocessing cycle.
 
 [tool.ruff.lint.flake8-bugbear]
 # Allow default arguments like, e.g., `data: List[str] = fastapi.Query(None)`.

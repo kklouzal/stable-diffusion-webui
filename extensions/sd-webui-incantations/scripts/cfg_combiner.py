@@ -1,9 +1,8 @@
-from modules import headless_ui as gr
 import logging
 import time
 import torch
 import torch.nn.functional as F
-from modules import shared, scripts, script_callbacks
+from modules import scripts, script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper
@@ -15,10 +14,7 @@ _SANF_KERNEL_CACHE = {}
 def sanf_gaussian_blur3(x):
         """Small cached 3x3 Gaussian blur for PAG SANF saliency maps."""
         squeeze_batch = x.ndim == 3
-        if squeeze_batch:
-                x_in = x.unsqueeze(0)
-        else:
-                x_in = x
+        x_in = x.unsqueeze(0) if squeeze_batch else x
         channels = x_in.shape[-3]
         key = (x_in.device, x_in.dtype, channels)
         kernel = _SANF_KERNEL_CACHE.get(key)
@@ -95,7 +91,7 @@ class CFGCombinerScript(UIWrapper):
         def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
             logger.debug("CFGCombinerScript before_process")
             if not hasattr(p, 'incant_cfg_params'):
-                setattr(p, 'incant_cfg_params', {})
+                p.incant_cfg_params = {}
 
         def process(self, p: StableDiffusionProcessing, *args, **kwargs):
             pass
@@ -179,8 +175,8 @@ class CFGCombinerScript(UIWrapper):
 
             gb10_combine_denoised.__name__ = 'gb10_incantations_combine_denoised'
             denoiser.combine_denoised = gb10_combine_denoised
-            setattr(denoiser, '_gb10_incantations_original_combine_denoised', original_func)
-            setattr(denoiser, '_gb10_incantations_wrapped_combine_denoised', gb10_combine_denoised)
+            denoiser._gb10_incantations_original_combine_denoised = original_func
+            denoiser._gb10_incantations_wrapped_combine_denoised = gb10_combine_denoised
             cfg_dict['denoiser'] = denoiser
             cfg_dict['original_combine_denoised'] = original_func
             cfg_dict['wrapped_combine_denoised'] = gb10_combine_denoised
@@ -223,8 +219,8 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
         so Dynamic Thresholding / CFG-Fix and similar extensions can still
         rescale the base CFG result before PAG is added.
         """
-        original_func = kwargs.get('original_func', None)
-        cfg_dict = kwargs.get('cfg_dict', None) or {}
+        original_func = kwargs.get('original_func')
+        cfg_dict = kwargs.get('cfg_dict') or {}
         pag_params = cfg_dict.get('pag_params')
         if original_func is None:
                 raise RuntimeError("GB10 CFG combiner missing original combine_denoised function")
@@ -247,9 +243,8 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
 
                 # 1. CFG Interval
                 # Overrides cfg_scale if pag_params is not None
-                if pag_params is not None:
-                        if pag_params.cfg_interval_enable:
-                                cfg_scale = pag_params.cfg_interval_scheduled_value
+                if pag_params is not None and pag_params.cfg_interval_enable:
+                        cfg_scale = pag_params.cfg_interval_scheduled_value
 
                 # Build the base CFG result by delegating to the captured original combiner.
                 # This is intentionally important for compatibility with extensions such
@@ -271,11 +266,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                         pag_x_out = pag_params.pag_x_out
                         pag_scale = pag_params.pag_scale
 
-                        if not pag_active:
-                                run_pag = False
-                        elif not pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step:
-                                run_pag = False
-                        elif pag_scale <= 0:
+                        if not pag_active or not (pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step) or pag_scale <= 0:
                                 run_pag = False
                         elif pag_x_out is None:
                                 logger.warning("PAG was requested but no PAG denoised output is available; using base CFG only")
