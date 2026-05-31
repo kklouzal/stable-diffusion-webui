@@ -18,7 +18,7 @@ import torch
 from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
-from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, shared
+from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, sd_schedulers, shared
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
 
@@ -140,6 +140,39 @@ def _chain_switch_points(definition: dict[str, Any], stage_count: int) -> list[i
     return points
 
 
+def _has_scheduler_chain(definition: dict[str, Any]) -> bool:
+    return "schedulers" in definition or any(
+        key in definition
+        for index in range(1, 4)
+        for key in (f"scheduler_{index}", f"scheduler{index}")
+    )
+
+
+def _normalize_scheduler_name(value: Any) -> str:
+    scheduler = str(value or "Automatic").strip() or "Automatic"
+    if scheduler not in sd_schedulers.schedulers_map:
+        raise ValueError(f"Unsupported scheduler: {scheduler}")
+    return scheduler
+
+
+def _chain_scheduler_names(definition: dict[str, Any], sampler_names: list[str]) -> list[str]:
+    if not _has_scheduler_chain(definition):
+        return []
+    raw = definition.get("schedulers")
+    if isinstance(raw, (list, tuple)):
+        schedulers = [_normalize_scheduler_name(item) for item in raw]
+    else:
+        schedulers = []
+        for index in range(1, len(sampler_names) + 1):
+            value = definition.get(f"scheduler_{index}")
+            if value is None:
+                value = definition.get(f"scheduler{index}")
+            schedulers.append(_normalize_scheduler_name(value))
+    if len(schedulers) != len(sampler_names):
+        raise ValueError(f"Expected {len(sampler_names)} scheduler value(s) for the sampler chain")
+    return schedulers
+
+
 def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str], list[int]]:
     samplers = _chain_sampler_names(definition)
     switch_ats = _chain_switch_points(definition, len(samplers))
@@ -162,6 +195,16 @@ def _format_chain_metadata(stages: list[tuple[str, torch.Tensor, int, int]]) -> 
     return " -> ".join(f"{sampler_name}@{start}-{end}" for sampler_name, _stage_sigmas, start, end in stages)
 
 
+def _format_stage_scheduler_metadata(stages: list[tuple[str, str | None, torch.Tensor, int, int]]) -> str:
+    parts = []
+    for sampler_name, scheduler_name, _stage_sigmas, start, end in stages:
+        if scheduler_name:
+            parts.append(f"{sampler_name}[{scheduler_name}]@{start}-{end}")
+        else:
+            parts.append(f"{sampler_name}@{start}-{end}")
+    return " -> ".join(parts)
+
+
 def _normalize_definition(data: dict[str, Any], *, require_name: bool = True) -> dict[str, Any]:
     name = str(data.get("name") or "").strip()
     if require_name and not name:
@@ -170,6 +213,7 @@ def _normalize_definition(data: dict[str, Any], *, require_name: bool = True) ->
         name = f"{CUSTOM_PREFIX}{name}"
     sampler_names = _chain_sampler_names(data)
     switch_ats = _chain_switch_points(data, len(sampler_names))
+    scheduler_names = _chain_scheduler_names(data, sampler_names)
     definition = {
         "name": name,
         "samplers": sampler_names,
@@ -179,6 +223,10 @@ def _normalize_definition(data: dict[str, Any], *, require_name: bool = True) ->
     }
     for index, sampler_name in enumerate(sampler_names, start=1):
         definition[f"sampler_{index}"] = sampler_name
+    if scheduler_names:
+        definition["schedulers"] = scheduler_names
+        for index, scheduler_name in enumerate(scheduler_names, start=1):
+            definition[f"scheduler_{index}"] = scheduler_name
     for index, switch_at in enumerate(switch_ats, start=1):
         key = "switch_at" if index == 1 else f"switch_at_{index}"
         definition[key] = switch_at
@@ -247,8 +295,62 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.definition = dict(definition)
         self.extra_params = []
 
-    def _split_sigmas(self, sigmas: torch.Tensor, steps: int) -> list[tuple[str, torch.Tensor, int, int]]:
-        return _definition_stages(self.definition, sigmas, steps)
+    def _sigmas_for_scheduler(self, p, steps: int, sampler_name: str, scheduler_name: str) -> torch.Tensor:
+        old_config = self.config
+        old_scheduler = getattr(p, "scheduler", None)
+        old_extra_generation_params = dict(getattr(p, "extra_generation_params", {}) or {})
+        try:
+            self.config = _k_sampler_config(sampler_name)
+            p.scheduler = _normalize_scheduler_name(scheduler_name)
+            return super().get_sigmas(p, steps)
+        finally:
+            self.config = old_config
+            p.scheduler = old_scheduler
+            if hasattr(p, "extra_generation_params"):
+                p.extra_generation_params.clear()
+                p.extra_generation_params.update(old_extra_generation_params)
+
+    def _base_sigmas(self, p, steps: int) -> torch.Tensor:
+        sampler_names = _chain_sampler_names(self.definition)
+        scheduler_names = _chain_scheduler_names(self.definition, sampler_names)
+        if scheduler_names:
+            return self._sigmas_for_scheduler(p, steps, sampler_names[0], scheduler_names[0])
+        return self.get_sigmas(p, steps)
+
+    def _build_stages(
+        self,
+        p,
+        sigmas: torch.Tensor,
+        steps: int,
+        *,
+        scheduler_steps: int | None = None,
+        scheduler_slice_start: int = 0,
+        sigma_transform=None,
+    ) -> list[tuple[str, str | None, torch.Tensor, int, int]]:
+        samplers, boundaries = _chain_boundaries(self.definition, steps)
+        scheduler_names = _chain_scheduler_names(self.definition, samplers)
+        if not scheduler_names:
+            return [
+                (sampler_name, None, sigmas[boundaries[index] : boundaries[index + 1] + 1], boundaries[index], boundaries[index + 1])
+                for index, sampler_name in enumerate(samplers)
+            ]
+
+        source_steps = scheduler_steps if scheduler_steps is not None else steps
+        stages: list[tuple[str, str | None, torch.Tensor, int, int]] = []
+        previous_final_sigma = None
+        for index, (sampler_name, scheduler_name) in enumerate(zip(samplers, scheduler_names)):
+            stage_source = self._sigmas_for_scheduler(p, source_steps, sampler_name, scheduler_name)
+            if sigma_transform is not None:
+                stage_source = sigma_transform(stage_source)
+            stage_source = stage_source[scheduler_slice_start:].to(device=sigmas.device, dtype=sigmas.dtype)
+            start, end = boundaries[index], boundaries[index + 1]
+            stage_sigmas = stage_source[start : end + 1].clone()
+            if previous_final_sigma is not None and len(stage_sigmas):
+                stage_sigmas[0] = previous_final_sigma.to(device=stage_sigmas.device, dtype=stage_sigmas.dtype)
+            if len(stage_sigmas):
+                previous_final_sigma = stage_sigmas[-1].detach()
+            stages.append((sampler_name, scheduler_name, stage_sigmas, start, end))
+        return stages
 
     def _initialize_chain(self, p) -> None:
         self.p = p
@@ -352,12 +454,34 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     def _stage_total_steps(self, sampler_name: str, stage_steps: int) -> int:
         return _k_sampler_config(sampler_name).total_steps(stage_steps)
 
-    def _run_chain(self, p, x, conditioning, unconditional_conditioning, sigmas: torch.Tensor, steps: int, *, is_img2img: bool, launch_steps: int | None = None, image_conditioning=None):
+    def _run_chain(
+        self,
+        p,
+        x,
+        conditioning,
+        unconditional_conditioning,
+        sigmas: torch.Tensor,
+        steps: int,
+        *,
+        is_img2img: bool,
+        launch_steps: int | None = None,
+        image_conditioning=None,
+        scheduler_steps: int | None = None,
+        scheduler_slice_start: int = 0,
+        sigma_transform=None,
+    ):
         self._initialize_chain(p)
-        stages = self._split_sigmas(sigmas, steps)
+        stages = self._build_stages(
+            p,
+            sigmas,
+            steps,
+            scheduler_steps=scheduler_steps,
+            scheduler_slice_start=scheduler_slice_start,
+            sigma_transform=sigma_transform,
+        )
         launch_steps = steps if launch_steps is None else launch_steps
         self.model_wrap_cfg.steps = launch_steps
-        self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, end - start)) for name, _stage_sigmas, start, end in stages)
+        self.model_wrap_cfg.total_steps = sum(self._stage_total_steps(name, max(0, end - start)) for name, _scheduler_name, _stage_sigmas, start, end in stages)
         state.sampling_steps = launch_steps
         state.sampling_step = 0
         self.last_latent = x
@@ -368,12 +492,16 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             "cond_scale": p.cfg_scale,
             "s_min_uncond": self.s_min_uncond,
         }
-        p.extra_generation_params["Sampler chain"] = _format_chain_metadata(stages)
-        scheduler = _sampler_data_for(self.definition).options.get("scheduler")
-        if scheduler:
-            p.extra_generation_params["Sampler chain scheduler"] = scheduler
+        p.extra_generation_params["Sampler chain"] = _format_stage_scheduler_metadata(stages)
+        scheduler_names = [scheduler_name for _sampler_name, scheduler_name, _stage_sigmas, _start, _end in stages if scheduler_name]
+        if scheduler_names:
+            p.extra_generation_params["Sampler chain schedulers"] = " -> ".join(scheduler_names)
+        else:
+            scheduler = _sampler_data_for(self.definition).options.get("scheduler")
+            if scheduler:
+                p.extra_generation_params["Sampler chain scheduler"] = scheduler
         try:
-            for sampler_name, stage_sigmas, offset, end in stages:
+            for sampler_name, _scheduler_name, stage_sigmas, offset, end in stages:
                 stage_steps = max(0, end - offset)
                 if stage_steps <= 0:
                     continue
@@ -403,7 +531,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
     def sample(self, p, x, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps = steps or p.steps
-        sigmas = self.get_sigmas(p, steps)
+        sigmas = self._base_sigmas(p, steps)
         if opts.sgm_noise_multiplier:
             p.extra_generation_params["SGM noise multiplier"] = True
             x = x * torch.sqrt(1.0 + sigmas[0] ** 2.0)
@@ -415,11 +543,12 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
-        sigmas = self.get_sigmas(p, steps)
+        sigmas = self._base_sigmas(p, steps)
         ramp_sigmas_for_img2img = _load_denoise_ramp_func()
         if ramp_sigmas_for_img2img is not None:
             sigmas = ramp_sigmas_for_img2img(p, sigmas, steps, t_enc)
-        sigma_sched = sigmas[steps - t_enc - 1:]
+        sigma_sched_start = steps - t_enc - 1
+        sigma_sched = sigmas[sigma_sched_start:]
         if hasattr(shared.sd_model, "add_noise_to_latent"):
             xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
         else:
@@ -434,7 +563,23 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x
-        samples = self._run_chain(p, xi, conditioning, unconditional_conditioning, sigma_sched, t_enc, is_img2img=True, launch_steps=t_enc + 1, image_conditioning=image_conditioning)
+        sigma_transform = None
+        if ramp_sigmas_for_img2img is not None:
+            sigma_transform = lambda stage_sigmas: ramp_sigmas_for_img2img(p, stage_sigmas, steps, t_enc)
+        samples = self._run_chain(
+            p,
+            xi,
+            conditioning,
+            unconditional_conditioning,
+            sigma_sched,
+            t_enc,
+            is_img2img=True,
+            launch_steps=t_enc + 1,
+            image_conditioning=image_conditioning,
+            scheduler_steps=steps,
+            scheduler_slice_start=sigma_sched_start,
+            sigma_transform=sigma_transform,
+        )
         self.add_infotext(p)
         return samples
 
@@ -524,7 +669,13 @@ def on_app_started(_: object, app: FastAPI) -> None:
 
     @app.get("/sdapi/v1/openclaw/multi-sampler")
     async def list_multi_samplers():
-        return {"ok": True, "k_samplers": _k_sampler_names(), "custom_samplers": _load_custom_defs(), "snapshot_root": str(SNAPSHOT_ROOT)}
+        return {
+            "ok": True,
+            "k_samplers": _k_sampler_names(),
+            "schedulers": [scheduler.label for scheduler in sd_schedulers.schedulers],
+            "custom_samplers": _load_custom_defs(),
+            "snapshot_root": str(SNAPSHOT_ROOT),
+        }
 
     @app.post("/sdapi/v1/openclaw/multi-sampler/custom")
     async def save_multi_sampler(request: Request):
