@@ -68,22 +68,25 @@ def get_matched_noise(_np_src_image, np_mask_rgb, noise_q=1, color_variation=0.0
             np_mask_rgb[:, :, c] = hardened[:]
         return np_mask_rgb
 
+    def _safe_normalizer(value, dtype=np.float64):
+        return max(float(value), np.finfo(dtype).eps)
+
     width = _np_src_image.shape[0]
     height = _np_src_image.shape[1]
     num_channels = _np_src_image.shape[2]
 
-    _np_src_image[:] * (1. - np_mask_rgb)
     np_mask_grey = (np.sum(np_mask_rgb, axis=2) / 3.)
     img_mask = np_mask_grey > 1e-6
     ref_mask = np_mask_grey < 1e-3
 
     windowed_image = _np_src_image * (1. - _get_masked_window_rgb(np_mask_grey))
-    windowed_image /= np.max(windowed_image)
+    windowed_image /= _safe_normalizer(np.max(windowed_image), windowed_image.dtype)
     windowed_image += np.average(_np_src_image) * np_mask_rgb  # / (1.-np.average(np_mask_rgb))  # rather than leave the masked area black, we get better results from fft by filling the average unmasked color
 
     src_fft = _fft2(windowed_image)  # get feature statistics from masked src img
     src_dist = np.absolute(src_fft)
-    src_phase = src_fft / src_dist
+    src_eps = np.finfo(src_dist.dtype).eps
+    src_phase = np.divide(src_fft, np.maximum(src_dist, src_eps), out=np.zeros_like(src_fft), where=src_dist > src_eps)
 
     # create a generator with a static seed to make outpainting deterministic / only follow global seed
     rng = np.random.default_rng(0)
@@ -108,7 +111,7 @@ def get_matched_noise(_np_src_image, np_mask_rgb, noise_q=1, color_variation=0.0
     # scikit-image is used for histogram matching, very convenient!
     shaped_noise = np.real(_ifft2(shaped_noise_fft))
     shaped_noise -= np.min(shaped_noise)
-    shaped_noise /= np.max(shaped_noise)
+    shaped_noise /= _safe_normalizer(np.max(shaped_noise), shaped_noise.dtype)
     shaped_noise[img_mask, :] = skimage.exposure.match_histograms(shaped_noise[img_mask, :] ** 1., contrast_adjusted_np_src[ref_mask, :], channel_axis=1)
     shaped_noise = _np_src_image[:] * (1. - np_mask_rgb) + shaped_noise * np_mask_rgb
 
