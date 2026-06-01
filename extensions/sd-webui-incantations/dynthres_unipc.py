@@ -94,7 +94,7 @@ class CustomUniPCSampler(uni_pc.sampler.UniPCSampler):
             guidance_scale=unconditional_guidance_scale,
             dt_data=self.main_class,
         )
-        self.main_class.step = 0
+        self.main_class.step = -1
 
         def before_sample(x, t, cond, uncond):
             self.main_class.step += 1

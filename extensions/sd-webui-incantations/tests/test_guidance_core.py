@@ -46,7 +46,32 @@ def install_a1111_stubs():
     processing_mod.StableDiffusionProcessing = object
     shared_mod = types.ModuleType("modules.shared")
     shared_mod.device = torch.device("cpu")
-    shared_mod.opts = types.SimpleNamespace(batch_cond_uncond=False)
+    shared_mod.opts = types.SimpleNamespace(
+        batch_cond_uncond=False,
+        uni_pc_variant="bh1",
+        uni_pc_skip_type="time_uniform",
+        uni_pc_order=3,
+        uni_pc_lower_order_final=True,
+    )
+    models_mod = types.ModuleType("modules.models")
+    diffusion_mod = types.ModuleType("modules.models.diffusion")
+    uni_pc_mod = types.ModuleType("modules.models.diffusion.uni_pc")
+
+    class UniPCSampler:
+        def __init__(self, model, **kwargs):
+            self.model = model
+
+        def before_sample(self, x, t, cond, uncond):
+            return x, t, cond, uncond
+
+        def after_sample(self, *args, **kwargs):
+            return None
+
+        def after_update(self, *args, **kwargs):
+            return None
+
+    uni_pc_mod.sampler = types.SimpleNamespace(UniPCSampler=UniPCSampler)
+    uni_pc_mod.uni_pc = types.SimpleNamespace()
     samplers_mod = types.ModuleType("modules.sd_samplers_cfg_denoiser")
 
     def catenate_conds(conds):
@@ -67,9 +92,15 @@ def install_a1111_stubs():
     modules_pkg.script_callbacks = script_callbacks_mod
     modules_pkg.processing = processing_mod
     modules_pkg.shared = shared_mod
+    modules_pkg.models = models_mod
+    models_mod.diffusion = diffusion_mod
+    diffusion_mod.uni_pc = uni_pc_mod
     sys.modules.update(
         {
             "modules": modules_pkg,
+            "modules.models": models_mod,
+            "modules.models.diffusion": diffusion_mod,
+            "modules.models.diffusion.uni_pc": uni_pc_mod,
             "modules.headless_ui": headless_ui_mod,
             "modules.scripts": scripts_mod,
             "modules.script_callbacks": script_callbacks_mod,
@@ -78,6 +109,62 @@ def install_a1111_stubs():
             "modules.sd_samplers_cfg_denoiser": samplers_mod,
         }
     )
+
+
+class DynThreshUniPCTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.dynthres_unipc = importlib.import_module("dynthres_unipc")
+
+    def test_unipc_before_sample_starts_schedule_at_zero(self):
+        class Model:
+            betas = torch.zeros(1)
+            alphas_cumprod = torch.ones(1)
+            parameterization = "eps"
+
+            @staticmethod
+            def apply_model(x, t, cond, **kwargs):
+                return x
+
+        dt = types.SimpleNamespace(step=None)
+        sampler = self.dynthres_unipc.CustomUniPCSampler(Model())
+        sampler.main_class = dt
+        sampler.alphas_cumprod = Model.alphas_cumprod
+
+        captured_before_sample = None
+        test_case = self
+
+        class FakeNoiseScheduleVP:
+            def __init__(self, *args, **kwargs):
+                self.total_N = 1000
+
+        class FakeUniPC:
+            def __init__(self, *args, before_sample=None, **kwargs):
+                nonlocal captured_before_sample
+                captured_before_sample = before_sample
+
+            def sample(self, img, **kwargs):
+                for expected_step in (0, 1, 2):
+                    captured_before_sample(img, torch.zeros(img.shape[0]), None, None)
+                    test_case.assertEqual(dt.step, expected_step)
+                return img
+
+        original_noise_schedule = getattr(self.dynthres_unipc.uni_pc.uni_pc, "NoiseScheduleVP", None)
+        original_unipc = getattr(self.dynthres_unipc.uni_pc.uni_pc, "UniPC", None)
+        self.dynthres_unipc.uni_pc.uni_pc.NoiseScheduleVP = FakeNoiseScheduleVP
+        self.dynthres_unipc.uni_pc.uni_pc.UniPC = FakeUniPC
+        try:
+            sampler.sample(3, 1, (4, 2, 2), conditioning=torch.zeros(1, 1, 1))
+        finally:
+            if original_noise_schedule is None:
+                del self.dynthres_unipc.uni_pc.uni_pc.NoiseScheduleVP
+            else:
+                self.dynthres_unipc.uni_pc.uni_pc.NoiseScheduleVP = original_noise_schedule
+            if original_unipc is None:
+                del self.dynthres_unipc.uni_pc.uni_pc.UniPC
+            else:
+                self.dynthres_unipc.uni_pc.uni_pc.UniPC = original_unipc
 
 
 class DynamicThresholdingTests(unittest.TestCase):
