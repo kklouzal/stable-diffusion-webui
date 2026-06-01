@@ -240,6 +240,7 @@ class Api:
         self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.set_sdpa_backend, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/generation-diagnostics", self.get_openclaw_generation_diagnostics, methods=["GET"])
         self.add_api_route("/sdapi/v1/cmd-flags", self.get_cmd_flags, methods=["GET"], response_model=models.FlagsModel)
         self.add_api_route("/sdapi/v1/samplers", self.get_samplers, methods=["GET"], response_model=list[models.SamplerItem])
         self.add_api_route("/sdapi/v1/schedulers", self.get_schedulers, methods=["GET"], response_model=list[models.SchedulerItem])
@@ -340,6 +341,10 @@ class Api:
         enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
         clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
         return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
+
+    def get_openclaw_generation_diagnostics(self):
+        from modules import openclaw_generation_diagnostics
+        return openclaw_generation_diagnostics.last_generation_diagnostics() or {}
 
     def auth(self, credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         if credentials.username in self.credentials:

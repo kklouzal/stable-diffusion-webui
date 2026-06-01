@@ -531,6 +531,19 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertTrue(all(call[1] is None for call in calls))
 
 
+class SEGBlurTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.seg = importlib.import_module("scripts.smoothed_energy_guidance")
+
+    def test_gaussian_blur_clamps_kernel_to_shorter_spatial_side(self):
+        img = torch.randn(2, 3, 2, 9)
+        out = self.seg.gaussian_blur_2d(img, kernel_size=13, sigma=2.0)
+        self.assertEqual(tuple(out.shape), tuple(img.shape))
+        self.assertTrue(torch.isfinite(out).all())
+
+
 class ModuleHookTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

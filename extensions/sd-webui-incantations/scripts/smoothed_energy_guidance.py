@@ -361,8 +361,9 @@ _GAUSSIAN_KERNEL_CACHE = {}
 
 
 def gaussian_blur_2d(img, kernel_size, sigma):
-        height = img.shape[-1]
-        kernel_size = min(kernel_size, height - (height % 2 - 1))
+        min_spatial = min(img.shape[-2:])
+        max_reflect_kernel = min_spatial - (min_spatial % 2 - 1)
+        kernel_size = min(kernel_size, max_reflect_kernel)
         channels = img.shape[-3]
         key = (img.device, img.dtype, channels, kernel_size, float(sigma))
         kernel2d = _GAUSSIAN_KERNEL_CACHE.get(key)

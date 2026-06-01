@@ -17,7 +17,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
@@ -330,7 +330,8 @@ class StableDiffusionProcessing:
         c_adm = self.sd_model.embedder(source_image)
         if self.sd_model.noise_augmentor is not None:
             noise_level = 0 # TODO: Allow other noise levels?
-            c_adm, noise_level_emb = self.sd_model.noise_augmentor(c_adm, noise_level=repeat(torch.tensor([noise_level]).to(c_adm.device), '1 -> b', b=c_adm.shape[0]))
+            noise_level = repeat(c_adm.new_tensor([noise_level]), '1 -> b', b=c_adm.shape[0])
+            c_adm, noise_level_emb = self.sd_model.noise_augmentor(c_adm, noise_level=noise_level)
             c_adm = torch.cat((c_adm, noise_level_emb), 1)
         return c_adm
 
@@ -604,6 +605,8 @@ class Processed:
         self.openclaw_cond_cache_stats = getattr(p, "openclaw_cond_cache_stats", None)
         self.openclaw_script_timings = getattr(p, "openclaw_script_timings", None)
         self.openclaw_extension_timings = getattr(p, "openclaw_extension_timings", None)
+        self.openclaw_generation_diagnostics = getattr(p, "openclaw_generation_diagnostics", None)
+        self.openclaw_generation_diagnostics_history = getattr(p, "openclaw_generation_diagnostics_history", None)
 
     def js(self):
         obj = {
@@ -639,6 +642,8 @@ class Processed:
             "clip_skip": self.clip_skip,
             "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
             "version": self.version,
+            "openclaw_generation_diagnostics": self.openclaw_generation_diagnostics,
+            "openclaw_generation_diagnostics_history": self.openclaw_generation_diagnostics_history,
         }
 
         return json.dumps(obj, default=lambda o: None)
@@ -1060,8 +1065,12 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             sd_models.apply_alpha_schedule_override(p.sd_model, p)
 
-            with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
-                samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
+            openclaw_sample_diagnostics = openclaw_generation_diagnostics.before_sample(p, n)
+            try:
+                with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
+                    samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
+            finally:
+                openclaw_generation_diagnostics.after_sample(p, openclaw_sample_diagnostics, n)
 
             if p.scripts is not None:
                 ps = scripts.PostSampleArgs(samples_ddim)

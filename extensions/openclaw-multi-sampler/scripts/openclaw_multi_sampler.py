@@ -183,6 +183,10 @@ def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str]
     return samplers, boundaries
 
 
+def _sigma_transition_count(sigmas: torch.Tensor) -> int:
+    return max(0, len(sigmas) - 1)
+
+
 def _definition_stages(definition: dict[str, Any], sigmas: torch.Tensor, steps: int) -> list[tuple[str, torch.Tensor, int, int]]:
     samplers, boundaries = _chain_boundaries(definition, steps)
     return [
@@ -549,6 +553,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             sigmas = ramp_sigmas_for_img2img(p, sigmas, steps, t_enc)
         sigma_sched_start = steps - t_enc - 1
         sigma_sched = sigmas[sigma_sched_start:]
+        sampling_steps = _sigma_transition_count(sigma_sched)
         if hasattr(shared.sd_model, "add_noise_to_latent"):
             xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
         else:
@@ -572,7 +577,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             conditioning,
             unconditional_conditioning,
             sigma_sched,
-            t_enc,
+            sampling_steps,
             is_img2img=True,
             launch_steps=t_enc + 1,
             image_conditioning=image_conditioning,

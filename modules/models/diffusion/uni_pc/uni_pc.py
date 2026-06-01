@@ -462,7 +462,7 @@ class UniPC:
         if skip_type == 'logSNR':
             lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
             lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
-            logSNR_steps = torch.linspace(lambda_T.cpu().item(), lambda_0.cpu().item(), N + 1).to(device)
+            logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == 'time_uniform':
             return torch.linspace(t_T, t_0, N + 1).to(device)
