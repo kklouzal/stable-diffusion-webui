@@ -75,9 +75,13 @@ class Sd3ClipLG(sd_hijack_clip.TextConditionalModel):
     def encode_with_transformers(self, tokens):
         tokens_g = tokens.clone()
 
-        for batch_pos in range(tokens_g.shape[0]):
-            index = tokens_g[batch_pos].cpu().tolist().index(self.id_end)
-            tokens_g[batch_pos, index+1:tokens_g.shape[1]] = 0
+        end_token_mask = tokens_g == self.id_end
+        if not end_token_mask.any(dim=1).all():
+            raise ValueError("SD3 CLIP token batch is missing end tokens")
+
+        end_token_indices = end_token_mask.to(torch.int64).argmax(dim=1)
+        token_positions = torch.arange(tokens_g.shape[1], device=tokens_g.device).unsqueeze(0)
+        tokens_g[token_positions > end_token_indices.unsqueeze(1)] = 0
 
         l_out, l_pooled = self.clip_l(tokens)
         g_out, g_pooled = self.clip_g(tokens_g)

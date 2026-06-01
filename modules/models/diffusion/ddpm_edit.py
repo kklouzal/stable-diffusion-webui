@@ -600,35 +600,35 @@ class LatentDiffusion(DDPM):
             c = getattr(self.cond_stage_model, self.cond_stage_forward)(c)
         return c
 
-    def meshgrid(self, h, w):
-        y = torch.arange(0, h).view(h, 1, 1).repeat(1, w, 1)
-        x = torch.arange(0, w).view(1, w, 1).repeat(h, 1, 1)
+    def meshgrid(self, h, w, device=None, dtype=torch.float32):
+        y = torch.arange(0, h, device=device, dtype=dtype).view(h, 1, 1).expand(h, w, 1)
+        x = torch.arange(0, w, device=device, dtype=dtype).view(1, w, 1).expand(h, w, 1)
 
         arr = torch.cat([y, x], dim=-1)
         return arr
 
-    def delta_border(self, h, w):
+    def delta_border(self, h, w, device=None, dtype=torch.float32):
         """
         :param h: height
         :param w: width
         :return: normalized distance to image border,
          wtith min distance = 0 at border and max dist = 0.5 at image center
         """
-        lower_right_corner = torch.tensor([h - 1, w - 1]).view(1, 1, 2)
-        arr = self.meshgrid(h, w) / lower_right_corner
+        lower_right_corner = torch.tensor([max(h - 1, 1), max(w - 1, 1)], device=device, dtype=dtype).view(1, 1, 2)
+        arr = self.meshgrid(h, w, device=device, dtype=dtype) / lower_right_corner
         dist_left_up = torch.min(arr, dim=-1, keepdims=True)[0]
         dist_right_down = torch.min(1 - arr, dim=-1, keepdims=True)[0]
         edge_dist = torch.min(torch.cat([dist_left_up, dist_right_down], dim=-1), dim=-1)[0]
         return edge_dist
 
     def get_weighting(self, h, w, Ly, Lx, device):
-        weighting = self.delta_border(h, w)
+        weighting = self.delta_border(h, w, device=device)
         weighting = torch.clip(weighting, self.split_input_params["clip_min_weight"],
                                self.split_input_params["clip_max_weight"], )
         weighting = weighting.view(1, h * w, 1).repeat(1, 1, Ly * Lx).to(device)
 
         if self.split_input_params["tie_braker"]:
-            L_weighting = self.delta_border(Ly, Lx)
+            L_weighting = self.delta_border(Ly, Lx, device=device)
             L_weighting = torch.clip(L_weighting,
                                      self.split_input_params["clip_min_tie_weight"],
                                      self.split_input_params["clip_max_tie_weight"])
@@ -662,7 +662,7 @@ class LatentDiffusion(DDPM):
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
             unfold = torch.nn.Unfold(**fold_params)
 
-            fold_params2 = dict(kernel_size=(kernel_size[0] * uf, kernel_size[0] * uf),
+            fold_params2 = dict(kernel_size=(kernel_size[0] * uf, kernel_size[1] * uf),
                                 dilation=1, padding=0,
                                 stride=(stride[0] * uf, stride[1] * uf))
             fold = torch.nn.Fold(output_size=(x.shape[2] * uf, x.shape[3] * uf), **fold_params2)
@@ -675,7 +675,7 @@ class LatentDiffusion(DDPM):
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
             unfold = torch.nn.Unfold(**fold_params)
 
-            fold_params2 = dict(kernel_size=(kernel_size[0] // df, kernel_size[0] // df),
+            fold_params2 = dict(kernel_size=(kernel_size[0] // df, kernel_size[1] // df),
                                 dilation=1, padding=0,
                                 stride=(stride[0] // df, stride[1] // df))
             fold = torch.nn.Fold(output_size=(x.shape[2] // df, x.shape[3] // df), **fold_params2)
