@@ -17,6 +17,17 @@ def load_unipc_module():
     return module
 
 
+def available_test_device():
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    try:
+        probe = torch.empty((), device="cuda:0")
+        del probe
+        return torch.device("cuda:0")
+    except Exception:
+        return torch.device("cpu")
+
+
 class OpenClawDeviceDtypeTests(unittest.TestCase):
     def test_vae_cheap_approximation_preserves_sample_dtype(self):
         with mock.patch.object(sys, "argv", [sys.argv[0]]):
@@ -34,7 +45,7 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
     def test_unipc_time_steps_stay_on_requested_device(self):
         unipc = load_unipc_module()
 
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = available_test_device()
         sampler = unipc.UniPC(lambda x, t, cond=None, uncond=None: x, unipc.NoiseScheduleVP("linear"))
 
         timesteps = sampler.get_time_steps("logSNR", 1.0, 0.01, 4, device)
@@ -44,7 +55,7 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
     def test_unipc_singlestep_indices_stay_on_requested_device(self):
         unipc = load_unipc_module()
 
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = available_test_device()
         sampler = unipc.UniPC(lambda x, t, cond=None, uncond=None: x, unipc.NoiseScheduleVP("linear"))
 
         timesteps, orders = sampler.get_orders_and_timesteps_for_singlestep_solver(
