@@ -579,6 +579,52 @@ class PAGBatchingTests(unittest.TestCase):
         script.remove_callbacks()
         self.assertEqual(callbacks, [])
 
+    def test_inactive_pag_batch_clears_previous_callbacks(self):
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.pag.PAGExtensionScript()
+
+        class Processing:
+            def __init__(self):
+                self.incant_cfg_params = {"pag_params": None}
+                self.steps = 4
+                self.cfg_scale = 8.0
+                self.batch_size = 1
+                self.extra_generation_params = {}
+
+        p = Processing()
+        script.pag_process_batch(
+            p,
+            False,
+            0.0,
+            0,
+            150,
+            True,
+            "Linear",
+            0.0,
+            100.0,
+            False,
+        )
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertIsNotNone(script._cfg_denoiser_callback)
+
+        script.pag_process_batch(
+            p,
+            False,
+            0.0,
+            0,
+            150,
+            False,
+            "Linear",
+            0.0,
+            100.0,
+            False,
+        )
+
+        self.assertEqual(callbacks, [])
+        self.assertIsNone(script._cfg_denoiser_callback)
+
     def test_pag_without_attention_modules_does_not_leave_inactive_combiner_state(self):
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()

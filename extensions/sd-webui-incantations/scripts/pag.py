@@ -334,8 +334,9 @@ class PAGExtensionScript(UIWrapper):
                self.pag_process_batch(p, *args, **kwargs)
 
         def pag_process_batch(self, p: StableDiffusionProcessing, active, pag_scale, start_step, end_step, cfg_interval_enable, cfg_schedule, cfg_interval_low, cfg_interval_high, pag_sanf, *args, **kwargs):
-                # Clean previous hook handles before registering this batch.
+                # Clean previous hook handles/callbacks before registering this batch.
                 self.remove_all_hooks()
+                self.remove_callbacks()
 
                 active = getattr(p, "pag_active", active)
                 pag_sanf = getattr(p, "pag_sanf", pag_sanf)
@@ -416,7 +417,6 @@ class PAGExtensionScript(UIWrapper):
                        logger.debug(f"Step Aligned CFG Interval (low, high): ({low_index}, {high_index}), Step Aligned CFG Interval: ({round(pag_params.cfg_interval_low, 4)}, {round(pag_params.cfg_interval_high, 4)})")
 
                 # Use lambdas to bind per-batch state without globals.
-                self.remove_callbacks()
                 cfg_denoise_lambda = lambda callback_params: self.on_cfg_denoiser_callback(callback_params, pag_params)
                 self._cfg_denoiser_callback = cfg_denoise_lambda
 
