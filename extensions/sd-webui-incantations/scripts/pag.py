@@ -415,25 +415,35 @@ class PAGExtensionScript(UIWrapper):
                                )
                        logger.debug(f"Step Aligned CFG Interval (low, high): ({low_index}, {high_index}), Step Aligned CFG Interval: ({round(pag_params.cfg_interval_low, 4)}, {round(pag_params.cfg_interval_high, 4)})")
 
-                # Get all the qv modules
-                cross_attn_modules = self.get_cross_attn_modules()
-                if len(cross_attn_modules) == 0:
-                        logger.error("No cross attention modules found, cannot proceed with PAG")
-                        return
-                pag_params.crossattn_modules = [m for m in cross_attn_modules if 'CrossAttention' in m.__class__.__name__]
-
                 # Use lambdas to bind per-batch state without globals.
                 self.remove_callbacks()
                 cfg_denoise_lambda = lambda callback_params: self.on_cfg_denoiser_callback(callback_params, pag_params)
-                cfg_denoised_lambda = lambda callback_params: self.on_cfg_denoised_callback(callback_params, pag_params)
                 self._cfg_denoiser_callback = cfg_denoise_lambda
-                self._cfg_denoised_callback = cfg_denoised_lambda
+
+                # CFG interval scheduling only needs the cfg-denoiser callback;
+                # do not make it depend on PAG attention hook discovery.
                 if pag_params.pag_active:
+                        cross_attn_modules = self.get_cross_attn_modules()
+                        pag_params.crossattn_modules = [m for m in cross_attn_modules if 'CrossAttention' in m.__class__.__name__]
+                        if len(pag_params.crossattn_modules) == 0:
+                                logger.error("No cross attention modules found, cannot proceed with PAG")
+                                pag_params.pag_active = False
+
+                if not pag_params.pag_active and not pag_params.cfg_interval_enable:
+                        p.incant_cfg_params['pag_params'] = None
+                        self.remove_callbacks()
+                        return
+
+                cfg_denoised_lambda = None
+                if pag_params.pag_active:
+                        cfg_denoised_lambda = lambda callback_params: self.on_cfg_denoised_callback(callback_params, pag_params)
+                        self._cfg_denoised_callback = cfg_denoised_lambda
                         self.ready_hijack_forward(pag_params.crossattn_modules, pag_scale)
 
                 logger.debug('Hooked PAG callbacks')
                 script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
-                script_callbacks.on_cfg_denoised(cfg_denoised_lambda)
+                if cfg_denoised_lambda is not None:
+                        script_callbacks.on_cfg_denoised(cfg_denoised_lambda)
 
 
 

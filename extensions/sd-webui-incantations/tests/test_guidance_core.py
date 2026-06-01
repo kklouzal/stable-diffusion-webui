@@ -536,6 +536,80 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], [847, 847, 770])
         self.assertTrue(all(call[1] is None for call in calls))
 
+    def test_cfg_interval_registers_without_pag_attention_modules(self):
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.pag.PAGExtensionScript()
+
+        def fail_if_called():
+            raise AssertionError("CFG interval should not need PAG attention modules")
+
+        script.get_cross_attn_modules = fail_if_called
+
+        class Processing:
+            def __init__(self):
+                self.incant_cfg_params = {"pag_params": None}
+                self.steps = 4
+                self.cfg_scale = 8.0
+                self.batch_size = 1
+                self.extra_generation_params = {}
+
+        p = Processing()
+        script.pag_process_batch(
+            p,
+            False,
+            0.0,
+            0,
+            150,
+            True,
+            "Linear",
+            0.0,
+            100.0,
+            False,
+        )
+
+        self.assertEqual(len(callbacks), 1)
+        pag_params = p.incant_cfg_params["pag_params"]
+        params = types.SimpleNamespace(sampling_step=1)
+        callbacks[0](params)
+        self.assertEqual(
+            pag_params.cfg_interval_scheduled_value,
+            self.pag.cfg_scheduler("Linear", 1, 4, 8.0),
+        )
+        script.remove_callbacks()
+        self.assertEqual(callbacks, [])
+
+    def test_pag_without_attention_modules_does_not_leave_inactive_combiner_state(self):
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.pag.PAGExtensionScript()
+        script.get_cross_attn_modules = lambda: []
+
+        class Processing:
+            def __init__(self):
+                self.incant_cfg_params = {"pag_params": None}
+                self.steps = 4
+                self.cfg_scale = 8.0
+                self.batch_size = 1
+                self.extra_generation_params = {}
+
+        p = Processing()
+        script.pag_process_batch(
+            p,
+            True,
+            3.0,
+            0,
+            150,
+            False,
+            "Constant",
+            0.0,
+            100.0,
+            False,
+        )
+
+        self.assertEqual(callbacks, [])
+        self.assertIsNone(p.incant_cfg_params["pag_params"])
+
 
 class SEGBlurTests(unittest.TestCase):
     @classmethod
