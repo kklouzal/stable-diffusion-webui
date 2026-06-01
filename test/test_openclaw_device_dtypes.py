@@ -17,6 +17,64 @@ def load_unipc_module():
     return module
 
 
+def load_timesteps_impl_module():
+    module_name = "test_timesteps_impl_module"
+    unipc_module = load_unipc_module()
+    originals = {}
+
+    def put(name, module):
+        originals[name] = sys.modules.get(name)
+        sys.modules[name] = module
+
+    modules_pkg = types.ModuleType("modules")
+    models_pkg = types.ModuleType("modules.models")
+    diffusion_pkg = types.ModuleType("modules.models.diffusion")
+    uni_pc_pkg = types.ModuleType("modules.models.diffusion.uni_pc")
+    shared_module = types.ModuleType("modules.shared")
+    torch_utils_module = types.ModuleType("modules.torch_utils")
+    k_diffusion_pkg = types.ModuleType("k_diffusion")
+    k_diffusion_pkg.__path__ = []
+    k_diffusion_sampling = types.ModuleType("k_diffusion.sampling")
+
+    shared_module.opts = types.SimpleNamespace()
+    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type in ("mps", "xpu") else torch.float64
+    k_diffusion_sampling.torch = torch
+    k_diffusion_pkg.sampling = k_diffusion_sampling
+    uni_pc_pkg.uni_pc = unipc_module
+    diffusion_pkg.uni_pc = uni_pc_pkg
+
+    modules_pkg.shared = shared_module
+    modules_pkg.models = models_pkg
+    modules_pkg.torch_utils = torch_utils_module
+    models_pkg.diffusion = diffusion_pkg
+
+    for name, module in (
+        ("modules", modules_pkg),
+        ("modules.shared", shared_module),
+        ("modules.models", models_pkg),
+        ("modules.models.diffusion", diffusion_pkg),
+        ("modules.models.diffusion.uni_pc", uni_pc_pkg),
+        ("modules.models.diffusion.uni_pc.uni_pc", unipc_module),
+        ("modules.torch_utils", torch_utils_module),
+        ("k_diffusion", k_diffusion_pkg),
+        ("k_diffusion.sampling", k_diffusion_sampling),
+    ):
+        put(name, module)
+
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, "modules/sd_samplers_timesteps_impl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for name, original in originals.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
+    return module
+
+
 def available_test_device():
     if not torch.cuda.is_available():
         return torch.device("cpu")
@@ -96,6 +154,71 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
         self.assertEqual(model_calls, 3)
         self.assertTrue(all(model_x is not None for _, model_x in callbacks))
         torch.testing.assert_close(callbacks[-1][1], callbacks[-1][0])
+
+    def test_timestep_sampler_callback_counts_match_transition_contract(self):
+        sd_samplers_timesteps_impl = load_timesteps_impl_module()
+
+        class FakeInner:
+            def __init__(self):
+                self.alphas_cumprod = torch.linspace(0.999, 0.001, 1000, dtype=torch.float64)
+
+        class FakeModel:
+            def __init__(self):
+                self.inner_model = types.SimpleNamespace(inner_model=FakeInner())
+                self.last_noise_uncond = None
+
+            def __call__(self, x, t, **kwargs):
+                self.last_noise_uncond = torch.zeros_like(x)
+                return torch.zeros_like(x)
+
+        x = torch.ones((1, 1, 2, 2), dtype=torch.float64)
+        timesteps = torch.tensor([1, 251, 501, 751], dtype=torch.long)
+
+        for sampler in (sd_samplers_timesteps_impl.ddim, sd_samplers_timesteps_impl.ddim_cfgpp, sd_samplers_timesteps_impl.plms):
+            callbacks = []
+            sampler(FakeModel(), x.clone(), timesteps, extra_args={}, callback=callbacks.append, disable=True)
+
+            self.assertEqual([payload["i"] for payload in callbacks], [0, 1, 2])
+
+    def test_unipc_wrapper_callback_count_matches_solver_steps(self):
+        sd_samplers_timesteps_impl = load_timesteps_impl_module()
+
+        class FakeInner:
+            def __init__(self):
+                self.alphas_cumprod = torch.linspace(0.999, 0.001, 1000, dtype=torch.float64)
+
+        class FakeModel:
+            def __init__(self):
+                self.inner_model = types.SimpleNamespace(inner_model=FakeInner())
+
+            def __call__(self, x, t, **kwargs):
+                return torch.zeros_like(x)
+
+        class QuietTqdm:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def update(self, *args, **kwargs):
+                pass
+
+        x = torch.ones((1, 1, 2, 2), dtype=torch.float64)
+        timesteps = torch.tensor([1, 251, 501, 751], dtype=torch.long)
+        callbacks = []
+        fake_opts = types.SimpleNamespace(uni_pc_variant="bh1", uni_pc_skip_type="time_uniform", uni_pc_order=2, uni_pc_lower_order_final=True)
+
+        with (
+            mock.patch.object(sd_samplers_timesteps_impl.shared, "opts", fake_opts),
+            mock.patch.object(sd_samplers_timesteps_impl.uni_pc.tqdm, "tqdm", QuietTqdm),
+        ):
+            sd_samplers_timesteps_impl.unipc(FakeModel(), x, timesteps, extra_args={}, callback=callbacks.append)
+
+        self.assertEqual([payload["i"] for payload in callbacks], [0, 1, 2, 3])
 
     def test_unipc_multistep_coefficients_match_cpu_and_cuda(self):
         if available_test_device().type != "cuda":
