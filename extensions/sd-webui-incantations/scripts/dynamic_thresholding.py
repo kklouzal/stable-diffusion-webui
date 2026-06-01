@@ -98,7 +98,22 @@ class Script(scripts.Script):
 
     last_id = 0
 
+    def _restore_original_sampler(self, p):
+        if not hasattr(p, 'orig_sampler_name'):
+            return
+        p.sampler_name = p.orig_sampler_name
+        if p.orig_latent_sampler_name:
+            p.latent_sampler = p.orig_latent_sampler_name
+        for added_sampler in p.fixed_samplers:
+            sd_samplers.all_samplers_map.pop(added_sampler, None)
+        if p.sampler is not None:
+            p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
+        del p.fixed_samplers
+        del p.orig_sampler_name
+        del p.orig_latent_sampler_name
+
     def process_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, prompts, seeds, subseeds):
+        self._restore_original_sampler(p)
         enabled = getattr(p, 'dynthres_enabled', enabled)
         if not enabled:
             return
@@ -184,16 +199,7 @@ class Script(scripts.Script):
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
 
     def postprocess_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, images):
-        if not hasattr(p, 'orig_sampler_name'):
-            return
-        p.sampler_name = p.orig_sampler_name
-        if p.orig_latent_sampler_name:
-            p.latent_sampler = p.orig_latent_sampler_name
-        for added_sampler in p.fixed_samplers:
-            sd_samplers.all_samplers_map.pop(added_sampler, None)
-        del p.fixed_samplers
-        del p.orig_sampler_name
-        del p.orig_latent_sampler_name
+        self._restore_original_sampler(p)
 
 ######################### CompVis Implementation logic #########################
 

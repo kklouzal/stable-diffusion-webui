@@ -16,6 +16,7 @@ def install_a1111_stubs():
     modules_pkg = types.ModuleType("modules")
     headless_ui_mod = types.ModuleType("modules.headless_ui")
     scripts_mod = types.ModuleType("modules.scripts")
+    scripts_mod.Script = object
     scripts_mod.AlwaysVisible = object()
     script_callbacks_mod = types.ModuleType("modules.script_callbacks")
 
@@ -39,8 +40,12 @@ def install_a1111_stubs():
     def remove_callbacks_for_function(callback):
         callback_registry[:] = [c for c in callback_registry if c is not callback]
 
+    def on_before_ui(callback, *args, **kwargs):
+        callback_registry.append(callback)
+
     script_callbacks_mod.on_cfg_denoiser = on_cfg_denoiser
     script_callbacks_mod.on_cfg_denoised = on_cfg_denoised
+    script_callbacks_mod.on_before_ui = on_before_ui
     script_callbacks_mod.remove_callbacks_for_function = remove_callbacks_for_function
     processing_mod = types.ModuleType("modules.processing")
     processing_mod.StableDiffusionProcessing = object
@@ -86,6 +91,37 @@ def install_a1111_stubs():
 
     samplers_mod.catenate_conds = catenate_conds
     samplers_mod.subscript_cond = subscript_cond
+    sd_samplers_mod = types.ModuleType("modules.sd_samplers")
+    sd_samplers_mod.all_samplers_map = {}
+
+    def create_sampler(name, sd_model):
+        return types.SimpleNamespace(name=name, sd_model=sd_model)
+
+    sd_samplers_mod.create_sampler = create_sampler
+    sd_samplers_common_mod = types.ModuleType("modules.sd_samplers_common")
+
+    class SamplerData:
+        def __init__(self, name, constructor, aliases=None, options=None):
+            self.name = name
+            self.constructor = constructor
+            self.aliases = aliases or []
+            self.options = options or {}
+
+    sd_samplers_common_mod.SamplerData = SamplerData
+    sd_samplers_compvis_mod = types.ModuleType("modules.sd_samplers_compvis")
+
+    class VanillaStableDiffusionSampler:
+        def __init__(self, constructor, sd_model):
+            self.sampler = constructor(sd_model)
+
+    sd_samplers_compvis_mod.VanillaStableDiffusionSampler = VanillaStableDiffusionSampler
+    sd_samplers_kdiffusion_mod = types.ModuleType("modules.sd_samplers_kdiffusion")
+
+    class CFGDenoiserKDiffusion:
+        def __init__(self, model):
+            self.model = model
+
+    sd_samplers_kdiffusion_mod.CFGDenoiserKDiffusion = CFGDenoiserKDiffusion
 
     modules_pkg.scripts = scripts_mod
     modules_pkg.headless_ui = headless_ui_mod
@@ -107,6 +143,10 @@ def install_a1111_stubs():
             "modules.processing": processing_mod,
             "modules.shared": shared_mod,
             "modules.sd_samplers_cfg_denoiser": samplers_mod,
+            "modules.sd_samplers": sd_samplers_mod,
+            "modules.sd_samplers_common": sd_samplers_common_mod,
+            "modules.sd_samplers_compvis": sd_samplers_compvis_mod,
+            "modules.sd_samplers_kdiffusion": sd_samplers_kdiffusion_mod,
         }
     )
 
@@ -220,6 +260,7 @@ class DynamicThresholdingTests(unittest.TestCase):
             self.assertEqual(out.dtype, dtype)
             self.assertTrue(torch.isfinite(out.float()).all())
 
+
     def test_ragged_multicond_equivalence_with_manual_relative(self):
         dt = DynThresh(
             7.0,
@@ -315,6 +356,89 @@ class DynamicThresholdingTests(unittest.TestCase):
             self.assertEqual(out.dtype, dtype)
             self.assertEqual(out.shape, uncond.shape)
             self.assertTrue(torch.isfinite(out.float()).all())
+
+
+class DynamicThresholdingLifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.dynamic_thresholding = importlib.import_module("scripts.dynamic_thresholding")
+
+    def setUp(self):
+        self.sd_samplers = sys.modules["modules.sd_samplers"]
+        self.sd_samplers.all_samplers_map.clear()
+
+        def constructor(model):
+            return types.SimpleNamespace(model_wrap_cfg=types.SimpleNamespace(inner_model=model))
+
+        sampler_data = sys.modules["modules.sd_samplers_common"].SamplerData(
+            "Euler",
+            constructor,
+            [],
+            {},
+        )
+        self.sd_samplers.all_samplers_map["Euler"] = sampler_data
+
+    def test_disabled_next_batch_restores_sampler_object_after_failed_cleanup(self):
+        script = self.dynamic_thresholding.Script()
+        p = types.SimpleNamespace(
+            sampler_name="Euler",
+            latent_sampler=None,
+            sampler=types.SimpleNamespace(name="Euler"),
+            sd_model=object(),
+            steps=4,
+            enable_hr=False,
+            extra_generation_params={},
+        )
+
+        script.process_batch(
+            p,
+            True,
+            7.0,
+            100.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+            0,
+            [],
+            [],
+            [],
+        )
+        self.assertNotEqual(p.sampler_name, "Euler")
+        self.assertTrue(p.sampler_name.startswith("Euler_dynthres"))
+        self.assertIn(p.sampler_name, self.sd_samplers.all_samplers_map)
+
+        p.dynthres_enabled = False
+        script.process_batch(
+            p,
+            False,
+            7.0,
+            100.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+            1,
+            [],
+            [],
+            [],
+        )
+
+        self.assertEqual(p.sampler_name, "Euler")
+        self.assertEqual(p.sampler.name, "Euler")
+        self.assertFalse(any(name.startswith("Euler_dynthres") for name in self.sd_samplers.all_samplers_map))
+        self.assertFalse(hasattr(p, "orig_sampler_name"))
 
 
 class CFGCombinerTests(unittest.TestCase):
