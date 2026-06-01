@@ -523,6 +523,7 @@ class UniPC:
         #print(f'using unified predictor-corrector with order {order} (solver type: vary coeff)')
         ns = self.noise_schedule
         assert order <= len(model_prev_list)
+        dims = x.dim()
 
         # first compute rks
         t_prev_0 = t_prev_list[-1]
@@ -541,12 +542,12 @@ class UniPC:
             t_prev_i = t_prev_list[-(i + 1)]
             model_prev_i = model_prev_list[-(i + 1)]
             lambda_prev_i = ns.marginal_lambda(t_prev_i)
-            rk = (lambda_prev_i - lambda_prev_0) / h
+            rk = ((lambda_prev_i - lambda_prev_0) / h)[0]
             rks.append(rk)
             D1s.append((model_prev_i - model_prev_0) / rk)
 
-        rks.append(1.)
-        rks = torch.tensor(rks, device=x.device)
+        rks.append(h.new_ones(()))
+        rks = torch.stack(rks)
 
         K = len(rks)
         # build C matrix
@@ -581,15 +582,15 @@ class UniPC:
         model_t = None
         if self.predict_x0:
             x_t_ = (
-                sigma_t / sigma_prev_0 * x
-                - alpha_t * h_phi_1 * model_prev_0
+                expand_dims(sigma_t / sigma_prev_0, dims) * x
+                - expand_dims(alpha_t * h_phi_1, dims) * model_prev_0
             )
             # now predictor
             x_t = x_t_
             if len(D1s) > 0:
                 # compute the residuals for predictor
                 for k in range(K - 1):
-                    x_t = x_t - alpha_t * h_phi_ks[k + 1] * torch.einsum('bkchw,k->bchw', D1s, A_p[k])
+                    x_t = x_t - expand_dims(alpha_t * h_phi_ks[k + 1], dims) * torch.einsum('bkchw,k->bchw', D1s, A_p[k])
             # now corrector
             if use_corrector:
                 model_t = self.model_fn(x_t, t)
@@ -597,20 +598,20 @@ class UniPC:
                 x_t = x_t_
                 k = 0
                 for k in range(K - 1):
-                    x_t = x_t - alpha_t * h_phi_ks[k + 1] * torch.einsum('bkchw,k->bchw', D1s, A_c[k][:-1])
-                x_t = x_t - alpha_t * h_phi_ks[K] * (D1_t * A_c[k][-1])
+                    x_t = x_t - expand_dims(alpha_t * h_phi_ks[k + 1], dims) * torch.einsum('bkchw,k->bchw', D1s, A_c[k][:-1])
+                x_t = x_t - expand_dims(alpha_t * h_phi_ks[K], dims) * (D1_t * A_c[k][-1])
         else:
             log_alpha_prev_0, log_alpha_t = ns.marginal_log_mean_coeff(t_prev_0), ns.marginal_log_mean_coeff(t)
             x_t_ = (
-                (torch.exp(log_alpha_t - log_alpha_prev_0)) * x
-                - (sigma_t * h_phi_1) * model_prev_0
+                expand_dims(torch.exp(log_alpha_t - log_alpha_prev_0), dims) * x
+                - expand_dims(sigma_t * h_phi_1, dims) * model_prev_0
             )
             # now predictor
             x_t = x_t_
             if len(D1s) > 0:
                 # compute the residuals for predictor
                 for k in range(K - 1):
-                    x_t = x_t - sigma_t * h_phi_ks[k + 1] * torch.einsum('bkchw,k->bchw', D1s, A_p[k])
+                    x_t = x_t - expand_dims(sigma_t * h_phi_ks[k + 1], dims) * torch.einsum('bkchw,k->bchw', D1s, A_p[k])
             # now corrector
             if use_corrector:
                 model_t = self.model_fn(x_t, t)
@@ -618,8 +619,8 @@ class UniPC:
                 x_t = x_t_
                 k = 0
                 for k in range(K - 1):
-                    x_t = x_t - sigma_t * h_phi_ks[k + 1] * torch.einsum('bkchw,k->bchw', D1s, A_c[k][:-1])
-                x_t = x_t - sigma_t * h_phi_ks[K] * (D1_t * A_c[k][-1])
+                    x_t = x_t - expand_dims(sigma_t * h_phi_ks[k + 1], dims) * torch.einsum('bkchw,k->bchw', D1s, A_c[k][:-1])
+                x_t = x_t - expand_dims(sigma_t * h_phi_ks[K], dims) * (D1_t * A_c[k][-1])
         return x_t, model_t
 
     def multistep_uni_pc_bh_update(self, x, model_prev_list, t_prev_list, t, order, x_t=None, use_corrector=True):
@@ -649,8 +650,8 @@ class UniPC:
             rks.append(rk)
             D1s.append((model_prev_i - model_prev_0) / rk)
 
-        rks.append(1.)
-        rks = torch.tensor(rks, device=x.device)
+        rks.append(h.new_ones(()))
+        rks = torch.stack(rks)
 
         R = []
         b = []
@@ -675,7 +676,7 @@ class UniPC:
             h_phi_k = h_phi_k / hh - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=x.device)
+        b = torch.stack(b)
 
         # now predictor
         use_predictor = len(D1s) > 0 and x_t is None
@@ -684,7 +685,7 @@ class UniPC:
             if x_t is None:
                 # for order 2, we use a simplified version
                 if order == 2:
-                    rhos_p = torch.tensor([0.5], device=b.device)
+                    rhos_p = b.new_full((1,), 0.5)
                 else:
                     rhos_p = torch.linalg.solve(R[:-1, :-1], b[:-1])
         else:
@@ -694,7 +695,7 @@ class UniPC:
             #print('using corrector')
             # for order 1, we use a simplified version
             if order == 1:
-                rhos_c = torch.tensor([0.5], device=b.device)
+                rhos_c = b.new_full((1,), 0.5)
             else:
                 rhos_c = torch.linalg.solve(R, b)
 
