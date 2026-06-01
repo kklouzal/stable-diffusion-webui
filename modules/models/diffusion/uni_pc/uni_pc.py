@@ -160,15 +160,15 @@ class NoiseScheduleVP:
         Compute the continuous-time label t in [0, T] of a given half-logSNR lambda_t.
         """
         if self.schedule == 'linear':
-            tmp = 2. * (self.beta_1 - self.beta_0) * torch.logaddexp(-2. * lamb, torch.zeros((1,)).to(lamb))
+            tmp = 2. * (self.beta_1 - self.beta_0) * torch.logaddexp(-2. * lamb, lamb.new_zeros((1,)))
             Delta = self.beta_0**2 + tmp
             return tmp / (torch.sqrt(Delta) + self.beta_0) / (self.beta_1 - self.beta_0)
         elif self.schedule == 'discrete':
-            log_alpha = -0.5 * torch.logaddexp(torch.zeros((1,)).to(lamb.device), -2. * lamb)
+            log_alpha = -0.5 * torch.logaddexp(lamb.new_zeros((1,)), -2. * lamb)
             t = interpolate_fn(log_alpha.reshape((-1, 1)), torch.flip(self.log_alpha_array.to(lamb.device), [1]), torch.flip(self.t_array.to(lamb.device), [1]))
             return t.reshape((-1,))
         else:
-            log_alpha = -0.5 * torch.logaddexp(-2. * lamb, torch.zeros((1,)).to(lamb))
+            log_alpha = -0.5 * torch.logaddexp(-2. * lamb, lamb.new_zeros((1,)))
             t_fn = lambda log_alpha_t: torch.arccos(torch.exp(log_alpha_t + self.cosine_log_alpha_0)) * 2. * (1. + self.cosine_s) / math.pi - self.cosine_s
             t = t_fn(log_alpha)
             return t
@@ -407,7 +407,7 @@ class UniPC:
         dims = x0.dim()
         p = self.dynamic_thresholding_ratio
         s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-        s = expand_dims(torch.maximum(s, self.thresholding_max_val * torch.ones_like(s).to(s.device)), dims)
+        s = expand_dims(torch.maximum(s, s.new_full(s.shape, self.thresholding_max_val)), dims)
         x0 = torch.clamp(x0, -s, s) / s
         return x0
 
@@ -443,7 +443,7 @@ class UniPC:
         if self.thresholding:
             p = 0.995   # A hyperparameter in the paper of "Imagen" [1].
             s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-            s = expand_dims(torch.maximum(s, self.max_val * torch.ones_like(s).to(s.device)), dims)
+            s = expand_dims(torch.maximum(s, s.new_full(s.shape, self.max_val)), dims)
             x0 = torch.clamp(x0, -s, s) / s
         return x0
 
@@ -465,10 +465,10 @@ class UniPC:
             logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == 'time_uniform':
-            return torch.linspace(t_T, t_0, N + 1).to(device)
+            return torch.linspace(t_T, t_0, N + 1, device=device)
         elif skip_type == 'time_quadratic':
             t_order = 2
-            t = torch.linspace(t_T**(1. / t_order), t_0**(1. / t_order), N + 1).pow(t_order).to(device)
+            t = torch.linspace(t_T**(1. / t_order), t_0**(1. / t_order), N + 1, device=device).pow(t_order)
             return t
         else:
             raise ValueError(f"Unsupported skip_type {skip_type}, need to be 'logSNR' or 'time_uniform' or 'time_quadratic'")
@@ -800,7 +800,7 @@ class UniPC:
         else:
             raise NotImplementedError()
         if denoise_to_zero:
-            x = self.denoise_to_zero_fn(x, torch.ones((x.shape[0],)).to(device) * t_0)
+            x = self.denoise_to_zero_fn(x, torch.full((x.shape[0],), t_0, device=device))
         return x
 
 
@@ -828,9 +828,9 @@ def interpolate_fn(x, xp, yp):
     cand_start_idx = x_idx - 1
     start_idx = torch.where(
         torch.eq(x_idx, 0),
-        torch.tensor(1, device=x.device),
+        x_idx.new_tensor(1),
         torch.where(
-            torch.eq(x_idx, K), torch.tensor(K - 2, device=x.device), cand_start_idx,
+            torch.eq(x_idx, K), x_idx.new_tensor(K - 2), cand_start_idx,
         ),
     )
     end_idx = torch.where(torch.eq(start_idx, cand_start_idx), start_idx + 2, start_idx + 1)
@@ -838,9 +838,9 @@ def interpolate_fn(x, xp, yp):
     end_x = torch.gather(sorted_all_x, dim=2, index=end_idx.unsqueeze(2)).squeeze(2)
     start_idx2 = torch.where(
         torch.eq(x_idx, 0),
-        torch.tensor(0, device=x.device),
+        x_idx.new_tensor(0),
         torch.where(
-            torch.eq(x_idx, K), torch.tensor(K - 2, device=x.device), cand_start_idx,
+            torch.eq(x_idx, K), x_idx.new_tensor(K - 2), cand_start_idx,
         ),
     )
     y_positions_expanded = yp.unsqueeze(0).expand(N, -1, -1)
