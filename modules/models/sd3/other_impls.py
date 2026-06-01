@@ -132,6 +132,7 @@ class CLIPTextModel_(torch.nn.Module):
         self.embeddings = CLIPEmbeddings(embed_dim, dtype=torch.float32, device=device, textual_inversion_key=config_dict.get('textual_inversion_key', 'clip_l'))
         self.encoder = CLIPEncoder(num_layers, embed_dim, heads, intermediate_size, intermediate_activation, dtype, device)
         self.final_layer_norm = nn.LayerNorm(embed_dim, dtype=dtype, device=device)
+        self.pool_token_id = config_dict.get("pool_token_id", 49407)
 
     def forward(self, input_tokens, intermediate_output=None, final_layer_norm_intermediate=True):
         x = self.embeddings(input_tokens)
@@ -140,7 +141,11 @@ class CLIPTextModel_(torch.nn.Module):
         x = self.final_layer_norm(x)
         if i is not None and final_layer_norm_intermediate:
             i = self.final_layer_norm(i)
-        pooled_output = x[torch.arange(x.shape[0], device=x.device), input_tokens.argmax(dim=-1),]
+        pooled_token_indices = input_tokens.argmax(dim=-1)
+        end_token_mask = input_tokens == self.pool_token_id
+        first_end_token_indices = end_token_mask.to(torch.int64).argmax(dim=1)
+        pooled_token_indices = torch.where(end_token_mask.any(dim=1), first_end_token_indices, pooled_token_indices)
+        pooled_output = x[torch.arange(x.shape[0], device=x.device), pooled_token_indices,]
         return x, i, pooled_output
 
 
