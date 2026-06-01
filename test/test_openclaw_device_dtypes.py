@@ -65,6 +65,38 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
         self.assertEqual(timesteps.device, device)
         self.assertEqual(orders, [2, 2, 1])
 
+    def test_unipc_final_callback_uses_current_latent_without_extra_model_eval(self):
+        unipc = load_unipc_module()
+
+        model_calls = 0
+        callbacks = []
+
+        def model_fn(x, t, cond=None, uncond=None):
+            nonlocal model_calls
+            model_calls += 1
+            while t.dim() < x.dim():
+                t = t.unsqueeze(-1)
+            return x.mul(0.25).add(t.mul(0.125))
+
+        def after_update(x, model_x):
+            callbacks.append((x.detach().clone(), None if model_x is None else model_x.detach().clone()))
+
+        sampler = unipc.UniPC(
+            model_fn,
+            unipc.NoiseScheduleVP("linear"),
+            predict_x0=True,
+            variant="bh1",
+            after_update=after_update,
+        )
+        x = torch.ones((1, 1, 2, 2), dtype=torch.float64)
+
+        sampler.sample(x, steps=3, order=2, skip_type="time_uniform", method="multistep")
+
+        self.assertEqual(len(callbacks), 3)
+        self.assertEqual(model_calls, 3)
+        self.assertTrue(all(model_x is not None for _, model_x in callbacks))
+        torch.testing.assert_close(callbacks[-1][1], callbacks[-1][0])
+
     def test_unipc_multistep_coefficients_match_cpu_and_cuda(self):
         if available_test_device().type != "cuda":
             self.skipTest("CUDA is not available for UniPC coefficient parity")

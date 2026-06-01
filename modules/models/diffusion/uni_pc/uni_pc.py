@@ -786,8 +786,11 @@ class UniPC:
                         else:
                             use_corrector = True
                         x, model_x =  self.multistep_uni_pc_update(x, model_prev_list, t_prev_list, vec_t, step_order, use_corrector=use_corrector)
+                        callback_model_x = model_x
+                        if callback_model_x is None and step == steps:
+                            callback_model_x = x
                         if self.after_update is not None:
-                            self.after_update(x, model_x)
+                            self.after_update(x, callback_model_x)
                         for i in range(order - 1):
                             t_prev_list[i] = t_prev_list[i + 1]
                             model_prev_list[i] = model_prev_list[i + 1]
