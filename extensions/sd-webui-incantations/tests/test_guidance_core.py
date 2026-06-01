@@ -397,6 +397,12 @@ class CFGCombinerTests(unittest.TestCase):
         script.remove_callbacks()
         self.assertEqual(callbacks, [])
 
+    def test_sanf_blur_handles_single_pixel_spatial_side(self):
+        img = torch.randn(2, 4, 1, 9)
+        out = self.cfg_combiner.sanf_gaussian_blur3(img)
+        self.assertEqual(tuple(out.shape), tuple(img.shape))
+        self.assertTrue(torch.isfinite(out).all())
+
     def test_cfg_combiner_wrapper_restores_only_own_wrapper(self):
         script = self.cfg_combiner.CFGCombinerScript()
 

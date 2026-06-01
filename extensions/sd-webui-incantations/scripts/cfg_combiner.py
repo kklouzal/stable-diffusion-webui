@@ -15,6 +15,8 @@ def sanf_gaussian_blur3(x):
         """Small cached 3x3 Gaussian blur for PAG SANF saliency maps."""
         squeeze_batch = x.ndim == 3
         x_in = x.unsqueeze(0) if squeeze_batch else x
+        if min(x_in.shape[-2:]) < 2:
+            return x
         channels = x_in.shape[-3]
         key = (x_in.device, x_in.dtype, channels)
         kernel = _SANF_KERNEL_CACHE.get(key)

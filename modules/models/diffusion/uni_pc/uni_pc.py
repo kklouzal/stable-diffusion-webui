@@ -460,8 +460,8 @@ class UniPC:
         """Compute the intermediate time steps for sampling.
         """
         if skip_type == 'logSNR':
-            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
+            lambda_T = self.noise_schedule.marginal_lambda(torch.as_tensor(t_T, device=device))
+            lambda_0 = self.noise_schedule.marginal_lambda(torch.as_tensor(t_0, device=device))
             logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == 'time_uniform':
@@ -501,7 +501,7 @@ class UniPC:
             # To reproduce the results in DPM-Solver paper
             timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, K, device)
         else:
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, steps, device)[torch.cumsum(torch.tensor([0,] + orders), 0).to(device)]
+            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, steps, device)[torch.cumsum(torch.tensor([0,] + orders, device=device), 0)]
         return timesteps_outer, orders
 
     def denoise_to_zero_fn(self, x, s):

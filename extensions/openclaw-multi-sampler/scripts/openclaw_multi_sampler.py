@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import importlib.util
 import json
 import re
@@ -35,6 +36,7 @@ _DENOISE_RAMP_FUNC = None
 _DENOISE_RAMP_FUNC_LOADED = False
 _SIGNATURE_PARAM_CACHE: dict[int, set[str]] = {}
 _SAMPLER_FUNC_CACHE: dict[str, tuple[Any, str]] = {}
+logger = logging.getLogger(__name__)
 
 
 def _load_denoise_ramp_func():
@@ -252,10 +254,10 @@ def _load_custom_defs() -> list[dict[str, Any]]:
                 try:
                     normalized.append(_normalize_definition(item))
                 except Exception as exc:
-                    print(f"[openclaw-multi-sampler] ignoring invalid sampler definition: {exc}")
+                    logger.warning("Ignoring invalid sampler definition: %s", exc)
         return normalized
     except Exception as exc:
-        print(f"[openclaw-multi-sampler] failed to read {CUSTOM_FILE}: {exc}")
+        logger.warning("Failed to read %s: %s", CUSTOM_FILE, exc)
         return []
 
 
@@ -439,8 +441,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             name = "final.png" if final else f"step-{step:03d}.png"
             image.save(out_dir / name)
         except Exception:
-            print("[openclaw-multi-sampler] snapshot save failed")
-            traceback.print_exc()
+            logger.exception("Snapshot save failed")
 
     def _callback(self, p, *, offset: int):
         def inner(d: dict[str, Any]):
@@ -528,7 +529,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             self._save_snapshot(p, x, step=steps, final=True)
             return x
         except RecursionError:
-            print("Encountered RecursionError during multi-sampler sampling; returning last latent.")
+            logger.exception("Encountered RecursionError during multi-sampler sampling; returning last latent")
             return self.last_latent
         except sd_samplers_common.InterruptedException:
             return self.last_latent
