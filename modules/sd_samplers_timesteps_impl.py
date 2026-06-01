@@ -166,7 +166,8 @@ class UniPCCFG(uni_pc.UniPC):
         super().__init__(None, *args, **kwargs)
 
         def after_update(x, model_x):
-            callback({'x': x, 'i': self.index, 'sigma': 0, 'sigma_hat': 0, 'denoised': model_x})
+            if callback is not None:
+                callback({'x': x, 'i': self.index, 'sigma': 0, 'sigma_hat': 0, 'denoised': model_x})
             self.index += 1
 
         self.cfg_model = cfg_model
@@ -189,6 +190,7 @@ class UniPCCFG(uni_pc.UniPC):
 def unipc(model, x, timesteps, extra_args=None, callback=None, disable=None, is_img2img=False):
     alphas_cumprod = model.inner_model.inner_model.alphas_cumprod
 
+    extra_args = {} if extra_args is None else extra_args
     ns = uni_pc.NoiseScheduleVP('discrete', alphas_cumprod=alphas_cumprod)
     t_start = timesteps[-1] / 1000 + 1 / 1000 if is_img2img else None  # this is likely off by a bit - if someone wants to fix it please by all means
     unipc_sampler = UniPCCFG(model, extra_args, callback, ns, predict_x0=True, thresholding=False, variant=shared.opts.uni_pc_variant)
