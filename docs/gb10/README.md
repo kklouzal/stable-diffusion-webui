@@ -71,8 +71,8 @@ Current defaults:
 - PyTorch nightly lane: `https://download.pytorch.org/whl/nightly/cu132`
 - A1111 source: this fork checkout (`https://github.com/kklouzal/stable-diffusion-webui.git`), upstream-derived from AUTOMATIC1111
 - companion Stable Diffusion repo: `https://github.com/w-e-w/stablediffusion.git` at the Dockerfile-pinned ref
-- image tag: `local/gb10-a1111:latest-mxfp8-dev`
-- container name: `gb10-a1111-latest-mxfp8`
+- image tag: `local/gb10-a1111:latest`
+- container name: `gb10-a1111-latest`
 
 ## Owned A1111 extensions
 

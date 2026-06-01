@@ -35,6 +35,277 @@ from contextlib import closing
 from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
 
 
+_precision_map_cache_key = None
+_precision_map_cache_value = None
+
+
+def _precision_lora_signature(lora_networks):
+    if lora_networks is None:
+        return ()
+
+    signature = []
+    for net in getattr(lora_networks, "loaded_networks", []) or []:
+        on_disk = getattr(net, "network_on_disk", None)
+        modules = getattr(net, "modules", {}) or {}
+        signature.append((
+            getattr(net, "name", None),
+            getattr(net, "mentioned_name", None),
+            getattr(net, "te_multiplier", None),
+            getattr(net, "unet_multiplier", None),
+            getattr(net, "dyn_dim", None),
+            getattr(on_disk, "filename", None),
+            getattr(on_disk, "shorthash", None),
+            tuple(sorted(modules.keys())),
+        ))
+    return tuple(signature)
+
+
+def _precision_selected_coverage(name: str):
+    fn = getattr(sd_models, f"{name}_selected_linear_coverage", None)
+    if fn is None:
+        return ()
+    try:
+        return tuple(sorted(fn()))
+    except Exception:
+        return ()
+
+
+def _precision_model_signature(sd_model, lora_networks):
+    checkpoint = getattr(sd_model, "sd_checkpoint_info", None)
+    return (
+        id(sd_model),
+        getattr(checkpoint, "filename", None),
+        getattr(checkpoint, "sha256", None),
+        getattr(sd_model, "sd_model_hash", None),
+        getattr(sd_model, "loaded_vae_file", None) or getattr(sd_model, "base_vae", None),
+        str(getattr(devices, "dtype", None)),
+        str(getattr(devices, "dtype_unet", None)),
+        str(getattr(devices, "dtype_vae", None)),
+        bool(getattr(devices, "fp8", False)),
+        bool(getattr(devices, "mxfp8", False)),
+        bool(getattr(devices, "nvfp4", False)),
+        getattr(shared.opts, "mxfp8_storage", None),
+        _precision_selected_coverage("mxfp8"),
+        getattr(shared.opts, "nvfp4_storage", None),
+        _precision_selected_coverage("nvfp4"),
+        _precision_lora_signature(lora_networks),
+    )
+
+
+def _precision_tensor_info(tensor):
+    if tensor is None:
+        return None
+
+    tensor_type = type(tensor)
+    tensor_name = tensor_type.__name__
+    tensor_module = tensor_type.__module__
+    is_mxfp8 = tensor_name == "MXTensor" and tensor_module.startswith("torchao.")
+    is_nvfp4 = tensor_name == "NVFP4Tensor" and tensor_module.startswith("torchao.")
+    return {
+        "dtype": str(getattr(tensor, "dtype", None)).replace("torch.", ""),
+        "device": str(getattr(tensor, "device", "")),
+        "shape": list(getattr(tensor, "shape", []) or []),
+        "tensor_type": tensor_name,
+        "tensor_module": tensor_module,
+        "is_mxfp8": is_mxfp8,
+        "is_nvfp4": is_nvfp4,
+        "is_torchao_quantized": is_mxfp8 or is_nvfp4,
+    }
+
+
+def _precision_name_from_info(weight_info):
+    if not weight_info:
+        return "unknown"
+    if weight_info.get("is_mxfp8"):
+        return "mxfp8"
+    if weight_info.get("is_nvfp4"):
+        return "nvfp4"
+    return weight_info.get("dtype") or "unknown"
+
+
+def _precision_module_source(name: str) -> str:
+    if name.startswith("conditioner.") or name.startswith("cond_stage_model."):
+        return "text_conditioner"
+    if name.startswith("first_stage_model."):
+        return "vae"
+    if name.startswith("model.diffusion_model") or name.startswith("model."):
+        return "unet"
+    return "base_model"
+
+
+def _precision_layer_kind(name: str, module) -> str:
+    lowered = name.lower()
+    if "attn" in lowered or "attention" in lowered or any(x in lowered for x in ("q_proj", "k_proj", "v_proj", "out_proj", "to_q", "to_k", "to_v", "to_out")):
+        return "attention"
+    if "conditioner" in lowered or "text_model" in lowered or "cond_stage" in lowered:
+        return "text"
+    if "first_stage_model" in lowered:
+        return "vae"
+    return type(module).__name__
+
+
+def _precision_skip_reason(backend: str, module, fqn: str):
+    fn = getattr(sd_models, f"{backend}_linear_skip_reason", None)
+    if fn is None:
+        return None
+    try:
+        return fn(module, fqn)
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
+
+
+def build_precision_map():
+    global _precision_map_cache_key, _precision_map_cache_value
+
+    sd_model = shared.sd_model
+    if sd_model is None:
+        return {"ok": False, "error": "No model loaded", "layers": [], "loras": [], "cache": {"hit": False}}
+
+    try:
+        import networks as lora_networks
+    except Exception:
+        lora_networks = None
+
+    cache_key = _precision_model_signature(sd_model, lora_networks)
+    if _precision_map_cache_key == cache_key and _precision_map_cache_value is not None:
+        cached = dict(_precision_map_cache_value)
+        cached["cache"] = {"hit": True, "cached_at": _precision_map_cache_value.get("generated_at")}
+        return cached
+
+    lora_targets = {}
+    loras = []
+    if lora_networks is not None:
+        for net in getattr(lora_networks, "loaded_networks", []) or []:
+            on_disk = getattr(net, "network_on_disk", None)
+            modules = getattr(net, "modules", {}) or {}
+            lora = {
+                "name": getattr(net, "name", None),
+                "mentioned_name": getattr(net, "mentioned_name", None),
+                "te_multiplier": getattr(net, "te_multiplier", None),
+                "unet_multiplier": getattr(net, "unet_multiplier", None),
+                "dyn_dim": getattr(net, "dyn_dim", None),
+                "path": getattr(on_disk, "filename", None),
+                "hash": getattr(on_disk, "hash", None),
+                "shorthash": getattr(on_disk, "shorthash", None),
+                "alias": getattr(on_disk, "alias", None),
+                "target_count": len(modules),
+                "targets": sorted(modules.keys()),
+            }
+            loras.append(lora)
+            for layer_name, module in modules.items():
+                lora_targets.setdefault(layer_name, []).append({
+                    "name": lora["name"],
+                    "te_multiplier": lora["te_multiplier"],
+                    "unet_multiplier": lora["unet_multiplier"],
+                    "network_key": getattr(module, "network_key", None),
+                    "sd_key": getattr(module, "sd_key", None),
+                    "module_type": type(module).__name__,
+                    "path": lora["path"],
+                })
+
+    checkpoint = getattr(sd_model, "sd_checkpoint_info", None)
+    checkpoint_filename = getattr(checkpoint, "filename", None)
+    vae_filename = getattr(sd_model, "loaded_vae_file", None) or getattr(sd_model, "base_vae", None)
+    layers = []
+    counts = {}
+    for fqn, module in sd_model.named_modules():
+        weight = getattr(module, "weight", None)
+        bias = getattr(module, "bias", None)
+        mha_out = getattr(getattr(module, "out_proj", None), "weight", None)
+        if weight is None and mha_out is None and bias is None:
+            continue
+
+        network_layer_name = getattr(module, "network_layer_name", None)
+        weight_info = _precision_tensor_info(weight if weight is not None else mha_out)
+        bias_info = _precision_tensor_info(bias)
+        precision = _precision_name_from_info(weight_info)
+        target_entries = list(lora_targets.get(network_layer_name, [])) if network_layer_name else []
+        mha_lora_targets = []
+        if type(module).__name__ == "MultiheadAttention" and network_layer_name:
+            for suffix in ("_q_proj", "_k_proj", "_v_proj", "_out_proj"):
+                mha_lora_targets.extend(lora_targets.get(network_layer_name + suffix, []))
+        source = _precision_module_source(fqn)
+        source_file = vae_filename if source == "vae" and vae_filename else checkpoint_filename
+        lora_paths = sorted({item.get("path") for item in [*target_entries, *mha_lora_targets] if item.get("path")})
+        entry = {
+            "name": fqn,
+            "network_layer_name": network_layer_name,
+            "source": source,
+            "source_file": source_file,
+            "lora_files": lora_paths,
+            "kind": _precision_layer_kind(fqn, module),
+            "module_type": type(module).__name__,
+            "precision": precision,
+            "weight": weight_info,
+            "bias": bias_info,
+            "has_mxfp8_base_backup": hasattr(module, "network_mxfp8_base_weight"),
+            "has_nvfp4_base_backup": hasattr(module, "network_nvfp4_base_weight"),
+            "network_current_names": list(getattr(module, "network_current_names", ()) or ()),
+            "lora_targets": target_entries,
+            "mha_lora_targets": mha_lora_targets,
+            "mxfp8_skip_reason": _precision_skip_reason("mxfp8", module, fqn),
+            "nvfp4_skip_reason": _precision_skip_reason("nvfp4", module, fqn),
+            "mxfp8_mha_lora_skipped": bool(weight_info and weight_info.get("is_mxfp8") and mha_lora_targets),
+            "nvfp4_mha_lora_skipped": bool(weight_info and weight_info.get("is_nvfp4") and mha_lora_targets),
+        }
+        layers.append(entry)
+        counts[precision] = counts.get(precision, 0) + 1
+
+    by_source = {}
+    for layer in layers:
+        src = layer.get("source") or "unknown"
+        by_source.setdefault(src, {"total": 0, "precision": {}})
+        by_source[src]["total"] += 1
+        by_source[src]["precision"][layer["precision"]] = by_source[src]["precision"].get(layer["precision"], 0) + 1
+
+    result = {
+        "ok": True,
+        "generated_at": time.time(),
+        "checkpoint": {
+            "title": getattr(checkpoint, "title", None),
+            "filename": getattr(checkpoint, "filename", None),
+            "hash": getattr(sd_model, "sd_model_hash", None),
+            "sha256": getattr(checkpoint, "sha256", None),
+        },
+        "vae": {"filename": vae_filename},
+        "devices": {
+            "dtype": str(getattr(devices, "dtype", None)).replace("torch.", ""),
+            "dtype_unet": str(getattr(devices, "dtype_unet", None)).replace("torch.", ""),
+            "dtype_vae": str(getattr(devices, "dtype_vae", None)).replace("torch.", ""),
+            "fp8": bool(getattr(devices, "fp8", False)),
+            "mxfp8": bool(getattr(devices, "mxfp8", False)),
+            "nvfp4": bool(getattr(devices, "nvfp4", False)),
+        },
+        "options": {
+            "mxfp8_storage": getattr(shared.opts, "mxfp8_storage", None),
+            "mxfp8_linear_coverage": list(_precision_selected_coverage("mxfp8")),
+            "nvfp4_storage": getattr(shared.opts, "nvfp4_storage", None),
+            "nvfp4_linear_coverage": list(_precision_selected_coverage("nvfp4")),
+        },
+        "quantization_stats": {
+            "mxfp8": getattr(sd_model, "mxfp8_quantization_stats", None),
+            "nvfp4": getattr(sd_model, "nvfp4_quantization_stats", None),
+            "mxfp8_lora_prepare": getattr(sd_model, "network_mxfp8_prepare_stats", None),
+            "nvfp4_lora_prepare": getattr(sd_model, "network_nvfp4_prepare_stats", None),
+        },
+        "summary": {
+            "layer_count": len(layers),
+            "precision": counts,
+            "by_source": by_source,
+            "lora_count": len(loras),
+            "lora_targeted_layer_count": sum(1 for layer in layers if layer.get("lora_targets") or layer.get("mha_lora_targets")),
+            "mxfp8_mha_lora_skipped_count": sum(1 for layer in layers if layer.get("mxfp8_mha_lora_skipped")),
+            "nvfp4_mha_lora_skipped_count": sum(1 for layer in layers if layer.get("nvfp4_mha_lora_skipped")),
+        },
+        "loras": loras,
+        "layers": layers,
+        "cache": {"hit": False},
+    }
+    _precision_map_cache_key = cache_key
+    _precision_map_cache_value = result
+    return result
+
+
 class ScriptArgsList(list):
     pass
 
@@ -241,6 +512,8 @@ class Api:
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/generation-diagnostics", self.get_openclaw_generation_diagnostics, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/precision-map", self.get_precision_map, methods=["GET"])
+        self.add_api_route("/sdapi/v1/precision-map", self.get_precision_map, methods=["GET"])
         self.add_api_route("/sdapi/v1/cmd-flags", self.get_cmd_flags, methods=["GET"], response_model=models.FlagsModel)
         self.add_api_route("/sdapi/v1/samplers", self.get_samplers, methods=["GET"], response_model=list[models.SamplerItem])
         self.add_api_route("/sdapi/v1/schedulers", self.get_schedulers, methods=["GET"], response_model=list[models.SchedulerItem])
@@ -341,6 +614,9 @@ class Api:
         enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
         clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
         return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
+
+    def get_precision_map(self):
+        return build_precision_map()
 
     def get_openclaw_generation_diagnostics(self):
         from modules import openclaw_generation_diagnostics

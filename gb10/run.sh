@@ -3,8 +3,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8-dev}"
-CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest-mxfp8}"
+IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest}"
+LEGACY_CONTAINER_NAMES="${LEGACY_CONTAINER_NAMES:-gb10-a1111-latest-mxfp8}"
 HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
 PORT="${PORT:-7860}"
 OUTPUTS_TARGET="${OUTPUTS_TARGET:-/mnt/nas-warehouse/StableDiffusion/Outputs}"
@@ -82,6 +83,11 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
 done
 
 # Stop the bind-mounted live container before mutating Extensions underneath it.
+for legacy_container_name in ${LEGACY_CONTAINER_NAMES}; do
+  if [[ -n "${legacy_container_name}" && "${legacy_container_name}" != "${CONTAINER_NAME}" ]]; then
+    sudo "${DOCKER_BIN}" rm -f "${legacy_container_name}" >/dev/null 2>&1 || true
+  fi
+done
 sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do

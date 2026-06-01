@@ -7,7 +7,7 @@ BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04}"
 PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu132}"
 MSLK_REPO="${MSLK_REPO:-https://github.com/meta-pytorch/MSLK.git}"
 MSLK_COMMIT="${MSLK_COMMIT:-e54ee82d57492dfc08d89df65c3898d767ad8b24}"
-IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest-mxfp8-dev}"
+IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
 DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
 

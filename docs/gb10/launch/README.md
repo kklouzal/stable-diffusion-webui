@@ -4,8 +4,8 @@
 
 Current canonical container defaults:
 
-- image tag: `local/gb10-a1111:latest-mxfp8-dev`
-- container name: `gb10-a1111-latest-mxfp8`
+- image tag: `local/gb10-a1111:latest`
+- container name: `gb10-a1111-latest`
 - host root: `/opt/gb10/stable-diffusion`
 - port: `7860`
 - network mode: `host`
