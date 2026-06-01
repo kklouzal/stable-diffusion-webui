@@ -6,6 +6,7 @@ import math
 import platform
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -293,7 +294,9 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
         reason = sd_models.mxfp8_linear_skip_reason(module, fqn) if hasattr(sd_models, "mxfp8_linear_skip_reason") else None
         weight = getattr(module, "weight", None)
         shape = tuple(weight.shape) if weight is not None else None
-        is_mx = isinstance(weight, MXTensor) or type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
+        is_mx = isinstance(weight, MXTensor) or (
+            type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
+        )
         is_managed_bf16 = getattr(module, "network_mxfp8_base_weight", None) is not None and not is_mx
         if is_managed_bf16:
             managed_bf16_active_lora += 1
@@ -372,7 +375,6 @@ def run_probe(include_benchmarks: bool = True, save: bool = True) -> dict[str, A
 
 
 def get_last_result() -> dict[str, Any]:
-    global _LAST_RESULT
     with _LOCK:
         if _LAST_RESULT is not None:
             return {"running": _LAST_RUNNING, "result": _LAST_RESULT, "path": str(last_result_path())}
@@ -386,7 +388,7 @@ def get_last_result() -> dict[str, Any]:
 
 
 def run_probe_background(include_benchmarks: bool = True) -> bool:
-    global _LAST_RUNNING, _LAST_RESULT
+    global _LAST_RUNNING
     with _LOCK:
         if _LAST_RUNNING:
             return False
@@ -398,10 +400,8 @@ def run_probe_background(include_benchmarks: bool = True) -> bool:
             print(f"MXFP8 diagnostics completed: {last_result_path()}", flush=True)
         except Exception as e:
             _LAST_RESULT = {"ok": False, "error": repr(e), "finished_at": time.time()}
-            try:
+            with suppress(Exception):
                 last_result_path().write_text(json.dumps(_LAST_RESULT, indent=2, sort_keys=True), encoding="utf8")
-            except Exception:
-                pass
             print(f"MXFP8 diagnostics failed: {e!r}", flush=True)
         finally:
             with _LOCK:
