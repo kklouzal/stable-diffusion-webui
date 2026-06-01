@@ -299,6 +299,7 @@ class CFGDenoiser(torch.nn.Module):
 
         denoised_params = CFGDenoisedParams(x_out, state.sampling_step, state.sampling_steps, self.inner_model)
         cfg_denoised_callback(denoised_params)
+        x_out = denoised_params.x
 
         if self.need_last_noise_uncond:
             self.last_noise_uncond = torch.clone(x_out[-uncond.shape[0]:])
