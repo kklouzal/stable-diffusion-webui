@@ -9,6 +9,8 @@ import torch
 EXT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EXT_ROOT))
 
+DynThresh = importlib.import_module("dynthres_core").DynThresh
+
 
 def install_a1111_stubs():
     modules_pkg = types.ModuleType("modules")
@@ -27,6 +29,7 @@ def install_a1111_stubs():
     script_callbacks_mod.CFGDenoiserParams = CFGDenoiserParams
     script_callbacks_mod.CFGDenoisedParams = CFGDenoisedParams
     script_callbacks_mod.callback_registry = callback_registry
+
     def on_cfg_denoiser(callback, *args, **kwargs):
         callback_registry.append(callback)
 
@@ -49,7 +52,7 @@ def install_a1111_stubs():
     def catenate_conds(conds):
         if not isinstance(conds[0], dict):
             return torch.cat(conds)
-        return {key: torch.cat([x[key] for x in conds]) for key in conds[0].keys()}
+        return {key: torch.cat([x[key] for x in conds]) for key in conds[0]}
 
     def subscript_cond(cond, a, b):
         if not isinstance(cond, dict):
@@ -64,28 +67,38 @@ def install_a1111_stubs():
     modules_pkg.script_callbacks = script_callbacks_mod
     modules_pkg.processing = processing_mod
     modules_pkg.shared = shared_mod
-    sys.modules.update({
-        "modules": modules_pkg,
-        "modules.headless_ui": headless_ui_mod,
-        "modules.scripts": scripts_mod,
-        "modules.script_callbacks": script_callbacks_mod,
-        "modules.processing": processing_mod,
-        "modules.shared": shared_mod,
-        "modules.sd_samplers_cfg_denoiser": samplers_mod,
-    })
+    sys.modules.update(
+        {
+            "modules": modules_pkg,
+            "modules.headless_ui": headless_ui_mod,
+            "modules.scripts": scripts_mod,
+            "modules.script_callbacks": script_callbacks_mod,
+            "modules.processing": processing_mod,
+            "modules.shared": shared_mod,
+            "modules.sd_samplers_cfg_denoiser": samplers_mod,
+        }
+    )
 
 
 class DynamicThresholdingTests(unittest.TestCase):
     @staticmethod
     def _reference_experiment_mode3(actual_res, step, max_steps):
-        coefs = torch.tensor([
-            [0.298,   0.207,  0.208, 0.0],
-            [0.187,   0.286,  0.173, 0.0],
-            [-0.158,  0.189,  0.264, 0.0],
-            [-0.184, -0.271, -0.473, 1.0],
-        ], device=actual_res.device, dtype=actual_res.dtype)
+        coefs = torch.tensor(
+            [
+                [0.298, 0.207, 0.208, 0.0],
+                [0.187, 0.286, 0.173, 0.0],
+                [-0.158, 0.189, 0.264, 0.0],
+                [-0.184, -0.271, -0.473, 1.0],
+            ],
+            device=actual_res.device,
+            dtype=actual_res.dtype,
+        )
         res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
-        max_r, max_g, max_b = res_rgb[0][0].max(), res_rgb[0][1].max(), res_rgb[0][2].max()
+        max_r, max_g, max_b = (
+            res_rgb[0][0].max(),
+            res_rgb[0][1].max(),
+            res_rgb[0][2].max(),
+        )
         max_w = res_rgb[0][3].max()
         max_rgb = torch.maximum(max_r, torch.maximum(max_g, max_b))
         if step / max(max_steps - 1, 1) > 0.2:
@@ -97,10 +110,22 @@ class DynamicThresholdingTests(unittest.TestCase):
         return torch.einsum("laxy,ab -> lbxy", res_rgb, coefs.inverse())
 
     def test_relative_path_preserves_dtype_and_finiteness(self):
-        from dynthres_core import DynThresh
-
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
-            dt = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 0, 10, True, "MEAN", "AD", 1.0)
+            dt = DynThresh(
+                7.0,
+                1.0,
+                "Constant",
+                0.0,
+                "Constant",
+                0.0,
+                4.0,
+                0,
+                10,
+                True,
+                "MEAN",
+                "AD",
+                1.0,
+            )
             dt.step = 1
             uncond = torch.randn(2, 4, 8, 8, dtype=dtype)
             relative = torch.randn_like(uncond) * 0.1
@@ -109,9 +134,21 @@ class DynamicThresholdingTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(out.float()).all())
 
     def test_ragged_multicond_equivalence_with_manual_relative(self):
-        from dynthres_core import DynThresh
-
-        dt = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 0, 10, True, "MEAN", "AD", 1.0)
+        dt = DynThresh(
+            7.0,
+            1.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            0,
+            10,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+        )
         dt.step = 1
         uncond = torch.randn(2, 4, 4, 4)
         x_out = torch.randn(5, 4, 4, 4)
@@ -125,25 +162,65 @@ class DynamicThresholdingTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(out).all())
 
     def test_experiment_mode3_matches_reference_float32(self):
-        from dynthres_core import DynThresh
-
         torch.manual_seed(1234)
-        base = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 0, 10, True, "MEAN", "AD", 1.0)
-        exp3 = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 3, 10, True, "MEAN", "AD", 1.0)
+        base = DynThresh(
+            7.0,
+            1.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            0,
+            10,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+        )
+        exp3 = DynThresh(
+            7.0,
+            1.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            3,
+            10,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+        )
         base.step = exp3.step = 3
         uncond = torch.randn(2, 4, 8, 8)
         relative = torch.randn_like(uncond) * 0.1
 
-        expected = self._reference_experiment_mode3(base.dynthresh_from_relative(relative, uncond, 12.0), 3, 10)
+        expected = self._reference_experiment_mode3(
+            base.dynthresh_from_relative(relative, uncond, 12.0), 3, 10
+        )
         actual = exp3.dynthresh_from_relative(relative, uncond, 12.0)
 
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
     def test_experiment_mode3_preserves_dtype_and_handles_single_step(self):
-        from dynthres_core import DynThresh
-
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
-            dt = DynThresh(7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 3, 1, True, "MEAN", "AD", 1.0)
+            dt = DynThresh(
+                7.0,
+                1.0,
+                "Constant",
+                0.0,
+                "Constant",
+                0.0,
+                4.0,
+                3,
+                1,
+                True,
+                "MEAN",
+                "AD",
+                1.0,
+            )
             dt.step = 0
             uncond = torch.randn(2, 4, 8, 8, dtype=dtype)
             relative = torch.randn_like(uncond) * 0.1
@@ -164,12 +241,17 @@ class CFGCombinerTests(unittest.TestCase):
 
         def original(x_out, conds_list, uncond, cond_scale):
             called["value"] = True
-            return torch.full_like(x_out[-uncond.shape[0]:], cond_scale)
+            return torch.full_like(x_out[-uncond.shape[0] :], cond_scale)
 
         x_out = torch.randn(3, 4, 4, 4)
         uncond = torch.randn(1, 77, 32)
         out = self.cfg_combiner.combine_denoised_pass_conds_list(
-            x_out, [[(0, 1.0)]], uncond, 7.5, original_func=original, cfg_dict={"pag_params": None}
+            x_out,
+            [[(0, 1.0)]],
+            uncond,
+            7.5,
+            original_func=original,
+            cfg_dict={"pag_params": None},
         )
         self.assertTrue(called["value"])
         self.assertTrue(torch.equal(out, torch.full_like(out, 7.5)))
@@ -187,12 +269,17 @@ class CFGCombinerTests(unittest.TestCase):
             cfg_interval_scheduled_value = 7.0
 
         def original(x_out, conds_list, uncond, cond_scale):
-            return torch.full_like(x_out[-uncond["crossattn"].shape[0]:], cond_scale)
+            return torch.full_like(x_out[-uncond["crossattn"].shape[0] :], cond_scale)
 
         x_out = torch.randn(4, 4, 4, 4)
         uncond = {"crossattn": torch.randn(2, 77, 32), "vector": torch.randn(2, 1280)}
         out = self.cfg_combiner.combine_denoised_pass_conds_list(
-            x_out, [[(0, 1.0)], [(1, 1.0)]], uncond, 6.0, original_func=original, cfg_dict={"pag_params": Pag()}
+            x_out,
+            [[(0, 1.0)], [(1, 1.0)]],
+            uncond,
+            6.0,
+            original_func=original,
+            cfg_dict={"pag_params": Pag()},
         )
         self.assertEqual(tuple(out.shape), (2, 4, 4, 4))
         self.assertTrue(torch.equal(out, torch.full_like(out, 6.0)))
@@ -203,7 +290,8 @@ class CFGCombinerTests(unittest.TestCase):
         script = self.cfg_combiner.CFGCombinerScript()
 
         class Processing:
-            incant_cfg_params = {"pag_params": None}
+            def __init__(self):
+                self.incant_cfg_params = {"pag_params": None}
 
         script.process_batch(Processing())
         self.assertEqual(callbacks, [])
@@ -214,7 +302,8 @@ class CFGCombinerTests(unittest.TestCase):
         script = self.cfg_combiner.CFGCombinerScript()
 
         class Processing:
-            incant_cfg_params = {"pag_params": object()}
+            def __init__(self):
+                self.incant_cfg_params = {"pag_params": object()}
 
         script.process_batch(Processing())
         self.assertEqual(len(callbacks), 1)
@@ -225,13 +314,18 @@ class CFGCombinerTests(unittest.TestCase):
         script = self.cfg_combiner.CFGCombinerScript()
 
         def original(x_out, conds_list, uncond, cond_scale):
-            return torch.full_like(x_out[-uncond.shape[0]:], cond_scale)
+            return torch.full_like(x_out[-uncond.shape[0] :], cond_scale)
 
         class Denoiser:
             combine_denoised = staticmethod(original)
 
         denoiser = Denoiser()
-        cfg_dict = {"denoiser": None, "original_combine_denoised": None, "wrapped_combine_denoised": None, "pag_params": None}
+        cfg_dict = {
+            "denoiser": None,
+            "original_combine_denoised": None,
+            "wrapped_combine_denoised": None,
+            "pag_params": None,
+        }
         script.patch_cfg_denoiser(denoiser, cfg_dict)
         wrapped = denoiser.combine_denoised
         self.assertIs(cfg_dict["wrapped_combine_denoised"], wrapped)
@@ -263,7 +357,13 @@ class PAGBatchingTests(unittest.TestCase):
         calls = []
 
         def inner_model(x_in, sigma_in, cond):
-            calls.append((tuple(x_in.shape), cond["crossattn"].shape[1], tuple(cond["c_concat"][0].shape)))
+            calls.append(
+                (
+                    tuple(x_in.shape),
+                    cond["crossattn"].shape[1],
+                    tuple(cond["c_concat"][0].shape),
+                )
+            )
             return torch.ones_like(x_in) * len(calls)
 
         def make_condition_dict(c_crossattn, c_concat):
@@ -275,7 +375,16 @@ class PAGBatchingTests(unittest.TestCase):
         tensor = {"crossattn": torch.randn(2, 539, 8), "vector": torch.randn(2, 4)}
         uncond = {"crossattn": torch.randn(1, 462, 8), "vector": torch.randn(1, 4)}
 
-        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+        out = self.pag.pag_inner_model_x_out(
+            inner_model,
+            x_in,
+            sigma_in,
+            tensor,
+            uncond,
+            image_cond,
+            make_condition_dict,
+            1,
+        )
 
         self.assertEqual(tuple(out.shape), tuple(x_in.shape))
         self.assertEqual(len(calls), 3)
@@ -297,11 +406,19 @@ class PAGBatchingTests(unittest.TestCase):
         tensor = {"crossattn": torch.randn(2, 77, 8), "vector": torch.randn(2, 4)}
         uncond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
 
-        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+        out = self.pag.pag_inner_model_x_out(
+            inner_model,
+            x_in,
+            sigma_in,
+            tensor,
+            uncond,
+            image_cond,
+            make_condition_dict,
+            1,
+        )
 
         self.assertEqual(tuple(out.shape), tuple(x_in.shape))
         self.assertEqual(calls, [torch.Size([3, 77, 8])])
-
 
     def test_pag_extra_pass_split_allows_missing_image_conditioning(self):
         calls = []
@@ -318,7 +435,9 @@ class PAGBatchingTests(unittest.TestCase):
         tensor = {"crossattn": torch.randn(2, 847, 8), "vector": torch.randn(2, 4)}
         uncond = {"crossattn": torch.randn(1, 770, 8), "vector": torch.randn(1, 4)}
 
-        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, None, make_condition_dict, 1)
+        out = self.pag.pag_inner_model_x_out(
+            inner_model, x_in, sigma_in, tensor, uncond, None, make_condition_dict, 1
+        )
 
         self.assertEqual(tuple(out.shape), tuple(x_in.shape))
         self.assertEqual([call[0] for call in calls], [847, 847, 770])
