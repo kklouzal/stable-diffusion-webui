@@ -140,7 +140,7 @@ class CLIPTextModel_(torch.nn.Module):
         x = self.final_layer_norm(x)
         if i is not None and final_layer_norm_intermediate:
             i = self.final_layer_norm(i)
-        pooled_output = x[torch.arange(x.shape[0], device=x.device), input_tokens.to(dtype=torch.int, device=x.device).argmax(dim=-1),]
+        pooled_output = x[torch.arange(x.shape[0], device=x.device), input_tokens.argmax(dim=-1),]
         return x, i, pooled_output
 
 
