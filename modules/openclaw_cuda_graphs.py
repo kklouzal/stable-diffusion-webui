@@ -251,10 +251,12 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
 
         seg_params = _seg_params(denoiser)
         if bool(getattr(seg_params, "seg_active", False)):
-            if not _allow_seg_graphs():
-                return "seg_not_allowed"
-            if not _seg_active_for_all_graph_steps(denoiser, seg_params):
-                return "seg_partial_interval"
+            # SEG mutates Python attention hooks and module fields during
+            # sampling. Capturing that path can silently replay stale hook
+            # state across later requests, producing persistent corrupted
+            # images until the process restarts. Keep SEG eager until that
+            # hook lifecycle is made graph-safe end to end.
+            return "seg_active"
 
     return None
 
