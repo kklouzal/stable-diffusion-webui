@@ -570,6 +570,53 @@ class PAGBatchingTests(unittest.TestCase):
         install_a1111_stubs()
         cls.pag = importlib.import_module("scripts.pag")
 
+    def setUp(self):
+        shared = sys.modules["modules.shared"]
+        shared.opts.batch_cond_uncond = False
+        shared.opts.pad_cond_uncond = False
+        shared.opts.pad_cond_uncond_v0 = False
+        shared.sd_model = types.SimpleNamespace(
+            cond_stage_model_empty_prompt=torch.zeros(1, 77, 8))
+
+    def test_pag_padding_matches_main_denoiser_without_mutating_inputs(self):
+        shared = sys.modules["modules.shared"]
+        shared.opts.pad_cond_uncond = True
+        cond = {"crossattn": torch.ones(2, 539, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.zeros(1, 462, 8), "vector": torch.randn(1, 4)}
+
+        padded_cond, padded_uncond = self.pag._pad_pag_cond_uncond(cond, uncond)
+
+        self.assertIs(padded_cond, cond)
+        self.assertIsNot(padded_uncond, uncond)
+        self.assertEqual(uncond["crossattn"].shape[1], 462)
+        self.assertEqual(padded_uncond["crossattn"].shape[1], 539)
+        self.assertIs(padded_uncond["vector"], uncond["vector"])
+        torch.testing.assert_close(padded_uncond["crossattn"][:, :462], uncond["crossattn"])
+
+    def test_pag_extra_pass_uses_padded_batch_when_main_denoiser_would_pad(self):
+        shared = sys.modules["modules.shared"]
+        shared.opts.batch_cond_uncond = True
+        shared.opts.pad_cond_uncond = True
+        calls = []
+
+        def inner_model(x_in, sigma_in, cond):
+            calls.append((tuple(x_in.shape), cond["crossattn"].shape))
+            return torch.ones_like(x_in)
+
+        def make_condition_dict(c_crossattn, c_concat):
+            return {**c_crossattn, "c_concat": [c_concat]}
+
+        x_in = torch.zeros(3, 4, 2, 2)
+        sigma_in = torch.zeros(3)
+        image_cond = torch.zeros(3, 1, 2, 2)
+        tensor = {"crossattn": torch.randn(2, 539, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.randn(1, 462, 8), "vector": torch.randn(1, 4)}
+
+        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+
+        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
+        self.assertEqual(calls, [((3, 4, 2, 2), torch.Size([3, 539, 8]))])
+
     def test_pag_extra_pass_splits_sdxl_cond_uncond_when_token_counts_differ(self):
         calls = []
 

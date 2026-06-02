@@ -141,6 +141,62 @@ def cond_token_count(cond):
         return tensor.shape[1]
 
 
+def _with_crossattn(cond, crossattn):
+        if not isinstance(cond, dict):
+                return crossattn
+        copied = dict(cond)
+        copied['crossattn'] = crossattn
+        return copied
+
+
+def _pad_with_empty(cond, repeats, empty):
+        tensor = cond_crossattn(cond)
+        if tensor is None:
+                raise RuntimeError("PAG conditioning is missing a cross-attention tensor")
+        empty = empty.to(device=tensor.device, dtype=tensor.dtype)
+        padded = torch.cat([tensor, empty.repeat((tensor.shape[0], repeats, 1))], dim=1)
+        return _with_crossattn(cond, padded)
+
+
+def _pad_v0_uncond(cond, uncond):
+        cond_tokens = cond_token_count(cond)
+        uncond_vec = cond_crossattn(uncond)
+        if uncond_vec is None:
+                raise RuntimeError("PAG unconditional conditioning is missing a cross-attention tensor")
+
+        if uncond_vec.shape[1] < cond_tokens:
+                last_vector = uncond_vec[:, -1:]
+                uncond_vec = torch.cat([uncond_vec, last_vector.repeat([1, cond_tokens - uncond_vec.shape[1], 1])], dim=1)
+        elif uncond_vec.shape[1] > cond_tokens:
+                uncond_vec = uncond_vec[:, :cond_tokens]
+        return cond, _with_crossattn(uncond, uncond_vec)
+
+
+def _pad_pag_cond_uncond(cond, uncond):
+        """Mirror A1111 cond/uncond padding for PAG's hidden denoise pass.
+
+        CFGDenoiser callbacks receive text conditioning before A1111 applies
+        pad_cond_uncond / pad_cond_uncond_v0. PAG stores that callback state and
+        later runs its own hidden denoise pass, so it needs a local non-mutating
+        copy of the same padding decision to keep batching and token shapes in
+        sync with the main denoiser path.
+        """
+        if cond_token_count(cond) == cond_token_count(uncond):
+                return cond, uncond
+        if getattr(shared.opts, 'pad_cond_uncond_v0', False):
+                return _pad_v0_uncond(cond, uncond)
+        if not getattr(shared.opts, 'pad_cond_uncond', False):
+                return cond, uncond
+
+        empty = shared.sd_model.cond_stage_model_empty_prompt
+        num_repeats = (cond_token_count(cond) - cond_token_count(uncond)) // empty.shape[1]
+        if num_repeats < 0:
+                cond = _pad_with_empty(cond, -num_repeats, empty)
+        elif num_repeats > 0:
+                uncond = _pad_with_empty(uncond, num_repeats, empty)
+        return cond, uncond
+
+
 def _seg_to_q_modules():
         """Return SEG-managed to_q modules currently installed on the shared model.
 
@@ -191,6 +247,7 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
         SDXL prompt/negative pairs with different token counts makes the
         callback fail before ``pag_x_out`` can be produced.
         """
+        tensor, uncond = _pad_pag_cond_uncond(tensor, uncond)
         if cond_token_count(tensor) == cond_token_count(uncond):
                 cond_in = catenate_conds([tensor, uncond])
                 return inner_model(x_in, sigma_in, cond=make_condition_dict(cond_in, image_cond_in))

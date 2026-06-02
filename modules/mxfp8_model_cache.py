@@ -66,6 +66,29 @@ def _metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
     return _device_matches(getattr(tensor, "device", None), expected_device)
 
 
+def _bias_metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
+    if metadata:
+        actual = _tensor_meta(tensor)
+        for key in ("shape", "dtype"):
+            if actual.get(key) != metadata.get(key):
+                return False
+    return _device_matches(getattr(tensor, "device", None), expected_device)
+
+
+def _cached_bias_matches(bias, bias_meta: dict | None, module, expected_device) -> bool:
+    if bias is None:
+        return module.bias is None
+    if module.bias is None or list(bias.shape) != list(module.bias.shape):
+        return False
+    return _bias_metadata_matches(bias, bias_meta, expected_device)
+
+
+def _parameter_on_device(tensor, device: torch.device | str) -> torch.nn.Parameter:
+    if _device_matches(getattr(tensor, "device", None), device):
+        return torch.nn.Parameter(tensor, requires_grad=False)
+    return torch.nn.Parameter(tensor.to(device=device), requires_grad=False)
+
+
 def is_mxfp8_cache_path(filename: str) -> bool:
     return CACHE_DIR_NAME in Path(filename).parts
 
@@ -227,9 +250,10 @@ def load_into_model(model, source_path: Optional[str], filter_fn: Callable, devi
             incompatible.append({"name": fqn, "expected": expected_shape, "cached": _tensor_meta(weight)})
         bias = entry.get("bias")
         bias_meta = metadata.get(fqn, {}).get("bias")
-        if bias is not None and (module.bias is None or list(bias.shape) != list(module.bias.shape) or not _metadata_matches(bias, bias_meta, device)):
+        if not _cached_bias_matches(bias, bias_meta, module, device):
             expected_bias = None if module.bias is None else list(module.bias.shape)
-            incompatible.append({"name": fqn + ".bias", "expected": expected_bias, "cached": _tensor_meta(bias)})
+            cached_bias = None if bias is None else _tensor_meta(bias)
+            incompatible.append({"name": fqn + ".bias", "expected": expected_bias, "cached": cached_bias})
 
     if missing:
         print(f"Ignoring incomplete MXFP8 cache {cache_path}: expected {len(eligible_modules)}, missing {len(missing)}")
@@ -245,7 +269,7 @@ def load_into_model(model, source_path: Optional[str], filter_fn: Callable, devi
             module._parameters["weight"] = entry["weight"]
             bias = entry.get("bias")
             if bias is not None:
-                module._parameters["bias"] = torch.nn.Parameter(bias.to(device=device), requires_grad=False)
+                module._parameters["bias"] = _parameter_on_device(bias, device)
             elif module.bias is not None:
                 module._parameters["bias"] = None
 
