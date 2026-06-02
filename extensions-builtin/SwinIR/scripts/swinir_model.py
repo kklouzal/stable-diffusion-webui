@@ -33,7 +33,13 @@ class UpscalerSwinIR(Upscaler):
         self.scalers = scalers
 
     def do_upscale(self, img: Image.Image, model_file: str) -> Image.Image:
-        current_config = (model_file, shared.opts.SWIN_tile)
+        current_config = (
+            model_file,
+            shared.opts.SWIN_tile,
+            bool(getattr(shared.opts, 'SWIN_torch_compile', False)),
+            str(self._get_device()),
+            str(devices.dtype),
+        )
 
         if self._cached_model_config == current_config:
             model = self._cached_model

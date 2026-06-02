@@ -15,14 +15,22 @@ from ldm.util import instantiate_from_config, ismap
 from modules import shared, sd_hijack, devices
 
 cached_ldsr_model: torch.nn.Module = None
+cached_ldsr_model_config: tuple | None = None
 
 
 # Create LDSR Class
 class LDSR:
     def load_model_from_config(self, half_attention):
-        global cached_ldsr_model
+        global cached_ldsr_model, cached_ldsr_model_config
 
-        if shared.opts.ldsr_cached and cached_ldsr_model is not None:
+        current_config = (
+            self.modelPath,
+            self.yamlPath,
+            bool(half_attention),
+            str(shared.device),
+            bool(shared.cmd_opts.opt_channelslast),
+        )
+        if shared.opts.ldsr_cached and cached_ldsr_model is not None and cached_ldsr_model_config == current_config:
             print("Loading model from cache")
             model: torch.nn.Module = cached_ldsr_model
         else:
@@ -48,6 +56,7 @@ class LDSR:
 
             if shared.opts.ldsr_cached:
                 cached_ldsr_model = model
+                cached_ldsr_model_config = current_config
 
         return {"model": model}
 

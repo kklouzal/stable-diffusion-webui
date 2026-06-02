@@ -102,12 +102,15 @@ def cached_data_for_file(subsection, title, filename, func):
     """
 
     existing_cache = cache(subsection)
-    ondisk_mtime = os.path.getmtime(filename)
+    ondisk_stat = os.stat(filename)
+    ondisk_mtime = ondisk_stat.st_mtime
+    ondisk_size = ondisk_stat.st_size
 
     entry = existing_cache.get(title)
     if entry:
         cached_mtime = entry.get("mtime", 0)
-        if ondisk_mtime > cached_mtime:
+        cached_size = entry.get("size", None)
+        if ondisk_mtime != cached_mtime or (cached_size is not None and ondisk_size != cached_size):
             entry = None
 
     if not entry or 'value' not in entry:
@@ -115,7 +118,7 @@ def cached_data_for_file(subsection, title, filename, func):
         if value is None:
             return None
 
-        entry = {'mtime': ondisk_mtime, 'value': value}
+        entry = {'mtime': ondisk_mtime, 'size': ondisk_size, 'value': value}
         existing_cache[title] = entry
 
         dump_cache()

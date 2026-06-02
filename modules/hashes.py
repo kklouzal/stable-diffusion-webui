@@ -1,4 +1,5 @@
 import hashlib
+import os
 import os.path
 
 from modules import shared, errors
@@ -22,17 +23,20 @@ def calculate_sha256(filename):
 def sha256_from_cache(filename, title, use_addnet_hash=False):
     hashes = cache("hashes-addnet") if use_addnet_hash else cache("hashes")
     try:
-        ondisk_mtime = os.path.getmtime(filename)
+        ondisk_stat = os.stat(filename)
     except FileNotFoundError:
         return None
+    ondisk_mtime = ondisk_stat.st_mtime
+    ondisk_size = ondisk_stat.st_size
 
     if title not in hashes:
         return None
 
     cached_sha256 = hashes[title].get("sha256", None)
     cached_mtime = hashes[title].get("mtime", 0)
+    cached_size = hashes[title].get("size", None)
 
-    if ondisk_mtime != cached_mtime or cached_sha256 is None:
+    if ondisk_mtime != cached_mtime or (cached_size is not None and ondisk_size != cached_size) or cached_sha256 is None:
         return None
 
     return cached_sha256
@@ -56,8 +60,10 @@ def sha256(filename, title, use_addnet_hash=False):
         sha256_value = calculate_sha256(filename)
     print(f"{sha256_value}")
 
+    stat = os.stat(filename)
     hashes[title] = {
-        "mtime": os.path.getmtime(filename),
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
         "sha256": sha256_value,
     }
 
@@ -89,12 +95,15 @@ def partial_hash_from_cache(filename, *, ignore_cache: bool = False, digits: int
     """
     try:
         filename = str(filename)
-        mtime = os.path.getmtime(filename)
+        stat = os.stat(filename)
+        mtime = stat.st_mtime
+        size = stat.st_size
         hashes = cache('partial-hash')
         cache_entry = hashes.get(filename, {})
         cache_mtime = cache_entry.get("mtime", 0)
+        cache_size = cache_entry.get("size", None)
         cache_hash = cache_entry.get("hash", None)
-        if mtime == cache_mtime and cache_hash and not ignore_cache:
+        if mtime == cache_mtime and (cache_size is None or size == cache_size) and cache_hash and not ignore_cache:
             return cache_hash[0:digits]
 
         with open(filename, 'rb') as file:
@@ -102,7 +111,7 @@ def partial_hash_from_cache(filename, *, ignore_cache: bool = False, digits: int
             file.seek(0x100000)
             m.update(file.read(0x10000))
             partial_hash = m.hexdigest()
-            hashes[filename] = {'mtime': mtime, 'hash': partial_hash}
+            hashes[filename] = {'mtime': mtime, 'size': size, 'hash': partial_hash}
             return partial_hash[0:digits]
 
     except FileNotFoundError:

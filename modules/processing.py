@@ -1807,6 +1807,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             getattr(checkpoint_info, "sha256", None),
         )
 
+        effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", getattr(opts, "inpainting_mask_weight", None))
+
         return (
             _array_cache_fingerprint(batch_images),
             _image_cache_fingerprint(image_mask),
@@ -1835,7 +1837,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.mask_blur_x,
             self.mask_blur_y,
             getattr(opts, "sd_vae_encode_method", None),
-            getattr(opts, "inpainting_mask_weight", None),
+            effective_inpainting_mask_weight,
             getattr(opts, "img2img_background_color", None),
             str(devices.dtype),
             str(devices.dtype_vae),

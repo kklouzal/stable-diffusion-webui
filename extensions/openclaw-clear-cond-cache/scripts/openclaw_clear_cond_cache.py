@@ -525,27 +525,60 @@ def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
 
 
-def clear_cond_cache() -> dict:
+def _normalize_cache_targets(targets: Any | None) -> set[str]:
+    if targets is None:
+        return {"c", "uc", "hr_c", "hr_uc", "img2img_init"}
+    if isinstance(targets, str):
+        targets = [targets]
+    elif isinstance(targets, dict):
+        targets = [key for key, enabled in targets.items() if enabled]
+
+    normalized: set[str] = set()
+    for target in targets or []:
+        name = str(target).strip().lower().replace("-", "_")
+        if name in {"all", "cond", "conds", "conditioning"}:
+            normalized.update({"c", "uc", "hr_c", "hr_uc", "img2img_init"})
+        elif name in {"prompt", "prompts", "txt2img"}:
+            normalized.update({"c", "uc", "hr_c", "hr_uc"})
+        elif name in {"base", "base_cond"}:
+            normalized.update({"c", "uc"})
+        elif name in {"hr", "hires", "hires_fix"}:
+            normalized.update({"hr_c", "hr_uc"})
+        elif name in {"img2img", "img2img_init", "init"}:
+            normalized.add("img2img_init")
+        elif name in {"c", "uc", "hr_c", "hr_uc"}:
+            normalized.add(name)
+    return normalized
+
+
+def clear_cond_cache(targets: Any | None = None) -> dict:
     """Clear A1111 reusable generation caches."""
     global _last_cleared_at
 
-    StableDiffusionProcessing.cached_c = [None, None]
-    StableDiffusionProcessing.cached_uc = [None, None]
-    StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
-    StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
-    StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
+    normalized_targets = _normalize_cache_targets(targets)
+    cleared = []
+    if "c" in normalized_targets:
+        StableDiffusionProcessing.cached_c = [None, None]
+        cleared.append("StableDiffusionProcessing.cached_c")
+    if "uc" in normalized_targets:
+        StableDiffusionProcessing.cached_uc = [None, None]
+        cleared.append("StableDiffusionProcessing.cached_uc")
+    if "hr_c" in normalized_targets:
+        StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
+        cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_c")
+    if "hr_uc" in normalized_targets:
+        StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
+        cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_uc")
+    if "img2img_init" in normalized_targets:
+        StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
+        cleared.append("StableDiffusionProcessing.cached_img2img_init")
 
     _last_cleared_at = time.time()
     return {
         "ok": True,
         "cleared_at": _last_cleared_at,
-        "cleared": [
-            "StableDiffusionProcessing.cached_c",
-            "StableDiffusionProcessing.cached_uc",
-            "StableDiffusionProcessingTxt2Img.cached_hr_c",
-            "StableDiffusionProcessingTxt2Img.cached_hr_uc",
-            "StableDiffusionProcessing.cached_img2img_init",
-        ],
+        "cleared": cleared,
+        "targets": sorted(normalized_targets),
     }
 
 
@@ -553,8 +586,14 @@ def on_app_started(_: object, app: FastAPI) -> None:
     _install_backend_status_hooks()
 
     @app.post("/sdapi/v1/openclaw/clear-cond-cache")
-    async def _clear_cond_cache():
-        return clear_cond_cache()
+    async def _clear_cond_cache(request: Request):
+        data = {}
+        try:
+            data = await request.json()
+        except Exception:
+            pass
+        targets = data.get("targets", data.get("target")) if isinstance(data, dict) else None
+        return clear_cond_cache(targets)
 
     @app.post("/sdapi/v1/openclaw/token-count")
     async def _token_count(request: Request):
