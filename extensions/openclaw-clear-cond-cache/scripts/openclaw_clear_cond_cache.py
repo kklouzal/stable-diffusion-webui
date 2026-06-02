@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 
 from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models
-from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img
+from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 from modules.textual_inversion import textual_inversion
 
 _last_cleared_at = 0.0
@@ -526,13 +526,14 @@ def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
 
 
 def clear_cond_cache() -> dict:
-    """Clear A1111 prompt-conditioning caches used by persistent_cond_cache."""
+    """Clear A1111 reusable generation caches."""
     global _last_cleared_at
 
     StableDiffusionProcessing.cached_c = [None, None]
     StableDiffusionProcessing.cached_uc = [None, None]
     StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
     StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
+    StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
 
     _last_cleared_at = time.time()
     return {
@@ -543,6 +544,7 @@ def clear_cond_cache() -> dict:
             "StableDiffusionProcessing.cached_uc",
             "StableDiffusionProcessingTxt2Img.cached_hr_c",
             "StableDiffusionProcessingTxt2Img.cached_hr_uc",
+            "StableDiffusionProcessing.cached_img2img_init",
         ],
     }
 
@@ -619,7 +621,9 @@ def on_app_started(_: object, app: FastAPI) -> None:
                 "uc": StableDiffusionProcessing.cached_uc[0] is not None,
                 "hr_c": StableDiffusionProcessingTxt2Img.cached_hr_c[0] is not None,
                 "hr_uc": StableDiffusionProcessingTxt2Img.cached_hr_uc[0] is not None,
+                "img2img_init": StableDiffusionProcessing.cached_img2img_init[0] is not None,
             },
+            "img2img_init": StableDiffusionProcessingImg2Img.img2img_init_cache_status(),
         }
 
 

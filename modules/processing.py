@@ -98,6 +98,42 @@ def create_binary_mask(image, round=True):
         image = image.convert('L')
     return image
 
+
+def _image_cache_fingerprint(image):
+    if image is None:
+        return None
+    return (
+        getattr(image, "mode", None),
+        getattr(image, "size", None),
+        hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest(),
+    )
+
+
+def _array_cache_fingerprint(array):
+    array = np.ascontiguousarray(array)
+    return (
+        tuple(array.shape),
+        str(array.dtype),
+        hashlib.blake2b(array.view(np.uint8), digest_size=16).hexdigest(),
+    )
+
+
+def _clone_cache_value(value):
+    if torch.is_tensor(value):
+        return value.detach().clone()
+    if isinstance(value, Image.Image):
+        return value.copy()
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if isinstance(value, list):
+        return [_clone_cache_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_cache_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _clone_cache_value(item) for key, item in value.items()}
+    return value
+
+
 def txt2img_image_conditioning(sd_model, x, width, height):
     if sd_model.model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
 
@@ -188,6 +224,15 @@ class StableDiffusionProcessing:
 
     cached_uc = [None, None]
     cached_c = [None, None]
+    cached_img2img_init = [None, None]
+    cached_img2img_init_stats = {
+        "hits": 0,
+        "misses": 0,
+        "compute_seconds": 0.0,
+        "last_hit": False,
+        "cached": False,
+        "bypass_reason": None,
+    }
 
     comments: dict = None
     sampler: sd_samplers_common.Sampler | None = field(default=None, init=False)
@@ -251,6 +296,7 @@ class StableDiffusionProcessing:
 
         self.cached_uc = StableDiffusionProcessing.cached_uc
         self.cached_c = StableDiffusionProcessing.cached_c
+        self.openclaw_img2img_init_cache_stats = None
 
     def fill_fields_from_opts(self):
         self.s_min_uncond = self.s_min_uncond if self.s_min_uncond is not None else opts.s_min_uncond
@@ -603,6 +649,7 @@ class Processed:
         self.infotexts = infotexts or [info] * len(images_list)
         self.version = program_version()
         self.openclaw_cond_cache_stats = getattr(p, "openclaw_cond_cache_stats", None)
+        self.openclaw_img2img_init_cache_stats = getattr(p, "openclaw_img2img_init_cache_stats", None)
         self.openclaw_script_timings = getattr(p, "openclaw_script_timings", None)
         self.openclaw_extension_timings = getattr(p, "openclaw_extension_timings", None)
         self.openclaw_generation_diagnostics = getattr(p, "openclaw_generation_diagnostics", None)
@@ -644,6 +691,7 @@ class Processed:
             "version": self.version,
             "openclaw_generation_diagnostics": self.openclaw_generation_diagnostics,
             "openclaw_generation_diagnostics_history": self.openclaw_generation_diagnostics_history,
+            "openclaw_img2img_init_cache_stats": self.openclaw_img2img_init_cache_stats,
         }
 
         return json.dumps(obj, default=lambda o: None)
@@ -1695,6 +1743,140 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.mask_blur_x = value
             self.mask_blur_y = value
 
+    @classmethod
+    def clear_img2img_init_cache(cls):
+        StableDiffusionProcessing.cached_img2img_init = [None, None]
+        StableDiffusionProcessing.cached_img2img_init_stats.update({
+            "hits": 0,
+            "misses": 0,
+            "compute_seconds": 0.0,
+            "last_hit": False,
+            "cached": False,
+            "bypass_reason": None,
+        })
+
+    @classmethod
+    def img2img_init_cache_status(cls):
+        stats = dict(StableDiffusionProcessing.cached_img2img_init_stats)
+        stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
+        return stats
+
+    def _record_img2img_init_cache_bypass(self, reason):
+        stats = StableDiffusionProcessing.cached_img2img_init_stats
+        stats["last_hit"] = False
+        stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
+        stats["bypass_reason"] = reason
+        self.openclaw_img2img_init_cache_stats = dict(stats)
+
+    def _record_img2img_init_cache_hit(self):
+        stats = StableDiffusionProcessing.cached_img2img_init_stats
+        stats["hits"] += 1
+        stats["last_hit"] = True
+        stats["cached"] = True
+        stats["bypass_reason"] = None
+        self.openclaw_img2img_init_cache_stats = dict(stats)
+
+    def _record_img2img_init_cache_miss(self, started_at):
+        stats = StableDiffusionProcessing.cached_img2img_init_stats
+        stats["misses"] += 1
+        stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
+        stats["last_hit"] = False
+        stats["cached"] = True
+        stats["bypass_reason"] = None
+        self.openclaw_img2img_init_cache_stats = dict(stats)
+
+    def _img2img_init_cache_bypass_reason(self):
+        if not getattr(opts, "persistent_img2img_init_cache", True):
+            return "disabled"
+        if not self.init_images:
+            return "no_init_images"
+        if self.inpainting_fill == 2:
+            return "latent_noise_fill_uses_seeded_random"
+        return None
+
+    def _img2img_init_cache_key(self, batch_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections):
+        reason = self._img2img_init_cache_bypass_reason()
+        if reason is not None:
+            self._record_img2img_init_cache_bypass(reason)
+            return None
+
+        checkpoint_info = getattr(self.sd_model, "sd_checkpoint_info", None)
+        checkpoint_key = (
+            getattr(checkpoint_info, "filename", None),
+            getattr(checkpoint_info, "hash", None),
+            getattr(checkpoint_info, "sha256", None),
+        )
+
+        return (
+            _array_cache_fingerprint(batch_images),
+            _image_cache_fingerprint(image_mask),
+            _image_cache_fingerprint(latent_mask),
+            checkpoint_key,
+            self.sd_model_name,
+            self.sd_model_hash,
+            sd_vae.get_loaded_vae_name(),
+            sd_vae.get_loaded_vae_hash(),
+            type(self.sd_model).__module__,
+            type(self.sd_model).__qualname__,
+            getattr(self.sd_model, "cond_stage_key", None),
+            getattr(self.sd_model, "is_sdxl_inpaint", False),
+            getattr(self.sampler, "conditioning_key", None),
+            self.width,
+            self.height,
+            self.resize_mode,
+            self.batch_size,
+            bool(repeat_init_latent),
+            bool(add_color_corrections),
+            self.mask_round,
+            self.inpainting_fill,
+            self.inpainting_mask_invert,
+            self.inpaint_full_res,
+            self.inpaint_full_res_padding,
+            self.mask_blur_x,
+            self.mask_blur_y,
+            getattr(opts, "sd_vae_encode_method", None),
+            getattr(opts, "inpainting_mask_weight", None),
+            getattr(opts, "img2img_background_color", None),
+            str(devices.dtype),
+            str(devices.dtype_vae),
+            str(shared.device),
+        )
+
+    def _restore_img2img_init_cache(self, cache_key):
+        if cache_key is None:
+            return False
+
+        cache = StableDiffusionProcessing.cached_img2img_init
+        if cache[0] != cache_key:
+            return False
+
+        payload = cache[1] or {}
+        for attr in ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to"):
+            setattr(self, attr, _clone_cache_value(payload.get(attr)))
+
+        self.is_using_inpainting_conditioning = bool(payload.get("is_using_inpainting_conditioning", False))
+        self.extra_generation_params.update(_clone_cache_value(payload.get("extra_generation_params") or {}))
+        self._record_img2img_init_cache_hit()
+        return True
+
+    def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params):
+        if cache_key is None:
+            return
+
+        StableDiffusionProcessing.cached_img2img_init = [cache_key, {
+            "init_latent": _clone_cache_value(self.init_latent),
+            "image_conditioning": _clone_cache_value(self.image_conditioning),
+            "mask": _clone_cache_value(self.mask),
+            "nmask": _clone_cache_value(self.nmask),
+            "mask_for_overlay": _clone_cache_value(getattr(self, "mask_for_overlay", None)),
+            "overlay_images": _clone_cache_value(getattr(self, "overlay_images", None)),
+            "color_corrections": _clone_cache_value(getattr(self, "color_corrections", None)),
+            "paste_to": _clone_cache_value(getattr(self, "paste_to", None)),
+            "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
+            "extra_generation_params": _clone_cache_value(extra_generation_params),
+        }]
+        self._record_img2img_init_cache_miss(started_at)
+
     def init(self, all_prompts, all_seeds, all_subseeds):
         self.extra_generation_params["Denoising strength"] = self.denoising_strength
 
@@ -1815,11 +1997,24 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         else:
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
 
-        image = torch.from_numpy(batch_images)
-        image = image.to(shared.device, dtype=devices.dtype_vae)
-
         if opts.sd_vae_encode_method != 'Full':
             self.extra_generation_params['VAE Encoder'] = opts.sd_vae_encode_method
+
+        if image_mask is not None and self.inpainting_fill == 3:
+            self.extra_generation_params["Masked content"] = 'latent nothing'
+
+        init_cache_key = self._img2img_init_cache_key(batch_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections)
+        init_cache_started = time.perf_counter()
+        cache_extra_generation_params = {
+            key: self.extra_generation_params[key]
+            for key in ("VAE Encoder", "Masked content")
+            if key in self.extra_generation_params
+        }
+        if self._restore_img2img_init_cache(init_cache_key):
+            return
+
+        image = torch.from_numpy(batch_images)
+        image = image.to(shared.device, dtype=devices.dtype_vae)
 
         self.init_latent = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
         devices.torch_gc()
@@ -1850,9 +2045,14 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             elif self.inpainting_fill == 3:
                 self.init_latent = self.init_latent * self.mask
-                self.extra_generation_params["Masked content"] = 'latent nothing'
 
         self.image_conditioning = self.img2img_image_conditioning(image * 2 - 1, self.init_latent, image_mask, self.mask_round)
+        self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params)
+
+    def close(self):
+        super().close()
+        if not getattr(opts, "persistent_img2img_init_cache", True):
+            self.clear_img2img_init_cache()
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         x = self.rng.next()
