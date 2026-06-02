@@ -616,7 +616,10 @@ class Api:
         return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
 
     def get_precision_map(self):
-        return build_precision_map()
+        # The precision map walks shared.sd_model. Keep it out of the model
+        # reload/generation window, which is also guarded by queue_lock.
+        with self.queue_lock:
+            return build_precision_map()
 
     def get_openclaw_generation_diagnostics(self):
         from modules import openclaw_generation_diagnostics
