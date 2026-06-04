@@ -193,9 +193,10 @@ class DynThresh:
 
     def dynthresh(self, cond, uncond, cfg_scale, weights):
         # uncond shape is (batch, 4, height, width)
-        conds_per_batch = cond.shape[0] / uncond.shape[0]
-        assert conds_per_batch == int(conds_per_batch), "Expected # of conds per batch to be constant across batches"
-        cond_stacked = cond.reshape((-1, int(conds_per_batch), *uncond.shape[1:]))
+        if uncond.shape[0] <= 0 or cond.shape[0] % uncond.shape[0] != 0:
+            raise ValueError("Expected # of conds per batch to be constant across batches")
+        conds_per_batch = cond.shape[0] // uncond.shape[0]
+        cond_stacked = cond.reshape((-1, conds_per_batch, *uncond.shape[1:]))
         diff = cond_stacked - uncond.unsqueeze(1)
         if weights is not None:
             diff = diff * weights.to(device=diff.device, dtype=diff.dtype)

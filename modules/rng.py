@@ -88,7 +88,7 @@ def slerp(val, low, high):
     dot = (low_norm*high_norm).sum(1)
 
     if dot.mean() > 0.9995:
-        return low * val + high * (1 - val)
+        return low * (1 - val) + high * val
 
     omega = torch.acos(dot)
     so = torch.sin(omega)

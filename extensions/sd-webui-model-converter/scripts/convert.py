@@ -493,7 +493,7 @@ def lora_doctor(
         "alpha_key_count": len(alpha_keys),
         "missing_up_examples": missing_up[:25],
         "missing_down_examples": missing_down[:25],
-        "known_junk_count": len([k for k in keys if is_known_junk_key(k)]),
+        "known_junk_count": len([k for k in keys if is_known_lora_junk_key(k)]),
         "nonfinite": nonfinite or {},
         "warnings": warnings,
     }

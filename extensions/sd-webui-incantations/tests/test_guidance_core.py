@@ -289,6 +289,29 @@ class DynamicThresholdingTests(unittest.TestCase):
         self.assertEqual(out.shape, uncond.shape)
         self.assertTrue(torch.isfinite(out).all())
 
+    def test_dynthresh_rejects_ragged_batch_ratio_without_assert(self):
+        dt = DynThresh(
+            7.0,
+            1.0,
+            "Constant",
+            0.0,
+            "Constant",
+            0.0,
+            4.0,
+            0,
+            10,
+            True,
+            "MEAN",
+            "AD",
+            1.0,
+        )
+        dt.step = 1
+        cond = torch.randn(3, 4, 4, 4)
+        uncond = torch.randn(2, 4, 4, 4)
+
+        with self.assertRaisesRegex(ValueError, "constant across batches"):
+            dt.dynthresh(cond, uncond, 9.0, None)
+
     def test_experiment_mode3_matches_reference_float32(self):
         torch.manual_seed(1234)
         base = DynThresh(
