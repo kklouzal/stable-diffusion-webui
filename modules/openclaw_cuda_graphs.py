@@ -251,12 +251,12 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
 
         seg_params = _seg_params(denoiser)
         if bool(getattr(seg_params, "seg_active", False)):
-            # SEG mutates Python attention hooks and module fields during
-            # sampling. Capturing that path can silently replay stale hook
-            # state across later requests, producing persistent corrupted
-            # images until the process restarts. Keep SEG eager until that
-            # hook lifecycle is made graph-safe end to end.
-            return "seg_active"
+            # SEG mutates Python attention hooks and module fields during sampling.
+            # Full-window SEG keeps the same hook path for every denoiser call, so
+            # allow it only behind the explicit opt-in. Partial-window SEG still has
+            # changing Python hook state and must stay eager.
+            if not (_allow_seg_graphs() and _seg_active_for_all_graph_steps(denoiser, seg_params)):
+                return "seg_active"
 
     return None
 
