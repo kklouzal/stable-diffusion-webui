@@ -132,6 +132,7 @@ def _copy_into_static(static: Any, current: Any) -> None:
 
 def _evict_if_needed_locked() -> None:
     if _MAX_CACHE_SIZE <= 0:
+        _CACHE.clear()
         return
     while len(_CACHE) >= _MAX_CACHE_SIZE:
         _CACHE.pop(next(iter(_CACHE)))
@@ -276,6 +277,9 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
     bypass_reason = _graph_denoiser_bypass_reason(denoiser)
     if bypass_reason is not None:
         _record_bypass(bypass_reason)
+        return fn(x, sigma, cond=cond)
+    if _MAX_CACHE_SIZE <= 0:
+        _record_bypass("cache_disabled")
         return fn(x, sigma, cond=cond)
     if not torch.cuda.is_available() or not torch.is_tensor(x) or x.device.type != "cuda" or torch.is_grad_enabled():
         with _LOCK:

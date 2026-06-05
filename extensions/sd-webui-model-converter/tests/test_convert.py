@@ -53,6 +53,8 @@ class LoraDoctorTests(unittest.TestCase):
         doctor = self.convert.lora_doctor(model, info, {})
 
         self.assertEqual(doctor["known_junk_count"], 1)
+        self.assertEqual(doctor["missing_up_examples"], [])
+        self.assertEqual(doctor["missing_down_examples"], [])
 
 
 if __name__ == "__main__":

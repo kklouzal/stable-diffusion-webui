@@ -448,8 +448,8 @@ def lora_doctor(
     component_counts: Counter[str] = Counter()
     rank_examples = []
     keys = set(map(str, model.keys()))
-    up_bases = {k.rsplit(".", 1)[0] for k in keys if k.endswith(".lora_up.weight")}
-    down_bases = {k.rsplit(".", 1)[0] for k in keys if k.endswith(".lora_down.weight")}
+    up_bases = {k.removesuffix(".lora_up.weight") for k in keys if k.endswith(".lora_up.weight")}
+    down_bases = {k.removesuffix(".lora_down.weight") for k in keys if k.endswith(".lora_down.weight")}
     alpha_keys = sorted(k for k in keys if k.endswith(".alpha"))
     for key, value in model.items():
         if not isinstance(value, Tensor):

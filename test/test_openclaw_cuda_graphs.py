@@ -4,6 +4,8 @@ import os
 import types
 import unittest
 
+import torch
+
 from modules import openclaw_cuda_graphs
 
 
@@ -58,6 +60,42 @@ class CudaGraphSegBypassTests(unittest.TestCase):
         reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
 
         self.assertEqual(reason, "processing_mask")
+
+
+class CudaGraphCacheSizeTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_max_cache_size = openclaw_cuda_graphs._MAX_CACHE_SIZE
+        openclaw_cuda_graphs.set_enabled(False, clear=True)
+
+    def tearDown(self):
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = self.previous_max_cache_size
+        openclaw_cuda_graphs.set_enabled(False, clear=True)
+
+    def test_zero_max_cache_size_clears_existing_cache_entries(self):
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = 0
+        openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
+
+        openclaw_cuda_graphs._evict_if_needed_locked()
+
+        self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
+
+    def test_zero_max_cache_size_bypasses_capture(self):
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = 0
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        calls = []
+        x = torch.zeros(1)
+
+        def fn(x_arg, sigma_arg, cond=None):
+            calls.append((x_arg, sigma_arg, cond))
+            return x_arg + 1
+
+        out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
+        status = openclaw_cuda_graphs.status()
+
+        self.assertTrue(torch.equal(out, torch.ones(1)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(status["cache_size"], 0)
+        self.assertEqual(status["bypass_reasons"].get("cache_disabled"), 1)
 
 
 if __name__ == "__main__":
