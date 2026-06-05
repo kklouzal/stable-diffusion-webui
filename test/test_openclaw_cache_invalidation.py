@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 from pathlib import Path
@@ -92,6 +93,66 @@ def test_token_count_uses_longest_scheduled_prompt(monkeypatch):
     result = clear_module.estimate_token_count("ignored base prompt", 20)
 
     assert result == {"ok": True, "token_count": len("the longest scheduled prompt"), "max_length": 75}
+
+
+def test_clear_cond_cache_endpoint_uses_queue_lock(monkeypatch):
+    clear_module = _load_clear_cond_cache_module()
+
+    class RecordingLock:
+        def __init__(self):
+            self.active = False
+            self.entered = False
+            self.exited = False
+
+        def __enter__(self):
+            self.entered = True
+            self.active = True
+
+        def __exit__(self, exc_type, exc, tb):
+            self.active = False
+            self.exited = True
+
+    class FakeApp:
+        def __init__(self):
+            self.routes = {}
+
+        def post(self, path):
+            def decorator(fn):
+                self.routes[("POST", path)] = fn
+                return fn
+
+            return decorator
+
+        def get(self, path):
+            def decorator(fn):
+                self.routes[("GET", path)] = fn
+                return fn
+
+            return decorator
+
+    class FakeRequest:
+        async def json(self):
+            return {"targets": ["c"]}
+
+    lock = RecordingLock()
+    calls = []
+
+    def clear_cond_cache(targets):
+        assert lock.active
+        calls.append(targets)
+        return {"ok": True, "targets": targets}
+
+    monkeypatch.setattr(clear_module.call_queue, "queue_lock", lock)
+    monkeypatch.setattr(clear_module, "clear_cond_cache", clear_cond_cache)
+
+    app = FakeApp()
+    clear_module.on_app_started(None, app)
+    result = asyncio.run(app.routes[("POST", "/sdapi/v1/openclaw/clear-cond-cache")](FakeRequest()))
+
+    assert result == {"ok": True, "targets": ["c"]}
+    assert calls == [["c"]]
+    assert lock.entered is True
+    assert lock.exited is True
 
 
 def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(monkeypatch):

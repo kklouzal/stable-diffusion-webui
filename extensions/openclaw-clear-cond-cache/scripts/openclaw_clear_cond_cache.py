@@ -595,7 +595,8 @@ def on_app_started(_: object, app: FastAPI) -> None:
         except Exception:
             pass
         targets = data.get("targets", data.get("target")) if isinstance(data, dict) else None
-        return clear_cond_cache(targets)
+        with call_queue.queue_lock:
+            return clear_cond_cache(targets)
 
     @app.post("/sdapi/v1/openclaw/token-count")
     async def _token_count(request: Request):
