@@ -4,32 +4,53 @@ on:
   - push
   - pull_request
 
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint-python:
+  ruff-check:
     name: ruff
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
-          python-version: 3.11
-          # NB: there's no cache: pip here since we're not installing anything
-          #     from the requirements.txt file(s) in the repository; it's faster
-          #     not to have GHA download an (at the time of writing) 4 GB cache
-          #     of PyTorch and other dependencies.
-      - name: Install Ruff
-        run: pip install ruff==0.3.3
-      - name: Run Ruff
-        run: ruff .
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-test.txt
+
+      - name: Install lint dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run Ruff lint
+        run: >-
+          python -m ruff check
+          --output-format=github
+          .
+
   lint-js:
     name: eslint
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
