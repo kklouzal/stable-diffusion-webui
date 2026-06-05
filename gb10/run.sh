@@ -169,8 +169,17 @@ DOCKER_ARGS=(
   -v "${HOST_ROOT}/config/styles.csv:/opt/stable-diffusion-webui/styles.csv"
 )
 
-sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
-  "${IMAGE_TAG}"
+TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
+if ! sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
+  "${IMAGE_TAG}"; then
+  observed_image_id="$(sudo "$DOCKER_BIN" inspect "${CONTAINER_NAME}" --format '{{.Image}}' 2>/dev/null || true)"
+  observed_status="$(sudo "$DOCKER_BIN" inspect "${CONTAINER_NAME}" --format '{{.State.Status}}' 2>/dev/null || true)"
+  if [[ "${observed_status}" == "running" && "${observed_image_id}" == "${TARGET_IMAGE_ID}" ]]; then
+    echo "Docker run returned nonzero, but ${CONTAINER_NAME} is running target image ${TARGET_IMAGE_ID}; continuing." >&2
+  else
+    exit 1
+  fi
+fi
 
 echo "Started ${CONTAINER_NAME} from ${IMAGE_TAG}"
 echo "CPU set: ${CPUSET_CPUS}"
