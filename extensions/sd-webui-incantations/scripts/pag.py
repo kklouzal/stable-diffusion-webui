@@ -787,9 +787,11 @@ def calculate_noise_level(i, N, sigma_min=0.002, sigma_max=80.0, rho=3):
     Returns:
     float: Calculated noise level for the given step.
     """
-    if i == 0:
+    if N <= 0:
+        return 0.0
+    if i <= 0:
         return sigma_max
-    if i >= N:
+    if i >= N or N == 1:
         return 0.0
     sigma_max_p = sigma_max ** (1/rho)
     sigma_min_p = sigma_min ** (1/rho)
@@ -814,6 +816,8 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
     int: The closest index to the specified noise level.
     """
     # Min/max noise levels for the given range
+    if N <= 0:
+        return 0
     if noise_level <= sigma_min:
         return N
     if noise_level >= sigma_max:
@@ -832,7 +836,13 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
             low = mid + 1
 
     # If exact match not found, return the index with noise level closest to the target
-    return low if abs(calculate_noise_level(low, N) - noise_level) < abs(calculate_noise_level(high, N) - noise_level) else high
+    low = max(0, min(N, low))
+    high = max(0, min(N, high))
+    low_delta = abs(calculate_noise_level(low, N, sigma_min, sigma_max, rho) - noise_level)
+    high_delta = abs(calculate_noise_level(high, N, sigma_min, sigma_max, rho) - noise_level)
+    if low_delta < high_delta:
+        return low
+    return high
 
 
 ### CFG Schedulers
@@ -854,7 +864,15 @@ def cfg_scheduler(schedule: str, step: int, max_steps: int, w0: float) -> float:
         if scheduler is None:
                 logger.error("Invalid CFG schedule: %s", schedule)
                 scheduler = constant_schedule
+        if max_steps <= 0:
+                return w0
         return scheduler(step, max_steps, w0)
+
+
+def _schedule_progress(step: int, max_steps: int) -> float:
+        if max_steps <= 0:
+                return 0.0
+        return max(0.0, min(1.0, step / max_steps))
 
 
 def constant_schedule(step: int, max_steps: int, w0: float):
@@ -870,7 +888,7 @@ def linear_schedule(step: int, max_steps: int, w0: float):
         Such that integral 0-> T ~ w(t) dt  = w*T
         """
         # return w0 * (1 - step / max_steps)
-        return w0 * 2 * (1 - step / max_steps)
+        return w0 * 2 * (1 - _schedule_progress(step, max_steps))
 
 
 def clamp_linear_schedule(step: int, max_steps: int, w0: float, c: float):
@@ -892,28 +910,29 @@ def invlinear_schedule(step: int, max_steps: int, w0: float):
         Normalized inverse linear scheduler for CFG guidance weight.
         """
         # return w0 * (step / max_steps)
-        return w0 * 2 * (step / max_steps)
+        return w0 * 2 * _schedule_progress(step, max_steps)
 
 
 def powered_cosine_schedule(step: int, max_steps: int, w0: float, s: float):
         """
         Normalized cosine scheduler for CFG guidance weight.
         """
-        return w0 * ((1 - math.cos(math.pi * ((max_steps - step) / max_steps)**s))/2.0)
+        progress = _schedule_progress(step, max_steps)
+        return w0 * ((1 - math.cos(math.pi * (1 - progress)**s))/2.0)
 
 
 def cosine_schedule(step: int, max_steps: int, w0: float):
         """
         Normalized cosine scheduler for CFG guidance weight.
         """
-        return w0 * (1 + math.cos(math.pi * step / max_steps))
+        return w0 * (1 + math.cos(math.pi * _schedule_progress(step, max_steps)))
 
 
 def sine_schedule(step: int, max_steps: int, w0: float):
         """
         Normalized sine scheduler for CFG guidance weight.
         """
-        return w0 * (math.sin((math.pi * step / max_steps) - (math.pi / 2)) + 1)
+        return w0 * (math.sin((math.pi * _schedule_progress(step, max_steps)) - (math.pi / 2)) + 1)
 
 
 def v_shape_schedule(step: int, max_steps: int, w0: float):

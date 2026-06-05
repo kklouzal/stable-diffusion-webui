@@ -31,6 +31,18 @@ def sanf_gaussian_blur3(x):
         return x_blur.squeeze(0) if squeeze_batch else x_blur
 
 
+def _sanf_guidance_blend(cfg_x, pag_x):
+        """Select CFG or PAG guidance by SANF saliency without extra stacking."""
+        omega_rt = sanf_gaussian_blur3(cfg_x.abs()).float()
+        omega_rs = sanf_gaussian_blur3(pag_x.abs()).float()
+        soft_rt = torch.softmax(omega_rt, dim=0)
+        soft_rs = torch.softmax(omega_rs, dim=0)
+
+        # The previous 2-way stack + argmax path selected CFG on ties because
+        # index 0 won. Keep that behavior while avoiding the stack/reduction.
+        return torch.where(soft_rt >= soft_rs, cfg_x, pag_x)
+
+
 def _record_cfg_timing(cfg_dict, hook_name, elapsed):
         timings = cfg_dict.setdefault("openclaw_extension_timings", {})
         hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
@@ -308,16 +320,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                                         sanf_started = time.perf_counter()
                                         try:
                                                 model_delta = x_out[cond_index] - denoised_uncond[i]
-                                                cfg_x = model_delta * (weight * cfg_scale)
-                                                omega_rt = sanf_gaussian_blur3(cfg_x.abs()).float()
-                                                omega_rs = sanf_gaussian_blur3(pag_x.abs()).float()
-                                                soft_rt = torch.softmax(omega_rt, dim=0)
-                                                soft_rs = torch.softmax(omega_rs, dim=0)
-
-                                                m = torch.stack([soft_rt, soft_rs], dim=0) # 2 c h w
-                                                _, argmax_indices = torch.max(m, dim=0)
-                                                m1 = (argmax_indices == 0).to(dtype=cfg_x.dtype)
-                                                sal_cfg = cfg_x * m1 + pag_x * (1 - m1)
+                                                sal_cfg = _sanf_guidance_blend(model_delta * (weight * cfg_scale), pag_x)
                                                 denoised[i] += sal_cfg
                                         finally:
                                                 _record_cfg_timing(cfg_dict, "combine_sanf_blend", time.perf_counter() - sanf_started)

@@ -56,6 +56,44 @@ def test_clear_cond_cache_default_preserves_legacy_clear_all_behavior():
     assert StableDiffusionProcessing.cached_img2img_init[0] is None
 
 
+def test_token_count_falls_back_to_input_text_when_prompt_schedule_is_empty(monkeypatch):
+    clear_module = _load_clear_cond_cache_module()
+
+    monkeypatch.setattr(clear_module.extra_networks, "parse_prompt", lambda text: (text, []))
+    monkeypatch.setattr(clear_module.prompt_parser, "get_multicond_prompt_list", lambda prompts: (None, prompts, None))
+    monkeypatch.setattr(clear_module.prompt_parser, "get_learned_conditioning_prompt_schedules", lambda _prompts, _steps: [])
+    monkeypatch.setattr(
+        clear_module,
+        "model_hijack",
+        SimpleNamespace(get_prompt_lengths=lambda prompt, *_args: (len(prompt), 75)),
+    )
+
+    result = clear_module.estimate_token_count("fallback prompt", 20)
+
+    assert result == {"ok": True, "token_count": len("fallback prompt"), "max_length": 75}
+
+
+def test_token_count_uses_longest_scheduled_prompt(monkeypatch):
+    clear_module = _load_clear_cond_cache_module()
+
+    schedules = [
+        [[5, "short"], [10, "medium prompt"]],
+        [[20, "the longest scheduled prompt"]],
+    ]
+    monkeypatch.setattr(clear_module.extra_networks, "parse_prompt", lambda text: (text, []))
+    monkeypatch.setattr(clear_module.prompt_parser, "get_multicond_prompt_list", lambda prompts: (None, prompts, None))
+    monkeypatch.setattr(clear_module.prompt_parser, "get_learned_conditioning_prompt_schedules", lambda _prompts, _steps: schedules)
+    monkeypatch.setattr(
+        clear_module,
+        "model_hijack",
+        SimpleNamespace(get_prompt_lengths=lambda prompt, *_args: (len(prompt), 75)),
+    )
+
+    result = clear_module.estimate_token_count("ignored base prompt", 20)
+
+    assert result == {"ok": True, "token_count": len("the longest scheduled prompt"), "max_length": 75}
+
+
 def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(monkeypatch):
     checkpoint = SimpleNamespace(filename="model.safetensors", hash="abcd", sha256="sha256")
     sd_model = SimpleNamespace(

@@ -4,7 +4,6 @@ import importlib.util
 import os
 import threading
 import time
-from functools import reduce
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -43,8 +42,11 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
 
         forge = importlib.util.find_spec("modules_forge") is not None
 
-        flat_prompts = reduce(lambda list1, list2: list1 + list2, prompt_schedules, [])
-        prompts = [prompt_text for _step, prompt_text in flat_prompts] or [text or ""]
+        prompts = [
+            prompt_text
+            for prompt_schedule in prompt_schedules
+            for _step, prompt_text in prompt_schedule
+        ] or [text or ""]
 
         if model_hijack is None:
             return {"ok": False, "error": "A1111 model_hijack tokenizer is unavailable", "token_count": None, "max_length": None}

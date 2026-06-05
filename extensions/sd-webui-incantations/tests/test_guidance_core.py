@@ -1,4 +1,5 @@
 import importlib
+import math
 import sys
 import types
 from pathlib import Path
@@ -550,6 +551,29 @@ class CFGCombinerTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), tuple(img.shape))
         self.assertTrue(torch.isfinite(out).all())
 
+    def test_sanf_guidance_blend_matches_stack_argmax_and_prefers_cfg_on_tie(self):
+        cfg_x = torch.tensor(
+            [
+                [[1.0, -2.0], [3.0, -4.0]],
+                [[-0.5, 0.25], [-0.75, 1.5]],
+            ]
+        )
+        pag_x = torch.tensor(
+            [
+                [[0.25, -4.0], [1.0, -8.0]],
+                [[-1.0, 0.5], [-2.0, 0.25]],
+            ]
+        )
+        omega_rt = self.cfg_combiner.sanf_gaussian_blur3(cfg_x.abs()).float()
+        omega_rs = self.cfg_combiner.sanf_gaussian_blur3(pag_x.abs()).float()
+        soft_rt = torch.softmax(omega_rt, dim=0)
+        soft_rs = torch.softmax(omega_rs, dim=0)
+        _, argmax_indices = torch.max(torch.stack([soft_rt, soft_rs], dim=0), dim=0)
+        expected = cfg_x * (argmax_indices == 0) + pag_x * (argmax_indices == 1)
+
+        torch.testing.assert_close(self.cfg_combiner._sanf_guidance_blend(cfg_x, pag_x), expected)
+        torch.testing.assert_close(self.cfg_combiner._sanf_guidance_blend(cfg_x, -cfg_x), cfg_x)
+
     def test_cfg_combiner_wrapper_restores_only_own_wrapper(self):
         script = self.cfg_combiner.CFGCombinerScript()
 
@@ -729,6 +753,19 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), tuple(x_in.shape))
         self.assertEqual([call[0] for call in calls], [847, 847, 770])
         self.assertTrue(all(call[1] is None for call in calls))
+
+    def test_pag_noise_helpers_handle_degenerate_step_counts(self):
+        self.assertEqual(self.pag.calculate_noise_level(0, 0), 0.0)
+        self.assertEqual(self.pag.calculate_noise_level(-1, 4), 80.0)
+        self.assertEqual(self.pag.calculate_noise_level(4, 4), 0.0)
+        self.assertEqual(self.pag.find_closest_index(1.0, 0), 0)
+
+    def test_cfg_schedulers_handle_zero_steps_and_clamp_progress(self):
+        for schedule in self.pag._CFG_SCHEDULE_DISPATCH:
+            self.assertTrue(math.isfinite(self.pag.cfg_scheduler(schedule, 0, 0, 8.0)))
+        self.assertEqual(self.pag.cfg_scheduler("Linear", 0, 0, 8.0), 8.0)
+        self.assertEqual(self.pag.linear_schedule(-1, 4, 8.0), 16.0)
+        self.assertEqual(self.pag.invlinear_schedule(5, 4, 8.0), 16.0)
 
     def test_cfg_interval_registers_without_pag_attention_modules(self):
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
