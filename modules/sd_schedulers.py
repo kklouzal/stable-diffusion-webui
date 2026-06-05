@@ -27,6 +27,7 @@ class Scheduler:
 
 
 def uniform(n, sigma_min, sigma_max, inner_model, device):
+    n = _validate_step_count(n)
     return inner_model.get_sigmas(n).to(device)
 
 
@@ -42,17 +43,35 @@ def _append_zero(sigmas):
     return torch.cat([sigmas, sigmas.new_zeros(1)])
 
 
+def _validate_step_count(n):
+    if n <= 0:
+        raise ValueError("scheduler step count must be positive")
+    return n
+
+
+def _sigmas_from_timesteps(inner_model, timesteps, device, dtype=torch.float32):
+    try:
+        sigmas = inner_model.t_to_sigma(timesteps)
+    except Exception:
+        sigmas = None
+
+    if torch.is_tensor(sigmas) and sigmas.ndim > 0:
+        return sigmas.to(device=device, dtype=dtype).reshape(-1)
+
+    return _stack_sigmas((inner_model.t_to_sigma(ts) for ts in timesteps), device, dtype)
+
+
 def sgm_uniform(n, sigma_min, sigma_max, inner_model, device):
+    n = _validate_step_count(n)
     start = inner_model.sigma_to_t(_as_sigma(sigma_max, device))
     end = inner_model.sigma_to_t(_as_sigma(sigma_min, device))
-    sigs = [
-        inner_model.t_to_sigma(ts)
-        for ts in torch.linspace(start, end, n + 1, device=device)[:-1]
-    ]
-    return _append_zero(_stack_sigmas(sigs, device))
+    timesteps = torch.linspace(start, end, n + 1, device=device)[:-1]
+    return _append_zero(_sigmas_from_timesteps(inner_model, timesteps, device))
 
 
 def get_align_your_steps_sigmas(n, sigma_min, sigma_max, device):
+    n = _validate_step_count(n)
+
     # https://research.nvidia.com/labs/toronto-ai/AlignYourSteps/howto.html
     def loglinear_interp(t_steps, num_steps):
         """
@@ -82,6 +101,7 @@ def get_align_your_steps_sigmas(n, sigma_min, sigma_max, device):
 
 
 def kl_optimal(n, sigma_min, sigma_max, device):
+    n = _validate_step_count(n)
     alpha_min = torch.arctan(_as_sigma(sigma_min, device))
     alpha_max = torch.arctan(_as_sigma(sigma_max, device))
     step_indices = torch.arange(n + 1, device=device)
@@ -90,13 +110,15 @@ def kl_optimal(n, sigma_min, sigma_max, device):
 
 
 def simple_scheduler(n, sigma_min, sigma_max, inner_model, device):
+    n = _validate_step_count(n)
     sigmas = torch.as_tensor(inner_model.sigmas, device=device, dtype=torch.float32)
     ss = len(inner_model.sigmas) / n
-    indices = [-(1 + int(x * ss)) for x in range(n)]
+    indices = -(1 + (torch.arange(n, device=device, dtype=torch.float32) * ss).to(torch.long))
     return _append_zero(sigmas[indices])
 
 
 def normal_scheduler(n, sigma_min, sigma_max, inner_model, device, sgm=False, floor=False):
+    n = _validate_step_count(n)
     start = inner_model.sigma_to_t(_as_sigma(sigma_max, device))
     end = inner_model.sigma_to_t(_as_sigma(sigma_min, device))
 
@@ -105,36 +127,29 @@ def normal_scheduler(n, sigma_min, sigma_max, inner_model, device, sgm=False, fl
     else:
         timesteps = torch.linspace(start, end, n, device=device)
 
-    sigs = []
-    for x in range(len(timesteps)):
-        ts = timesteps[x]
-        sigs.append(inner_model.t_to_sigma(ts))
-    return _append_zero(_stack_sigmas(sigs, device))
+    return _append_zero(_sigmas_from_timesteps(inner_model, timesteps, device))
 
 
 def ddim_scheduler(n, sigma_min, sigma_max, inner_model, device):
-    sigs = []
+    n = _validate_step_count(n)
     sigmas = torch.as_tensor(inner_model.sigmas, device=device, dtype=torch.float32)
     ss = max(len(inner_model.sigmas) // n, 1)
-    x = 1
-    while x < len(inner_model.sigmas):
-        sigs.append(sigmas[x])
-        x += ss
-    sigs = sigs[::-1]
-    return _append_zero(_stack_sigmas(sigs, device))
+    indices = torch.arange(1, len(inner_model.sigmas), ss, device=device)
+    return _append_zero(sigmas[indices].flip(0))
 
 
 def beta_scheduler(n, sigma_min, sigma_max, inner_model, device):
+    n = _validate_step_count(n)
+
     # From "Beta Sampling is All You Need" [arXiv:2407.12173] (Lee et. al, 2024)
     alpha = shared.opts.beta_dist_alpha
     beta = shared.opts.beta_dist_beta
-    curve = [stats.beta.ppf(x, alpha, beta) for x in np.linspace(1, 0, n)]
+    curve = torch.as_tensor(stats.beta.ppf(np.linspace(1, 0, n), alpha, beta), device=device, dtype=torch.float32)
 
     start = inner_model.sigma_to_t(_as_sigma(sigma_max, device))
     end = inner_model.sigma_to_t(_as_sigma(sigma_min, device))
-    timesteps = [end + x * (start - end) for x in curve]
-    sigmas = [inner_model.t_to_sigma(ts) for ts in timesteps]
-    return _append_zero(_stack_sigmas(sigmas, device))
+    timesteps = end + curve * (start - end)
+    return _append_zero(_sigmas_from_timesteps(inner_model, timesteps, device))
 
 
 schedulers = [
