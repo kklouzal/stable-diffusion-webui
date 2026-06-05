@@ -72,6 +72,13 @@ class CFGDenoiserTimesteps(CFGDenoiser):
         return self.model_wrap
 
 
+def _make_timesteps(steps: int, device) -> torch.Tensor:
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    stride = max(1, 1000 // steps)
+    return torch.arange(0, 1000, stride, device=device, dtype=torch.int64).add_(1).clamp_(0, 999)
+
+
 class CompVisSampler(sd_samplers_common.Sampler):
     def __init__(self, funcname, sd_model):
         super().__init__(funcname)
@@ -91,9 +98,7 @@ class CompVisSampler(sd_samplers_common.Sampler):
 
         steps += 1 if discard_next_to_last_sigma else 0
 
-        timesteps = torch.clip(torch.asarray(list(range(0, 1000, 1000 // steps)), device=devices.device) + 1, 0, 999)
-
-        return timesteps
+        return _make_timesteps(steps, devices.device)
 
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)

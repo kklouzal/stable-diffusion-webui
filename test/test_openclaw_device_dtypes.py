@@ -75,6 +75,74 @@ def load_timesteps_impl_module():
     return module
 
 
+def load_timesteps_sampler_module(device=None):
+    module_name = "test_timesteps_sampler_module"
+    originals = {}
+
+    def put(name, module):
+        originals[name] = sys.modules.get(name)
+        sys.modules[name] = module
+
+    class CFGDenoiser:
+        def __init__(self, sampler):
+            self.model_wrap = None
+
+    class Sampler:
+        def __init__(self, funcname):
+            self.funcname = funcname
+            self.config = None
+
+    class SamplerData(tuple):
+        def __new__(cls, name, constructor, aliases, options):
+            return tuple.__new__(cls, (name, constructor, aliases, options))
+
+    modules_pkg = types.ModuleType("modules")
+    devices_module = types.ModuleType("modules.devices")
+    devices_module.device = device or torch.device("cpu")
+    callbacks_module = types.ModuleType("modules.script_callbacks")
+    callbacks_module.ExtraNoiseParams = object
+    callbacks_module.extra_noise_callback = lambda params: None
+    cfg_module = types.ModuleType("modules.sd_samplers_cfg_denoiser")
+    cfg_module.CFGDenoiser = CFGDenoiser
+    common_module = types.ModuleType("modules.sd_samplers_common")
+    common_module.Sampler = Sampler
+    common_module.SamplerData = SamplerData
+    impl_module = types.ModuleType("modules.sd_samplers_timesteps_impl")
+    impl_module.ddim = lambda *args, **kwargs: None
+    impl_module.ddim_cfgpp = lambda *args, **kwargs: None
+    impl_module.plms = lambda *args, **kwargs: None
+    impl_module.unipc = lambda *args, **kwargs: None
+    shared_module = types.ModuleType("modules.shared")
+    shared_module.opts = types.SimpleNamespace(always_discard_next_to_last_sigma=False)
+    shared_module.sd_model = types.SimpleNamespace(parameterization="eps", alphas_cumprod=torch.linspace(0.999, 0.001, 1000))
+
+    for name, module in (
+        ("modules", modules_pkg),
+        ("modules.devices", devices_module),
+        ("modules.script_callbacks", callbacks_module),
+        ("modules.sd_samplers_cfg_denoiser", cfg_module),
+        ("modules.sd_samplers_common", common_module),
+        ("modules.sd_samplers_timesteps_impl", impl_module),
+        ("modules.shared", shared_module),
+    ):
+        put(name, module)
+
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, "modules/sd_samplers_timesteps.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+        for name, original in originals.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
+    return module
+
+
 def available_test_device():
     if not torch.cuda.is_available():
         return torch.device("cpu")
@@ -87,6 +155,29 @@ def available_test_device():
 
 
 class OpenClawDeviceDtypeTests(unittest.TestCase):
+
+    def test_timestep_schedule_preserves_existing_stride_for_normal_counts(self):
+        sampler_module = load_timesteps_sampler_module()
+
+        timesteps = sampler_module._make_timesteps(20, torch.device("cpu"))
+
+        self.assertEqual(timesteps.tolist(), list(range(1, 1000, 50)))
+
+    def test_timestep_schedule_handles_more_than_training_steps(self):
+        sampler_module = load_timesteps_sampler_module()
+
+        timesteps = sampler_module._make_timesteps(1001, torch.device("cpu"))
+
+        self.assertEqual(len(timesteps), 1000)
+        self.assertEqual(timesteps[0].item(), 1)
+        self.assertEqual(timesteps[-1].item(), 999)
+
+    def test_timestep_schedule_rejects_nonpositive_steps(self):
+        sampler_module = load_timesteps_sampler_module()
+
+        with self.assertRaises(ValueError):
+            sampler_module._make_timesteps(0, torch.device("cpu"))
+
     def test_vae_cheap_approximation_preserves_sample_dtype(self):
         with mock.patch.object(sys, "argv", [sys.argv[0]]):
             from modules import sd_vae_approx
