@@ -760,6 +760,14 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual(self.pag.calculate_noise_level(4, 4), 0.0)
         self.assertEqual(self.pag.find_closest_index(1.0, 0), 0)
 
+    def test_pag_find_closest_index_honors_custom_noise_curve(self):
+        target = self.pag.calculate_noise_level(2, 5, sigma_min=0.01, sigma_max=10.0, rho=5)
+
+        self.assertEqual(
+            self.pag.find_closest_index(target, 5, sigma_min=0.01, sigma_max=10.0, rho=5),
+            2,
+        )
+
     def test_cfg_schedulers_handle_zero_steps_and_clamp_progress(self):
         for schedule in self.pag._CFG_SCHEDULE_DISPATCH:
             self.assertTrue(math.isfinite(self.pag.cfg_scheduler(schedule, 0, 0, 8.0)))

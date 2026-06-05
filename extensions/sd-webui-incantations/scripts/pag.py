@@ -827,7 +827,7 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
     low, high = 0, N - 1
     while low <= high:
         mid = (low + high) // 2
-        mid_nl = calculate_noise_level(mid, N)
+        mid_nl = calculate_noise_level(mid, N, sigma_min, sigma_max, rho)
         if abs(mid_nl - noise_level) < tol:
             return mid
         elif mid_nl < noise_level:
