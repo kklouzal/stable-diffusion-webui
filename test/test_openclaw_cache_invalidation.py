@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 from modules import cache as cache_module, hashes, processing
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
@@ -187,6 +188,8 @@ def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(mo
     p.mask_blur_x = 0
     p.mask_blur_y = 0
     p._record_img2img_init_cache_bypass = lambda reason: None
+    p.image_mask = None
+    p.latent_mask = None
 
     batch_images = np.zeros((1, 3, 8, 8), dtype=np.float32)
 
@@ -196,6 +199,30 @@ def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(mo
     key_high = p._img2img_init_cache_key(batch_images, None, None, False, False)
 
     assert key_low != key_high
+
+
+def test_img2img_init_cache_bypasses_masked_requests(monkeypatch):
+    monkeypatch.setattr(processing.opts, "persistent_img2img_init_cache", True, raising=False)
+
+    p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
+    p.init_images = [object()]
+    p.image_mask = object()
+    p.latent_mask = None
+    p.inpainting_fill = 0
+    bypasses = []
+    p._record_img2img_init_cache_bypass = bypasses.append
+
+    batch_images = np.zeros((1, 3, 8, 8), dtype=np.float32)
+
+    assert p._img2img_init_cache_key(batch_images, None, None, False, False) is None
+    assert bypasses == ["masked_request"]
+
+
+def test_resize_latent_mask_uses_area_coverage_when_rounding():
+    mask = Image.new("L", (8, 8), 0)
+    ImageDraw.Draw(mask).rectangle((0, 0, 3, 3), fill=255)
+
+    assert processing._resize_latent_mask(mask, (2, 2), round=True).tolist() == [[1.0, 0.0], [0.0, 0.0]]
 
 
 def test_cached_data_for_file_invalidates_when_mtime_moves_backward(tmp_path, monkeypatch):

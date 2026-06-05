@@ -99,6 +99,17 @@ def create_binary_mask(image, round=True):
     return image
 
 
+def _resize_latent_mask(image, size, round=True):
+    resampling = Image.Resampling.BOX if hasattr(Image, "Resampling") else Image.BOX
+    latmask = image.convert('L').resize(size, resample=resampling)
+    latmask = np.asarray(latmask, dtype=np.float32) / 255.0
+
+    if round:
+        latmask = (latmask >= 0.5).astype(np.float32)
+
+    return latmask
+
+
 def _image_cache_fingerprint(image):
     if image is None:
         return None
@@ -1790,6 +1801,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             return "disabled"
         if not self.init_images:
             return "no_init_images"
+        if getattr(self, "image_mask", None) is not None or getattr(self, "latent_mask", None) is not None:
+            return "masked_request"
         if self.inpainting_fill == 2:
             return "latent_noise_fill_uses_seeded_random"
         return None
@@ -2030,10 +2043,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         if image_mask is not None:
             init_mask = latent_mask
-            latmask = init_mask.convert('L').resize((self.init_latent.shape[3], self.init_latent.shape[2]))
-            latmask = np.asarray(latmask, dtype=np.float32) / 255.0
-            if self.mask_round:
-                latmask = np.around(latmask)
+            latmask = _resize_latent_mask(init_mask, (self.init_latent.shape[3], self.init_latent.shape[2]), self.mask_round)
             latmask = torch.from_numpy(latmask).to(device=shared.device, dtype=devices.dtype)
             latmask = latmask.unsqueeze(0).expand(self.init_latent.shape[1], -1, -1)
 
