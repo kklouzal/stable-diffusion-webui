@@ -14,11 +14,11 @@ from PIL import Image
 
 class ModelSamplingDiscreteFlow(torch.nn.Module):
     """Helper for sampler scheduling (ie timestep/sigma calculations) for Discrete Flow models"""
-    def __init__(self, shift=1.0):
+    def __init__(self, shift=1.0, device=None):
         super().__init__()
         self.shift = shift
         timesteps = 1000
-        ts = self.sigma(torch.arange(1, timesteps + 1, 1))
+        ts = self.sigma(torch.arange(1, timesteps + 1, 1, device=device, dtype=torch.float32))
         self.register_buffer('sigmas', ts)
 
     @property
@@ -66,7 +66,7 @@ class BaseModel(torch.nn.Module):
             }
         }
         self.diffusion_model = MMDiT(input_size=None, pos_embed_scaling_factor=None, pos_embed_offset=None, pos_embed_max_size=pos_embed_max_size, patch_size=patch_size, in_channels=16, depth=depth, num_patches=num_patches, adm_in_channels=adm_in_channels, context_embedder_config=context_embedder_config, device=device, dtype=dtype)
-        self.model_sampling = ModelSamplingDiscreteFlow(shift=shift)
+        self.model_sampling = ModelSamplingDiscreteFlow(shift=shift, device=device)
         self.depth = depth
 
     def apply_model(self, x, sigma, c_crossattn=None, y=None):
