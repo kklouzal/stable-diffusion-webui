@@ -175,6 +175,21 @@ def _chain_scheduler_names(definition: dict[str, Any], sampler_names: list[str])
     return schedulers
 
 
+def _validate_stage_spans(boundaries: list[int], steps: int) -> None:
+    if steps <= 0:
+        raise ValueError("Sampler chains require at least one sampling step")
+    for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), start=1):
+        if end <= start:
+            raise ValueError(f"Sampler stage {index} has no sampling steps; adjust switch points")
+
+
+def _validate_stage_sigmas(sigmas: Any, start: int, end: int, sampler_name: str, scheduler_name: str | None) -> None:
+    expected = end - start + 1
+    if len(sigmas) != expected:
+        label = f"{sampler_name}[{scheduler_name}]" if scheduler_name else sampler_name
+        raise ValueError(f"Sampler stage {label}@{start}-{end} expected {expected} sigma value(s), got {len(sigmas)}")
+
+
 def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str], list[int]]:
     samplers = _chain_sampler_names(definition)
     switch_ats = _chain_switch_points(definition, len(samplers))
@@ -182,6 +197,7 @@ def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str]
     for point in switch_ats:
         boundaries.append(max(boundaries[-1], min(_safe_int(point, 0), steps)))
     boundaries.append(steps)
+    _validate_stage_spans(boundaries, steps)
     return samplers, boundaries
 
 
@@ -336,10 +352,13 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         samplers, boundaries = _chain_boundaries(self.definition, steps)
         scheduler_names = _chain_scheduler_names(self.definition, samplers)
         if not scheduler_names:
-            return [
-                (sampler_name, None, sigmas[boundaries[index] : boundaries[index + 1] + 1], boundaries[index], boundaries[index + 1])
-                for index, sampler_name in enumerate(samplers)
-            ]
+            stages = []
+            for index, sampler_name in enumerate(samplers):
+                start, end = boundaries[index], boundaries[index + 1]
+                stage_sigmas = sigmas[start : end + 1]
+                _validate_stage_sigmas(stage_sigmas, start, end, sampler_name, None)
+                stages.append((sampler_name, None, stage_sigmas, start, end))
+            return stages
 
         source_steps = scheduler_steps if scheduler_steps is not None else steps
         stages: list[tuple[str, str | None, torch.Tensor, int, int]] = []
@@ -351,6 +370,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             stage_source = stage_source[scheduler_slice_start:].to(device=sigmas.device, dtype=sigmas.dtype)
             start, end = boundaries[index], boundaries[index + 1]
             stage_sigmas = stage_source[start : end + 1].clone()
+            _validate_stage_sigmas(stage_sigmas, start, end, sampler_name, scheduler_name)
             if previous_final_sigma is not None and len(stage_sigmas):
                 stage_sigmas[0] = previous_final_sigma.to(device=stage_sigmas.device, dtype=stage_sigmas.dtype)
             if len(stage_sigmas):
