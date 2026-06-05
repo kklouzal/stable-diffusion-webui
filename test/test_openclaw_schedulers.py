@@ -113,6 +113,22 @@ class OpenClawSchedulerTests(unittest.TestCase):
         self.assertTrue(torch.equal(simple, torch.cat([inner_model.sigmas[[-1, -201, -401, -601, -801]], torch.zeros(1)])))
         self.assertTrue(torch.equal(ddim, torch.cat([inner_model.sigmas[[801, 601, 401, 201, 1]], torch.zeros(1)])))
 
+    def test_align_your_steps_preserves_legacy_loglinear_values(self):
+        schedulers = load_scheduler_module()
+
+        interpolated = schedulers.get_align_your_steps_sigmas(5, 0.1, 10.0, torch.device("cpu"))
+        native = schedulers.get_align_your_steps_sigmas(11, 0.1, 10.0, torch.device("cpu"))
+
+        self.assertEqual(interpolated.device.type, "cpu")
+        torch.testing.assert_close(
+            interpolated,
+            torch.tensor([14.615, 3.22693616, 1.396, 0.51004706, 0.029, 0.0]),
+        )
+        torch.testing.assert_close(
+            native,
+            torch.tensor([14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029, 0.0]),
+        )
+
     def test_internal_schedulers_reject_nonpositive_step_counts(self):
         schedulers = load_scheduler_module()
         inner_model = VectorInnerModel()

@@ -43,6 +43,12 @@ def _append_zero(sigmas):
     return torch.cat([sigmas, sigmas.new_zeros(1)])
 
 
+def _loglinear_interp_sigmas(sigmas, num_steps):
+    log_values = sigmas.flip(0).log().reshape(1, 1, -1)
+    interped = torch.nn.functional.interpolate(log_values, size=num_steps, mode="linear", align_corners=True).reshape(-1)
+    return interped.exp().flip(0)
+
+
 def _validate_step_count(n):
     if n <= 0:
         raise ValueError("scheduler step count must be positive")
@@ -73,31 +79,17 @@ def get_align_your_steps_sigmas(n, sigma_min, sigma_max, device):
     n = _validate_step_count(n)
 
     # https://research.nvidia.com/labs/toronto-ai/AlignYourSteps/howto.html
-    def loglinear_interp(t_steps, num_steps):
-        """
-        Performs log-linear interpolation of a given array of decreasing numbers.
-        """
-        xs = np.linspace(0, 1, len(t_steps))
-        ys = np.log(t_steps[::-1])
-
-        new_xs = np.linspace(0, 1, num_steps)
-        new_ys = np.interp(new_xs, xs, ys)
-
-        interped_ys = np.exp(new_ys)[::-1].copy()
-        return interped_ys
-
     if shared.sd_model.is_sdxl:
-        sigmas = [14.615, 6.315, 3.771, 2.181, 1.342, 0.862, 0.555, 0.380, 0.234, 0.113, 0.029]
+        base_sigmas = [14.615, 6.315, 3.771, 2.181, 1.342, 0.862, 0.555, 0.380, 0.234, 0.113, 0.029]
     else:
         # Default to SD 1.5 sigmas.
-        sigmas = [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029]
+        base_sigmas = [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029]
 
-    if n != len(sigmas):
-        sigmas = np.append(loglinear_interp(sigmas, n), [0.0])
-    else:
-        sigmas.append(0.0)
+    sigmas = torch.as_tensor(base_sigmas, device=device, dtype=torch.float32)
+    if n != sigmas.numel():
+        sigmas = _loglinear_interp_sigmas(sigmas, n)
 
-    return torch.as_tensor(sigmas, device=device, dtype=torch.float32)
+    return _append_zero(sigmas)
 
 
 def kl_optimal(n, sigma_min, sigma_max, device):
