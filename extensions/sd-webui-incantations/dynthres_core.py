@@ -165,15 +165,13 @@ class DynThresh:
         elif self.experiment_mode == 3:
             coefs, inv_coefs = self._experiment_mode3_matrices(actual_res.device, stats_dtype)
             res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
-            rgb_channel_max = res_rgb[0, :3].amax(dim=(1, 2))
-            max_rgb = rgb_channel_max.amax()
-            max_w = res_rgb[0, 3].amax()
+            rgb_channel_max = res_rgb[:, :3].amax(dim=(2, 3))
+            max_rgb = rgb_channel_max.amax(dim=1)
+            max_w = res_rgb[:, 3].amax(dim=(1, 2))
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "experiment_mode=3 max values: r=%s, g=%s, b=%s, w=%s, rgb=%s",
-                    rgb_channel_max[0],
-                    rgb_channel_max[1],
-                    rgb_channel_max[2],
+                    "experiment_mode=3 max values: rgb_channels=%s, w=%s, rgb=%s",
+                    rgb_channel_max,
                     max_w,
                     max_rgb,
                 )
@@ -186,7 +184,7 @@ class DynThresh:
                 self._safe_denominator(max_rgb / 2.4),
                 torch.ones_like(max_rgb),
             )
-            res_rgb = res_rgb / scale
+            res_rgb = res_rgb / scale.view(-1, 1, 1, 1)
             actual_res = torch.einsum("laxy,ab -> lbxy", res_rgb, inv_coefs)
 
         return actual_res.to(dtype=orig_dtype)

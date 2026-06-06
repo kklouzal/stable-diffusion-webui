@@ -222,19 +222,18 @@ class DynamicThresholdingTests(unittest.TestCase):
             dtype=actual_res.dtype,
         )
         res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
-        max_r, max_g, max_b = (
-            res_rgb[0][0].max(),
-            res_rgb[0][1].max(),
-            res_rgb[0][2].max(),
-        )
-        max_w = res_rgb[0][3].max()
-        max_rgb = torch.maximum(max_r, torch.maximum(max_g, max_b))
+        max_rgb = res_rgb[:, :3].amax(dim=(1, 2, 3))
+        max_w = res_rgb[:, 3].amax(dim=(1, 2))
         if step / max(max_steps - 1, 1) > 0.2:
-            if bool((max_rgb < 2.0) & (max_w < 3.0)):
-                res_rgb /= max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps)
+            should_scale = (max_rgb < 2.0) & (max_w < 3.0)
         else:
-            if bool((max_rgb > 2.4) & (max_w > 3.0)):
-                res_rgb /= max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps)
+            should_scale = (max_rgb > 2.4) & (max_w > 3.0)
+        scale = torch.where(
+            should_scale,
+            max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps),
+            torch.ones_like(max_rgb),
+        )
+        res_rgb = res_rgb / scale.view(-1, 1, 1, 1)
         return torch.einsum("laxy,ab -> lbxy", res_rgb, coefs.inverse())
 
     def test_relative_path_preserves_dtype_and_finiteness(self):
@@ -701,7 +700,39 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual([call[1] for call in calls], [539, 539, 462])
 
-    def test_pag_extra_pass_concatenates_when_token_counts_match(self):
+    def test_pag_extra_pass_splits_equal_tokens_when_batching_disabled(self):
+        calls = []
+
+        def inner_model(x_in, sigma_in, cond):
+            calls.append(cond["crossattn"].shape)
+            return torch.ones_like(x_in)
+
+        def make_condition_dict(c_crossattn, c_concat):
+            return {**c_crossattn, "c_concat": [c_concat]}
+
+        x_in = torch.zeros(3, 4, 2, 2)
+        sigma_in = torch.zeros(3)
+        image_cond = torch.zeros(3, 1, 2, 2)
+        tensor = {"crossattn": torch.randn(2, 77, 8), "vector": torch.randn(2, 4)}
+        uncond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
+
+        out = self.pag.pag_inner_model_x_out(
+            inner_model,
+            x_in,
+            sigma_in,
+            tensor,
+            uncond,
+            image_cond,
+            make_condition_dict,
+            1,
+        )
+
+        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
+        self.assertEqual(calls, [torch.Size([1, 77, 8])] * 3)
+
+    def test_pag_extra_pass_concatenates_when_batching_enabled_and_tokens_match(self):
+        shared = sys.modules["modules.shared"]
+        shared.opts.batch_cond_uncond = True
         calls = []
 
         def inner_model(x_in, sigma_in, cond):
@@ -907,6 +938,21 @@ class SEGBlurTests(unittest.TestCase):
         out = self.seg.gaussian_blur_2d(img, kernel_size=13, sigma=2.0)
         self.assertEqual(tuple(out.shape), tuple(img.shape))
         self.assertTrue(torch.isfinite(out).all())
+
+    def test_seg_query_blur_mutates_cond_half_only(self):
+        output = torch.arange(16, dtype=torch.float32).reshape(2, 4, 2)
+
+        out = self.seg._blur_seg_cond_queries(
+            output,
+            heads=1,
+            head_dim=2,
+            downscale_h=2,
+            downscale_w=2,
+            blur_fn=lambda q: q + 100.0,
+        )
+
+        torch.testing.assert_close(out[0], output[0] + 100.0)
+        torch.testing.assert_close(out[1], output[1])
 
 
 class ModuleHookTests(unittest.TestCase):

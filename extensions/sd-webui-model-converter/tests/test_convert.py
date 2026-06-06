@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tempfile
 import types
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import torch
 
@@ -55,6 +57,38 @@ class LoraDoctorTests(unittest.TestCase):
         self.assertEqual(doctor["known_junk_count"], 1)
         self.assertEqual(doctor["missing_up_examples"], [])
         self.assertEqual(doctor["missing_down_examples"], [])
+
+
+class ConverterSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.convert = importlib.import_module("scripts.convert")
+
+    def test_output_name_rejects_paths(self):
+        for name in ("/tmp/out", "../out", "nested/out", "nested\\out", ".", ".."):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "filename"):
+                    self.convert.safe_output_name(name)
+
+    def test_output_path_refuses_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "model.safetensors"
+            path.write_bytes(b"existing")
+
+            with self.assertRaisesRegex(FileExistsError, "overwrite"):
+                self.convert.safe_output_path(tmpdir, "model", ".safetensors")
+
+    def test_legacy_checkpoint_load_uses_weights_only(self):
+        with mock.patch.object(
+            self.convert.torch,
+            "load",
+            return_value={"state_dict": {"x": torch.zeros(1)}},
+        ) as load:
+            loaded = self.convert.load_model("/tmp/model.ckpt")
+
+        self.assertEqual(set(loaded), {"x"})
+        load.assert_called_once_with("/tmp/model.ckpt", map_location="cpu", weights_only=True)
 
 
 if __name__ == "__main__":

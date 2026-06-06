@@ -126,9 +126,11 @@ class CFGCombinerScript(UIWrapper):
             self.remove_callbacks()
             if not getattr(p, 'incant_cfg_params', None) or p.incant_cfg_params.get('pag_params') is None:
                 return
-            cfg_denoise_lambda = lambda params: self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
-            self._cfg_denoiser_callback = cfg_denoise_lambda
-            script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
+            def cfg_denoise_callback(params):
+                return self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
+
+            self._cfg_denoiser_callback = cfg_denoise_callback
+            script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
             logger.debug('Hooked CFG combiner callback')
 
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):

@@ -74,6 +74,23 @@ def _merge_seg_timings(p, seg_params):
                 ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
         seg_params.openclaw_extension_timings = {}
 
+
+def _blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, blur_fn):
+        """Blur only A1111's conditional CFG half, preserving the unconditional tail."""
+        output_batch = output.shape[0]
+        half_batch = output_batch // 2
+        seq_len = downscale_h * downscale_w
+        q_cond, q_uncond = output.split(half_batch, dim=0)
+        q_cond = q_cond.view(half_batch, -1, heads, head_dim).transpose(1, 2)
+        q_cond = q_cond.permute(0, 1, 3, 2).reshape(
+                half_batch * heads, head_dim, downscale_h, downscale_w
+        )
+        q_cond = blur_fn(q_cond)
+        q_cond = q_cond.reshape(half_batch, heads, head_dim, seq_len)
+        q_cond = q_cond.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
+        return torch.cat((q_cond, q_uncond), dim=0)
+
+
 class SEGExtensionScript(UIWrapper):
         def __init__(self):
                 self.paste_field_names = []
@@ -163,13 +180,15 @@ class SEGExtensionScript(UIWrapper):
                 seg_params.crossattn_modules = self_attn_modules
 
                 self.remove_callbacks()
-                cfg_denoise_lambda = lambda callback_params: self.on_cfg_denoiser_callback(callback_params, seg_params)
-                self._cfg_denoiser_callback = cfg_denoise_lambda
+                def cfg_denoise_callback(callback_params):
+                        return self.on_cfg_denoiser_callback(callback_params, seg_params)
+
+                self._cfg_denoiser_callback = cfg_denoise_callback
                 if seg_params.seg_active:
                         self.ready_hijack_forward(seg_params.crossattn_modules, seg_blur_sigma, seg_params.seg_blur_threshold, p.height, p.width)
 
                 logger.debug('Hooked callbacks')
-                script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
+                script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
 
         def postprocess_batch(self, p, *args, **kwargs):
                 self.seg_postprocess_batch(p, *args, **kwargs)
@@ -259,21 +278,19 @@ class SEGExtensionScript(UIWrapper):
                                 )
                                 return
 
-                        half_batch = output_batch // 2
-                        q_uncond, q = output.split(half_batch, dim=0)
-                        q = q.view(half_batch, -1, h, head_dim).transpose(1, 2) # (batch, num_heads, seq_len, head_dim)
-                        q = q.permute(0, 1, 3, 2).reshape(half_batch * h, head_dim, downscale_h, downscale_w) # (batch * num_heads, head_dim, height, width)
+                        def blur_fn(q):
+                                if is_inf_blur:
+                                        return gaussian_blur_inf(q, 1.0, blur_sigma_exp)
+                                return gaussian_blur_2d(q, kernel_size, blur_sigma_exp)
 
-                        if is_inf_blur:
-                                q = gaussian_blur_inf(q, 1.0, blur_sigma_exp)
-                        else:
-                                q = gaussian_blur_2d(q, kernel_size, blur_sigma_exp)
-
-                        q = q.reshape(half_batch, h, head_dim, downscale_h * downscale_w) # (batch, num_heads, head_dim, seq_len)
-                        q = q.view(half_batch, h * head_dim, seq_len).transpose(1, 2) # (batch, inner_dim, seq_len)
-                        q = torch.cat((q_uncond, q), dim=0)
-
-                        return q
+                        return _blur_seg_cond_queries(
+                                output,
+                                heads=h,
+                                head_dim=head_dim,
+                                downscale_h=downscale_h,
+                                downscale_w=downscale_w,
+                                blur_fn=blur_fn,
+                        )
 
                 # Create hooks and keep RemovableHandles so cleanup does not need
                 # to rewrite PyTorch hook tables globally.

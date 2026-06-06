@@ -591,7 +591,8 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.last_latent = x
         sigma_transform = None
         if ramp_sigmas_for_img2img is not None:
-            sigma_transform = lambda stage_sigmas: ramp_sigmas_for_img2img(p, stage_sigmas, steps, t_enc)
+            def sigma_transform(stage_sigmas):
+                return ramp_sigmas_for_img2img(p, stage_sigmas, steps, t_enc)
         samples = self._run_chain(
             p,
             xi,

@@ -248,7 +248,7 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
         callback fail before ``pag_x_out`` can be produced.
         """
         tensor, uncond = _pad_pag_cond_uncond(tensor, uncond)
-        if cond_token_count(tensor) == cond_token_count(uncond):
+        if shared.opts.batch_cond_uncond and cond_token_count(tensor) == cond_token_count(uncond):
                 cond_in = catenate_conds([tensor, uncond])
                 return inner_model(x_in, sigma_in, cond=make_condition_dict(cond_in, image_cond_in))
 
@@ -473,9 +473,10 @@ class PAGExtensionScript(UIWrapper):
                                )
                        logger.debug(f"Step Aligned CFG Interval (low, high): ({low_index}, {high_index}), Step Aligned CFG Interval: ({round(pag_params.cfg_interval_low, 4)}, {round(pag_params.cfg_interval_high, 4)})")
 
-                # Use lambdas to bind per-batch state without globals.
-                cfg_denoise_lambda = lambda callback_params: self.on_cfg_denoiser_callback(callback_params, pag_params)
-                self._cfg_denoiser_callback = cfg_denoise_lambda
+                def cfg_denoise_callback(callback_params):
+                        return self.on_cfg_denoiser_callback(callback_params, pag_params)
+
+                self._cfg_denoiser_callback = cfg_denoise_callback
 
                 # CFG interval scheduling only needs the cfg-denoiser callback;
                 # do not make it depend on PAG attention hook discovery.
@@ -491,16 +492,18 @@ class PAGExtensionScript(UIWrapper):
                         self.remove_callbacks()
                         return
 
-                cfg_denoised_lambda = None
+                cfg_denoised_callback = None
                 if pag_params.pag_active:
-                        cfg_denoised_lambda = lambda callback_params: self.on_cfg_denoised_callback(callback_params, pag_params)
-                        self._cfg_denoised_callback = cfg_denoised_lambda
+                        def cfg_denoised_callback(callback_params):
+                                return self.on_cfg_denoised_callback(callback_params, pag_params)
+
+                        self._cfg_denoised_callback = cfg_denoised_callback
                         self.ready_hijack_forward(pag_params.crossattn_modules, pag_scale)
 
                 logger.debug('Hooked PAG callbacks')
-                script_callbacks.on_cfg_denoiser(cfg_denoise_lambda)
-                if cfg_denoised_lambda is not None:
-                        script_callbacks.on_cfg_denoised(cfg_denoised_lambda)
+                script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
+                if cfg_denoised_callback is not None:
+                        script_callbacks.on_cfg_denoised(cfg_denoised_callback)
 
 
 
@@ -764,12 +767,15 @@ class PAGExtensionScript(UIWrapper):
 # from modules/sd_samplers_cfg_denoiser.py:187-195
 def get_make_condition_dict_fn(text_uncond):
         if shared.sd_model.model.conditioning_key == "crossattn-adm":
-                make_condition_dict = lambda c_crossattn, c_adm: {"c_crossattn": [c_crossattn], "c_adm": c_adm}
+                def make_condition_dict(c_crossattn, c_adm):
+                        return {"c_crossattn": [c_crossattn], "c_adm": c_adm}
         else:
                 if isinstance(text_uncond, dict):
-                        make_condition_dict = lambda c_crossattn, c_concat: {**c_crossattn, "c_concat": [c_concat]}
+                        def make_condition_dict(c_crossattn, c_concat):
+                                return {**c_crossattn, "c_concat": [c_concat]}
                 else:
-                        make_condition_dict = lambda c_crossattn, c_concat: {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
+                        def make_condition_dict(c_crossattn, c_concat):
+                                return {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
         return make_condition_dict
 
 

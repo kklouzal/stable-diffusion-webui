@@ -93,8 +93,45 @@ def load_model(path: str) -> dict[str, Any]:
     if path.endswith(".safetensors"):
         loaded = safetensors.torch.load_file(path, device="cpu")
     else:
-        loaded = torch.load(path, map_location="cpu")
+        try:
+            loaded = torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError as exc:
+            if "weights_only" not in str(exc):
+                raise
+            raise RuntimeError(
+                "This PyTorch version cannot safely load legacy pickle checkpoints; "
+                "use a safetensors source or a PyTorch build with weights_only support."
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not safely load legacy checkpoint {path!r}. "
+                "Use safetensors or a checkpoint containing tensor-only weights."
+            ) from exc
     return loaded.get("state_dict", loaded) if isinstance(loaded, dict) else loaded
+
+
+def safe_output_name(name: str, fallback: str = "") -> str:
+    save_name = str(name or fallback).strip()
+    if not save_name:
+        raise ValueError("output name cannot be empty")
+    if (
+        os.path.isabs(save_name)
+        or "/" in save_name
+        or "\\" in save_name
+        or save_name in {".", ".."}
+    ):
+        raise ValueError("output name must be a filename, not a path")
+    return save_name
+
+
+def safe_output_path(directory: str, save_name: str, extension: str) -> str:
+    directory_abs = os.path.abspath(directory)
+    save_path = os.path.abspath(os.path.join(directory_abs, save_name + extension))
+    if os.path.commonpath([directory_abs, save_path]) != directory_abs:
+        raise ValueError("output path escapes the model directory")
+    if os.path.exists(save_path):
+        raise FileExistsError(f"refusing to overwrite existing file: {save_path}")
+    return save_path
 
 
 def position_id_keys(model: dict[str, Any]) -> list[str]:
@@ -578,9 +615,9 @@ def convert_lora(payload: dict[str, Any]) -> str:
             cleanup=cleanup,
             nonfinite={"source": source_nonfinite, "output": output_nonfinite},
         )
-        save_name = custom_name or f"{model_info.model_name}-{precision}"
-        save_path = os.path.join(
-            os.path.dirname(model_info.filepath), save_name + ".safetensors"
+        save_name = safe_output_name(custom_name, f"{model_info.model_name}-{precision}")
+        save_path = safe_output_path(
+            os.path.dirname(model_info.filepath), save_name, ".safetensors"
         )
         safetensors.torch.save_file(ok, save_path, metadata=metadata)
         refresh_after_convert("lora")
@@ -872,19 +909,17 @@ def do_convert(
             doctor=after_doctor,
         )
         ckpt_dir = os.path.dirname(model_info.filepath)
-        save_name = (
-            custom_name.strip()
-            if custom_name
-            else f"{model_info.model_name}-{precision}"
-        )
+        custom_name = str(custom_name or "").strip()
+        save_name = custom_name or f"{model_info.model_name}-{precision}"
         if conv_type != "disabled" and not custom_name:
             save_name += f"-{conv_type}"
         if fix_clip and not custom_name:
             save_name += "-clip-fix"
+        save_name = safe_output_name(save_name)
         output = ""
         for fmt in checkpoint_formats:
             ext = ".safetensors" if fmt == "safetensors" else ".ckpt"
-            save_path = os.path.join(ckpt_dir, save_name + ext)
+            save_path = safe_output_path(ckpt_dir, save_name, ext)
             print(f"[OpenClaw Model Converter] Saving to {save_path}...")
             if fmt == "safetensors":
                 safetensors.torch.save_file(ok, save_path, metadata=metadata)
