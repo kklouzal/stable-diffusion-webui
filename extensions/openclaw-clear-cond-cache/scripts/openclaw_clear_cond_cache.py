@@ -150,11 +150,14 @@ def _checkpoint_detail(checkpoint_info: Any) -> str | None:
 
 
 def _wrap_backend_function(module: Any, attr: str, wrapper_factory) -> None:
-    original = getattr(module, attr, None)
-    if original is None or getattr(original, "__openclaw_backend_status_wrapped__", False):
+    current = getattr(module, attr, None)
+    if current is None:
         return
+    original = getattr(current, "__openclaw_backend_status_original__", current)
     wrapped = wrapper_factory(original)
     wrapped.__openclaw_backend_status_wrapped__ = True
+    wrapped.__openclaw_backend_status_original__ = original
+    wrapped.__wrapped__ = original
     setattr(module, attr, wrapped)
 
 

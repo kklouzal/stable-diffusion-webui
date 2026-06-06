@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-import importlib.util
 import json
 import re
-import sys
 import threading
 import time
 import traceback
@@ -50,23 +48,12 @@ def _load_denoise_ramp_func():
             _DENOISE_RAMP_FUNC = getattr(module, "ramp_sigmas_for_img2img", None)
             _DENOISE_RAMP_FUNC_LOADED = True
             return _DENOISE_RAMP_FUNC
-    if not target.exists():
-        _DENOISE_RAMP_FUNC_LOADED = True
-        return None
 
-    module_name = "_openclaw_denoise_ramp_for_multi_sampler"
-    module = sys.modules.get(module_name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(module_name, target)
-        if spec is None or spec.loader is None:
-            _DENOISE_RAMP_FUNC_LOADED = True
-            return None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-    _DENOISE_RAMP_FUNC = getattr(module, "ramp_sigmas_for_img2img", None)
+    # Importing denoise-ramp has global sampler monkeypatch side effects.
+    # Respect A1111's extension load/disable boundary and only share the
+    # helper when that extension was actually loaded by the script loader.
     _DENOISE_RAMP_FUNC_LOADED = True
-    return _DENOISE_RAMP_FUNC
+    return None
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
