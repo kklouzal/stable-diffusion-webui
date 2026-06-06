@@ -76,19 +76,19 @@ def _merge_seg_timings(p, seg_params):
 
 
 def _blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, blur_fn):
-        """Blur only A1111's conditional CFG half, preserving the unconditional tail."""
+        """Blur the legacy SEG tail half, preserving tuned GB10 generation behavior."""
         output_batch = output.shape[0]
         half_batch = output_batch // 2
         seq_len = downscale_h * downscale_w
-        q_cond, q_uncond = output.split(half_batch, dim=0)
-        q_cond = q_cond.view(half_batch, -1, heads, head_dim).transpose(1, 2)
-        q_cond = q_cond.permute(0, 1, 3, 2).reshape(
+        q_passthrough, q_blur = output.split(half_batch, dim=0)
+        q_blur = q_blur.view(half_batch, -1, heads, head_dim).transpose(1, 2)
+        q_blur = q_blur.permute(0, 1, 3, 2).reshape(
                 half_batch * heads, head_dim, downscale_h, downscale_w
         )
-        q_cond = blur_fn(q_cond)
-        q_cond = q_cond.reshape(half_batch, heads, head_dim, seq_len)
-        q_cond = q_cond.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
-        return torch.cat((q_cond, q_uncond), dim=0)
+        q_blur = blur_fn(q_blur)
+        q_blur = q_blur.reshape(half_batch, heads, head_dim, seq_len)
+        q_blur = q_blur.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
+        return torch.cat((q_passthrough, q_blur), dim=0)
 
 
 class SEGExtensionScript(UIWrapper):

@@ -939,7 +939,7 @@ class SEGBlurTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), tuple(img.shape))
         self.assertTrue(torch.isfinite(out).all())
 
-    def test_seg_query_blur_mutates_cond_half_only(self):
+    def test_seg_query_blur_mutates_legacy_tail_half_only(self):
         output = torch.arange(16, dtype=torch.float32).reshape(2, 4, 2)
 
         out = self.seg._blur_seg_cond_queries(
@@ -951,8 +951,8 @@ class SEGBlurTests(unittest.TestCase):
             blur_fn=lambda q: q + 100.0,
         )
 
-        torch.testing.assert_close(out[0], output[0] + 100.0)
-        torch.testing.assert_close(out[1], output[1])
+        torch.testing.assert_close(out[0], output[0])
+        torch.testing.assert_close(out[1], output[1] + 100.0)
 
 
 class ModuleHookTests(unittest.TestCase):
