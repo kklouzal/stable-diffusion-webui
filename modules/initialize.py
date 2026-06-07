@@ -10,7 +10,6 @@ from modules.timer import startup_timer
 
 def imports():
     logging.getLogger("torch.distributed.nn").setLevel(logging.ERROR)  # sshh...
-    logging.getLogger("xformers").addFilter(lambda record: 'A matching Triton is not available' not in record.getMessage())
 
     import torch  # noqa: F401
     startup_timer.record("import torch")

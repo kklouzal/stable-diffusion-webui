@@ -187,7 +187,7 @@ def optimized_attention(qkv, num_heads):
     return attention(qkv[0], qkv[1], qkv[2], num_heads)
 
 class SelfAttention(nn.Module):
-    ATTENTION_MODES = ("xformers", "torch", "torch-hb", "math", "debug")
+    ATTENTION_MODES = ("torch", "torch-hb", "math", "debug")
 
     def __init__(
         self,
@@ -195,7 +195,7 @@ class SelfAttention(nn.Module):
         num_heads: int = 8,
         qkv_bias: bool = False,
         qk_scale: Optional[float] = None,
-        attn_mode: str = "xformers",
+        attn_mode: str = "torch",
         pre_only: bool = False,
         qk_norm: Optional[str] = None,
         rmsnorm: bool = False,
@@ -332,14 +332,14 @@ class SwiGLUFeedForward(nn.Module):
 class DismantledBlock(nn.Module):
     """A DiT block with gated adaptive layer norm (adaLN) conditioning."""
 
-    ATTENTION_MODES = ("xformers", "torch", "torch-hb", "math", "debug")
+    ATTENTION_MODES = ("torch", "torch-hb", "math", "debug")
 
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        attn_mode: str = "xformers",
+        attn_mode: str = "torch",
         qkv_bias: bool = False,
         pre_only: bool = False,
         rmsnorm: bool = False,

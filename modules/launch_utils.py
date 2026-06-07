@@ -429,9 +429,6 @@ def prepare_environment():
         run_pip(f"install {openclip_package}", "open_clip")
         startup_timer.record("install open_clip")
 
-    if args.xformers or args.reinstall_xformers:
-        print("xformers auto-install is disabled in this fork; use PyTorch SDPA on GB10 or install xformers manually for experimental non-GB10 runs.")
-
     if not is_installed("ngrok") and args.ngrok:
         run_pip("install ngrok", "ngrok")
         startup_timer.record("install ngrok")

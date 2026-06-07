@@ -987,7 +987,7 @@ def repair_config(sd_config, state_dict=None):
             sd_config.model.params.unet_config.params.use_fp16 = True
 
     if hasattr(sd_config.model.params, 'first_stage_config'):
-        if getattr(sd_config.model.params.first_stage_config.params.ddconfig, "attn_type", None) == "vanilla-xformers" and not shared.xformers_available:
+        if getattr(sd_config.model.params.first_stage_config.params.ddconfig, "attn_type", None) == "vanilla-xformers":
             sd_config.model.params.first_stage_config.params.ddconfig.attn_type = "vanilla"
 
     # For UnCLIP-L, override the hardcoded karlo directory

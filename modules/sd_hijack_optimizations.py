@@ -11,7 +11,7 @@ from torch import einsum
 from ldm.util import default
 from einops import rearrange
 
-from modules import shared, errors, devices, sub_quadratic_attention
+from modules import shared, devices, sub_quadratic_attention
 from modules.hypernetworks import hypernetwork
 
 import ldm.modules.attention
@@ -50,21 +50,6 @@ class SdOptimization:
 
         sgm.modules.attention.CrossAttention.forward = hypernetwork.attention_CrossAttention_forward
         sgm.modules.diffusionmodules.model.AttnBlock.forward = sgm_diffusionmodules_model_AttnBlock_forward
-
-
-class SdOptimizationXformers(SdOptimization):
-    name = "xformers"
-    cmd_opt = "xformers"
-    priority = 100
-
-    def is_available(self):
-        return shared.cmd_opts.force_enable_xformers or (shared.xformers_available and torch.cuda.is_available() and (6, 0) <= torch.cuda.get_device_capability(shared.device) <= (12, 0))
-
-    def apply(self):
-        ldm.modules.attention.CrossAttention.forward = xformers_attention_forward
-        ldm.modules.diffusionmodules.model.AttnBlock.forward = xformers_attnblock_forward
-        sgm.modules.attention.CrossAttention.forward = xformers_attention_forward
-        sgm.modules.diffusionmodules.model.AttnBlock.forward = xformers_attnblock_forward
 
 
 class SdOptimizationSdpNoMem(SdOptimization):
@@ -149,7 +134,6 @@ class SdOptimizationDoggettx(SdOptimization):
 
 def list_optimizers(res):
     res.extend([
-        SdOptimizationXformers(),
         SdOptimizationSdpNoMem(),
         SdOptimizationSdp(),
         SdOptimizationSubQuad(),
@@ -159,12 +143,8 @@ def list_optimizers(res):
     ])
 
 
-if shared.cmd_opts.xformers or shared.cmd_opts.force_enable_xformers:
-    try:
-        import xformers.ops
-        shared.xformers_available = True
-    except Exception:
-        errors.report("Cannot import xformers", exc_info=True)
+def get_xformers_flash_attention_op(*_args, **_kwargs):
+    return None
 
 
 def get_available_vram():
@@ -466,47 +446,6 @@ def sub_quad_attention(q, k, v, q_chunk_size=1024, kv_chunk_size=None, kv_chunk_
         )
 
 
-def get_xformers_flash_attention_op(q, k, v):
-    if not shared.cmd_opts.xformers_flash_attention:
-        return None
-
-    try:
-        flash_attention_op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-        fw, bw = flash_attention_op
-        if fw.supports(xformers.ops.fmha.Inputs(query=q, key=k, value=v, attn_bias=None)):
-            return flash_attention_op
-    except Exception as e:
-        errors.display_once(e, "enabling flash attention")
-
-    return None
-
-
-def xformers_attention_forward(self, x, context=None, mask=None, **kwargs):
-    h = self.heads
-    q_in = self.to_q(x)
-    context = default(context, x)
-
-    context_k, context_v = hypernetwork.apply_hypernetworks(shared.loaded_hypernetworks, context)
-    k_in = self.to_k(context_k)
-    v_in = self.to_v(context_v)
-
-    q, k, v = (t.reshape(t.shape[0], t.shape[1], h, -1) for t in (q_in, k_in, v_in))
-
-    del q_in, k_in, v_in
-
-    dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-
-    out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=get_xformers_flash_attention_op(q, k, v))
-
-    out = out.to(dtype)
-
-    b, n, h, d = out.shape
-    out = out.reshape(b, n, h * d)
-    return self.to_out(out)
-
-
 # Based on Diffusers usage of scaled dot product attention from https://github.com/huggingface/diffusers/blob/c7da8fd23359a22d0df2741688b5b4f33c26df21/src/diffusers/models/cross_attention.py
 # The scaled_dot_product_attention_forward function contains parts of code under Apache-2.0 license listed under Scaled Dot Product Attention in the Licenses section of the web UI interface
 def scaled_dot_product_attention_forward(self, x, context=None, mask=None, sdpa_backend_override=None, **kwargs):
@@ -707,30 +646,6 @@ def cross_attention_attnblock_forward(self, x):
         h3 += x
 
         return h3
-
-
-def xformers_attnblock_forward(self, x):
-    try:
-        h_ = x
-        h_ = self.norm(h_)
-        q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
-        b, c, h, w = q.shape
-        q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
-        dtype = q.dtype
-        if shared.opts.upcast_attn:
-            q, k = q.float(), k.float()
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-        out = xformers.ops.memory_efficient_attention(q, k, v, op=get_xformers_flash_attention_op(q, k, v))
-        out = out.to(dtype)
-        out = rearrange(out, 'b (h w) c -> b c h w', h=h)
-        out = self.proj_out(out)
-        return x + out
-    except NotImplementedError:
-        return cross_attention_attnblock_forward(self, x)
 
 
 def sdp_attnblock_forward(self, x):

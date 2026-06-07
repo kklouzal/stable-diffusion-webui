@@ -19,7 +19,6 @@ environment_whitelist = {
     "TORCH_INDEX_URL",
     "TORCH_COMMAND",
     "REQS_FILE",
-    "XFORMERS_PACKAGE",
     "CLIP_PACKAGE",
     "OPENCLIP_PACKAGE",
     "ASSETS_REPO",

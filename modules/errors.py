@@ -102,13 +102,10 @@ def run(code, task):
 
 def check_versions():
     from packaging import version
-    from modules import shared
-
     import torch
 
 
     expected_torch_version = "2.1.2"
-    expected_xformers_version = "0.0.23.post1"
 
     if version.parse(torch.__version__) < version.parse(expected_torch_version):
         print_error_explanation(f"""
@@ -120,16 +117,3 @@ there are reports of issues with training tab on the latest version.
 
 Use --skip-version-check commandline argument to disable this check.
         """.strip())
-
-    if shared.xformers_available:
-        import xformers
-
-        if version.parse(xformers.__version__) < version.parse(expected_xformers_version):
-            print_error_explanation(f"""
-You are running xformers {xformers.__version__}.
-The program is tested to work with xformers {expected_xformers_version}.
-To reinstall the desired version, run with commandline flag --reinstall-xformers.
-
-Use --skip-version-check commandline argument to disable this check.
-            """.strip())
-

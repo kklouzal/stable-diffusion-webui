@@ -26,8 +26,6 @@ device: str = None
 
 weight_load_location: str = None
 
-xformers_available = False
-
 hypernetworks = {}
 
 loaded_hypernetworks = []

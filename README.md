@@ -69,7 +69,6 @@ A web interface for Stable Diffusion, implemented using Gradio library.
      - also supports weights for prompts: `a cat :1.2 AND a dog AND a penguin :2.2`
 - No token limit for prompts (original stable diffusion lets you use up to 75 tokens)
 - DeepDanbooru integration, creates danbooru style tags for anime prompts
-- [xformers](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Xformers), major speed increase for select cards: (add `--xformers` to commandline args)
 - via extension: [History tab](https://github.com/yfszzx/stable-diffusion-webui-images-browser): view, direct and delete images conveniently within the UI
 - Generate forever option
 - Training tab
@@ -192,7 +191,6 @@ Licenses for borrowed code can be found in `Settings -> Licenses` screen, and al
 - Noise generation for outpainting mk2 - https://github.com/parlance-zz/g-diffuser-bot
 - CLIP interrogator idea and borrowing some code - https://github.com/pharmapsychotic/clip-interrogator
 - Idea for Composable Diffusion - https://github.com/energy-based-model/Compositional-Visual-Generation-with-Composable-Diffusion-Models-PyTorch
-- xformers - https://github.com/facebookresearch/xformers
 - DeepDanbooru - interrogator for anime diffusers https://github.com/KichangKim/DeepDanbooru
 - Sampling in float32 precision from a float16 UNet - marunine for the idea, Birch-san for the example Diffusers implementation (https://github.com/Birch-san/diffusers-play/tree/92feee6)
 - Instruct pix2pix - Tim Brooks (star), Aleksander Holynski (star), Alexei A. Efros (no star) - https://github.com/timothybrooks/instruct-pix2pix
