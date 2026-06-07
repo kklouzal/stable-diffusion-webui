@@ -14,3 +14,11 @@ embeddings/
 extensions/
 repositories/
 .cache/
+.pytest_cache/
+.ruff_cache/
+gb10/rebuild-*.log
+gb10/rebuild-*.meta
+gb10/rebuild-*.pid
+gb10/redeploy-*.log
+gb10/redeploy-*.meta
+gb10/redeploy-*.pid

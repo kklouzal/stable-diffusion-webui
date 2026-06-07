@@ -67,7 +67,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
-RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
+    python -m pip install --break-system-packages --upgrade setuptools==69.5.1
 
 # CUDA-base doctrine:
 # - start from the NVIDIA CUDA image, not the NVIDIA PyTorch image
@@ -76,20 +77,20 @@ RUN python -m pip install --break-system-packages --upgrade setuptools==69.5.1
 # - build MSLK from source against the same CUDA 13.2 / PyTorch nightly stack so
 #   the native mslk.so baseline stays aligned with GB10 bf16/NVFP4 work
 # - freeze the resulting system-Python package set so later app deps cannot overwrite it
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --break-system-packages --no-cache-dir --pre \
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
+    python -m pip install --break-system-packages --pre \
       torch torchvision torchaudio \
       --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG} \
-    && python -m pip install --break-system-packages --no-cache-dir --pre ${TORCHAO_PACKAGE} \
+    && python -m pip install --break-system-packages --pre ${TORCHAO_PACKAGE} \
     && python /opt/build/patch-torchao.py \
-    && python -m pip install --break-system-packages --no-cache-dir \
+    && python -m pip install --break-system-packages \
       scikit-build cmake ninja setuptools-git-versioning tabulate wheel build
 
 RUN git clone --filter=blob:none --recurse-submodules --shallow-submodules "${MSLK_REPO}" /opt/build/MSLK \
     && git -C /opt/build/MSLK checkout "${MSLK_COMMIT}" \
     && git -C /opt/build/MSLK submodule update --init --recursive --depth 1
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=gb10-global-ccache,target=/root/.cache/ccache,sharing=locked \
     ccache --set-config=max_size=${CCACHE_MAXSIZE} \
     && ccache --set-config=compiler_check=${CCACHE_COMPILERCHECK} \
@@ -97,7 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && MSLK_PACKAGE_NAME=${MSLK_PACKAGE_NAME} python setup.py --verbose bdist_wheel \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
       -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-    && python -m pip install --break-system-packages --no-cache-dir --force-reinstall /opt/build/MSLK/dist/mslk-*.whl \
+    && python -m pip install --break-system-packages --force-reinstall /opt/build/MSLK/dist/mslk-*.whl \
     && ccache --show-stats \
     && rm -rf /opt/build/MSLK
 
@@ -222,7 +223,8 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 #   below the known-good GB10 floor or fall back to an sdist/Rust build
 # - the legacy browser UI dependency has been moved out of the base image.
 #   API/headless builds must resolve and run without the browser UI package.
-RUN rustc --version \
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
+    rustc --version \
     && cargo --version \
     && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
@@ -231,8 +233,8 @@ RUN rustc --version \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
     && python /opt/build/render-resolved-requirements.py
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,id=gb10-global-ccache,target=/root/.cache/ccache,sharing=locked \
     --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/root/.cache/cargo-target \
@@ -309,7 +311,8 @@ print(json.dumps({
     }
 }, indent=2))
 PY
-RUN chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
+RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
+    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
     && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
     && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
