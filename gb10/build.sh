@@ -36,6 +36,7 @@ A1111 source:              local fork checkout (${PROJECT_ROOT})
 DOCKER_BUILDKIT:           ${DOCKER_BUILDKIT}
 BUILDKIT_PROGRESS:         ${BUILDKIT_PROGRESS}
 Docker build cache:        enabled
+Compiler cache:            enabled (BuildKit cache mount gb10-global-ccache)
 Cache-from image:          ${CACHE_FROM} (${CACHE_FROM_STATUS})
 EOM
 

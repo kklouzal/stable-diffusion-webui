@@ -41,9 +41,15 @@ ENV CCACHE_DIR=/root/.cache/ccache
 ENV CCACHE_MAXSIZE=50G
 ENV CCACHE_COMPILERCHECK=content
 ENV CCACHE_SLOPPINESS=time_macros
+ENV CCACHE_BASEDIR=/opt/build
+ENV CC=gcc
+ENV CXX=g++
+ENV CUDAHOSTCXX=g++
+ENV CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache"
 ENV TORCH_CUDA_ARCH_LIST=12.1a
 ENV MAX_JOBS=4
 ENV CMAKE_BUILD_PARALLEL_LEVEL=4
+ENV PATH=/usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
@@ -63,7 +69,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
-    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python
+    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python \
+    && test "$(command -v gcc)" = /usr/lib/ccache/gcc \
+    && test "$(command -v g++)" = /usr/lib/ccache/g++ \
+    && ccache --version
 
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
@@ -94,12 +103,13 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     --mount=type=cache,id=gb10-global-ccache,target=/root/.cache/ccache,sharing=locked \
     ccache --set-config=max_size=${CCACHE_MAXSIZE} \
     && ccache --set-config=compiler_check=${CCACHE_COMPILERCHECK} \
+    && ccache --set-config=sloppiness=${CCACHE_SLOPPINESS} \
+    && ccache --zero-stats \
     && cd /opt/build/MSLK \
     && MSLK_PACKAGE_NAME=${MSLK_PACKAGE_NAME} python setup.py --verbose bdist_wheel \
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+      ${CMAKE_ARGS} \
     && python -m pip install --break-system-packages --force-reinstall /opt/build/MSLK/dist/mslk-*.whl \
-    && ccache --show-stats \
+    && ccache --show-stats --verbose \
     && rm -rf /opt/build/MSLK
 
 RUN python - <<'PY'
@@ -200,8 +210,9 @@ ENV RUSTUP_HOME=/opt/rustup
 ENV CARGO_HOME=/opt/cargo
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CARGO_TARGET_DIR=/root/.cache/cargo-target
-ENV CC="ccache gcc"
-ENV CXX="ccache g++"
+ENV CC=gcc
+ENV CXX=g++
+ENV CUDAHOSTCXX=g++
 ENV PATH=/usr/lib/ccache:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --profile minimal --default-toolchain stable
@@ -238,15 +249,20 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/root/.cache/cargo-target \
-    export CCACHE_DIR=/root/.cache/ccache \
-    && export MAX_JOBS="$(nproc)" \
+    ccache --set-config=max_size=${CCACHE_MAXSIZE} \
+    && ccache --set-config=compiler_check=${CCACHE_COMPILERCHECK} \
+    && ccache --set-config=sloppiness=${CCACHE_SLOPPINESS} \
     && ccache --zero-stats \
+    && export MAX_JOBS="$(nproc)" \
+    && test "$(command -v gcc)" = /usr/lib/ccache/gcc \
+    && test "$(command -v g++)" = /usr/lib/ccache/g++ \
+    && printf '[ccache] compiler wrappers: CC=%s CXX=%s CUDAHOSTCXX=%s CMAKE_ARGS=%s\n' "$CC" "$CXX" "$CUDAHOSTCXX" "$CMAKE_ARGS" \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
     && test -n "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels "dctorch==${DCTORCH_VERSION}" \
     && ls -1 /opt/wheels/clip-*.whl /opt/wheels/dctorch-*.whl \
-    && ccache --show-stats
+    && ccache --show-stats --verbose
 
 
 
