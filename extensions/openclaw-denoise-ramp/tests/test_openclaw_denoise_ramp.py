@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import sys
 import types
@@ -46,6 +47,22 @@ def install_a1111_stubs() -> None:
     )
 
 
+def load_api_denoise_ramp_persist_helper():
+    api_path = EXT_ROOT.parents[1] / "modules" / "api" / "api.py"
+    tree = ast.parse(api_path.read_text(), filename=str(api_path))
+    api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    helper = next(
+        node
+        for node in api_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "persist_openclaw_denoise_ramp_args"
+    )
+    module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, str(api_path), "exec"), namespace)
+    return namespace[helper.name]
+
+
 class DenoiseRampTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -75,6 +92,21 @@ class DenoiseRampTests(unittest.TestCase):
 
         self.assertIs(ramped, sigmas)
         self.assertEqual(p.extra_generation_params, {})
+
+    def test_api_default_persistence_keeps_selected_delta_until_changed(self):
+        persist = load_api_denoise_ramp_persist_helper()
+
+        script = types.SimpleNamespace(args_from=3, title=lambda: "OpenClaw Denoise Ramp")
+        defaults = [None, None, None, 0.0]
+
+        persist(defaults, script, [0.075])
+        self.assertEqual(defaults[3], 0.075)
+
+        next_request_args = defaults.copy()
+        self.assertEqual(next_request_args[3], 0.075)
+
+        persist(defaults, script, [0.0])
+        self.assertEqual(defaults[3], 0.0)
 
 
 if __name__ == "__main__":

@@ -682,6 +682,17 @@ class Api:
                     script_args[script.args_from:script.args_to] = ui_default_values
         return script_args
 
+    @staticmethod
+    def persist_openclaw_denoise_ramp_args(default_script_args, script, requested_args):
+        if script.title() != "OpenClaw Denoise Ramp":
+            return
+
+        for idx, value in enumerate(requested_args):
+            target_index = script.args_from + idx
+            if target_index >= len(default_script_args):
+                default_script_args.extend([None] * (target_index + 1 - len(default_script_args)))
+            default_script_args[target_index] = value
+
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
         script_args = ScriptArgsList(default_script_args.copy())
         script_args.openclaw_script_args_to_overrides = {}
@@ -724,6 +735,7 @@ class Api:
                         if target_index >= len(script_args):
                             script_args.extend([None] * (target_index + 1 - len(script_args)))
                         script_args[target_index] = value
+                    self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
         return script_args
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
