@@ -310,6 +310,16 @@ class ScriptArgsList(list):
     pass
 
 
+def script_default_ui_values(script):
+    """Return default script arg values from finalized UI controls when possible."""
+    controls = getattr(script, "controls", None)
+    if controls is None:
+        controls = script.ui(script.is_img2img)
+    if controls is None:
+        return []
+    return [elem.value for elem in controls]
+
+
 def api_infotext_value_for_field(field, params, target_type):
     value = field.function(params) if field.function else params.get(field.label)
     if value is None:
@@ -702,10 +712,8 @@ class Api:
         # get default values
         with gr.Blocks(): # will throw errors calling ui function without this
             for script in script_runner.scripts:
-                if script.ui(script.is_img2img):
-                    ui_default_values = []
-                    for elem in script.ui(script.is_img2img):
-                        ui_default_values.append(elem.value)
+                ui_default_values = script_default_ui_values(script)
+                if ui_default_values:
                     script_args[script.args_from:script.args_to] = ui_default_values
         return script_args
 
