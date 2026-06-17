@@ -1240,6 +1240,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                         if save_samples and opts.save_mask:
                             images.save_image(image_mask, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask")
                         if opts.return_mask:
+                            infotexts.append(text)
                             output_images.append(image_mask)
 
                     if opts.return_mask_composite or opts.save_mask_composite:
@@ -1247,6 +1248,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                         if save_samples and opts.save_mask_composite:
                             images.save_image(image_mask_composite, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask-composite")
                         if opts.return_mask_composite:
+                            infotexts.append(text)
                             output_images.append(image_mask_composite)
 
             del x_samples_ddim
