@@ -161,12 +161,12 @@ class ScriptPostprocessingRunner:
         inputs += list(script.controls.values())
         script.args_to = len(inputs)
 
-    def scripts_in_preferred_order(self):
+    def scripts_in_preferred_order(self, scripts_order=None):
         if self.scripts is None:
             import modules.scripts
             self.initialize_scripts(modules.scripts.postprocessing_scripts_data)
 
-        scripts_order = shared.opts.postprocessing_operation_order
+        scripts_order = shared.opts.postprocessing_operation_order if scripts_order is None else scripts_order
         scripts_filter_out = set(shared.opts.postprocessing_disable_in_extras)
 
         def script_score(name):
@@ -193,10 +193,10 @@ class ScriptPostprocessingRunner:
         self.ui_created = True
         return inputs
 
-    def run(self, pp: PostprocessedImage, args):
+    def run(self, pp: PostprocessedImage, args, scripts_order=None):
         scripts = []
 
-        for script in self.scripts_in_preferred_order():
+        for script in self.scripts_in_preferred_order(scripts_order):
             script_args = args[script.args_from:script.args_to]
 
             process_args = {}
@@ -231,20 +231,27 @@ class ScriptPostprocessingRunner:
 
         pp.extra_images = all_images[1:]
 
-    def create_args_for_run(self, scripts_args):
+    def create_args_for_run(self, scripts_args, scripts_order=None):
         if not self.ui_created:
             with gr.Blocks(analytics_enabled=False):
                 self.setup_ui()
 
-        scripts = self.scripts_in_preferred_order()
+        scripts = self.scripts_in_preferred_order(scripts_order)
+        if not scripts:
+            return []
+
         args = [None] * max([x.args_to for x in scripts])
 
         for script in scripts:
+            for i, control in enumerate(script.controls.values()):
+                args[script.args_from + i] = getattr(control, "value", None)
+
             script_args_dict = scripts_args.get(script.name, None)
             if script_args_dict is not None:
 
                 for i, name in enumerate(script.controls):
-                    args[script.args_from + i] = script_args_dict.get(name, None)
+                    if name in script_args_dict:
+                        args[script.args_from + i] = script_args_dict[name]
 
         return args
 

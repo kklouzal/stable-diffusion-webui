@@ -6,7 +6,7 @@ from modules import shared, images, devices, scripts, scripts_postprocessing, ui
 from modules.shared import opts
 
 
-def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True):
+def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True, scripts_order=None):
     devices.torch_gc()
 
     shared.state.begin(job="extras")
@@ -70,7 +70,7 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
 
         initial_pp = scripts_postprocessing.PostprocessedImage(image_data)
 
-        scripts.scripts_postproc.run(initial_pp, args)
+        scripts.scripts_postproc.run(initial_pp, args, scripts_order=scripts_order)
 
         if shared.state.skipped:
             continue
@@ -136,6 +136,8 @@ def run_postprocessing_webui(id_task, *args, **kwargs):
 def run_extras(extras_mode, resize_mode, image, image_folder, input_dir, output_dir, show_extras_results, gfpgan_visibility, codeformer_visibility, codeformer_weight, upscaling_resize, upscaling_resize_w, upscaling_resize_h, upscaling_crop, extras_upscaler_1, extras_upscaler_2, extras_upscaler_2_visibility, upscale_first: bool, save_output: bool = True, max_side_length: int = 0):
     """old handler for API"""
 
+    scripts_order = ["Upscale", "GFPGAN", "CodeFormer"] if upscale_first else ["GFPGAN", "CodeFormer", "Upscale"]
+
     args = scripts.scripts_postproc.create_args_for_run({
         "Upscale": {
             "upscale_enabled": True,
@@ -158,6 +160,6 @@ def run_extras(extras_mode, resize_mode, image, image_folder, input_dir, output_
             "codeformer_visibility": codeformer_visibility,
             "codeformer_weight": codeformer_weight,
         },
-    })
+    }, scripts_order=scripts_order)
 
-    return run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output=save_output)
+    return run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output=save_output, scripts_order=scripts_order)
