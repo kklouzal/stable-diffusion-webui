@@ -17,6 +17,19 @@ def load_run_extras():
     return namespace["run_extras"]
 
 
+def load_run_postprocessing():
+    source = Path("modules/postprocessing.py").read_text()
+    tree = ast.parse(source)
+    module = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_postprocessing"],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, "modules/postprocessing.py", "exec"), namespace)
+    return namespace["run_postprocessing"]
+
+
 def test_postprocessing_runner_order_override_preserves_script_defaults(monkeypatch):
     from modules import scripts_postprocessing
 
@@ -61,6 +74,92 @@ def test_postprocessing_runner_order_override_preserves_script_defaults(monkeypa
         ("process", "GFPGAN"),
         ("process", "Upscale"),
     ]
+
+
+def test_ui_batch_upload_skips_unreadable_files_before_job_count():
+    from PIL import Image
+
+    run_postprocessing = load_run_postprocessing()
+    valid_image = Image.new("RGB", (1, 1))
+
+    class FakeState:
+        interrupted = False
+        stopping_generation = False
+        skipped = False
+        job = None
+        textinfo = None
+
+        def __init__(self):
+            self.job_count = None
+            self.nextjob_calls = 0
+
+        def begin(self, job):
+            self.job = job
+
+        def nextjob(self):
+            self.nextjob_calls += 1
+
+        def assign_current_image(self, image):
+            self.current_image = image
+
+        def end(self):
+            self.ended = True
+
+    class FakePostprocessedImage:
+        def __init__(self, image):
+            self.image = image
+            self.extra_images = []
+            self.info = {}
+            self.caption = None
+
+        def get_suffix(self, used_suffixes):
+            return ""
+
+    state = FakeState()
+
+    def fake_read(path):
+        if path.endswith("bad.png"):
+            raise RuntimeError("unreadable")
+        return valid_image.copy()
+
+    run_postprocessing.__globals__.update(
+        Image=Image,
+        os=__import__("os"),
+        devices=SimpleNamespace(torch_gc=lambda: None),
+        images=SimpleNamespace(
+            read=fake_read,
+            fix_image=lambda image: image,
+            read_info_from_image=lambda image: ("", {}),
+        ),
+        scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
+        scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=lambda pp, args, scripts_order=None: None)),
+        opts=SimpleNamespace(
+            outdir_samples="",
+            outdir_extras_samples="",
+            use_original_name_batch=False,
+            enable_pnginfo=False,
+            samples_format="png",
+        ),
+        shared=SimpleNamespace(
+            state=state,
+            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
+            listfiles=lambda input_dir: [],
+            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
+        ),
+        ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
+        infotext_utils=SimpleNamespace(quote=lambda value: value),
+    )
+
+    bad_upload = SimpleNamespace(name="/tmp/bad.png", orig_name="bad.png")
+    good_upload = SimpleNamespace(name="/tmp/good.png", orig_name="good.png")
+
+    outputs, html_info, html_log = run_postprocessing(1, None, [bad_upload, good_upload], "", "", True, save_output=False)
+
+    assert len(outputs) == 1
+    assert state.job_count == 1
+    assert state.nextjob_calls == 1
+    assert html_info == ""
+    assert html_log == ""
 
 
 def test_run_extras_maps_upscale_first_to_postprocessing_order():

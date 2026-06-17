@@ -20,7 +20,10 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
                     image = images.fix_image(img)
                     fn = ''
                 else:
-                    image = images.read(os.path.abspath(img.name))
+                    try:
+                        image = images.read(os.path.abspath(img.name))
+                    except Exception:
+                        continue
                     fn = os.path.splitext(img.orig_name)[0]
                 yield image, fn
         elif extras_mode == 2:
