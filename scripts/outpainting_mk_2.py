@@ -283,10 +283,12 @@ class Script(scripts.Script):
 
         combined_grid_image = images.image_grid(all_processed_images)
         unwanted_grid_because_of_img_count = len(all_processed_images) < 2 and opts.grid_only_if_multiple
-        if opts.return_grid and not unwanted_grid_because_of_img_count:
+        return_grid = opts.return_grid and not unwanted_grid_because_of_img_count
+        if return_grid:
             all_images = [combined_grid_image] + all_processed_images
 
-        res = Processed(p, all_images, initial_seed_and_info[0], initial_seed_and_info[1])
+        index_of_first_image = 1 if return_grid else 0
+        res = Processed(p, all_images, initial_seed_and_info[0], initial_seed_and_info[1], index_of_first_image=index_of_first_image)
 
         if opts.samples_save:
             for img in all_processed_images:
