@@ -107,3 +107,32 @@ def test_save_image_reports_number_suffixed_duplicate_filename(tmp_path, monkeyp
     assert original.read_bytes() == b"existing"
     assert (tmp_path / "duplicate-1.png").is_file()
     assert (tmp_path / "duplicate-1.txt").read_text(encoding="utf8") == "extras metadata\n"
+
+
+def test_save_image_creates_callback_rewritten_directory(tmp_path, monkeypatch):
+    images = load_images_module(monkeypatch)
+
+    callback_dir = tmp_path / "callback-target"
+
+    def rewrite_filename(params):
+        params.filename = str(callback_dir / "rewritten.webp")
+
+    monkeypatch.setattr(images.script_callbacks, "before_image_saved_callback", rewrite_filename)
+
+    image = Image.new("RGB", (1, 1), color="white")
+
+    fullfn, txt_fullfn = images.save_image(
+        image,
+        path=str(tmp_path),
+        basename="",
+        extension="png",
+        info="callback metadata",
+        forced_filename="original",
+        save_to_dirs=False,
+    )
+
+    assert fullfn == str(callback_dir / "rewritten.webp")
+    assert txt_fullfn == str(callback_dir / "rewritten.txt")
+    assert image.already_saved_as == fullfn
+    assert (callback_dir / "rewritten.webp").is_file()
+    assert (callback_dir / "rewritten.txt").read_text(encoding="utf8") == "callback metadata\n"

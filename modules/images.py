@@ -709,6 +709,8 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     image = params.image
     fullfn = params.filename
     info = params.pnginfo.get(pnginfo_section_name, None)
+    save_dir = os.path.dirname(fullfn) or "."
+    os.makedirs(save_dir, exist_ok=True)
 
     def _atomically_save_image(image_to_save, filename_without_extension, extension):
         """
@@ -729,7 +731,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
 
     fullfn_without_extension, extension = os.path.splitext(params.filename)
     if hasattr(os, 'statvfs'):
-        max_name_len = os.statvfs(path).f_namemax
+        max_name_len = os.statvfs(save_dir).f_namemax
         fullfn_without_extension = fullfn_without_extension[:max_name_len - max(4, len(extension))]
         params.filename = fullfn_without_extension + extension
         fullfn = params.filename
