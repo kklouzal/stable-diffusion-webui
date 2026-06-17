@@ -231,6 +231,33 @@ def restore_old_hires_fix_params(res):
     res['Hires resize-2'] = height
 
 
+def _indexed_infotext_value(params, label, choices):
+    value = params.get(label)
+    if value is None:
+        return None
+
+    try:
+        return choices.index(value)
+    except ValueError:
+        return None
+
+
+def inpainting_mask_invert_from_infotext(params):
+    return _indexed_infotext_value(params, "Mask mode", ["Inpaint masked", "Inpaint not masked"])
+
+
+def inpainting_fill_from_infotext(params):
+    return _indexed_infotext_value(params, "Masked content", ["fill", "original", "latent noise", "latent nothing"])
+
+
+def inpaint_full_res_from_infotext(params):
+    value = _indexed_infotext_value(params, "Inpaint area", ["Whole picture", "Only masked"])
+    if value is None:
+        return None
+
+    return value == 1
+
+
 def parse_generation_parameters(x: str, skip_fields: list[str] | None = None):
     """parses generation parameters string, the one you see in text field under the picture in UI:
 ```

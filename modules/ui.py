@@ -852,9 +852,9 @@ def create_ui():
                 PasteField(toprow.ui_styles.dropdown, lambda d: d["Styles array"] if isinstance(d.get("Styles array"), list) else gr.update(), api="styles"),
                 PasteField(denoising_strength, "Denoising strength", api="denoising_strength"),
                 PasteField(mask_blur, "Mask blur", api="mask_blur"),
-                PasteField(inpainting_mask_invert, 'Mask mode'),
-                PasteField(inpainting_fill, 'Masked content'),
-                PasteField(inpaint_full_res, 'Inpaint area'),
+                PasteField(inpainting_mask_invert, parameters_copypaste.inpainting_mask_invert_from_infotext, api="inpainting_mask_invert"),
+                PasteField(inpainting_fill, parameters_copypaste.inpainting_fill_from_infotext, api="inpainting_fill"),
+                PasteField(inpaint_full_res, parameters_copypaste.inpaint_full_res_from_infotext, api="inpaint_full_res"),
                 PasteField(inpaint_full_res_padding, 'Masked area padding', api="inpaint_full_res_padding"),
                 *scripts.scripts_img2img.infotext_fields
             ]
