@@ -107,3 +107,33 @@ def test_run_extras_maps_upscale_first_to_postprocessing_order():
     assert run_extras(**common_args, upscale_first=True) == "result"
     assert observed[0][1] == ["Upscale", "GFPGAN", "CodeFormer"]
     assert observed[1][1] == ["Upscale", "GFPGAN", "CodeFormer"]
+
+
+def load_set_upscalers():
+    source = Path("modules/api/api.py").read_text()
+    tree = ast.parse(source)
+    module = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "setUpscalers"],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
+    return namespace["setUpscalers"]
+
+
+def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
+    set_upscalers = load_set_upscalers()
+    req = SimpleNamespace(
+        show_extras_results=False,
+        upscaler_1="None",
+        upscaler_2="None",
+    )
+
+    result = set_upscalers(req)
+
+    assert result["show_extras_results"] is True
+    assert result["extras_upscaler_1"] == "None"
+    assert result["extras_upscaler_2"] == "None"
+    assert "upscaler_1" not in result
+    assert "upscaler_2" not in result

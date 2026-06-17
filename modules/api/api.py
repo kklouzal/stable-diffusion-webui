@@ -366,6 +366,10 @@ def setUpscalers(req: dict):
     reqDict = vars(req)
     reqDict['extras_upscaler_1'] = reqDict.pop('upscaler_1', None)
     reqDict['extras_upscaler_2'] = reqDict.pop('upscaler_2', None)
+
+    # API extras endpoints never use directory mode, so always return images
+    # regardless of the UI-only batch-directory gallery toggle.
+    reqDict['show_extras_results'] = True
     return reqDict
 
 
