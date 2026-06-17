@@ -23,6 +23,7 @@ def main() -> int:
     ap.add_argument('--report', default='/opt/build/report.json')
     ap.add_argument('--package', required=True)
     ap.add_argument('--min-version')
+    ap.add_argument('--absent', action='store_true', help='fail if the package is present in the pip report')
     ap.add_argument('--require-wheel', action='store_true')
     args = ap.parse_args()
 
@@ -34,6 +35,13 @@ def main() -> int:
         name = meta.get('name')
         if name and normalize(name) == wanted:
             matches.append(item)
+
+    if args.absent:
+        if matches:
+            versions = ', '.join((item.get('metadata') or {}).get('version', '<unknown>') for item in matches)
+            raise SystemExit(f'{args.package}: unexpectedly present in pip report: {versions}')
+        print(f'{args.package}: absent from pip report')
+        return 0
 
     if not matches:
         raise SystemExit(f'{args.package}: not present in pip report')

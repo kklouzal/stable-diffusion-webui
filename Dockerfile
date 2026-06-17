@@ -243,6 +243,8 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
+    && python /opt/build/assert-resolved-package.py --package gradio --absent \
+    && python /opt/build/assert-resolved-package.py --package gradio-client --absent \
     && python /opt/build/render-resolved-requirements.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=gb10-global-ccache,target=/root/.cache/ccache,sharing=locked \
