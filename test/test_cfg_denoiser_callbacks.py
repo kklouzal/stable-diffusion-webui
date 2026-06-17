@@ -134,5 +134,39 @@ class CFGDenoiserCallbackTests(unittest.TestCase):
         torch.testing.assert_close(denoised, torch.tensor([[[[14.0]]]]))
 
 
+    def test_last_noise_uncond_requirement_disables_uncond_skip(self):
+        module = load_cfg_denoiser(lambda params: None)
+        module.shared.opts.skip_early_cond = 1.0
+
+        class TestDenoiser(module.CFGDenoiser):
+            @property
+            def inner_model(self):
+                return object()
+
+            def run_inner_model(self, x, sigma, cond):
+                self.seen_batch = x.shape[0]
+                return torch.tensor([[[[2.0]]], [[[1.0]]]], device=x.device, dtype=x.dtype)
+
+        sampler = types.SimpleNamespace(sampler_extra_args={}, last_latent=None)
+        denoiser = TestDenoiser(sampler)
+        denoiser.p = types.SimpleNamespace(extra_generation_params={}, scripts=None)
+        denoiser.steps = 1
+        denoiser.total_steps = 1
+        denoiser.need_last_noise_uncond = True
+
+        x = torch.zeros(1, 1, 1, 1)
+        sigma = torch.ones(1)
+        cond = torch.zeros(1, 2, 3)
+        uncond = torch.zeros(1, 2, 3)
+        image_cond = torch.zeros(1, 1, 1, 1)
+
+        denoised = denoiser(x, sigma, uncond, cond, 3.0, 0.0, image_cond)
+
+        self.assertEqual(denoiser.seen_batch, 2)
+        torch.testing.assert_close(denoiser.last_noise_uncond, torch.tensor([[[[1.0]]]]))
+        torch.testing.assert_close(denoised, torch.tensor([[[[4.0]]]]))
+        self.assertNotIn("Skip Early CFG", denoiser.p.extra_generation_params)
+
+
 if __name__ == "__main__":
     unittest.main()

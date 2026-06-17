@@ -237,11 +237,12 @@ class CFGDenoiser(torch.nn.Module):
         tensor = denoiser_params.text_cond
         uncond = denoiser_params.text_uncond
         skip_uncond = False
+        can_skip_uncond = not self.need_last_noise_uncond
 
-        if shared.opts.skip_early_cond != 0. and self.step / self.total_steps <= shared.opts.skip_early_cond:
+        if can_skip_uncond and shared.opts.skip_early_cond != 0. and self.step / self.total_steps <= shared.opts.skip_early_cond:
             skip_uncond = True
             self.p.extra_generation_params["Skip Early CFG"] = shared.opts.skip_early_cond
-        elif (self.step % 2 or shared.opts.s_min_uncond_all) and s_min_uncond > 0 and sigma[0] < s_min_uncond and not is_edit_model:
+        elif can_skip_uncond and (self.step % 2 or shared.opts.s_min_uncond_all) and s_min_uncond > 0 and sigma[0] < s_min_uncond and not is_edit_model:
             skip_uncond = True
             self.p.extra_generation_params["NGMS"] = s_min_uncond
             if shared.opts.s_min_uncond_all:
