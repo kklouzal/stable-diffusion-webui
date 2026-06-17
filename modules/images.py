@@ -725,6 +725,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
                 n += 1
                 filename = f"{filename_without_extension}-{n}{extension}"
         os.replace(temp_file_path, filename)
+        return filename
 
     fullfn_without_extension, extension = os.path.splitext(params.filename)
     if hasattr(os, 'statvfs'):
@@ -732,7 +733,8 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
         fullfn_without_extension = fullfn_without_extension[:max_name_len - max(4, len(extension))]
         params.filename = fullfn_without_extension + extension
         fullfn = params.filename
-    _atomically_save_image(image, fullfn_without_extension, extension)
+    fullfn = _atomically_save_image(image, fullfn_without_extension, extension)
+    params.filename = fullfn
 
     image.already_saved_as = fullfn
 
@@ -757,7 +759,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
             errors.display(e, "saving image as downscaled JPG")
 
     if opts.save_txt and info is not None:
-        txt_fullfn = f"{fullfn_without_extension}.txt"
+        txt_fullfn = f"{os.path.splitext(fullfn)[0]}.txt"
         with open(txt_fullfn, "w", encoding="utf8") as file:
             file.write(f"{info}\n")
     else:
