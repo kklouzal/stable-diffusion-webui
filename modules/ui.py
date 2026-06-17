@@ -842,20 +842,20 @@ def create_ui():
             toprow.negative_token_button.click(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
 
             img2img_paste_fields = [
-                (toprow.prompt, "Prompt"),
-                (toprow.negative_prompt, "Negative prompt"),
-                (cfg_scale, "CFG scale"),
-                (image_cfg_scale, "Image CFG scale"),
-                (width, "Size-1"),
-                (height, "Size-2"),
-                (batch_size, "Batch size"),
-                (toprow.ui_styles.dropdown, lambda d: d["Styles array"] if isinstance(d.get("Styles array"), list) else gr.update()),
-                (denoising_strength, "Denoising strength"),
-                (mask_blur, "Mask blur"),
-                (inpainting_mask_invert, 'Mask mode'),
-                (inpainting_fill, 'Masked content'),
-                (inpaint_full_res, 'Inpaint area'),
-                (inpaint_full_res_padding, 'Masked area padding'),
+                PasteField(toprow.prompt, "Prompt", api="prompt"),
+                PasteField(toprow.negative_prompt, "Negative prompt", api="negative_prompt"),
+                PasteField(cfg_scale, "CFG scale", api="cfg_scale"),
+                PasteField(image_cfg_scale, "Image CFG scale", api="image_cfg_scale"),
+                PasteField(width, "Size-1", api="width"),
+                PasteField(height, "Size-2", api="height"),
+                PasteField(batch_size, "Batch size", api="batch_size"),
+                PasteField(toprow.ui_styles.dropdown, lambda d: d["Styles array"] if isinstance(d.get("Styles array"), list) else gr.update(), api="styles"),
+                PasteField(denoising_strength, "Denoising strength", api="denoising_strength"),
+                PasteField(mask_blur, "Mask blur", api="mask_blur"),
+                PasteField(inpainting_mask_invert, 'Mask mode'),
+                PasteField(inpainting_fill, 'Masked content'),
+                PasteField(inpaint_full_res, 'Inpaint area'),
+                PasteField(inpaint_full_res_padding, 'Masked area padding', api="inpaint_full_res_padding"),
                 *scripts.scripts_img2img.infotext_fields
             ]
             parameters_copypaste.add_paste_fields("img2img", init_img, img2img_paste_fields, override_settings)
