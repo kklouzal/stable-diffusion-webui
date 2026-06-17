@@ -737,8 +737,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
         fullfn = params.filename
     fullfn = _atomically_save_image(image, fullfn_without_extension, extension)
     params.filename = fullfn
-
-    image.already_saved_as = fullfn
+    saved_image = image
 
     oversize = image.width > opts.target_side_length or image.height > opts.target_side_length
     if opts.export_for_4chan and (oversize or os.stat(fullfn).st_size > opts.img_downscale_threshold * 1024 * 1024):
@@ -756,9 +755,13 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
             except Exception:
                 image = image.resize(resize_to)
         try:
-            _atomically_save_image(image, fullfn_without_extension, ".jpg")
+            fullfn = _atomically_save_image(image, fullfn_without_extension, ".jpg")
+            params.filename = fullfn
+            params.image = image
         except Exception as e:
             errors.display(e, "saving image as downscaled JPG")
+
+    saved_image.already_saved_as = fullfn
 
     if opts.save_txt and info is not None:
         txt_fullfn = f"{os.path.splitext(fullfn)[0]}.txt"

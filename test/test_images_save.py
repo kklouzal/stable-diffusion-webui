@@ -136,3 +136,33 @@ def test_save_image_creates_callback_rewritten_directory(tmp_path, monkeypatch):
     assert image.already_saved_as == fullfn
     assert (callback_dir / "rewritten.webp").is_file()
     assert (callback_dir / "rewritten.txt").read_text(encoding="utf8") == "callback metadata\n"
+
+
+def test_save_image_reports_exported_4chan_jpg_path(tmp_path, monkeypatch):
+    images = load_images_module(monkeypatch)
+    images.opts.export_for_4chan = True
+    images.opts.target_side_length = 2
+
+    saved_callbacks = []
+    monkeypatch.setattr(images.script_callbacks, "image_saved_callback", saved_callbacks.append)
+
+    image = Image.new("RGB", (4, 2), color="white")
+
+    fullfn, txt_fullfn = images.save_image(
+        image,
+        path=str(tmp_path),
+        basename="",
+        extension="png",
+        info="export metadata",
+        forced_filename="large",
+        save_to_dirs=False,
+    )
+
+    assert fullfn == str(tmp_path / "large.jpg")
+    assert txt_fullfn == str(tmp_path / "large.txt")
+    assert image.already_saved_as == fullfn
+    assert saved_callbacks[0].filename == fullfn
+    assert saved_callbacks[0].image.size == (2, 1)
+    assert (tmp_path / "large.png").is_file()
+    assert (tmp_path / "large.jpg").is_file()
+    assert (tmp_path / "large.txt").read_text(encoding="utf8") == "export metadata\n"
