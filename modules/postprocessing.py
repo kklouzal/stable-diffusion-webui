@@ -80,6 +80,9 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
 
         used_suffixes = {}
         for pp in [initial_pp, *initial_pp.extra_images]:
+            if shared.state.skipped:
+                break
+
             suffix = pp.get_suffix(used_suffixes)
 
             if opts.use_original_name_batch and name is not None:

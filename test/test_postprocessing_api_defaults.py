@@ -308,3 +308,82 @@ def test_extras_single_response_allows_no_output_from_skipped_or_interrupted_run
     )
 
     assert api.extras_single_image_api(SimpleNamespace(image="input")) == {"image": None, "html_info": "info"}
+
+
+def test_run_postprocessing_honors_skip_during_extra_image_output_loop():
+    from PIL import Image
+
+    run_postprocessing = load_run_postprocessing()
+    source = Image.new("RGB", (1, 1), color="white")
+    extra = Image.new("RGB", (1, 1), color="black")
+
+    class FakeState:
+        interrupted = False
+        stopping_generation = False
+        skipped = False
+        job = None
+        textinfo = None
+
+        def begin(self, job):
+            self.job = job
+
+        def nextjob(self):
+            pass
+
+        def assign_current_image(self, image):
+            self.current_image = image
+            self.skipped = True
+
+        def end(self):
+            self.ended = True
+
+    class FakePostprocessedImage:
+        def __init__(self, image):
+            self.image = image
+            self.extra_images = []
+            self.info = {}
+            self.caption = None
+
+        def get_suffix(self, used_suffixes):
+            return ""
+
+    state = FakeState()
+
+    def fake_run(pp, args, scripts_order=None):
+        pp.extra_images.append(FakePostprocessedImage(extra))
+
+    run_postprocessing.__globals__.update(
+        Image=Image,
+        os=__import__("os"),
+        devices=SimpleNamespace(torch_gc=lambda: None),
+        images=SimpleNamespace(
+            fix_image=lambda image: image,
+            read_info_from_image=lambda image: ("", {}),
+        ),
+        scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
+        scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=fake_run)),
+        opts=SimpleNamespace(
+            outdir_samples="",
+            outdir_extras_samples="",
+            use_original_name_batch=False,
+            enable_pnginfo=False,
+            samples_format="png",
+        ),
+        shared=SimpleNamespace(
+            state=state,
+            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
+            listfiles=lambda input_dir: [],
+            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
+        ),
+        ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
+        infotext_utils=SimpleNamespace(quote=lambda value: value),
+    )
+
+    outputs, html_info, html_log = run_postprocessing(0, source, [], "", "", True, save_output=False)
+
+    assert outputs == [source]
+    assert state.current_image is source
+    assert state.skipped is True
+    assert state.ended is True
+    assert html_info == ""
+    assert html_log == ""
