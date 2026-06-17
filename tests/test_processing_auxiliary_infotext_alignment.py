@@ -61,6 +61,15 @@ def test_sd_upscale_tracks_per_result_infotexts():
     assert "infotexts=result_infotexts" in processed_block
 
 
+def test_xyz_grid_marks_first_image_as_sample_when_grid_disabled():
+    source = Path("scripts/xyz_grid.py").read_text()
+
+    init_at = source.index("processed_result.images = [None] * list_size")
+    init_block = source[init_at:source.index("idx = index(ix, iy, iz)", init_at)]
+
+    assert "processed_result.index_of_first_image = 1 if draw_grid else 0" in init_block
+
+
 def test_xyz_grid_drops_stale_lone_image_infotexts():
     source = Path("scripts/xyz_grid.py").read_text()
 

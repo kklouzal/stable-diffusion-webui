@@ -313,7 +313,7 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
             processed_result.all_prompts = [None] * list_size
             processed_result.all_seeds = [None] * list_size
             processed_result.infotexts = [None] * list_size
-            processed_result.index_of_first_image = 1
+            processed_result.index_of_first_image = 1 if draw_grid else 0
 
         idx = index(ix, iy, iz)
         if processed.images:
