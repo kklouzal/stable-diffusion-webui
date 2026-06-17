@@ -801,6 +801,7 @@ class Script(scripts.Script):
         if not include_lone_images:
             # Don't need sub-images anymore, drop from list:
             processed.images = processed.images[:z_count + 1] if draw_grid else []
+            processed.infotexts = processed.infotexts[:z_count + 1] if draw_grid else []
 
         if draw_grid and opts.grid_save:
             # Auto-save main and sub-grids:
