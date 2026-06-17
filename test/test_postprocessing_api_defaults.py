@@ -122,6 +122,30 @@ def load_set_upscalers():
     return namespace["setUpscalers"]
 
 
+def load_api_extras_helpers():
+    source = Path("modules/api/api.py").read_text()
+    tree = ast.parse(source)
+    names = {"decode_extras_batch_images"}
+    module = ast.Module(body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
+    return namespace
+
+
+def load_api_extras_method(method_name):
+    source = Path("modules/api/api.py").read_text()
+    tree = ast.parse(source)
+    api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    method = next(node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == method_name)
+    fake_class = ast.ClassDef(name="FakeApi", bases=[], keywords=[], body=[method], decorator_list=[])
+    module = ast.Module(body=[fake_class], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"models": SimpleNamespace(ExtrasSingleImageRequest=object, ExtrasBatchImagesRequest=object)}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
+    return namespace["FakeApi"]
+
+
 def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
     set_upscalers = load_set_upscalers()
     req = SimpleNamespace(
@@ -137,3 +161,51 @@ def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
     assert result["extras_upscaler_2"] == "None"
     assert "upscaler_1" not in result
     assert "upscaler_2" not in result
+
+
+def test_extras_batch_decode_skips_corrupt_images_but_keeps_valid_items():
+    helpers = load_api_extras_helpers()
+    invalid_image_error = RuntimeError("invalid")
+    invalid_image_error.detail = "Invalid encoded image"
+
+    def fake_decode(data):
+        if data == "bad":
+            raise invalid_image_error
+        return f"decoded:{data}"
+
+    helpers["decode_base64_to_image"] = fake_decode
+    helpers["HTTPException"] = RuntimeError
+
+    result = helpers["decode_extras_batch_images"]([
+        SimpleNamespace(data="good-1"),
+        SimpleNamespace(data="bad"),
+        SimpleNamespace(data="good-2"),
+    ])
+
+    assert result == ["decoded:good-1", "decoded:good-2"]
+
+
+def test_extras_single_response_allows_no_output_from_skipped_or_interrupted_run():
+    api_class = load_api_extras_method("extras_single_image_api")
+    api = api_class()
+
+    class Lock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_set_upscalers(req):
+        return {"image": req.image}
+
+    api.queue_lock = Lock()
+    api.extras_single_image_api.__globals__.update(
+        setUpscalers=fake_set_upscalers,
+        decode_base64_to_image=lambda image: image,
+        encode_pil_to_base64=lambda image: (_ for _ in ()).throw(AssertionError("no image should be encoded")),
+        postprocessing=SimpleNamespace(run_extras=lambda **kwargs: ([], "info", "")),
+        models=SimpleNamespace(ExtrasSingleImageResponse=lambda **kwargs: kwargs),
+    )
+
+    assert api.extras_single_image_api(SimpleNamespace(image="input")) == {"image": None, "html_info": "info"}

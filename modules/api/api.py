@@ -417,6 +417,21 @@ def decode_base64_to_image(encoding):
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
 
 
+def decode_extras_batch_images(image_list):
+    decoded_images = []
+
+    for item in image_list:
+        try:
+            decoded_images.append(decode_base64_to_image(item.data))
+        except HTTPException as e:
+            if e.detail not in ("Invalid encoded image", "Invalid image url"):
+                raise
+
+            continue
+
+    return decoded_images
+
+
 def processed_js_with_image_paths(processed, extra: dict | None = None):
     data = json.loads(processed.js())
     data["image_paths"] = [getattr(image, "already_saved_as", None) for image in processed.images]
@@ -1006,13 +1021,14 @@ class Api:
         with self.queue_lock:
             result = postprocessing.run_extras(extras_mode=0, image_folder="", input_dir="", output_dir="", save_output=False, **reqDict)
 
-        return models.ExtrasSingleImageResponse(image=encode_pil_to_base64(result[0][0]), html_info=result[1])
+        image = encode_pil_to_base64(result[0][0]) if result[0] else None
+        return models.ExtrasSingleImageResponse(image=image, html_info=result[1])
 
     def extras_batch_images_api(self, req: models.ExtrasBatchImagesRequest):
         reqDict = setUpscalers(req)
 
         image_list = reqDict.pop('imageList', [])
-        image_folder = [decode_base64_to_image(x.data) for x in image_list]
+        image_folder = decode_extras_batch_images(image_list)
 
         with self.queue_lock:
             result = postprocessing.run_extras(extras_mode=1, image_folder=image_folder, image="", input_dir="", output_dir="", save_output=False, **reqDict)
