@@ -26,6 +26,41 @@ def test_outpainting_mk2_marks_prepended_grid_as_non_sample():
     assert "index_of_first_image = 1 if return_grid else 0" in processed_block
     assert "index_of_first_image=index_of_first_image" in processed_block
 
+
+def test_loopback_marks_prepended_grid_as_non_sample():
+    source = Path("scripts/loopback.py").read_text()
+
+    grid_join_at = source.index("all_images = grids + all_images")
+    processed_block = source[grid_join_at:source.index("return processed", grid_join_at)]
+
+    assert "index_of_first_image = 1 if grids else 0" in processed_block
+    assert "index_of_first_image=index_of_first_image" in processed_block
+
+
+def test_loopback_saves_grid_with_initial_infotext():
+    source = Path("scripts/loopback.py").read_text()
+
+    save_call_at = source.index("images.save_image(grid")
+    save_call = source[save_call_at:source.index(")", save_call_at)]
+
+    assert "info=initial_info" in save_call
+
+
+def test_sd_upscale_tracks_per_result_infotexts():
+    source = Path("scripts/sd_upscale.py").read_text()
+
+    result_images_at = source.index("result_images = []")
+    processed_at = source.index("processed = Processed(p, result_images", result_images_at)
+    processed_block = source[result_images_at:source.index("return processed", processed_at)]
+
+    assert "result_infotexts = []" in processed_block
+    assert "result_info = None" in processed_block
+    assert "result_info = processed.info" in processed_block
+    assert "result_infotexts.append(result_info)" in processed_block
+    assert "info=result_info" in processed_block
+    assert "infotexts=result_infotexts" in processed_block
+
+
 def test_xyz_grid_drops_stale_lone_image_infotexts():
     source = Path("scripts/xyz_grid.py").read_text()
 

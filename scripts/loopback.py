@@ -128,13 +128,14 @@ class Script(scripts.Script):
         if len(history) > 1:
             grid = images.image_grid(history, rows=1)
             if opts.grid_save:
-                images.save_image(grid, p.outpath_grids, "grid", initial_seed, p.prompt, opts.grid_format, info=info, short_filename=not opts.grid_extended_filename, grid=True, p=p)
+                images.save_image(grid, p.outpath_grids, "grid", initial_seed, p.prompt, opts.grid_format, info=initial_info, short_filename=not opts.grid_extended_filename, grid=True, p=p)
 
             if opts.return_grid:
                 grids.append(grid)
 
         all_images = grids + all_images
+        index_of_first_image = 1 if grids else 0
 
-        processed = Processed(p, all_images, initial_seed, initial_info)
+        processed = Processed(p, all_images, initial_seed, initial_info, index_of_first_image=index_of_first_image)
 
         return processed

@@ -66,11 +66,13 @@ class Script(scripts.Script):
         print(f"SD upscaling will process a total of {len(work)} images tiled as {len(grid.tiles[0][2])}x{len(grid.tiles)} per upscale in a total of {state.job_count} batches.")
 
         result_images = []
+        result_infotexts = []
         for n in range(upscale_count):
             start_seed = seed + n
             p.seed = start_seed
 
             work_results = []
+            result_info = None
             for i in range(batch_count):
                 p.batch_size = batch_size
                 p.init_images = work[i * batch_size:(i + 1) * batch_size]
@@ -80,6 +82,8 @@ class Script(scripts.Script):
 
                 if initial_info is None:
                     initial_info = processed.info
+                if result_info is None:
+                    result_info = processed.info
 
                 p.seed = processed.seed + 1
                 work_results += processed.images
@@ -92,10 +96,11 @@ class Script(scripts.Script):
 
             combined_image = images.combine_grid(grid)
             result_images.append(combined_image)
+            result_infotexts.append(result_info)
 
             if opts.samples_save:
-                images.save_image(combined_image, p.outpath_samples, "", start_seed, p.prompt, opts.samples_format, info=initial_info, p=p)
+                images.save_image(combined_image, p.outpath_samples, "", start_seed, p.prompt, opts.samples_format, info=result_info, p=p)
 
-        processed = Processed(p, result_images, seed, initial_info)
+        processed = Processed(p, result_images, seed, initial_info, infotexts=result_infotexts)
 
         return processed
