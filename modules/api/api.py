@@ -310,6 +310,33 @@ class ScriptArgsList(list):
     pass
 
 
+def api_infotext_value_for_field(field, params, target_type):
+    value = field.function(params) if field.function else params.get(field.label)
+    if value is None:
+        return None
+
+    if isinstance(value, dict) and value.get('__type__') == 'generic_update':
+        value = value.get('value')
+
+    if value is None:
+        return None
+
+    if target_type == type(None):
+        target_type = type(value)
+
+    if target_type is bool and isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+
+    if not isinstance(value, target_type):
+        value = target_type(value)
+
+    return value
+
+
 def script_name_to_index(name, scripts):
     try:
         return [script.title().lower() for script in scripts].index(name.lower())
@@ -754,25 +781,12 @@ class Api:
         params = infotext_utils.parse_generation_parameters(request.infotext)
 
         def get_field_value(field, params):
-            value = field.function(params) if field.function else params.get(field.label)
-            if value is None:
-                return None
-
             if field.api in request.__fields__:
                 target_type = request.__fields__[field.api].type_
             else:
                 target_type = type(field.component.value)
 
-            if target_type == type(None):
-                return None
-
-            if isinstance(value, dict) and value.get('__type__') == 'generic_update':  # this is an update payload rather than a value
-                value = value.get('value')
-
-            if value is not None and not isinstance(value, target_type):
-                value = target_type(value)
-
-            return value
+            return api_infotext_value_for_field(field, params, target_type)
 
         for field in possible_fields:
             if not field.api:
