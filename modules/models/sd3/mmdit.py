@@ -262,7 +262,7 @@ class RMSNorm(torch.nn.Module):
         self.eps = eps
         self.learnable_scale = elementwise_affine
         if self.learnable_scale:
-            self.weight = nn.Parameter(torch.empty(dim, device=device, dtype=dtype))
+            self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
         else:
             self.register_parameter("weight", None)
 
