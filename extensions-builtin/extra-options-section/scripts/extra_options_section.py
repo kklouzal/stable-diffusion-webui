@@ -30,12 +30,17 @@ class ExtraOptionsSection(scripts.Script):
         with gr.Blocks() as interface:
             with gr.Accordion("Options", open=False, elem_id=elem_id_tabname) if shared.opts.extra_options_accordion and extra_options else gr.Group(elem_id=elem_id_tabname):
 
-                row_count = math.ceil(len(extra_options) / shared.opts.extra_options_cols)
+                try:
+                    extra_options_cols = int(shared.opts.extra_options_cols or 1)
+                except (TypeError, ValueError):
+                    extra_options_cols = 1
+                extra_options_cols = max(1, extra_options_cols)
+                row_count = math.ceil(len(extra_options) / extra_options_cols)
 
                 for row in range(row_count):
                     with gr.Row():
-                        for col in range(shared.opts.extra_options_cols):
-                            index = row * shared.opts.extra_options_cols + col
+                        for col in range(extra_options_cols):
+                            index = row * extra_options_cols + col
                             if index >= len(extra_options):
                                 break
 
