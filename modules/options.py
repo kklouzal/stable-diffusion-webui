@@ -309,8 +309,15 @@ class Options:
             return None
 
         expected_type = type(default_value)
-        if expected_type == bool and value == "False":
-            value = False
+        if expected_type == bool:
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "1", "yes", "on"):
+                    return True
+                if normalized in ("false", "0", "no", "off"):
+                    return False
+
+            value = bool(value)
         else:
             value = expected_type(value)
 

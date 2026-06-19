@@ -37,6 +37,27 @@ def load_api_infotext_value_helper():
     return namespace[helper.name]
 
 
+def load_options_casting_helpers():
+    source = Path("modules/options.py").read_text()
+    tree = ast.parse(source)
+    wanted_names = {"OptionInfo", "Options"}
+    body = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.ClassDef) and node.name in wanted_names
+        ) or (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "options_builtin_fields" for target in node.targets)
+        )
+    ]
+    module = ast.Module(body=body, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, "modules/options.py", "exec"), namespace)
+    return namespace["OptionInfo"], namespace["Options"]
+
+
 def test_inpaint_infotext_labels_convert_to_api_values():
     helpers = load_infotext_conversion_helpers()
     params = {
@@ -102,3 +123,14 @@ def test_api_script_infotext_coerces_bool_strings_without_truthiness_bug():
 
     assert convert(field, {"CFG Interval Enable": "False"}, bool) is False
     assert convert(field, {"CFG Interval Enable": "True"}, bool) is True
+
+
+def test_option_bool_casting_accepts_common_false_strings():
+    option_info, options = load_options_casting_helpers()
+    opts = options({"tiling": option_info(False, "Tiling")}, restricted_opts={})
+
+    for value in ("False", "false", "0", "no", "off"):
+        assert opts.cast_value("tiling", value) is False
+
+    for value in ("True", "true", "1", "yes", "on"):
+        assert opts.cast_value("tiling", value) is True
