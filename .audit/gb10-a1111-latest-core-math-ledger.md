@@ -85,3 +85,50 @@ Continuation instructions:
 - Next slice should start at `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_clip_old.py`, `modules/sd_hijack_checkpoint.py`, and finish the remainder of `modules/scripts.py` after `postprocess_batch`.
 - Then run focused review of extension scripts that alter sampler, refiner, or conditioning behavior under `modules/processing_scripts/` and relevant built-in extensions.
 - Re-run validation in the project runtime environment if available; GB10 system Python lacks the dependencies needed for full pytest collection.
+
+Checkpoint update - CLIP/script/extension audit continuation:
+- Pre-edit coordination: `git status --short --branch` reported `## latest...origin/latest [ahead 26]` with a clean working tree at the start of this continuation; recent HEAD was `96c3fbd2 Update core math audit ledger`.
+- `modules/sd_hijack_clip.py`: `clip_text_transformer_module`, `clip_text_embeddings`, `PromptChunk`, `TextConditionalModel.empty_chunk`, `get_target_prompt_token_count`, `tokenize_line`, `process_texts`, `forward`, `process_tokens`, `FrozenCLIPEmbedderWithCustomWordsBase.forward`, `FrozenCLIPEmbedderWithCustomWords.__init__`, `tokenize`, `encode_with_transformers`, `encode_embedding_init_text`, `FrozenCLIPEmbedderForSDXLWithCustomWords.encode_with_transformers`.
+  - Findings: no confirmed remediation. Prompt chunk padding, textual inversion fix offsets, SD2 pad replacement, emphasis multiplier application, pooled SDXL return handling, and CLIP skip layer selection were internally consistent in the reviewed paths.
+- `modules/sd_hijack_open_clip.py`: `FrozenOpenCLIPEmbedderWithCustomWords.__init__`, `tokenize`, `encode_with_transformers`, `encode_embedding_init_text`, `FrozenOpenCLIPEmbedder2WithCustomWords.__init__`, `tokenize`, `encode_with_transformers`, `encode_embedding_init_text`.
+  - Findings: no confirmed generation-path remediation. OpenCLIP tokenizer IDs, pad semantics, transformer delegation, and pooled return propagation were coherent for conditioning.
+- `modules/sd_hijack_clip_old.py`: `process_text_old`, `forward_old`.
+  - Findings: no confirmed remediation. Legacy emphasis truncation, multipliers, and hijack fixes match the old 77-token behavior.
+- `modules/sd_hijack_checkpoint.py`: `BasicTransformerBlock_forward`, `AttentionBlock_forward`, `ResBlock_forward`, `add`, `remove`.
+  - Findings: no confirmed remediation. Checkpoint wrapper patch/restore state is simple and shape-preserving.
+- `modules/scripts.py`: completed remaining `ScriptRunner` hooks after `postprocess_batch`: `postprocess_batch_list`, `post_sample`, `on_mask_blend`, `postprocess_image`, `postprocess_maskoverlay`, `postprocess_image_after_composite`, component callbacks, `reload_sources`, `before_hr`, `setup_scrips`, `set_named_arg`, `reload_script_body_only`.
+  - Findings: no confirmed remediation. Hook ordering, arg slicing via `openclaw_script_args_to_overrides`, and timing bookkeeping preserve script dataflow.
+- `modules/processing_scripts/seed.py`: `ScriptSeed.ui`, `setup`, `connect_reuse_seed`.
+  - Findings: no confirmed remediation. Seed/subseed/resize assignment and reuse parsing are consistent with processing RNG fields.
+- `modules/processing_scripts/sampler.py`: `ScriptSampler.ui`, `setup`.
+  - Findings: no confirmed remediation. Steps, sampler, and scheduler setup are direct assignments to processing state.
+- `modules/processing_scripts/refiner.py`: `ScriptRefiner.ui`, `setup`.
+  - Findings: no confirmed remediation. Refiner checkpoint/switch gating matches `apply_refiner` expectations.
+- `modules/processing_scripts/comments.py`: `strip_comments`, `ScriptStripComments.process`, `before_token_counter`.
+  - Findings: no confirmed remediation. Prompt/comment stripping is applied to generation prompts and token counter consistently when enabled.
+- `extensions-builtin/Lora/network.py`: `NetworkOnDisk`, `Network`, `NetworkModule.multiplier`, `calc_scale`, `apply_weight_decompose`, `finalize_updown`, `forward`.
+  - Findings: no confirmed remediation. Scale/multiplier and DoRA decomposition paths were reviewed for dtype/device and output-shape consistency.
+- `extensions-builtin/Lora/networks.py`: name conversion/mapping, `load_network`, `load_networks`, backup/restore, eager LoRA application, functional fallback, MXFP8/NVFP4 active-config preparation and merged LoRA helpers, patched module forwards/load-state hooks, infotext paste handling, available-network refresh.
+  - Findings: no confirmed remediation. Existing file-signature invalidation for loaded LoRAs and quantized active config signatures include the current effective LoRA source and multiplier state.
+- `extensions-builtin/Lora/network_lora.py`, `network_hada.py`, `network_lokr.py`, `network_glora.py`, `network_ia3.py`, `network_full.py`, `network_norm.py`, `network_oft.py`, `lora_patches.py`, `scripts/lora_script.py`, `extra_networks_lora.py`.
+  - Findings: no confirmed remediation. Reviewed supported LoRA/LyCORIS/OFT module reconstruction, q/k/v split handling, extension activation/deactivation, and patch installation.
+- `extensions-builtin/hypertile/hypertile.py`, `extensions-builtin/hypertile/scripts/hypertile_script.py`: divisor/tile candidate helpers, attention wrapper, model hook configuration, UI/XYZ integration.
+  - Findings: no confirmed remediation. Tile divisor selection, rearrange inverses, seeded randomization, and first/second-pass configuration were coherent.
+- `extensions-builtin/soft-inpainting/scripts/soft_inpainting.py`: inpainting detection, `latent_blend`, mask transforms, adaptive mask generation, histogram filters, UI/process hooks, `on_mask_blend`, `post_sample`, `postprocess_maskoverlay`.
+  - Findings: no confirmed remediation. Latent blend dtype promotion/restoration, mask broadcasting, final-blend bypass, overlay rebuild, and per-image mask replacement were reviewed.
+- `extensions-builtin/LDSR/scripts/ldsr_model.py`, `sd_hijack_autoencoder.py`, `sd_hijack_ddpm_v1.py`; `extensions-builtin/SwinIR/scripts/swinir_model.py`; `extensions-builtin/ScuNET/scripts/scunet_model.py`; selected postprocessing-for-training image math scripts.
+  - Finding/remediation: `extensions-builtin/ScuNET/scripts/scunet_model.py` ignored the selected HTTP model URL in `UpscalerScuNET.load_model` and always passed `self.model_url` to `load_file_from_url`. Selecting the PSNR URL could therefore download/use the GAN model, altering final restoration quality. Fixed the URL branch to pass the selected `path` and derive the cache filename from that URL.
+
+Validation for this continuation:
+- `python3 -m py_compile extensions-builtin/ScuNET/scripts/scunet_model.py` passed.
+- Static selected-URL check passed: the ScuNET HTTP branch now contains `load_file_from_url(path, model_dir=self.model_download_path, ...)` and no longer contains `load_file_from_url(self.model_url, ...)`.
+
+Commits made during this continuation:
+- `83b170bc Fix ScuNET URL model selection`: fixed ScuNET selected-URL handling for built-in restoration model selection.
+
+Working tree note:
+- After the ScuNET validation, unrelated concurrent changes appeared in `modules/ui_extra_networks.py` and `tests/test_extra_networks_path_contract.py`. They were not staged or modified by this continuation.
+
+Remaining areas:
+- Continue with any not-yet-reviewed generation-quality extension scripts outside this slice if desired, especially broader `scripts/` selectable scripts and deeper LDSR model internals if the audit scope extends to full postprocessing/upscaler architecture internals.
+- Full pytest remains blocked under GB10 system Python unless the project/runtime test dependencies are available.
