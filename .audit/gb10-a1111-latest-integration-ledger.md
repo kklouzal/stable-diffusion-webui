@@ -75,20 +75,46 @@ Reviewed files/functions:
   - Remediation: use `os.path.commonpath()` containment with cross-drive `ValueError` handling; added `tests/test_extra_networks_path_contract.py`.
   - Validation: `pytest -q tests/test_extra_networks_path_contract.py` passed with the pre-existing unknown `base_url` warning.
 
+- `javascript/extraNetworks.js`: setup/control relocation, prompt insertion/removal, card click/save-preview path, tree search/selection, metadata popup/request, user-metadata popup, single-card refresh, after-scripts setup.
+  - Findings: no confirmed generation-quality remediation. Noted minor non-scope issue: `toggleCss()` uses `style.innerHTML == ''` instead of assignment, which can accumulate CSS text if reused.
+- `javascript/progressbar.js`: progress request loop, title updates, live preview insertion/removal, inactivity completion, wake lock lifecycle.
+  - Findings: no confirmed remediation. Progress/live-preview state cleanup and timeout behavior are coherent in reviewed paths.
+- `javascript/token-counters.js`: txt2img/img2img token refresh hooks, counter relocation, visibility toggling.
+  - Findings: no confirmed remediation. Token counter callback registration lines up with Gradio button-triggered counters.
+- `javascript/edit-attention.js`: prompt selection expansion, emphasis/extra-network weight increment/decrement, old parenthesis conversion, input update.
+  - Findings: no confirmed remediation. Weight precision and selected-token replacement are coherent in reviewed paths.
+- `javascript/aspectRatioOverlay.js`, `javascript/imageviewer.js`, `javascript/imageviewerGamepad.js`, `javascript/resizeHandle.js`, `javascript/contextMenus.js`: img2img AR overlay math, modal image switching/saving/live-preview toggle/tiling, gamepad/wheel navigation, resize-handle layout persistence, context-menu generation-repeat helpers.
+  - Findings: no confirmed generation-quality remediation. Dimension overlay and modal/gallery selection behavior are coherent in reviewed paths.
+- `modules/ui_settings.py`: setting component creation, full/single setting apply, quicksettings, checkpoint selector bridge, sysinfo/actions/hash calculation wiring.
+  - Findings: no generation-quality remediation. Noted non-scope robustness issue: hash-calculation thread count comes from a `gr.Number` and is not explicitly coerced before `ThreadPoolExecutor(max_workers=...)`.
+- `modules/ui_extensions.py`: extension enable/update/apply, config-state save/restore/table rendering, install-from-index/URL, available-extension filtering/sorting, UI construction.
+  - Findings: no confirmed remediation in reviewed paths; extension state changes are gated by access checks and restart flow.
+- `extensions-builtin/extra-options-section/scripts/extra_options_section.py`: extra option component layout, infotext mappings, `before_process` override propagation.
+  - Findings: no confirmed remediation. Extra option values are injected only when not already present in `p.override_settings`.
+- `extensions-builtin/SwinIR/scripts/swinir_model.py`, `extensions-builtin/ScuNET/scripts/scunet_model.py`, `extensions-builtin/LDSR/scripts/ldsr_model.py`: model discovery/loading, tiling/overlap settings, cache signatures, upscale calls, LDSR model/yaml selection.
+  - Findings: no confirmed remediation. Reviewed tile/overlap/scale arguments and load failure fallback paths.
+- `extensions-builtin/Lora/networks.py` remainder and `extensions-builtin/Lora/network*.py`, `ui_extra_networks_lora.py`, `ui_edit_user_metadata.py`, `lora_patches.py`: network file scanning, alias/hash lookup, load/reload source signatures, bundle embeddings, LoRA/LoHa/LoKr/OFT/full/GLora/IA3/norm updown math, MXFP8/NVFP4 active config preparation, patched forward/load hooks, LoRA extra-network cards and metadata editor.
+  - Findings: no confirmed remediation. Source-signature invalidation, active LoRA preparation, prompt card construction, and patched layer restore/apply paths are coherent in reviewed chunks.
+
 Commits made during this audit:
 - `1196151a` - `Center inpaint mask canvas overlay` (fixes letterboxed inpaint mask UI offset; adds static regression test and initial integration ledger).
+- `284e8ad5` - `Tighten extra networks preview path checks` (fixes sibling-prefix path containment for extra-network preview paths; adds path contract test).
 
 Validation run:
 - `pytest -q tests/test_image_mask_fix_contract.py` - passed, with pre-existing pytest warning about unknown `base_url` config option.
 - `pytest -q tests/test_image_mask_fix_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py` - 11 passed, with the same pre-existing `base_url` warning.
+
+- `pytest -q tests/test_extra_networks_path_contract.py tests/test_image_mask_fix_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py test/test_postprocessing_api_defaults.py test/test_postprocessing_script_args.py` - 24 passed, with the pre-existing `base_url` warning.
+- `pytest -q tests/test_extra_networks_path_contract.py tests/test_image_mask_fix_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py test/test_postprocessing_api_defaults.py test/test_postprocessing_script_args.py test/test_extras.py` - 24 passed before 3 server-dependent `test/test_extras.py` errors because fixture `base_url` is unavailable in this non-server pytest invocation.
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile ...` over reviewed UI/postprocess/LoRA files - passed. The first py_compile attempt without `PYTHONPYCACHEPREFIX` hit an existing permission error writing `extensions-builtin/Lora/__pycache__`.
+- `npx eslint@8.40.0 javascript/edit-attention.js javascript/extraNetworks.js javascript/token-counters.js javascript/progressbar.js javascript/aspectRatioOverlay.js javascript/contextMenus.js javascript/imageviewer.js javascript/imageviewerGamepad.js javascript/resizeHandle.js` - passed. Plain `npx eslint` pulled ESLint 10 and failed because this repo still uses `.eslintrc.js`.
 
 Final checkpoint notes:
 - After commit `1196151a`, `git status --short` showed unrelated dirty files `modules/cache.py` and `test/test_openclaw_cache_invalidation.py`, plus untracked `.audit/gb10-a1111-latest-core-math-ledger.md`; this integration slice did not modify or stage those files.
 - Exhaustive review is not complete; continue from the remaining areas below.
 
 Remaining areas / continuation:
-- Continue `modules/ui.py` beyond helper/top-level UI construction, especially img2img component wiring and paste-field mappings.
-- Continue `modules/ui_common.py`, `modules/ui_postprocessing.py`, `modules/ui_settings.py`, `modules/ui_loadsave.py`, `modules/ui_extensions.py`, `modules/ui_extra_networks*.py`.
-- Continue remaining JS files: `edit-attention.js`, `extraNetworks.js`, `token-counters.js`, `progressbar.js`, `aspectRatioOverlay.js`, `contextMenus.js`, `imageviewer*.js`, `resizeHandle.js`, extension JS.
-- Continue remaining scripts and builtin extensions, especially Lora integration, Hypertile, LDSR/SwinIR/ScuNET postprocess paths, and extra-options-section.
-- Run a broader focused gate after more remediations: API/script tests plus any available JS lint/static checks.
+- Continue any not-yet-reviewed tail of `modules/ui.py` beyond the previously checked generation wiring, plus any deeper `modules/ui_common.py` output-panel edge cases if desired.
+- Continue extension JS outside the core reviewed files, plus any third-party/builtin extension UI scripts not covered by this checkpoint.
+- Continue remaining scripts/builtin extensions not covered by prior slices; Hypertile, LoRA integration, LDSR/SwinIR/ScuNET, and extra-options-section are now reviewed in this ledger pass.
+- For server-dependent API/extras coverage, rerun `test/test_extras.py` with the expected `base_url` fixture/server harness.
