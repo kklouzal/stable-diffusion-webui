@@ -59,6 +59,7 @@ def restore_with_face_helper(
     np_image: np.ndarray,
     face_helper: FaceRestoreHelper,
     restore_face: Callable[[torch.Tensor], torch.Tensor],
+    device,
 ) -> np.ndarray:
     """
     Find faces in the image using face_helper, restore them using restore_face, and paste them back into the image.
@@ -79,7 +80,7 @@ def restore_with_face_helper(
         for cropped_face in face_helper.cropped_faces:
             cropped_face_t = bgr_image_to_rgb_tensor(cropped_face / 255.0)
             normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
-            cropped_face_t = cropped_face_t.unsqueeze(0).to(devices.device_codeformer)
+            cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
 
             try:
                 with torch.no_grad():
@@ -154,7 +155,7 @@ class CommonFaceRestoration(face_restoration.FaceRestoration):
 
         try:
             self.send_model_to(self.get_device())
-            return restore_with_face_helper(np_image, self.face_helper, restore_face)
+            return restore_with_face_helper(np_image, self.face_helper, restore_face, self.get_device())
         finally:
             if shared.opts.face_restoration_unload:
                 self.send_model_to(devices.cpu)
