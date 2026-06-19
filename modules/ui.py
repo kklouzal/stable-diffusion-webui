@@ -560,7 +560,7 @@ def create_ui():
                                 def update_orig(image, state):
                                     if image is not None:
                                         same_size = state is not None and state.size == image.size
-                                        has_exact_match = np.any(np.all(np.array(image) == np.array(state), axis=-1))
+                                        has_exact_match = same_size and np.any(np.all(np.array(image) == np.array(state), axis=-1))
                                         edited = same_size and has_exact_match
                                         return image if not edited or state is None else state
 

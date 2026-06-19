@@ -29,7 +29,13 @@ def process_float_tag(tag):
 
 
 def process_boolean_tag(tag):
-    return True if (tag == "true") else False
+    value = tag.lower()
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+
+    raise ValueError(f"invalid boolean value: {tag}")
 
 
 prompt_tags = {
