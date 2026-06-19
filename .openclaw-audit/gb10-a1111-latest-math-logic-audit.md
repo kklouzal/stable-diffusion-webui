@@ -129,7 +129,7 @@ References:
 - PyTorch `torch.acos` domain is [-1, 1], and division by `torch.sin(omega)` is singular at omega 0/pi; local harness reproduced the old NaN path and verified the patched finite path.
 
 Commits:
-- Pending at time of ledger entry.
+- `8cf3573d484634eafe5b081c638c405d5a531333` - Fix subseed slerp singularities.
 
 Next unchecked scope:
 - Continue `modules/rng_philox.py`, then `modules/sd_hijack*.py`, `modules/sd_unet.py`, `modules/sd_vae*.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
