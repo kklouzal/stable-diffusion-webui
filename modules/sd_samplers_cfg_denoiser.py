@@ -251,6 +251,7 @@ class CFGDenoiser(torch.nn.Module):
         if skip_uncond:
             x_in = x_in[:-batch_size]
             sigma_in = sigma_in[:-batch_size]
+            image_cond_in = image_cond_in[:-batch_size]
 
         self.padded_cond_uncond = False
         self.padded_cond_uncond_v0 = False

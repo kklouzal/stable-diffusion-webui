@@ -1,0 +1,58 @@
+# GB10 A1111 latest math/logic generation-quality audit
+
+Started: 2026-06-19 UTC
+Host/repo/branch: GB10 `/home/kklouzal/stable-diffusion-webui` branch `latest`
+Starting HEAD: e67054caa89dd79fe84613b828321e729f69b5d0
+Scope: function-by-function audit for math errors and logical inconsistencies that could hinder final generation quality.
+
+## Audit policy
+- Prioritize sampling, conditioning, attention/UNet call paths, CFG/NEG, hires/img2img/inpaint, precision/caching/replay, mask/latent/image geometry, scheduler/sampler integration, prompt shape handling, model loading/precision, generation-altering extensions, and API parameter handling.
+- For each coherent defect: verify locally and against authoritative semantics where needed, patch narrowly, validate, commit, and record here.
+- Preserve GB10 intentional CUDA graph behavior: full-window SEG replay may be enabled by `OPENCLAW_CUDA_GRAPH_ALLOW_SEG=1`; masks/inpaint bypass replay.
+
+## Current status
+- Initial repo state: clean `latest` at `e67054caa89dd79fe84613b828321e729f69b5d0`, tracking `origin/latest`.
+- Next unchecked scope: `modules/processing.py` top-level helpers and processing classes.
+
+## Checked scope
+
+## Findings and fixes
+
+## Validation log
+
+## References consulted
+
+## Remaining high-priority scope
+- `modules/processing.py`
+- `modules/sd_samplers*.py`
+- `modules/prompt_parser.py`
+- `modules/openclaw_cuda_graphs.py`
+- `modules/masking.py`, `modules/images.py`, `modules/img2img.py`, `modules/txt2img.py`
+- precision/cache modules (`mxfp8*`, `nvfp4*`, `cache.py`)
+- generation-altering extensions under `extensions/`
+
+### 2026-06-19 pass 1 - CFG denoiser skip-uncond conditioning alignment
+Checked:
+- `modules/sd_samplers_cfg_denoiser.py`: `catenate_conds`, `subscript_cond`, `pad_cond`, `CFGDenoiser.combine_denoised`, `combine_denoised_for_edit_model`, `get_pred_x0`, `update_inner_model`, `run_inner_model`, `pad_cond_uncond`, `pad_cond_uncond_v0`, and the high-risk first half of `CFGDenoiser.forward` through skip-uncond input assembly.
+- `modules/openclaw_cuda_graphs.py`: `_env_flag`, `_allow_seg_graphs`, `status`, `set_enabled`, `clear`, signature helpers, SEG graph-key helpers, `_graph_denoiser_bypass_reason`, and `run`; no defect found in this pass. Mask/inpaint bypass and explicit full-window SEG opt-in match GB10 policy.
+- `modules/prompt_parser.py`: schedule parsing/reconstruction functions through `reconstruct_multicond_batch`; no defect found in this pass. Prompt schedule step math preserves existing A1111 hires scheduling semantics.
+
+Finding:
+- In `CFGDenoiser.forward`, when `skip_uncond` was true, `x_in` and `sigma_in` were trimmed to remove the uncond branch but `image_cond_in` was not. The next inner-model call could therefore receive text/noise batches shorter than concat/image conditioning. This is a logical shape inconsistency on image-conditioning paths and CFG callbacks; it can error or feed mismatched conditioning and harm generation quality.
+
+Fix:
+- Trim `image_cond_in` alongside `x_in` and `sigma_in` in the skip-uncond branch.
+
+Validation:
+- `python3 -m py_compile modules/sd_samplers_cfg_denoiser.py`
+- Dependency-free static harness verified the branch contains the coupled `x_in`/`sigma_in`/`image_cond_in` trim.
+
+References:
+- Local A1111 CFG denoiser implementation and callback contract in `modules/script_callbacks.py` (`CFGDenoiserParams` carries `x`, `image_cond`, and `sigma` as coupled inner-model inputs).
+- Official PyTorch tensor concatenation/indexing semantics: tensors passed to model branches must agree on leading batch dimension for downstream operations.
+
+Commits:
+- Pending at time of ledger entry.
+
+Next unchecked scope:
+- Continue `CFGDenoiser.forward` after inner-model output assembly, then `modules/sd_samplers_kdiffusion.py` sampler schedule/noise paths.
