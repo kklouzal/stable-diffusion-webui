@@ -51,8 +51,7 @@ class ExtensionMetadata:
         except Exception:
             errors.report(f"Error reading {self.filename} for extension {canonical_name}.", exc_info=True)
 
-        self.canonical_name = self.config.get("Extension", "Name", fallback=canonical_name)
-        self.canonical_name = canonical_name.lower().strip()
+        self.canonical_name = self.config.get("Extension", "Name", fallback=canonical_name).lower().strip()
 
         self.requires = None
 
@@ -121,7 +120,7 @@ class Extension:
         self.remote = None
         self.have_info_from_repo = False
         self.metadata = metadata if metadata else ExtensionMetadata(self.path, name.lower())
-        self.canonical_name = metadata.canonical_name
+        self.canonical_name = self.metadata.canonical_name
 
     def to_dict(self):
         return {x: getattr(self, x) for x in self.cached_fields}
@@ -263,7 +262,7 @@ def list_extensions():
             extension = Extension(name=extension_dirname, path=path, enabled=extension_dirname not in shared.opts.disabled_extensions, is_builtin=is_builtin, metadata=metadata)
             extensions.append(extension)
             extension_paths[extension.path] = extension
-            loaded_extensions[canonical_name] = extension
+            loaded_extensions[metadata.canonical_name] = extension
 
     for extension in extensions:
         extension.metadata.requires = extension.metadata.get_script_requirements("Requires", "Extension")
