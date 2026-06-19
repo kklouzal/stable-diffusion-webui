@@ -109,9 +109,14 @@ class PersonalizedBase(Dataset):
                 npweight = np.array(weight_img).astype(np.float32)
                 #Repeat for every channel in the latent sample
                 weight = torch.tensor([npweight] * channels).reshape([channels] + latent_size)
-                #Normalize the weight to a minimum of 0 and a mean of 1, that way the loss will be comparable to default.
+                # Normalize the weight to a minimum of 0 and a mean of 1, that way the loss will be comparable to default.
+                # A constant alpha channel has no relative weighting information after min subtraction; keep it neutral.
                 weight -= weight.min()
-                weight /= weight.mean()
+                weight_mean = weight.mean()
+                if weight_mean > 0:
+                    weight /= weight_mean
+                else:
+                    weight = torch.ones_like(weight)
             elif use_weight:
                 #If an image does not have a alpha channel, add a ones weight map anyway so we can stack it later
                 weight = torch.ones(latent_sample.shape)
