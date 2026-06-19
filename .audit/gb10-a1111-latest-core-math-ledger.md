@@ -52,4 +52,36 @@ Validation for cache remediation:
 - Dependency-stubbed direct check of `cached_data_for_file` legacy missing-size invalidation passed: `legacy cache size-missing invalidation passed`.
 
 Commits made during this audit:
-- Pending: cache remediation not yet committed at this ledger update.
+- `183d1ff4 Fix legacy file cache invalidation`: tightened file-derived metadata cache invalidation and added a legacy missing-size regression test.
+
+
+Checkpoint update - additional reviewed paths:
+- `modules/processing.py`: `StableDiffusionProcessing.__post_init__`, image conditioning helpers, prompt/cond cache setup, `process_images`, `process_images_inner`, `old_hires_fix_first_pass_dimensions`, `StableDiffusionProcessingTxt2Img.__post_init__`, `calculate_target_resolution`, `init`, `sample`, `sample_hr_pass`, HR condition setup, `StableDiffusionProcessingImg2Img.__post_init__`, mask blur accessors, img2img init-cache helpers, `StableDiffusionProcessingImg2Img.init`, `sample`, `get_token_merging_ratio`.
+  - Findings: no additional confirmed remediation. Rechecked the post-decode color-correction branch after terminal output suggested a duplicate application; working tree contains only one `apply_color_correction` call in that branch.
+- `modules/sd_models.py`: `rescale_zero_terminal_snr_abar`, `apply_alpha_schedule_override`, `SdModelData`, empty conditioning, TorchAO quantization detection/device/reload helpers, `load_model`, `reuse_model_from_already_loaded`, `reload_model_weights`, `unload_model_weights`, `apply_token_merging`.
+  - Findings: no additional confirmed remediation. Noted duplicate `class SdModelData` declaration in source; the first empty version is immediately shadowed by the complete class and does not affect runtime behavior.
+- `modules/sd_vae.py`: VAE identity/hash helpers, base VAE store/restore, list/resolve/load/reload paths.
+  - Findings: no additional confirmed remediation. VAE cache/reload path preserves base VAE restoration semantics and dtype move after load.
+- `modules/images.py`: `image_grid`, `split_grid`, `combine_grid`, `resize_image`.
+  - Findings: no additional confirmed remediation in reviewed normal generation paths.
+- `modules/sd_hijack.py`: optimizer selection/reset, weighted loss/forward helpers, partial `StableDiffusionModelHijack`, circular conv option, MPS buffer registration.
+  - Findings: no remediation. `hijack_ddpm_edit` in `modules/sd_hijack_unet.py` registers `encode_first_stage` twice; reviewed as redundant same-dtype wrapping rather than a numerical output change.
+- `modules/sd_hijack_optimizations.py`: split attention variants, einsum slicing, SDPA backend selection and attention forward.
+  - Findings: no confirmed remediation.
+- `modules/sd_hijack_unet.py`: `TorchHijackForUnet`, UNet apply-model dtype cast, timestep embedding, spatial transformer forward, GELU hijack, first-stage dtype hooks.
+  - Findings: no confirmed remediation.
+- `modules/scripts.py`: script callback registration/order/timing and generation-affecting hooks through `postprocess_batch` start.
+  - Findings: no confirmed remediation in reviewed hook dispatch logic.
+- `modules/shared_state.py`, `modules/shared.py`: generation state reset/progress preview and shared latent upscaler/device globals.
+  - Findings: no confirmed remediation.
+- `modules/sd_models_xl.py`, `modules/sd_models_config.py`: SDXL conditioning/apply-model extensions and checkpoint config inference.
+  - Findings: no confirmed remediation.
+
+Checkpoint validation after commit:
+- `git status --short --branch` after commit reported branch `latest...origin/latest [ahead 25]` with no dirty entries before continuing reads.
+- Later `git status --short` was clean after the false-positive color-correction candidate was rechecked.
+
+Continuation instructions:
+- Next slice should start at `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_clip_old.py`, `modules/sd_hijack_checkpoint.py`, and finish the remainder of `modules/scripts.py` after `postprocess_batch`.
+- Then run focused review of extension scripts that alter sampler, refiner, or conditioning behavior under `modules/processing_scripts/` and relevant built-in extensions.
+- Re-run validation in the project runtime environment if available; GB10 system Python lacks the dependencies needed for full pytest collection.
