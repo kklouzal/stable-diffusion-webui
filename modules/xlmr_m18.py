@@ -100,7 +100,8 @@ class BertSeriesModelWithTransformation(BertPreTrainedModel):
         r"""
         """
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # This wrapper always returns a dict and reads ModelOutput attributes below.
+        return_dict = True
 
 
         outputs = self.roberta(

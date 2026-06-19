@@ -27,10 +27,11 @@ def patch():
         else:
             command, _args = _kwargs.pop("args", ""), ()
 
-        if isinstance(command, str):
+        shell_command = isinstance(command, str)
+        if shell_command:
             command = shlex.split(command)
         else:
-            command = [arg.strip() for arg in command]
+            command = [str(arg).strip() for arg in command]
 
         if not isinstance(command, list) or "pip" not in command:
             return subprocess.__original_run(*args, **kwargs)
@@ -41,8 +42,10 @@ def patch():
 
         modified_command = ["uv", "pip", *cmd]
 
-        cmd_str = shlex.join([*modified_command, *_args])
-        result = subprocess.__original_run(cmd_str, **_kwargs)
+        if shell_command:
+            modified_command = shlex.join(modified_command)
+
+        result = subprocess.__original_run(modified_command, *_args, **_kwargs)
         if result.returncode != 0:
             return subprocess.__original_run(*args, **kwargs)
         return result
