@@ -271,6 +271,7 @@ class UiSettings:
             )
 
             def calculate_all_checkpoint_hash_fn(max_thread):
+                max_thread = max(1, int(max_thread))
                 checkpoints_list = sd_models.checkpoints_list.values()
                 with ThreadPoolExecutor(max_workers=max_thread) as executor:
                     futures = [executor.submit(checkpoint.calculate_shorthash) for checkpoint in checkpoints_list]

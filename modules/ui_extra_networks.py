@@ -636,8 +636,8 @@ class ExtraNetworksPage:
         pth = Path(path)
         mtime, ctime = self.lister.mctime(path)
         return {
-            "date_created": int(mtime),
-            "date_modified": int(ctime),
+            "date_created": int(ctime),
+            "date_modified": int(mtime),
             "name": pth.name.lower(),
             "path": str(pth).lower(),
         }
