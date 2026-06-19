@@ -115,7 +115,7 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
             if model_info is not None:
                 p.override_settings['sd_model_checkpoint'] = model_info.name
             elif sd_model_checkpoint_override:
-                p.override_settings['sd_model_checkpoint'] = sd_model_checkpoint_override
+                p.override_settings['sd_model_checkpoint'] = sd_model_checkpoint_override.name
             else:
                 p.override_settings.pop("sd_model_checkpoint", None)
 
@@ -166,6 +166,8 @@ def img2img(id_task: str, request: gr.Request, mode: int, prompt: str, negative_
     elif mode == 3:  # inpaint sketch
         image = inpaint_color_sketch
         orig = inpaint_color_sketch_orig or inpaint_color_sketch
+        if orig.size != image.size:
+            orig = orig.resize(image.size, Image.Resampling.LANCZOS)
         pred = np.any(np.array(image) != np.array(orig), axis=-1)
         mask = Image.fromarray(pred.astype(np.uint8) * 255, "L")
         mask = ImageEnhance.Brightness(mask).enhance(1 - mask_alpha / 100)
