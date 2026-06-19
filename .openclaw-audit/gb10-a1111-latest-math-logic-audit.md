@@ -153,3 +153,28 @@ References:
 
 Next unchecked scope:
 - Finish `modules/sd_vae_taesd.py`, then `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_optimizations.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
+
+### 2026-06-19 pass 6 - TAESD, CLIP hijacks, attention optimizers, API mapping, extension sampler controls
+Checked:
+- `modules/sd_vae_taesd.py`: TAESD encoder/decoder architecture, SD3 latent-channel selection, model-name dispatch for SD1/SDXL/SD3, download/cache/load, eval/device/dtype movement, and call sites through `modules/sd_samplers_common.py`; no defect found. TAESD decode remains correctly remapped from `[0, 1]` to `[-1, 1]`, while TAESD encode consumes `[0, 1]` image tensors as expected by the TAESD encoder path.
+- `modules/sd_hijack_clip.py`: prompt chunking, comma backtracking, textual inversion placeholder insertion, empty chunk padding, pooled-output preservation, emphasis handoff, CLIP skip selection for SD1/SDXL, and infotext metadata; no generation defect found.
+- `modules/sd_hijack_open_clip.py`: OpenCLIP tokenization, layer/pooled output handling, and embedding lookup path; no inference-conditioning defect found. `encode_embedding_init_text` does not cap to `nvpt` like the CLIP implementation, but this is a training/embedding initialization inconsistency rather than an inference generation-quality defect in this pass.
+- `modules/sd_hijack_optimizations.py`: split attention, InvokeAI split attention, sub-quadratic attention, SDPA backend selection, attention block replacements, scale placement, dtype/upcast behavior, chunk/slice sizing, and mask handling where supported; no defect found.
+- `modules/api/models.py`, `modules/api/api.py`: txt2img/img2img generation parameter mapping, sampler/scheduler alias normalization, infotext parameter import, override settings, init image/mask decode, selectable and always-on script argument vector handling, GB10 variable-length script arg override path, and response-only fields; no defect found.
+- `extensions/openclaw-denoise-ramp/scripts/openclaw_denoise_ramp.py`: sigma interpolation and img2img tail remapping; no defect found. The ramp preserves A1111 img2img start/end sigma points and only bends spacing inside the active tail.
+- `extensions/openclaw-multi-sampler/scripts/openclaw_multi_sampler.py`: custom sampler definition normalization, stage boundary validation, scheduler-chain sigma slicing, denoise-ramp composition, sampler kwargs dispatch, brownian-noise forwarding, state/tqdm callbacks, one-step DPM++ 2M SDE final-stage workaround, and snapshot decoding; no defect found.
+- `extensions/sd-webui-incantations/scripts/cfg_combiner.py`, `pag.py`, `smoothed_energy_guidance.py`, `dynthres_core.py`, `dynthres_unipc.py`: CFG combiner wrapper ownership, PAG hidden-pass cond/uncond padding, SEG paired-batch guard and hook cleanup, dynamic thresholding denominator/std/quantile safeguards, and UniPC dynamic-threshold integration; no new defect found.
+
+Validation:
+- `python3 -m pytest -q extensions/sd-webui-incantations/tests/test_guidance_core.py extensions/openclaw-multi-sampler/tests` could not collect because host Python lacks `torch`; no host installs performed.
+- `docker run --rm -v /home/kklouzal/stable-diffusion-webui:/work:ro -w /work local/gb10-a1111:latest python -m pytest -q extensions/sd-webui-incantations/tests/test_guidance_core.py extensions/openclaw-multi-sampler/tests` could not run because the existing validation image lacks `pytest`; no image/toolchain mutation performed.
+- Source inspection only for this checkpoint because no code defect was confirmed.
+
+References:
+- Local A1111 TAESD call sites in `modules/sd_samplers_common.py`.
+- Local sampler/scheduler normalization in `modules/sd_samplers.py` and API request construction in `modules/api/api.py`.
+- Local extension tests in `extensions/sd-webui-incantations/tests/test_guidance_core.py` and `extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py` were used as behavioral specifications where executable tooling was unavailable.
+
+Next unchecked scope:
+- Remaining built-in generation-altering scripts: `scripts/img2imgalt.py`, `scripts/loopback.py`, `scripts/outpainting_mk_2.py`, `scripts/poor_mans_outpainting.py`, `scripts/prompt_matrix.py`, `scripts/prompts_from_file.py`, `scripts/sd_upscale.py`, and `scripts/xyz_grid.py`; then non-generation postprocessing/diagnostic scripts can be recorded as out of generation-quality scope or lightly checked.
+
