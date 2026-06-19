@@ -107,7 +107,7 @@ References:
 - Local TorchAO cache loaders and sidecar metadata schema in `modules/mxfp8_model_cache.py` and `modules/nvfp4_model_cache.py`.
 
 Next unchecked scope:
-- Continue `modules/rng_philox.py`, then `modules/sd_hijack*.py`, `modules/sd_unet.py`, `modules/sd_vae*.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
+- Continue `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_optimizations.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
 
 
 ### 2026-06-19 pass 4 - model reload and RNG subseed blending
@@ -133,3 +133,23 @@ Commits:
 
 Next unchecked scope:
 - Continue `modules/rng_philox.py`, then `modules/sd_hijack*.py`, `modules/sd_unet.py`, `modules/sd_vae*.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
+
+
+### 2026-06-19 pass 5 - Philox RNG, hijack shell, UNet/VAE load paths
+Checked:
+- `modules/rng_philox.py`: `uint32`, `philox4_round`, `philox4_32`, `box_muller`, and `Generator.randn`; no defect patched. Counter/key shapes and Box-Muller clamping offset avoid log(0), and behavior is intentionally CUDA-RNG-emulation oriented.
+- `modules/sd_hijack.py`: optimizer selection/undo, weighted loss forwarding, SDXL/SSD conditioner wrapping, hijack/undo/redo, circular padding, embeddings replacement, and buffer registration. No defect found in checked generation-affecting logic.
+- `modules/sd_unet.py`: UNet option lookup, activation/deactivation, and patched UNet forward dispatch. No defect found; custom UNet routing preserves original forward when inactive.
+- `modules/sd_vae.py`: VAE discovery, resolution precedence, base VAE store/restore, VAE checkpoint cache, load/reload device transitions, and hijack callback ordering. No defect found.
+- `modules/sd_vae_approx.py`: preview VAE architecture, model selection, load/cache, cheap RGB approximations for SD1/SDXL/SD3. No defect found in checked preview-quality math.
+- `modules/sd_vae_taesd.py`: began architecture/model selection read; remaining TAESD functions still need full audit.
+
+Validation:
+- Source inspection only for this no-change checkpoint. Previous `modules/rng.py` py_compile and slerp harness remain the active validation for the only code change in this pass group.
+
+References:
+- Local Philox implementation comments and expected-output contract.
+- Local VAE/UNet/hijack call graph from `modules/sd_models.py` reload/load paths checked in pass 4.
+
+Next unchecked scope:
+- Finish `modules/sd_vae_taesd.py`, then `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_optimizations.py`, API parameter mapping, and remaining generation-altering scripts/extensions.
