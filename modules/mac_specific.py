@@ -60,8 +60,7 @@ def interpolate_with_fp32_fallback(orig_func, *args, **kwargs) -> Tensor:
         if "not implemented for" in str(e) and "Half" in str(e):
             input_tensor = args[0]
             return orig_func(input_tensor.to(torch.float32), *args[1:], **kwargs).to(input_tensor.dtype)
-        else:
-            print(f"An unexpected RuntimeError occurred: {str(e)}")
+        raise
 
 if has_mps:
     if platform.mac_ver()[0].startswith("13.2."):

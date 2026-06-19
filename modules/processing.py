@@ -375,7 +375,10 @@ class StableDiffusionProcessing:
         )
 
         (depth_min, depth_max) = torch.aminmax(conditioning)
-        conditioning = 2. * (conditioning - depth_min) / (depth_max - depth_min) - 1.
+        depth_range = depth_max - depth_min
+        if depth_range == 0:
+            return torch.zeros_like(conditioning)
+        conditioning = 2. * (conditioning - depth_min) / depth_range - 1.
         return conditioning
 
     def edit_image_conditioning(self, source_image):
