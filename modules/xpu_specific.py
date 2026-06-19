@@ -71,7 +71,7 @@ def torch_xpu_scaled_dot_product_attention(
     key = torch.reshape(key, (-1, S, E))
     value = torch.reshape(value, (-1, S, Ev))
     if attn_mask is not None:
-        attn_mask = attn_mask.view(-1, L, S)
+        attn_mask = torch.broadcast_to(attn_mask, (*N, L, S)).reshape(-1, L, S)
     chunk_count = (total_batch_size + batch_size_limit - 1) // batch_size_limit
     outputs = []
     for i in range(chunk_count):
