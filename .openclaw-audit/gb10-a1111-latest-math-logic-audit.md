@@ -178,3 +178,23 @@ References:
 Next unchecked scope:
 - Remaining built-in generation-altering scripts: `scripts/img2imgalt.py`, `scripts/loopback.py`, `scripts/outpainting_mk_2.py`, `scripts/poor_mans_outpainting.py`, `scripts/prompt_matrix.py`, `scripts/prompts_from_file.py`, `scripts/sd_upscale.py`, and `scripts/xyz_grid.py`; then non-generation postprocessing/diagnostic scripts can be recorded as out of generation-quality scope or lightly checked.
 
+### 2026-06-19 pass 7 - built-in generation scripts
+Checked:
+- `scripts/img2imgalt.py`: reverse-noise reconstruction loops, sigma-adjustment branch, CFG decode blend, cached recovered-noise reuse, random/recovered noise normalization, sampler handoff, and seed mutation; no new defect found. The script remains an explicitly experimental legacy img2img alternative and keeps Euler-oriented behavior by design.
+- `scripts/loopback.py`: per-loop denoising curves, seed progression, prompt interrogation append path, inpainting-fill restoration, grid/history construction, and interrupt/skip behavior; no defect found.
+- `scripts/outpainting_mk_2.py`: FFT/IFFT shaping, zero-normalization guards, phase normalization, histogram matching mask/reference split, directional expansion sizing, process crop selection, image/latent mask construction, seed/info capture, and final grid/save behavior; no new defect found.
+- `scripts/poor_mans_outpainting.py`: directional target sizing, mask/latent-mask construction, grid tile selection, per-tile seed progression, and recombination; no defect found.
+- `scripts/prompt_matrix.py`: prompt combination enumeration, positive/negative prompt replacement, seed-list generation, batch count, grid construction, and infotext insertion; no defect found.
+- `scripts/prompts_from_file.py`: command-line prompt tag parsing, boolean parsing, sampler alias mapping, model override handling, per-line processing copy, prompt prepend/append behavior, seed iteration, and result aggregation; no defect found.
+- `scripts/sd_upscale.py`: upscaler selection, tile splitting, batch/seed progression, recombination, and infotext/save behavior; no defect found.
+- `scripts/xyz_grid.py`: axis application functions, sampler/checkpoint/VAE validation, int/float range parsing, seed fixing/varying, total-step accounting, grid/subgrid assembly, checkpoint/VAE reload cleanup, and metadata handling; no generation defect found. Existing TODO about grid metadata array alignment is documented local behavior and was not changed.
+
+Validation:
+- `python3 -m py_compile scripts/img2imgalt.py scripts/loopback.py scripts/outpainting_mk_2.py scripts/poor_mans_outpainting.py scripts/prompt_matrix.py scripts/prompts_from_file.py scripts/sd_upscale.py scripts/xyz_grid.py` -> passed.
+
+References:
+- Local script implementations and call paths through `modules.processing.process_images` and `modules.images` grid helpers.
+
+Next unchecked scope:
+- Remaining non-core generation-adjacent scripts/extensions: `scripts/custom_code.py`, `scripts/mxfp8_diagnostics_api.py`, postprocessing scripts, model-converter UI hooks, clear-cond-cache UI/API, and any remaining extension script surfaces that affect generation state indirectly. Then do a final ledger pass to mark the exhaustive audit boundary and any residual validation gaps.
+
