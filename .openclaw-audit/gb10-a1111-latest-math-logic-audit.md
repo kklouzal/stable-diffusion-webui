@@ -198,3 +198,28 @@ References:
 Next unchecked scope:
 - Remaining non-core generation-adjacent scripts/extensions: `scripts/custom_code.py`, `scripts/mxfp8_diagnostics_api.py`, postprocessing scripts, model-converter UI hooks, clear-cond-cache UI/API, and any remaining extension script surfaces that affect generation state indirectly. Then do a final ledger pass to mark the exhaustive audit boundary and any residual validation gaps.
 
+### 2026-06-19 pass 8 - generation-adjacent scripts and final resumed-slice boundary
+Checked:
+- `scripts/custom_code.py`: generation mutation is intentionally user-authored and gated behind `--allow-code`; no fork math defect found in the wrapper path.
+- `scripts/mxfp8_diagnostics_api.py`: diagnostics API/startup probe registration only; no generation-state mutation found beyond launching diagnostics.
+- `scripts/postprocessing_codeformer.py`, `scripts/postprocessing_gfpgan.py`, `scripts/postprocessing_upscale.py`: postprocessing-only image transforms and extras upscaling; no diffusion-generation math path to remediate in this audit slice.
+- `extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py`: cache/status/compile/backend activity helpers and token estimation surface; no new generation-quality defect found in the inspected state-management portions.
+- `extensions/sd-webui-incantations/scripts/dynamic_thresholding.py`, `incantation_base.py`, `incant_utils/module_hooks.py`, `ui_wrapper.py`: dynamic-threshold sampler wrapping/restoration, incantation submodule dispatch ordering, hook registration/removal helpers, and wrapper no-op defaults; no new defect found beyond the already-audited core math in `dynthres_core.py`, `pag.py`, `cfg_combiner.py`, and `smoothed_energy_guidance.py`.
+- `extensions/sd-webui-model-converter/scripts/convert.py`, `ui.py`: checkpoint/LoRA conversion utility, precision conversion helpers, CLIP key/position-id repair, safe output naming/path checks, and API/UI hooks; generation-adjacent artifact tooling only, no runtime generation defect found.
+
+Validation:
+- `python3 -m py_compile scripts/custom_code.py scripts/mxfp8_diagnostics_api.py scripts/postprocessing_codeformer.py scripts/postprocessing_gfpgan.py scripts/postprocessing_upscale.py` -> passed.
+- Direct `python3 -m py_compile` for extension scripts failed to write an existing extension `__pycache__` file due to permissions, so compilation was rerun with explicit `/tmp` bytecode outputs.
+- `python3 - <<PY ... py_compile.compile(..., cfile=/tmp/a1111-pycompile-hwkpf2z4/*.pyc, doraise=True) ... PY` for `openclaw_clear_cond_cache.py`, Incantations wrapper/helper scripts, and model-converter scripts -> passed.
+
+References:
+- Local extension entrypoints and helper implementations listed above.
+- Existing executable tests remain blocked as recorded in pass 6 by host missing `torch` and validation image missing `pytest`.
+
+Resumed-slice status:
+- The resume scope from `modules/sd_vae_taesd.py` through CLIP hijacks, attention optimizers, API mapping, GB10 generation extensions, built-in generation scripts, and generation-adjacent scripts/extensions has been inspected and ledgered.
+- No additional code defect was confirmed in this resumed slice, so only ledger commits were made.
+
+Next unchecked scope:
+- A final owner review can decide whether to broaden beyond generation-quality math/logic into non-generation surfaces, documentation, UI-only behavior, or full integration tests after installing/using an approved test surface with both `torch` and `pytest` available. Do not push until the owner reviews the ahead commits.
+
