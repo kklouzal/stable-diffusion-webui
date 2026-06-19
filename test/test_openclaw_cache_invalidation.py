@@ -246,6 +246,30 @@ def test_cached_data_for_file_invalidates_when_mtime_moves_backward(tmp_path, mo
     assert cache_module.cached_data_for_file("test-metadata", "entry", str(source), build_value) == {"value": 2}
 
 
+def test_cached_data_for_file_invalidates_legacy_entry_without_size(tmp_path, monkeypatch):
+    cache_module.caches.clear()
+    monkeypatch.setattr(cache_module, "cache_dir", str(tmp_path / "cache"))
+
+    source = tmp_path / "metadata.txt"
+    source.write_text("first", encoding="utf-8")
+    stat = os.stat(source)
+
+    existing_cache = cache_module.cache("test-metadata")
+    existing_cache["entry"] = {"mtime": stat.st_mtime, "value": {"value": "stale"}}
+
+    source.write_text("second content", encoding="utf-8")
+    os.utime(source, (stat.st_mtime, stat.st_mtime))
+
+    calls = []
+
+    def build_value():
+        calls.append(1)
+        return {"value": "fresh"}
+
+    assert cache_module.cached_data_for_file("test-metadata", "entry", str(source), build_value) == {"value": "fresh"}
+    assert calls == [1]
+
+
 def test_sha256_cache_rejects_size_mismatch(tmp_path, monkeypatch):
     source = tmp_path / "model.safetensors"
     source.write_bytes(b"current")
