@@ -794,7 +794,10 @@ def path_is_parent(parent_path, child_path):
     parent_path = os.path.abspath(parent_path)
     child_path = os.path.abspath(child_path)
 
-    return child_path.startswith(parent_path)
+    try:
+        return os.path.commonpath([parent_path, child_path]) == parent_path
+    except ValueError:
+        return False
 
 
 def setup_ui(ui, gallery):

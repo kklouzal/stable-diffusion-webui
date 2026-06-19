@@ -70,6 +70,11 @@ Reviewed files/functions:
 - `extensions-builtin/Lora/networks.py`: initial conversion/name-assignment/load functions through `load_network` matching setup.
   - Findings: no confirmed remediation in reviewed chunk. Diffusers-to-CompVis conversion and layer-name assignment are coherent for reviewed mappings.
 
+- `modules/ui_extra_networks.py`: `fetch_file`, `fetch_cover_images`, `get_metadata`, `get_single_card`, `ExtraNetworksPage` preview/metadata/card/tree/dirs/html helpers, `create_ui`, `path_is_parent`, `setup_ui`; related `modules/ui_extra_networks_user_metadata.py` editor/preview save paths and checkpoint/TI/hypernetwork page item builders.
+  - Finding: `path_is_parent()` used raw string `startswith`, so legacy preview-save and relative-path checks could treat sibling prefix paths (for example `models-other`) as children of an allowed models directory.
+  - Remediation: use `os.path.commonpath()` containment with cross-drive `ValueError` handling; added `tests/test_extra_networks_path_contract.py`.
+  - Validation: `pytest -q tests/test_extra_networks_path_contract.py` passed with the pre-existing unknown `base_url` warning.
+
 Commits made during this audit:
 - `1196151a` - `Center inpaint mask canvas overlay` (fixes letterboxed inpaint mask UI offset; adds static regression test and initial integration ledger).
 
