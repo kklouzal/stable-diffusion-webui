@@ -51,11 +51,35 @@ Reviewed files/functions:
 - `modules/ui_toprow.py`: `Toprow` init, prompt creation, submit box, tool row, styles UI.
   - Findings: no confirmed remediation in reviewed chunks. Submit/interrupt hooks and prompt image extraction are coherent.
 
+- `modules/img2img.py`: `process_batch`, `img2img`.
+  - Findings: no confirmed remediation. Reviewed batch image enumeration, inpaint mask matching, PNG-info parameter propagation, per-image override reset for checkpoint, scale-by behavior, mode-to-image/mask selection, mask creation for sketch/inpaint/upload, and processing fallback.
+- `modules/ui.py`: helper functions `gr_show`, `send_gallery_to_image`, `calc_resolution_hires`, `resize_from_to_html`, `process_interrogate`, token counters, override dropdown creation; reviewed txt2img/img2img generation component wiring and paste-field API mappings around dimensions, denoising, hires, inpaint, resize, override settings, and submit inputs.
+  - Findings: no confirmed remediation. Noted img2img submit input order passes `height, width` intentionally because `modules.img2img.img2img` has that signature.
+- `modules/ui_common.py`: `update_generation_info`, `plaintext_to_html`, `update_logfile`, `save_files`, `OutputPanel`, start of `create_output_panel`.
+  - Findings: no confirmed remediation. Reviewed selected-image save indexing, grid detection by `index_of_first_image`, infotext parsing, CSV update padding, zip seed aggregation, and gallery generation-info refresh.
+- `modules/ui_loadsave.py`: `radio_choices`, `UiLoadsave.__init__`, `add_component`, `add_block`, `read_from_file`, `write_to_file`, `dump_defaults`, `iter_changes`, `ui_view`, `ui_apply`, `create_ui`, `setup_ui`.
+  - Findings: no confirmed remediation. Reviewed dropdown/radio choice validation, numeric coercion, InputAccordion default persistence, and tab default validation.
+- `scripts/loopback.py`: `Script.run`, nested `calculate_denoising_strength`.
+  - Findings: no confirmed remediation. Reviewed seed progression, denoising curve math, prompt interrogation reset, color correction reuse, inpainting fill restoration, grid/index handling, and cancellation checks.
+- `extensions-builtin/hypertile/scripts/hypertile_script.py`: `ScriptHypertile.process`, `before_hr`, `add_infotext`, `configure_hypertile`, `on_ui_settings`, `add_axis_options`.
+  - Findings: no confirmed remediation. Reviewed first/second-pass dimensions, hypertile seed source, option propagation, and XYZ override wiring.
+- `extensions-builtin/Lora/scripts/lora_script.py`: `unload`, `before_ui`, API route registration, infotext pasted registration.
+  - Findings: no confirmed remediation. Registration/unload hooks are coherent.
+- `extensions-builtin/Lora/extra_networks_lora.py`: `ExtraNetworkLora.activate`, `deactivate`.
+  - Findings: no confirmed remediation. Reviewed additional configured LoRA injection, multiplier parsing, active network load, MXFP8/NVFP4 hard-stop behavior, and infotext hash propagation.
+- `extensions-builtin/Lora/networks.py`: initial conversion/name-assignment/load functions through `load_network` matching setup.
+  - Findings: no confirmed remediation in reviewed chunk. Diffusers-to-CompVis conversion and layer-name assignment are coherent for reviewed mappings.
+
 Commits made during this audit:
-- Pending: fix and ledger/test commit for centered inpaint mask canvas.
+- `1196151a` - `Center inpaint mask canvas overlay` (fixes letterboxed inpaint mask UI offset; adds static regression test and initial integration ledger).
 
 Validation run:
 - `pytest -q tests/test_image_mask_fix_contract.py` - passed, with pre-existing pytest warning about unknown `base_url` config option.
+- `pytest -q tests/test_image_mask_fix_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py` - 11 passed, with the same pre-existing `base_url` warning.
+
+Final checkpoint notes:
+- After commit `1196151a`, `git status --short` showed unrelated dirty files `modules/cache.py` and `test/test_openclaw_cache_invalidation.py`, plus untracked `.audit/gb10-a1111-latest-core-math-ledger.md`; this integration slice did not modify or stage those files.
+- Exhaustive review is not complete; continue from the remaining areas below.
 
 Remaining areas / continuation:
 - Continue `modules/ui.py` beyond helper/top-level UI construction, especially img2img component wiring and paste-field mappings.
