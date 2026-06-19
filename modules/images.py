@@ -732,7 +732,10 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     fullfn_without_extension, extension = os.path.splitext(params.filename)
     if hasattr(os, 'statvfs'):
         max_name_len = os.statvfs(save_dir).f_namemax
-        fullfn_without_extension = fullfn_without_extension[:max_name_len - max(4, len(extension))]
+        directory, filename_without_extension = os.path.split(fullfn_without_extension)
+        max_basename_len = max_name_len - max(4, len(extension))
+        filename_without_extension = filename_without_extension[:max_basename_len]
+        fullfn_without_extension = os.path.join(directory, filename_without_extension) if directory else filename_without_extension
         params.filename = fullfn_without_extension + extension
         fullfn = params.filename
     fullfn = _atomically_save_image(image, fullfn_without_extension, extension)

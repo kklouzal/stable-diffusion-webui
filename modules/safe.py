@@ -65,7 +65,7 @@ class RestrictedUnpickler(pickle.Unpickler):
 
 
 # Regular expression that accepts 'dirname/version', 'dirname/byteorder', 'dirname/data.pkl', '.data/serialization_id', and 'dirname/data/<number>'
-allowed_zip_names_re = re.compile(r"^([^/]+)/((data/\d+)|version|byteorder|.format_version|.storage_alignment|.data/serialization_id|(data\.pkl))$")
+allowed_zip_names_re = re.compile(r"^([^/]+)/((data/\d+)|version|byteorder|\.format_version|\.storage_alignment|\.data/serialization_id|(data\.pkl))$")
 data_pkl_re = re.compile(r"^([^/]+)/data\.pkl$")
 
 def check_zip_filenames(filename, names):

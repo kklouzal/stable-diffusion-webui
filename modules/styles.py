@@ -39,6 +39,9 @@ def extract_style_text_from_prompt(style_text, prompt):
     extract_style_text_from_prompt("masterpiece, {prompt}", "exquisite, 1girl, art by greg") outputs (False, "exquisite, 1girl, art by greg")
     """
 
+    if not style_text:
+        return True, prompt
+
     stripped_prompt = prompt.strip()
     stripped_style_text = style_text.strip()
 

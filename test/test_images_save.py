@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+import os
 from types import SimpleNamespace
 
 from PIL import Image
@@ -166,3 +167,24 @@ def test_save_image_reports_exported_4chan_jpg_path(tmp_path, monkeypatch):
     assert (tmp_path / "large.png").is_file()
     assert (tmp_path / "large.jpg").is_file()
     assert (tmp_path / "large.txt").read_text(encoding="utf8") == "export metadata\n"
+
+def test_save_image_truncates_long_filename_component_only(tmp_path, monkeypatch):
+    images = load_images_module(monkeypatch)
+    image = Image.new("RGB", (1, 1), color="white")
+    max_stem_len = os.statvfs(tmp_path).f_namemax - 4
+
+    fullfn, txt_fullfn = images.save_image(
+        image,
+        path=str(tmp_path),
+        basename="",
+        extension="png",
+        info="long filename metadata",
+        forced_filename="x" * (max_stem_len + 50),
+        save_to_dirs=False,
+    )
+
+    saved_path = Path(fullfn)
+    assert saved_path.parent == tmp_path
+    assert saved_path.name == f"{'x' * max_stem_len}.png"
+    assert txt_fullfn == str(tmp_path / f"{'x' * max_stem_len}.txt")
+    assert saved_path.is_file()
