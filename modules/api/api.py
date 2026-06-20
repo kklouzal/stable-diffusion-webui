@@ -1007,13 +1007,16 @@ class Api:
 
         return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
 
+    def _run_extras(self, *, extras_mode, image, image_folder, reqDict):
+        with self.queue_lock:
+            return postprocessing.run_extras(extras_mode=extras_mode, image=image, image_folder=image_folder, input_dir="", output_dir="", save_output=False, **reqDict)
+
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)
 
-        reqDict['image'] = decode_base64_to_image(reqDict['image'])
+        image = decode_base64_to_image(reqDict.pop('image'))
 
-        with self.queue_lock:
-            result = postprocessing.run_extras(extras_mode=0, image_folder="", input_dir="", output_dir="", save_output=False, **reqDict)
+        result = self._run_extras(extras_mode=0, image=image, image_folder="", reqDict=reqDict)
 
         image = encode_pil_to_base64(result[0][0]) if result[0] else None
         return models.ExtrasSingleImageResponse(image=image, html_info=result[1])
@@ -1024,8 +1027,7 @@ class Api:
         image_list = reqDict.pop('imageList', [])
         image_folder = decode_extras_batch_images(image_list)
 
-        with self.queue_lock:
-            result = postprocessing.run_extras(extras_mode=1, image_folder=image_folder, image="", input_dir="", output_dir="", save_output=False, **reqDict)
+        result = self._run_extras(extras_mode=1, image="", image_folder=image_folder, reqDict=reqDict)
 
         return models.ExtrasBatchImagesResponse(images=list(map(encode_pil_to_base64, result[0])), html_info=result[1])
 

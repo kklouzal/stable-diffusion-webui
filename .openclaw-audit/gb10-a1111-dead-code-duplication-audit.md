@@ -1299,3 +1299,44 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: postprocessing script runner and script-argument surfaces outside the main generation runner, especially `modules/scripts_postprocessing.py`, postprocessing script arg dict/list conversion, extras API/UI postprocessing fanout, postprocessing tests, and any duplicated timing/error-wrapper patterns between postprocessing and generation script runners.
+
+
+## Pass 31 - postprocessing script runner and extras fanout (2026-06-20)
+
+### Checked scope
+- `modules/scripts_postprocessing.py` function/class surface: `PostprocessedImageSharedInfo`, `PostprocessedImage.__init__()`, `get_suffix()`, `create_copy()`, `ScriptPostprocessing` public stubs/element-id helpers, postprocessing `wrap_call()`, and `ScriptPostprocessingRunner` initialization, UI creation, ordering/filtering, run, arg-vector creation, and `image_changed()` dispatch.
+- `modules/postprocessing.py`: `combine_caption()`, `run_postprocessing()` including upload/batch-directory/single-image fanout, output saving/caption merge, `run_postprocessing_webui()`, and legacy/API `run_extras()` argument dict-to-list bridge.
+- Extras API surface in `modules/api/api.py`: `setUpscalers()`, `decode_extras_batch_images()`, `Api.extras_single_image_api()`, and `Api.extras_batch_images_api()`.
+- Focused postprocessing tests/contracts: `test/test_postprocessing_script_args.py`, `test/test_postprocessing_api_defaults.py`, `tests/test_postprocessing_caption_contract.py`, and live API smoke coverage in `test/test_extras.py`.
+- Adjacent generation runner comparison: `modules/scripts.py` `wrap_call()`, `ScriptRunner._script_args_for()`, `_record_script_timing()`, and `_run_timed_script_hook()` from pass 30, checked only to decide whether postprocessing timing/error wrappers could be safely shared.
+
+### Findings and fixes
+- Consolidated duplicated extras API queue/run fanout in `modules/api/api.py`. New private `Api._run_extras()` owns the common locked `postprocessing.run_extras(..., input_dir="", output_dir="", save_output=False, **reqDict)` call used by both single-image and batch-image extras endpoints.
+- Updated `extras_single_image_api()` and `extras_batch_images_api()` to perform only endpoint-specific decoding/response shaping around the shared helper.
+- Updated the AST-based focused test loader in `test/test_postprocessing_api_defaults.py` so extracted extras endpoint methods include `_run_extras()` and continue testing the real helper path.
+- No safe dead-code deletion was found in the postprocessing runner. The base `ScriptPostprocessing` stubs and element-id helpers are public extension API; `PostprocessedImage` fields are mutated by extension scripts; `run_postprocessing_webui()` is the UI task wrapper that preserves the queued task signature.
+- No safe shared timing/error wrapper was added between generation and postprocessing runners. Generation script lifecycle dispatch uses positional `p.script_args`, records `openclaw_script_timings`, and reports tracebacks with `errors.report`; postprocessing scripts use named UI-control dictionaries, direct `process_firstpass()`/`process()` extension calls, `shared.state.job`, and a UI-facing `errors.display()` wrapper for `ui()` construction.
+
+### Preserved compatibility/dead-code decisions
+- Preserved `ScriptPostprocessing.ui()`, `process()`, `process_firstpass()`, and `image_changed()` no-op stubs as subclass extension hooks.
+- Preserved `ScriptPostprocessing.extra_only`, `main_ui_only`, `order`, `group`, `args_from`, `args_to`, `controls`, and `tab_name` fields because they are populated/read across UI setup, ordering, filtering, and extension-facing element IDs.
+- Preserved dict-to-list conversion in `ScriptPostprocessingRunner.create_args_for_run()` as distinct from generation API script args: postprocessing API extras passes named per-script dictionaries, fills UI defaults from controls, and then runs the same positional vector the UI runner expects.
+- Preserved the two-phase postprocessing script run (`process_firstpass()` over all selected scripts, then `process()` over primary plus extra images) because extra image fanout and `disable_processing` semantics are postprocessing-specific.
+- Preserved `setUpscalers()` despite its legacy camelCase name because it is the current request-normalization bridge from API model field names (`upscaler_1`/`upscaler_2`) to `run_extras()` parameters (`extras_upscaler_1`/`extras_upscaler_2`) and enforces API image return behavior.
+- Preserved `decode_extras_batch_images()` corrupt-image skipping behavior because focused tests cover the tolerant batch contract.
+
+### Static/dynamic audit map notes
+- Extras API chain: endpoint request model -> `setUpscalers()` normalization -> endpoint-specific image decode -> `_run_extras()` queue-locked call -> `postprocessing.run_extras()` legacy dict assembly -> `scripts.scripts_postproc.create_args_for_run()` -> `run_postprocessing()` -> `scripts.scripts_postproc.run()`.
+- Postprocessing args chain: `setup_ui()` assigns each script `args_from`/`args_to` and ordered controls; `create_args_for_run()` creates a sparse default-filled list from current control values plus explicit named overrides; `run()` slices by each script's arg range and converts back to a named `process_args` dict for extension hooks.
+- Extra-image chain: each script can append PIL images or `PostprocessedImage` instances to `single_image.extra_images`; runner normalizes PIL extras with `create_copy()`, appends them to the current all-images list, and clears consumed extras before assigning `pp.extra_images` after all scripts finish.
+- Output chain: `run_postprocessing()` reads/generates infotext, saves primary plus extra images when requested, merges caption sidecars via `combine_caption()`, and returns gallery outputs only when mode/toggle requires it.
+- Compatibility surfaces to continue treating conservatively: extras endpoint JSON field names, `setUpscalers()` name, `run_extras()` signature, `run_postprocessing_webui(id_task, *args, **kwargs)`, postprocessing script hook names, arg vector positions, `PostprocessedImage` mutable fields, and postprocessing operation/disable option names.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass31.XXXXXX) python3 -m py_compile modules/scripts_postprocessing.py modules/postprocessing.py modules/api/api.py test/test_postprocessing_script_args.py test/test_postprocessing_api_defaults.py tests/test_postprocessing_caption_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass31.XXXXXX) python3 -m pytest -q test/test_postprocessing_script_args.py test/test_postprocessing_api_defaults.py tests/test_postprocessing_caption_contract.py` - passed: 14 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/scripts_postprocessing.py`, `modules/postprocessing.py`, `modules/api/api.py`, and `modules/scripts.py` reported `0 duplicate nontrivial function body groups` in every file after the extras API helper extraction.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: image saving/metadata sidecar and infotext duplication surfaces adjacent to postprocessing outputs, especially `modules/images.py` save/info helpers, caption/sidecar call sites, PNG info propagation in generation vs extras, and focused image-save tests/contracts.
