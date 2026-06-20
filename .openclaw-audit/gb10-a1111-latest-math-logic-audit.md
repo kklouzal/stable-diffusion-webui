@@ -636,26 +636,34 @@ Validation:
 Next unchecked scope:
 - The named broad source audit scope appears exhausted by passes 1-27. Recommend a final closeout/validation slice to reconcile the ledger against the full source inventory, rerun the highest-value contract tests in the available runtime, and produce a final audit summary; do not invent another open-ended discovery slice unless new source or runtime evidence appears.
 
+### 2026-06-20 final closeout - inventory reconciliation and aggregate validation
+Scope covered:
+- Reconciled the ledger against the broad repo inventory for `modules/`, built-in `scripts/`, the audited OpenClaw/Incantations/model-converter extension trees, `extensions-builtin` generation/runtime helpers, JavaScript UI state files, tests, and repo config manifests. No obvious high-value generation/runtime source island remains outside passes 1-27.
+- Core generation coverage includes processing, prompt parsing, CFG denoiser batching, k-diffusion/CompVis/LCM/DDIM/PLMS/UniPC/restart samplers, schedulers, RNG/subseed blending, image/mask/latent geometry, hires/img2img/inpaint paths, VAE/UNet/model load and reload, precision/cache metadata, API txt2img/img2img and progress contracts, and generation-altering extensions/scripts.
+- Broadened runtime/operator-safety coverage includes config/options/load-save, image save/history/infotext, extra-network metadata/cards, UI construction glue, training/textual-inversion/hypernetwork/checkpoint merger helpers, face restoration/interrogate/upscalers/postprocessing, launch/container helpers, and related lightweight contracts.
 
-### 2026-06-20 pass 27 - UI construction and remaining extra-network/editor glue
-Checked:
-- `modules/ui.py`: txt2img and img2img construction order, `txt2img_inputs`/`img2img_args` mapping into generation functions, hires controls and paste fields, img2img tab/source selection, inpaint mask/fill/full-res controls, resize-to/resize-by behavior, interrogate routing, progress restore, output panel wiring, PNG info paste routing, train preview parameter capture, settings/loadsave integration, checkpoint merger setup, and internal API helpers. No generation-parameter ordering defect found.
-- `modules/ui_components.py`, `modules/ui_component_patches.py`, and `modules/ui_toprow.py`: form component parents/block names, `InputAccordion` boolean state behavior and id de-duplication, component callback before/after hooks, tooltip/config patching, compact/classic prompt rows, submit/interrupt/skip behavior, prompt-image extraction, style apply, clear prompt, token counters, and img2img interrogate buttons. No generation-quality defect found in inspected paths.
-- `modules/headless_ui.py` and `modules/shared_ui_themes.py`: inert component default/value/choice metadata for API/headless script UI construction, event-chain no-op behavior, Gradio module shims, theme cache/load fallback, and theme variable resolution. No defect found in inspected paths.
-- `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_checkpoints_user_metadata.py`, `modules/ui_extra_networks_hypernets.py`, and `modules/ui_extra_networks_textual_inversion.py`: extra-network page registration/order, preview fetch/cover-image/metadata/get-single-card endpoints, path containment, card/tree/dirs HTML generation, checkpoint/hypernet/textual-inversion prompts and search terms, preview replacement, user metadata save/load, preferred VAE selection/reload behavior, local preview paths, and gallery-index preview save behavior. Found one operator-trust HTML/JS escaping defect.
-- `modules/extra_networks.py` and `modules/extra_networks_hypernet.py`: prompt parsing, activation/deactivation dispatch, alias handling, user metadata JSON reads, and hypernetwork multiplier/name application as related extra-network UI/API parameter flow. No additional defect found.
-- Remaining extension glue after pass 26: `extensions-builtin/LDSR/preload.py`, `extensions-builtin/ScuNET/preload.py`, `extensions-builtin/SwinIR/preload.py`, `extensions-builtin/canvas-zoom-and-pan/scripts/hotkey_config.py`, `extensions-builtin/extra-options-section/scripts/extra_options_section.py`, `extensions-builtin/canvas-zoom-and-pan/javascript/zoom.js`, `extensions-builtin/mobile/javascript/mobile.js`, `extensions-builtin/prompt-bracket-checker/javascript/prompt-bracket-checker.js`, and `javascript/generationParams.js`. The preloads only add model-dir CLI defaults; canvas/mobile/bracket/generationParams JS is UI-only state/feedback; extra-options preserves explicit `p.override_settings` while copying selected UI setting values into generation. No additional defect found.
-- Extension source inventory was rechecked against earlier passes: OpenClaw denoise-ramp and multi-sampler were covered in pass 6, OpenClaw clear-cond-cache in pass 8, core JS in pass 20, UI triage/inventory in pass 22, Lora/LDSR in pass 24, Hypertile/soft-inpainting/upscalers/postprocessing-for-training in pass 25, and Incantations/model-converter in pass 26.
+Key fixes committed during the audit:
+- Skip-CFG image conditioning alignment in `modules/sd_samplers_cfg_denoiser.py`.
+- Subseed `slerp` singularity handling in `modules/rng.py`.
+- UI defaults/config backup/extension/extra-network HTML and JavaScript escaping hardening.
+- API progress response contract for `current_task`.
+- Checkpoint display-name root-boundary handling.
+- Textual-inversion face detection array truthiness and hypernetwork create return contract.
+- Postprocessing caption merge behavior and upscaler tile-overlap clamping.
+- Multiple focused contract tests and test isolation repairs for the audited fixes.
 
-Findings/fixes:
-- Extra-network card/tree HTML interpolated local filenames, search terms, labels, hashes, and save-preview JavaScript with incomplete escaping. A model/checkpoint/embedding path containing quote-like characters could corrupt DOM attributes or save-preview onclick JavaScript and mislead operators inspecting or saving extra-network cards. Added `html_attr()` for attribute-safe escaping, escaped search terms/tree labels/data attributes, and changed save-preview JS construction to use existing JSON quoting via `quote_js()`.
-- Added `tests/test_extra_networks_metadata_contract.py::test_extra_network_card_html_escapes_attribute_and_js_paths` to lock the escaping/quoting contract.
+Final validation summary:
+- `git status --short --branch` -> `## latest...origin/latest [ahead 33]` plus only untracked `.openclaw-audit/logs/`.
+- `git diff --check` -> passed (`diff_check_rc:0`).
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3` py-compiled all practical Python files found by `find . -path ./.git -prune -o -path ./venv -prune -o -path ./.venv -prune -o -path ./repositories -prune -o -path ./models -prune -o -path ./outputs -prune -o -path ./__pycache__ -prune -o -name "*.py" -print` -> 284 files passed.
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m pytest -q tests` -> passed, 35 passed / 1 skipped / 1 warning (`Unknown config option: base_url`).
+- `node --check script.js javascript/*.js extensions/sd-webui-incantations/javascript/dynthres_active.js extensions-builtin/canvas-zoom-and-pan/javascript/zoom.js extensions-builtin/mobile/javascript/mobile.js extensions-builtin/prompt-bracket-checker/javascript/prompt-bracket-checker.js` -> passed.
 
-Validation:
-- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile modules/ui.py modules/ui_components.py modules/ui_component_patches.py modules/ui_toprow.py modules/headless_ui.py modules/shared_ui_themes.py modules/ui_extra_networks.py modules/ui_extra_networks_user_metadata.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_checkpoints_user_metadata.py modules/ui_extra_networks_hypernets.py modules/ui_extra_networks_textual_inversion.py modules/extra_networks.py modules/extra_networks_hypernet.py extensions-builtin/LDSR/preload.py extensions-builtin/ScuNET/preload.py extensions-builtin/SwinIR/preload.py extensions-builtin/canvas-zoom-and-pan/scripts/hotkey_config.py extensions-builtin/extra-options-section/scripts/extra_options_section.py tests/test_extra_networks_metadata_contract.py` -> passed.
-- `node --check javascript/generationParams.js extensions-builtin/canvas-zoom-and-pan/javascript/zoom.js extensions-builtin/mobile/javascript/mobile.js extensions-builtin/prompt-bracket-checker/javascript/prompt-bracket-checker.js` -> passed.
-- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m pytest -q tests/test_extra_networks_metadata_contract.py tests/test_extra_networks_path_contract.py` -> passed, 5 tests; existing pytest warning remains `Unknown config option: base_url`.
-- `git diff --check` -> passed.
+Remaining validation gaps and environment constraints:
+- System Python on GB10 lacks `torch`, so torch-bound extension tests for denoise-ramp, multi-sampler, Incantations, and model-converter fail during collection with `ModuleNotFoundError: No module named 'torch'`.
+- System Python also lacks `fastapi`, so `extensions/openclaw-clear-cond-cache/tests/test_openclaw_clear_cond_cache.py` fails during collection/import with `ModuleNotFoundError: No module named 'fastapi'`.
+- The existing `local/gb10-a1111:latest` Docker validation image lacks `pytest` for pytest-style extension tests (`/usr/local/bin/python: No module named pytest`), and no repo `venv` or `.venv` exists to provide the full runtime test surface.
+- Full live WebUI model-load/generation smoke tests, GPU/TorchAO quantization cache execution, and CUDA graph/runtime integration remain outside this closeout because the available validation surface does not provide a complete torch/pytest/runtime environment without mutating the machine.
 
-Next unchecked scope:
-- The named broad source audit scope appears exhausted by passes 1-27. Recommend a final closeout/validation slice to reconcile the ledger against the full source inventory, rerun the highest-value contract tests in the available runtime, and produce a final audit summary; do not invent another open-ended discovery slice unless new source or runtime evidence appears.
+Final status:
+- Audit scope is complete for the named broad source review. No further source-audit slice is recommended unless a real runtime test environment is provisioned or new failing evidence appears.
