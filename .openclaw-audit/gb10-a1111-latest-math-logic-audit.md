@@ -327,3 +327,30 @@ References:
 
 Next unchecked scope:
 - Continue with remaining API/postprocessing/file-history surfaces beyond previous generation passes: `modules/extras.py`, `modules/postprocessing.py`, `modules/scripts_postprocessing.py`, `modules/scripts_auto_postprocessing.py`, `modules/ui_postprocessing.py`, `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_extra_networks*.py`, `modules/hashes.py`, `modules/cache.py`, `modules/modelloader.py`, `modules/safe.py`, and remaining shell/launch scripts/config files where logic affects state, files, or runtime stability.
+
+
+### 2026-06-20 pass 12 - postprocessing file-output and caption handling
+Checked:
+- `modules/extras.py`: PNG info rendering, model-merger config selection/copy, safetensors metadata stringification, merge arithmetic dispatch, inpainting/instruct-pix2pix channel handling, VAE bake-in, metadata recipe construction, and output checkpoint naming; no new defect found in inspected paths.
+- `modules/postprocessing.py`: extras input source selection, batch/directory iteration, existing PNG info preservation, postprocessing script execution, output image save path, caption sidecar read/merge/write behavior, and API compatibility wrapper. Found incorrect existing-caption combine order for `Prepend` and `Append`.
+- `modules/scripts_postprocessing.py`: postprocessed image suffix collision handling, copied extra-image state, postprocessing script ordering/filtering, UI arg mapping, firstpass/process order, and API arg construction; no defect found in inspected paths.
+- `modules/scripts_auto_postprocessing.py`: main-UI postprocessing script bridge and option-based script selection; no defect found.
+- `modules/ui_postprocessing.py`: extras tab mode mapping, directory controls, script inputs, submit wiring, output panel, paste field registration, and image-change notification; no defect found.
+
+Findings/fixes:
+- Added `combine_caption(existing_caption, new_caption, action)` and fixed caption ordering so `Prepend` writes generated/new caption before existing caption, while `Append` writes existing caption before generated/new caption.
+- Added `tests/test_postprocessing_caption_contract.py` using AST extraction of the pure helper to avoid full app/Torch startup on host Python.
+
+Commits:
+- `6652986b Fix postprocessing caption combine order`
+
+Validation:
+- `python3 -m py_compile modules/extras.py modules/postprocessing.py modules/scripts_postprocessing.py modules/scripts_auto_postprocessing.py modules/ui_postprocessing.py tests/test_postprocessing_caption_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_postprocessing_caption_contract.py` -> passed, 2 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+References:
+- Local option label in `modules/shared_options.py`: `Prepend/Append = combine both`, with conventional prepend/append ordering applied to generated caption relative to existing caption.
+
+Next unchecked scope:
+- Continue with remaining file/cache/model metadata and extra-network surfaces: `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/ui_extra_networks_checkpoints*.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`, `modules/hashes.py`, `modules/cache.py`, `modules/modelloader.py`, `modules/safe.py`, `modules/paths.py`, and shell/launch/config files not yet covered.
