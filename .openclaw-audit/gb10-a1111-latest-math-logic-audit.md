@@ -377,3 +377,24 @@ Validation:
 
 Next unchecked scope:
 - Continue with shell/launch/config/runtime helper files and remaining non-Python/less-traveled source surfaces not yet covered: launch scripts, `webui*.sh`, `modules/paths_internal.py`, API/options/history/save/delete paths, scripts/hooks, tests, and repository JS/config/shell files outside the already audited frontend set.
+
+### 2026-06-20 pass 14 - launch shell and GB10 container helpers
+Checked:
+- `modules/paths_internal.py`: early `COMMANDLINE_ARGS` parsing with `shlex.split`, data/models/extensions/output path derivation, and default model/config path constants; no defect found.
+- `launch.py`: environment preparation/test-server/sysinfo/start dispatch; no defect found.
+- `webui-user.sh`, `webui-macos-env.sh`: user override templates and macOS defaults; no defect found.
+- `docker/entrypoint.sh`, `docker/launch-a1111.sh`: container-owned config/style initialization, ownership handoff, command override behavior, and `COMMANDLINE_ARGS` single-source launch path; no defect found.
+- `gb10/build.sh`, `gb10/run.sh`, `gb10/smoke-test.sh`, `gb10/stop.sh`: BuildKit/cache arguments, host data root setup, output symlink guard, owned extension sync/removal, container args/mounts/env, smoke-test API/import/quantization checks, and stop behavior; no defect found.
+- `webui.sh`: install/bootstrap, venv handling, GPU/TCMalloc detection, restart loop, and accelerate launch selection. Found a shell test expression that treated any non-empty `ACCELERATE` value as true.
+
+Findings/fixes:
+- Fixed `webui.sh` accelerate branch guard to require `ACCELERATE=True` with a quoted `[[ ... == ... ]]` comparison, instead of `[ ${ACCELERATE}="True" ]` which is a single non-empty test argument.
+- Added `tests/test_launch_shell_contract.py` to lock the corrected shell guard.
+
+Validation:
+- `bash -n webui.sh webui-user.sh webui-macos-env.sh docker/entrypoint.sh docker/launch-a1111.sh gb10/build.sh gb10/run.sh gb10/smoke-test.sh gb10/stop.sh` -> passed.
+- `python3 -m pytest -q tests/test_launch_shell_contract.py` -> passed, 1 test; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue through remaining API/options/history/save/delete paths, scripts/hooks, tests, repository JS/config files outside the already audited frontend set, and any source files not yet listed in ledger passes.
