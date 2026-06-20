@@ -309,6 +309,13 @@ class ScriptArgsList(list):
     pass
 
 
+def _set_script_arg(script_args, index, value):
+    """Set a script arg, extending sparse API arg vectors when needed."""
+    if index >= len(script_args):
+        script_args.extend([None] * (index + 1 - len(script_args)))
+    script_args[index] = value
+
+
 def script_default_ui_values(script):
     """Return default script arg values from finalized UI controls when possible."""
     controls = getattr(script, "controls", None)
@@ -736,10 +743,7 @@ class Api:
             return
 
         for idx, value in enumerate(requested_args):
-            target_index = script.args_from + idx
-            if target_index >= len(default_script_args):
-                default_script_args.extend([None] * (target_index + 1 - len(default_script_args)))
-            default_script_args[target_index] = value
+            _set_script_arg(default_script_args, script.args_from + idx, value)
 
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
         script_args = ScriptArgsList(default_script_args.copy())
@@ -747,7 +751,7 @@ class Api:
 
         if input_script_args is not None:
             for index, value in input_script_args.items():
-                script_args[index] = value
+                _set_script_arg(script_args, index, value)
 
         # position 0 in script_arg is the idx+1 of the selectable script that is going to be run when using scripts.scripts_*2img.run()
         if selectable_scripts:
@@ -779,10 +783,7 @@ class Api:
                     if request_args_to > alwayson_script.args_to:
                         script_args.openclaw_script_args_to_overrides[id(alwayson_script)] = request_args_to
                     for idx, value in enumerate(requested_args):
-                        target_index = alwayson_script.args_from + idx
-                        if target_index >= len(script_args):
-                            script_args.extend([None] * (target_index + 1 - len(script_args)))
-                        script_args[target_index] = value
+                        _set_script_arg(script_args, alwayson_script.args_from + idx, value)
                     self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
         return script_args
 

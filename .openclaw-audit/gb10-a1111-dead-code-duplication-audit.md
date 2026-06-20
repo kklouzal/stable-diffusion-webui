@@ -1553,3 +1553,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: script runtime helpers and API script-arg consumers beyond callback ordering, especially `modules/api/api.py` script argument initialization/defaulting, `modules/scripts.py` `set_named_arg()` and `init_default_script_args()` interactions, always-on script API persistence, and tests around script arg override/infotext paste behavior.
+
+## Pass 38 - API script-arg defaulting and runtime helper consumers (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: API bootstrap default vectors for txt2img/img2img scripts, `script_default_ui_values()`, `Api.init_default_script_args()`, `Api.init_script_args()`, infotext-provided script arg overlays, always-on script payload validation and sparse-vector extension, OpenClaw Denoise Ramp API persistence, and txt2img/img2img propagation of `openclaw_script_args_to_overrides` into processing objects.
+- `modules/scripts.py`: runtime script-arg dispatch through `_script_args_for()` and `_run_timed_script_hook()`, selectable script `run()` arg slicing, `set_named_arg()` tuple/list behavior, script API metadata from `create_script_ui_inner()`, and always-on/selectable script lookup helpers.
+- `modules/api/models.py`: txt2img/img2img `script_args` and `alwayson_scripts` request fields plus `ScriptArg`/`ScriptInfo` response models.
+- Focused tests: `test/test_api_script_defaults.py` and `test/test_infotext_api_mappings.py` around script default extraction, API infotext conversion, and newly covered sparse script-arg setting.
+
+### Findings and fixes
+- Consolidated duplicated sparse script-arg assignment in `modules/api/api.py` into private `_set_script_arg()`. The helper preserves existing list mutation semantics while centralizing the shared extend-with-`None` behavior used by always-on API payloads, OpenClaw Denoise Ramp default persistence, and infotext script-arg overlays.
+- Added focused tests in `test/test_api_script_defaults.py` covering both in-range script-arg replacement and extension of sparse API vectors.
+- No safe removal of `ScriptRunner.set_named_arg()` was found. It has no in-repo callers in this slice, but it is a public runtime helper on the script runner object, handles both tuple and list script args, and can be used by extensions or dynamic/plugin code by script/control elem_id.
+- No safe removal of `openclaw_script_args_to_overrides` was found. The override map is needed when an always-on request sends more args than the script runner's captured `args_to`, and `modules/scripts.py` consumes it in `_script_args_for()` for all timed always-on hook dispatch.
+- No safe unification of API script defaulting with UI/script metadata creation was made. API bootstrap must build a non-UI `script_args` vector with position `0` reserved for selectable script index, while UI metadata registration exposes controls, paste fields, and API model descriptions.
+- No safe deletion of OpenClaw Denoise Ramp default persistence was found. The persistence intentionally updates the API default vector for that always-on script after explicit API requests, preserving runtime/API behavior across subsequent calls.
+
+### Static/dynamic audit map notes
+- API default chain: API constructor ensures script runners are initialized -> `init_default_script_args()` sizes a vector to the max script `args_to` -> position `0` stores selectable script index -> default values come from finalized controls when available via `script_default_ui_values()`.
+- Request overlay chain: infotext paste fills `infotext_script_args` by component identity -> `init_script_args()` overlays those indexes, then selectable script request args, then always-on script args -> processing receives `p.script_args` and optional `p.openclaw_script_args_to_overrides`.
+- Always-on extension chain: request payload args beyond captured `args_to` extend the vector and record an override keyed by `id(script)` -> `ScriptRunner._script_args_for()` uses the override to avoid truncating hook args.
+- Compatibility surfaces to continue treating conservatively: request `script_args` list shape, `alwayson_scripts` dict shape, script arg position `0`, `ScriptArg`/`ScriptInfo` fields, `ScriptRunner.set_named_arg()`, and OpenClaw Denoise Ramp API persistence.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass38.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/scripts.py test/test_api_script_defaults.py test/test_infotext_api_mappings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass38.XXXXXX) python3 -m pytest -q test/test_api_script_defaults.py test/test_infotext_api_mappings.py` - passed: 12 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/scripts.py`, `test/test_api_script_defaults.py`, and `test/test_infotext_api_mappings.py` reported one pre-existing duplicate group in `modules/scripts.py` (`postprocess_image()` and `postprocess_maskoverlay()`), outside this slice's script-arg/defaulting scope.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: adjacent runtime script dispatch wrappers and postprocess helper duplication, especially `modules/scripts.py` postprocess hook wrappers (`postprocess_image`, `postprocess_maskoverlay`, image-after-composite, batch/list/sample/mask hooks), their argument object types, and extension compatibility constraints around hook method names.

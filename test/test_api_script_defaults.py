@@ -6,7 +6,7 @@ import types
 def load_api_script_default_helpers():
     source = Path("modules/api/api.py").read_text()
     tree = ast.parse(source)
-    wanted = {"script_default_ui_values"}
+    wanted = {"script_default_ui_values", "_set_script_arg"}
     module = ast.Module(
         body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
         type_ignores=[],
@@ -37,3 +37,19 @@ def test_script_default_ui_values_falls_back_for_scripts_without_controls():
     )
 
     assert helper(script) == ["fallback-True"]
+
+
+def test_set_script_arg_updates_existing_index():
+    helper = load_api_script_default_helpers()["_set_script_arg"]
+    script_args = [0, "old", "keep"]
+
+    helper(script_args, 1, "new")
+
+    assert script_args == [0, "new", "keep"]
+
+
+def test_set_script_arg_extends_sparse_api_vectors():
+    helper = load_api_script_default_helpers()["_set_script_arg"]
+    script_args = [0]
+
+    helper(script_args, 3, "value")
