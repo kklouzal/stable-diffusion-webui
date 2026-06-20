@@ -330,8 +330,8 @@ class ScriptInfo(BaseModel):
 class ExtensionItem(BaseModel):
     name: str = Field(title="Name", description="Extension name")
     remote: str = Field(title="Remote", description="Extension Repository URL")
-    branch: str = Field(title="Branch", description="Extension Repository Branch")
+    branch: Optional[str] = Field(title="Branch", description="Extension Repository Branch")
     commit_hash: str = Field(title="Commit Hash", description="Extension Repository Commit Hash")
     version: str = Field(title="Version", description="Extension Version")
-    commit_date: str = Field(title="Commit Date", description="Extension Repository Commit Date")
+    commit_date: Optional[int] = Field(title="Commit Date", description="Extension Repository Commit Date")
     enabled: bool = Field(title="Enabled", description="Flag specifying whether this extension is enabled")

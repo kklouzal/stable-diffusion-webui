@@ -1103,3 +1103,42 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: low-level model/listing and refresh API surfaces plus remaining utility/reporting endpoints, especially `modules/api/api.py` getters after progress (`get_config`, `set_config`, sampler/scheduler/upscaler/model/embedding/extension/memory/train/create endpoints), `modules/api/models.py` item/response schemas, `modules/sd_models.py` listing helpers, `modules/sd_vae.py`, `modules/shared_items.py`, and adjacent API model/listing tests.
+
+## Pass 26 - model/listing and refresh API surfaces (2026-06-20)
+
+### Checked scope
+- Low-level public API getters and utility/reporting endpoints in `modules/api/api.py` after progress: `get_config()`, `set_config()`, `get_cmd_flags()`, sampler/scheduler/upscaler/latent-upscale/model/VAE/hypernetwork/face-restorer/RealESRGAN/prompt-style/embedding getters, refresh endpoints, create/train embedding and hypernetwork endpoints, `get_memory()`, and `get_extensions_list()`.
+- API item/response schemas in `modules/api/models.py`, especially sampler/scheduler/upscaler/model/VAE/hypernetwork/face-restorer/RealESRGAN/prompt-style/embedding/memory/extension schemas.
+- Model/listing helpers in `modules/sd_models.py`, `modules/sd_vae.py`, and `modules/shared_items.py`, including `checkpoint_tiles()`, `list_models()`, `refresh_vae_list()`, `sd_vae_items()`, `refresh_checkpoints()`, `list_samplers()`, and `reload_hypernetworks()`.
+- Adjacent API/model listing tests and contracts: `tests/test_api_progress_contract.py`, `tests/test_sd_models_checkpoint_info_contract.py`, and new `tests/test_api_extension_item_contract.py`.
+- Focused duplicate/reachability checks: route registration grep for listing endpoints and schemas, shared-items fanout through option refresh callbacks/UI refresh buttons, extension metadata source inspection, and exact AST duplicate-body scan for `modules/api/api.py` and `modules/shared_items.py`.
+
+### Findings and fixes
+- Fixed stale `/sdapi/v1/extensions` response schema metadata types. `modules.extensions.Extension` initializes `branch` and `commit_date` as `None`, and `read_info_from_repo()` can leave them unset for detached/problematic repositories while `get_extensions_list()` still includes remote-backed extensions. `models.ExtensionItem` now declares `branch: Optional[str]` and `commit_date: Optional[int]`, matching the actual GitPython metadata (`committed_date` is an integer timestamp).
+- Added `tests/test_api_extension_item_contract.py` to lock the extension metadata nullable contract against the extension source defaults.
+- Updated the adjacent progress API contract test to match pass-25 behavior: `/sdapi/v1/progress` now reports `progress_module.current_task`, not the stale imported `current_task` snapshot.
+- No safe dead-code deletion or serializer collapse was found in the model/listing endpoints. The compact list comprehensions are public API response serializers with stable field names, while similarly named `shared_items` functions are live UI option refresh/list callbacks.
+
+### Preserved compatibility/dead-code decisions
+- API listing item schemas (`SamplerItem`, `SchedulerItem`, `UpscalerItem`, `SDModelItem`, `SDVaeItem`, `EmbeddingItem`, `MemoryResponse`, and related item models) remain separate explicit public schemas rather than being replaced with generic dicts or shared UI helpers.
+- `shared_items.refresh_vae_list()` and `shared_items.refresh_checkpoints()` remain live wrappers because `shared.py` exposes them as stable refresh callbacks and `shared_options.py` wires them into UI option refresh behavior.
+- `shared_items.sd_vae_items()`, `list_checkpoint_tiles()`, `list_samplers()`, and `reload_hypernetworks()` remain live because option choices, extra-network refreshes, training UI dropdowns, and sampler visibility settings call them through `shared`/`shared_items` indirection.
+- API refresh endpoints remain thin wrappers under `self.queue_lock`; collapsing them into direct route lambdas or shared UI callbacks would obscure the public API queue boundary.
+- `get_sd_models()` continues returning checkpoint config via `find_checkpoint_config_near_filename()` in the API serializer; `sd_models.checkpoint_tiles()` remains UI dropdown title serialization and is not a duplicate API helper.
+- `get_sd_vaes()` remains API-specific `{model_name, filename}` serialization; `shared_items.sd_vae_items()` intentionally prepends `Automatic` and `None` for UI option choices.
+
+### Static/dynamic audit map notes
+- API listing chain: route registration in `Api.__init__()` binds each `/sdapi/v1/...` listing endpoint to a method with a matching response model in `modules/api/models.py`; response keys are public API compatibility surface.
+- Checkpoint listing chain: `shared_items.refresh_checkpoints()` calls `sd_models.list_models()`, `shared_items.list_checkpoint_tiles()` calls `sd_models.checkpoint_tiles()`, and API `get_sd_models()` serializes richer checkpoint records directly from `sd_models.checkpoints_list.values()`.
+- VAE listing chain: `sd_vae.refresh_vae_list()` owns filesystem discovery into `sd_vae.vae_dict`; UI choice helpers add `Automatic`/`None`, while API `get_sd_vaes()` exposes discovered VAE names and filenames only.
+- Extension listing chain: API `get_extensions_list()` calls `extensions.list_extensions()`, then `read_info_from_repo()` for each extension, and returns only entries with `remote is not None`; branch and commit date may still be unset depending on repository state.
+- Compatibility surfaces to continue treating conservatively: `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, all `/sdapi/v1/*` listing field names, extension metadata field names, training/create endpoint response strings, queue locking on refresh routes, and UI option refresh wrappers in `shared_items.py`.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/api/api.py modules/api/models.py modules/sd_models.py modules/sd_vae.py modules/shared_items.py tests/test_api_extension_item_contract.py tests/test_api_progress_contract.py tests/test_sd_models_checkpoint_info_contract.py` - passed.
+- `pytest -q tests/test_api_extension_item_contract.py tests/test_api_progress_contract.py tests/test_sd_models_checkpoint_info_contract.py` - passed: 4 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py` and `modules/shared_items.py` reported `0 exact duplicate function bodies` for both files.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: API process/control and server lifecycle utility surfaces around auth/middleware, route registration wrappers, `/sdapi/v1/interrupt`, `/sdapi/v1/skip`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, launch/kill/restart/stop handlers, URL/base64 helpers, and remaining low-level API utility functions in `modules/api/api.py` plus adjacent tests.
