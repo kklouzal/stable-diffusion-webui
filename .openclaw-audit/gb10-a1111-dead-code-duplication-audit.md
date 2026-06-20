@@ -2512,3 +2512,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into infotext/style/prompt parsing and prompt-style extraction surfaces, especially `modules/infotext_utils.py` style extraction in `parse_generation_parameters()`, `modules/styles.py`, prompt/style UI controls, and any duplicated style-name/prompt parsing helpers, while preserving `infotext_styles` behavior and old prompt/style import contracts.
+
+## Pass 66 - Infotext/style/prompt parsing and prompt-style extraction surfaces (2026-06-20)
+
+### Checked scope
+- `modules/styles.py`: `PromptStyle`, `merge_prompts()`, module-level `apply_styles_to_prompt()`, `extract_style_text_from_prompt()`, `extract_original_prompts()`, `StyleDatabase.__init__()`, `reload()`, `load_from_csv()`, `get_style_paths()`, style prompt getters, positive/negative style application, `save_styles()`, and `extract_styles_from_prompt()`.
+- `modules/infotext_utils.py`: the style extraction branch in `parse_generation_parameters()`, `infotext_styles` mode behavior, hires prompt/negative prompt style comparison, `Styles array` emission, and old `modules.generation_parameters_copypaste` import alias preservation.
+- Prompt/style UI and API controls: `modules/ui_prompt_styles.py`, `modules/ui_toprow.py`, `modules/ui.py` style dropdown paste fields/token-counter integration, `/sdapi/v1/prompt-styles` response assembly in `modules/api/api.py`, `modules/api/models.py` `PromptStyleItem`, and `scripts/xyz_grid.py` Styles axis application.
+- Focused contract tests and adjacent references: `test/test_styles.py`, `test/test_infotext_api_mappings.py`, and `test/test_infotext_paste_bindings.py`.
+
+### Findings and fixes
+- No safe source-code removals or consolidations were made in this slice; this is a ledger-only checkpoint commit.
+- Preserved `modules.styles` module-level helpers even where `StyleDatabase` wraps them. `merge_prompts()`, `apply_styles_to_prompt()`, `extract_style_text_from_prompt()`, and `extract_original_prompts()` are small but form a direct public/importable prompt-style helper surface, and focused tests already import `extract_original_prompts()` directly.
+- Preserved the split between style merge/extract logic and `infotext_utils.parse_generation_parameters()`. `modules.styles` owns prompt-template matching and style database order; `parse_generation_parameters()` owns old infotext parsing, `infotext_styles` policy, hires prompt comparison, `Styles array` paste emission, and default/backcompat field filling.
+- Preserved the duplicate-looking positive/negative prompt application calls in processing/UI/token-counter paths. Positive and negative prompts intentionally use separate style text fields and component identities, while token counters optionally apply the same active styles before prompt parsing.
+- Preserved `ui_prompt_styles` save/delete/materialize/refresh helper functions. They are callback entry points bound into Gradio component events and operate on live `shared.prompt_styles` state; consolidating them into methods or anonymous callbacks would not remove real duplication and would risk UI callback/API-name behavior.
+- Preserved old style symbols in `modules.ui` despite sparse static use. They are module-level UI symbol exports from the older prompt/style surface, and this slice's compatibility bar explicitly calls for preserving old prompt/style import contracts.
+- Preserved `scripts/xyz_grid.py` `apply_styles()` as a script-specific style-name parser. It appends comma-separated XYZ axis style names into `p.styles`; this is separate from prompt-text style extraction and from the multiselect style UI value path.
+- Preserved `/sdapi/v1/prompt-styles` list assembly and `PromptStyleItem` shape. The route exposes the style CSV/database contract to API clients, so replacing it with internal namedtuple serialization or removing field-specific response logic would be externally visible.
+
+### Static/dynamic audit map notes
+- Runtime generation style chain remains: UI/API/script request stores selected style names in `p.styles` -> `StableDiffusionProcessing.setup_prompts()` and hires setup apply positive/negative style prompts through `shared.prompt_styles` -> generated infotext emits already-styled prompt text plus optional style inference on paste.
+- Infotext paste style chain remains: raw infotext prompt/negative prompt -> `parse_generation_parameters()` -> `shared.prompt_styles.extract_styles_from_prompt()` for base prompt and, when version-compatible, hires prompt -> only if base/hires extracted style names match, prompt text is stripped and `Styles array` may be emitted according to `infotext_styles`.
+- Prompt-style UI chain remains: `Toprow.create_styles_ui()` creates `UiPromptStyles` -> edit dialog callbacks select/save/delete/refresh database entries -> materialize buttons write styled prompt text into prompt boxes and clear the style dropdown -> style dropdown changes can recalculate token counters.
+- Compatibility surfaces to keep conservative: style CSV column names and old `name,text` import support, `PromptStyle` tuple field order, `None` style sentinel, style list divider entries/path marker `do_not_save`, `{prompt}` replacement semantics, style extraction order/reversal, `infotext_styles` modes, `Styles array` paste key/API name `styles`, old `modules.generation_parameters_copypaste` alias, and old module-level style/UI helper imports.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass66.XXXXXX) python3 -m py_compile modules/styles.py modules/ui_prompt_styles.py modules/infotext_utils.py modules/ui.py modules/ui_toprow.py modules/api/api.py modules/api/models.py scripts/xyz_grid.py test/test_styles.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass66.XXXXXX) python3 -m pytest -q test/test_styles.py test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py` - passed: 11 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/styles.py`, `modules/ui_prompt_styles.py`, `modules/infotext_utils.py`, `modules/ui.py`, `modules/ui_toprow.py`, `modules/api/api.py`, `modules/api/models.py`, `scripts/xyz_grid.py`, and `test/test_styles.py` reported no duplicate nontrivial function body groups.
+- Targeted reference scans confirmed style extraction/application is concentrated in `modules.styles`, `parse_generation_parameters()`, the prompt-style UI, txt2img/img2img paste fields, token counters, the prompt-styles API route, and the XYZ Styles axis.
+- `git diff --check` - passed.
+- Live WebUI prompt-style dialog/materialize behavior and API `/sdapi/v1/prompt-styles` calls were not exercised because they require a running WebUI/API session and style runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into prompt parsing and conditioning syntax surfaces not covered by style extraction, especially `modules/prompt_parser.py` schedule/AND/attention parsing, `modules/sd_emphasis.py`, CLIP token chunk reconstruction paths adjacent to prompt parsing, and tests around scheduled prompts/emphasis, while preserving prompt syntax compatibility and old emphasis behavior.
