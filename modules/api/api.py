@@ -1217,16 +1217,34 @@ class Api:
             for upscale_mode in (shared.latent_upscale_modes or {})
         ]
 
+    @staticmethod
+    def _items_from_mapping(mapping, item_factory):
+        return [item_factory(name, value) for name, value in mapping.items()]
+
+    @staticmethod
+    def _embedding_item(embedding):
+        return {
+            "step": embedding.step,
+            "sd_checkpoint": embedding.sd_checkpoint,
+            "sd_checkpoint_name": embedding.sd_checkpoint_name,
+            "shape": embedding.shape,
+            "vectors": embedding.vectors,
+        }
+
+    @classmethod
+    def _embedding_items(cls, embeddings):
+        return {embedding.name: cls._embedding_item(embedding) for embedding in embeddings.values()}
+
     def get_sd_models(self):
         import modules.sd_models as sd_models
         return [{"title": x.title, "model_name": x.model_name, "hash": x.shorthash, "sha256": x.sha256, "filename": x.filename, "config": find_checkpoint_config_near_filename(x)} for x in sd_models.checkpoints_list.values()]
 
     def get_sd_vaes(self):
         import modules.sd_vae as sd_vae
-        return [{"model_name": x, "filename": sd_vae.vae_dict[x]} for x in sd_vae.vae_dict.keys()]
+        return self._items_from_mapping(sd_vae.vae_dict, lambda name, filename: {"model_name": name, "filename": filename})
 
     def get_hypernetworks(self):
-        return [{"name": name, "path": shared.hypernetworks[name]} for name in shared.hypernetworks]
+        return self._items_from_mapping(shared.hypernetworks, lambda name, path: {"name": name, "path": path})
 
     def get_face_restorers(self):
         return [{"name":x.name(), "cmd_dir": getattr(x, "cmd_dir", None)} for x in shared.face_restorers]
@@ -1235,31 +1253,16 @@ class Api:
         return [{"name":x.name,"path":x.data_path, "scale":x.scale} for x in get_realesrgan_models(None)]
 
     def get_prompt_styles(self):
-        styleList = []
-        for k in shared.prompt_styles.styles:
-            style = shared.prompt_styles.styles[k]
-            styleList.append({"name":style[0], "prompt": style[1], "negative_prompt": style[2]})
-
-        return styleList
+        return self._items_from_mapping(
+            shared.prompt_styles.styles,
+            lambda _name, style: {"name": style[0], "prompt": style[1], "negative_prompt": style[2]},
+        )
 
     def get_embeddings(self):
         db = sd_hijack.model_hijack.embedding_db
-
-        def convert_embedding(embedding):
-            return {
-                "step": embedding.step,
-                "sd_checkpoint": embedding.sd_checkpoint,
-                "sd_checkpoint_name": embedding.sd_checkpoint_name,
-                "shape": embedding.shape,
-                "vectors": embedding.vectors,
-            }
-
-        def convert_embeddings(embeddings):
-            return {embedding.name: convert_embedding(embedding) for embedding in embeddings.values()}
-
         return {
-            "loaded": convert_embeddings(db.word_embeddings),
-            "skipped": convert_embeddings(db.skipped_embeddings),
+            "loaded": self._embedding_items(db.word_embeddings),
+            "skipped": self._embedding_items(db.skipped_embeddings),
         }
 
     def refresh_embeddings(self):

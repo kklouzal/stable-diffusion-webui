@@ -3783,3 +3783,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from model/path metadata helpers into checkpoint/extra-network page specializations and model-listing API surfaces, especially `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`, `extensions-builtin/Lora/ui_extra_networks_lora.py`, `modules/api/api.py` model metadata listing methods, and adjacent response-model tests, looking for duplicate item-shape construction or stale metadata exposure wrappers while preserving extension compatibility and public API response shapes.
+
+
+## Pass 103 - Checkpoint/extra-network page specializations and model-listing API surfaces (2026-06-20)
+
+### Scope checked
+- `modules/ui_extra_networks_checkpoints.py`: `ExtraNetworksPageCheckpoints.__init__()`, `refresh()`, `create_item()`, `list_items()`, preview directory allow-list, and user metadata editor creation.
+- `modules/ui_extra_networks_textual_inversion.py`: `ExtraNetworksPageTextualInversion.__init__()`, embedding refresh, `create_item()`, `list_items()`, and embedding preview directory allow-list.
+- `modules/ui_extra_networks_hypernets.py`: `ExtraNetworksPageHypernetworks.__init__()`, refresh, hash/search/prompt item construction, `list_items()`, and preview directory allow-list.
+- `extensions-builtin/Lora/ui_extra_networks_lora.py`: `ExtraNetworksPageLora.__init__()`, network refresh, base card construction, embedded preview fallback, user metadata prompt/negative prompt handling, SD-version filtering, `list_items()`, preview directory allow-list, and metadata editor creation.
+- `modules/api/api.py`: `Api.get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_embeddings()`, and adjacent metadata-listing helper surfaces.
+- Adjacent tests: `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py` response-model stubs/import surface, and `tests/test_extra_networks_metadata_contract.py` metadata/path behavior assertions.
+
+### Findings / fixes
+- Consolidated repeated API mapping-to-list wrappers into `Api._items_from_mapping()` and reused it for SD VAE, hypernetwork, and prompt-style listings while preserving the exact public response dictionaries and insertion-order behavior.
+- Lifted embedding response conversion out of nested per-call helpers into `Api._embedding_item()` and `Api._embedding_items()`, preserving the loaded/skipped map shape and field names.
+- Updated the focused AST-based API listing contract loader to include the new helper methods so the isolated method subset still exercises the real helper path.
+- Preserved checkpoint, textual inversion, hypernetwork, and LoRA extra-network `create_item()` implementations. They share a broad card-item shape but differ in public prompt insertion behavior, local preview naming, metadata/user-metadata handling, embedded preview fallback, hash sources, SD-version filtering, and extension-facing editor hooks, so further consolidation would risk behavior churn.
+- Preserved API listing methods whose item sources or response fields are materially distinct (`get_sd_models()`, face restorers, RealESRGAN models). No stale metadata exposure wrapper or safe dead endpoint was found in this bounded slice.
+
+### Static/dynamic audit map notes
+- Extra-network page item chains remain separate by model type: checkpoints use checkpoint aliases and disable prompt insertion; textual inversion inserts embedding names and allows negative prompts; hypernetworks build weighted `<hypernet:...>` prompts with hash-cache metadata; LoRA cards combine alias prompts, user activation/negative text, embedded previews, metadata, and SD-version compatibility filtering.
+- API metadata listing chain remains: route registration binds public `/sdapi/v1/*` endpoints to response models; model/vae/hypernetwork/style helpers shape dictionaries for those response models without changing discovery sources or keys.
+- Embedding listing chain remains: `sd_hijack.model_hijack.embedding_db` supplies loaded and skipped maps; response values still expose `step`, `sd_checkpoint`, `sd_checkpoint_name`, `shape`, and `vectors` only.
+- Compatibility surfaces kept conservative: extra-network card keys, `onclick` checkpoint selection, prompt JavaScript quoting, local preview filenames, user metadata lookup, LoRA embedded cover metadata, LoRA SD-version filtering, API response keys, response-model bindings, import-time API method names, and extension-facing page classes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass103.XXXXXX) python3 -m py_compile modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_textual_inversion.py modules/ui_extra_networks_hypernets.py extensions-builtin/Lora/ui_extra_networks_lora.py modules/api/api.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py tests/test_extra_networks_metadata_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass103.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_extra_networks_metadata_contract.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate function/class scan across the pass 103 source files reported no repeated function/class bodies after the helper extraction.
+- `git diff --check` - passed before commit.
+- Live WebUI/API startup, real `/sdapi/v1/*` HTTP calls, browser extra-network card rendering, actual model directory discovery, LoRA embedded preview rendering, and user metadata editing were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from API model metadata listings into API refresh/create/train model-management endpoints and their adjacent request/response helpers, especially `refresh_checkpoints()`, `unloadapi()`, `reloadapi()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `refresh_embeddings()`, `refresh_loras()`, `get_memory()`, and adjacent training/server-control contract tests, looking for stale task wrappers or duplicate create/train response handling while preserving public API behavior and runtime queue semantics.
