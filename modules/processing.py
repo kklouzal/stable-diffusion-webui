@@ -1553,9 +1553,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             lowres_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
             batch_images = []
-            for i, x_sample in enumerate(lowres_samples):
-                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-                x_sample = x_sample.astype(np.uint8)
+            for i, x_sample in enumerate(samples_to_uint8_images(lowres_samples)):
                 image = Image.fromarray(x_sample)
 
                 save_intermediate(image, i)
