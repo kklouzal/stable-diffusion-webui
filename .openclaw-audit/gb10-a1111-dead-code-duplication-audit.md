@@ -2360,3 +2360,42 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into script and extension infotext/paste integration surfaces, especially `modules/scripts.py` script `infotext_fields`/`paste_field_names`, sampler/seed script UI controls that feed paste fields, and any extension-facing script callback contracts, looking for duplicate script paste metadata while preserving script API and extension hook behavior.
+
+
+## Pass 62 - Script and extension infotext/paste integration surfaces (2026-06-20)
+
+### Checked scope
+- `modules/scripts.py`: `Script.infotext_fields`, `Script.paste_field_names`, component callback registration helpers, `ScriptRunner.initialize_scripts()`, `apply_on_before_component_callbacks()`, `create_script_ui_inner()`, `setup_ui()`, `before_component()`, and `after_component()`.
+- `modules/processing_scripts/sampler.py`: sampler/steps/scheduler UI controls and `PasteField` metadata consumed by txt2img/img2img paste and API infotext mapping.
+- `modules/processing_scripts/seed.py`: seed/subseed controls, variation visibility paste metadata, seed-resize paste metadata, and generation-info reuse button hookup via `on_after_component()`.
+- `modules/processing_scripts/refiner.py`: refiner accordion/checkpoint/switch-at paste metadata and checkpoint lookup behavior.
+- `scripts/xyz_grid.py`: selectable script infotext metadata for X/Y/Z axis type/value/dropdown restoration.
+- `modules/script_callbacks.py`: extension-facing `on_before_component()`, `on_after_component()`, and `on_infotext_pasted()` registration/callback contracts adjacent to script paste integration.
+- Adjacent wiring already touched by script metadata: `modules/ui.py` txt2img/img2img `PasteField` list expansion, `modules/ui_common.py` output-panel `paste_field_names` propagation, and `modules/infotext_utils.py` source-tab field-name filtering.
+- Focused contracts/tests: `test/test_infotext_paste_bindings.py` and `test/test_infotext_api_mappings.py`.
+
+### Findings and fixes
+- No safe source-code removals or consolidations were made in this slice.
+- Preserved `Script.infotext_fields` and `Script.paste_field_names` as public script API surfaces. Built-in and extension scripts populate them from `ui()`, `ScriptRunner.create_script_ui_inner()` aggregates them into tab-level paste/API metadata, and output-panel send-to buttons consume script `paste_field_names` for same-name field copying.
+- Preserved sampler, seed, and refiner `PasteField` declarations. The entries look small and repeated across txt2img/img2img because each built-in script instance owns tab-specific controls; sharing or moving them into static metadata would break component identity, API names, callable paste conversion, or UI visibility updates.
+- Preserved seed `on_after_component()` generation-info wiring. The callbacks target `generation_info_{tabname}` after output-panel construction and connect reuse-seed/reuse-subseed buttons to parsed generation infotext; this is active UI behavior, not dead callback plumbing.
+- Preserved xyz-grid `infotext_fields`. The tuple restores selected script UI controls from infotext when the selectable script is active, including dropdown/list conversion for axis values; it is distinct from built-in always-visible sampler/seed/refiner metadata.
+- Preserved extension-facing component callbacks in both `modules/scripts.py` and `modules/script_callbacks.py`. They are separate contract surfaces: per-script elem-id callbacks receive `OnComponent`, while global script callbacks receive raw component/kwargs through ordered callback lists.
+- Preserved `modules.ui` paste-field expansion and `ui_common` script field-name propagation. The former registers destination paste/API fields; the latter chooses which script fields can be copied by output-panel send-to buttons. They are paired but not redundant.
+
+### Static/dynamic audit map notes
+- Script paste metadata chain remains: script `ui()` builds live Gradio components -> script sets `infotext_fields`/`paste_field_names` -> `ScriptRunner.create_script_ui_inner()` appends them to the tab runner -> `modules/ui.py` expands runner `infotext_fields` into tab paste fields -> `modules/infotext_utils.add_paste_fields()` stores them and exposes legacy `modules.ui.*_paste_fields` -> UI/API paste consumers resolve values by labels/functions/API names.
+- Send-to script field chain remains: output panel chooses `scripts_txt2img.paste_field_names` or `scripts_img2img.paste_field_names` -> `ParamBinding.paste_field_names` extends the built-in allowlist -> `connect_paste_params_buttons()` copies same-name source/destination fields.
+- Component callback chain remains: scripts may enqueue elem-id callbacks during `show()`/`ui()` -> `apply_on_before_component_callbacks()` registers and clears pending entries -> component patch hooks call per-script callbacks around component construction while global `script_callbacks` hooks preserve extension-wide behavior.
+- Compatibility surfaces to keep conservative: `Script` attributes, `PasteField` tuple/API metadata, `OnComponent`, global component callbacks, callback ordering/user sort behavior, script group visibility restoration, `generation_info_{tabname}` elem IDs, and `modules.ui.txt2img_paste_fields`/`img2img_paste_fields` legacy exposure.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass62.XXXXXX) python3 -m py_compile modules/scripts.py modules/processing_scripts/sampler.py modules/processing_scripts/seed.py modules/processing_scripts/refiner.py scripts/xyz_grid.py modules/script_callbacks.py modules/ui.py modules/ui_common.py modules/infotext_utils.py test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass62.XXXXXX) python3 -m pytest -q test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/scripts.py`, `modules/processing_scripts/sampler.py`, `modules/processing_scripts/seed.py`, `modules/processing_scripts/refiner.py`, `scripts/xyz_grid.py`, `modules/script_callbacks.py`, `modules/ui.py`, `modules/ui_common.py`, and `modules/infotext_utils.py` reported no duplicate nontrivial function body groups.
+- Targeted reference scans confirmed active paste/script metadata declarations are limited to the built-in processing scripts, xyz-grid selectable script, `modules/scripts.py` aggregation, `modules/ui.py` destination paste-field registration, and `modules/ui_common.py` send-to field-name propagation.
+- `git diff --check` - passed.
+- Live browser paste/send-to/reuse-seed interactions were not exercised because they require a running WebUI session and browser/UI runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into generation-parameter production and script infotext emission paths, especially where `Processed.infotexts`, `processing.create_infotext()`, script extra generation params, sampler/scheduler/refiner/seed metadata emission, and API processed responses assemble infotext, looking for duplicate metadata formatting or stale script-parameter compatibility while preserving PNG/API/UI infotext contracts.
