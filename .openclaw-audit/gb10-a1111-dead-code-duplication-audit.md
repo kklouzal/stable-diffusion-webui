@@ -3060,3 +3060,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API memory and diagnostics/runtime metadata endpoints adjacent to this region, especially `get_memory()`, CUDA/RAM response shaping, generation diagnostics/CUDA graph status toggles, and any nearby low-level API status helpers, looking for stale response fields or duplicate stats shaping while preserving public route schemas and runtime side effects.
+
+## Pass 82 - API memory and diagnostics/runtime metadata endpoints (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/memory`, `/sdapi/v1/openclaw/cuda-graphs`, `/sdapi/v1/openclaw/generation-diagnostics`, and adjacent runtime-default helpers `_env_flag()`, `apply_openclaw_runtime_defaults()`, `get_cuda_graphs()`, `set_cuda_graphs()`, and `get_openclaw_generation_diagnostics()`.
+- `modules/api/models.py`: `MemoryResponse` public schema for RAM/CUDA dictionaries.
+- `modules/openclaw_generation_diagnostics.py`: `_cuda_graph_status()`, `_summarize_graph_key()`, `_summarize_cuda_graph_status()`, `_counter_delta()`, `_interesting_extra_params()`, `_request_summary()`, `before_sample()`, `after_sample()`, and `last_generation_diagnostics()`.
+- `modules/openclaw_cuda_graphs.py`: status/toggle surface used by the API and generation diagnostics, including `status()`, `set_enabled()`, `clear()`, cache/stat counters, bypass reasons, and graph-key summary inputs.
+- Focused tests: `tests/test_api_server_control_contract.py` and `test/test_openclaw_cuda_graphs.py` coverage context.
+
+### Findings and fixes
+- Added focused AST-isolated API contract coverage for this runtime metadata surface in `tests/test_api_server_control_contract.py`. The tests pin delegation and public fallback behavior for CUDA graph status/toggle endpoints, generation diagnostics empty fallback, `OPENCLAW_SDPA_BACKEND` and `OPENCLAW_CUDA_GRAPHS` runtime-default application, `_env_flag()` parsing, and the `/sdapi/v1/memory` RAM/CUDA response dictionary shape.
+- No production dead code or safe duplicate stats helper was removed in this slice. `get_memory()` has compact inline RAM/CUDA shaping, but no second equivalent API helper was found in the checked scope; extracting serializers would be cosmetic and could change exception boundaries or public error fields.
+- Preserved `MemoryResponse.ram` and `MemoryResponse.cuda` as untyped dictionaries. The current endpoint intentionally returns nested legacy field groups and error dictionaries; narrowing or restructuring the schema would be public API churn.
+- Preserved `get_cuda_graphs()` and `set_cuda_graphs()` as thin route wrappers. They bind a public OpenClaw route pair and preserve side effects on the CUDA graph runtime cache/stat state; merging them into diagnostics or defaults would obscure route behavior without eliminating duplicate logic.
+- Preserved `get_openclaw_generation_diagnostics()` returning `{}` when no generation has been captured. That empty-object fallback is a compatibility behavior distinct from the internal `None` sentinel returned by `last_generation_diagnostics()`.
+- Preserved generation diagnostics CUDA graph summarization helpers. They intentionally hide raw graph keys behind a hash/shape summary, preserve counter deltas and bypass reasons, and avoid leaking large runtime key details through the diagnostics endpoint.
+
+### Static/dynamic audit map notes
+- Memory chain remains: `/sdapi/v1/memory` -> `Api.get_memory()` -> process RSS/percent RAM estimate and `torch.cuda.mem_get_info()`/`torch.cuda.memory_stats(shared.device)` -> `models.MemoryResponse(ram=..., cuda=...)`.
+- CUDA graph status chain remains: `/sdapi/v1/openclaw/cuda-graphs` GET -> `openclaw_cuda_graphs.status()`; POST -> `openclaw_cuda_graphs.set_enabled(enabled, clear=clear)` with dict-shaped request coercion.
+- Runtime default chain remains: `Api.__init__()` -> `apply_openclaw_runtime_defaults()` -> `OPENCLAW_SDPA_BACKEND` into `sd_hijack_optimizations.set_sdpa_backend()` and optional `OPENCLAW_CUDA_GRAPHS` into `openclaw_cuda_graphs.set_enabled(..., clear=True)`, with error reporting instead of startup failure.
+- Generation diagnostics chain remains: processing sample hooks -> `openclaw_generation_diagnostics.before_sample()`/`after_sample()` -> `last_generation_diagnostics()` deep copy -> `/sdapi/v1/openclaw/generation-diagnostics`, with CUDA graph status summarized before/after and deltaed.
+- Compatibility surfaces to keep conservative: route paths and methods, MemoryResponse field names, RAM/CUDA nested keys, error dictionary fallback shape, CUDA graph status keys/counter meanings, POST request coercion for `enabled` and `clear`, environment flag accepted values, startup error reporting, diagnostics empty fallback, hashed graph-key summary, and process/runtime side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass82.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/openclaw_generation_diagnostics.py modules/openclaw_cuda_graphs.py tests/test_api_server_control_contract.py test/test_openclaw_cuda_graphs.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass82b.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass82.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py test/test_openclaw_cuda_graphs.py` - blocked during collection of `test/test_openclaw_cuda_graphs.py`: `ModuleNotFoundError: No module named torch` in the system Python environment. The API contract half of that command collected and passed separately as noted above.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/openclaw_generation_diagnostics.py`, `modules/openclaw_cuda_graphs.py`, `tests/test_api_server_control_contract.py`, and `test/test_openclaw_cuda_graphs.py` found no duplicate function bodies.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/memory`, `/sdapi/v1/openclaw/cuda-graphs`, and `/sdapi/v1/openclaw/generation-diagnostics` requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API training/create response helpers adjacent to the same class region, especially `_create_response()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, and `tests/test_api_training_contract.py`, looking for stale wrapper names or duplicate task response shaping while preserving public response bodies and training side effects.
