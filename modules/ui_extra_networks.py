@@ -184,6 +184,10 @@ def quote_js(s: str):
     return json.dumps(s, ensure_ascii=False)
 
 
+def html_attr(value):
+    return html.escape(str(value), quote=True)
+
+
 class ExtraNetworksPage:
     def __init__(self, title):
         self.title = title
@@ -270,7 +274,7 @@ class ExtraNetworksPage:
             )
             onclick = html.escape(onclick)
 
-        btn_copy_path = self.btn_copy_path_tpl.format(**{"filename": item["filename"]})
+        btn_copy_path = self.btn_copy_path_tpl.format(**{"filename": html_attr(item["filename"])})
         btn_metadata = ""
         metadata = item.get("metadata")
         if metadata:
@@ -305,7 +309,7 @@ class ExtraNetworksPage:
 
         sort_keys = " ".join(
             [
-                f'data-sort-{k}="{html.escape(str(v))}"'
+                f'data-sort-{html_attr(k)}="{html_attr(v)}"'
                 for k, v in item.get("sort_keys", {}).items()
             ]
         ).strip()
@@ -316,7 +320,7 @@ class ExtraNetworksPage:
             search_terms_html += search_term_template.format(
                 **{
                     "class": f"search_terms{' search_only' if search_only else ''}",
-                    "search_term": search_term,
+                    "search_term": html.escape(str(search_term)),
                 }
             )
 
@@ -335,7 +339,7 @@ class ExtraNetworksPage:
             "metadata_button": btn_metadata,
             "name": html.escape(item["name"]),
             "prompt": item.get("prompt", None),
-            "save_card_preview": html.escape(f"return saveCardPreview(event, '{tabname}', '{item['local_preview']}');"),
+            "save_card_preview": html_attr(f"return saveCardPreview(event, {quote_js(tabname)}, {quote_js(item['local_preview'])});"),
             "search_only": " search_only" if search_only else "",
             "search_terms": search_terms_html,
             "sort_keys": sort_keys,
@@ -385,11 +389,11 @@ class ExtraNetworksPage:
                 "tabname": tabname,
                 "extra_networks_tabname": self.extra_networks_tabname,
                 "onclick_extra": "",
-                "data_path": dir_path,
+                "data_path": html_attr(dir_path),
                 "data_hash": "",
                 "action_list_item_action_leading": "<i class='tree-list-item-action-chevron'></i>",
                 "action_list_item_visual_leading": "🗀",
-                "action_list_item_label": os.path.basename(dir_path),
+                "action_list_item_label": html.escape(os.path.basename(dir_path)),
                 "action_list_item_visual_trailing": "",
                 "action_list_item_action_trailing": "",
             }
@@ -436,11 +440,11 @@ class ExtraNetworksPage:
                 "tabname": tabname,
                 "extra_networks_tabname": self.extra_networks_tabname,
                 "onclick_extra": item_html_args["card_clicked"],
-                "data_path": file_path,
-                "data_hash": item["shorthash"],
+                "data_path": html_attr(file_path),
+                "data_hash": html_attr(item.get("shorthash") or ""),
                 "action_list_item_action_leading": "<i class='tree-list-item-action-chevron'></i>",
                 "action_list_item_visual_leading": "🗎",
-                "action_list_item_label": item["name"],
+                "action_list_item_label": html.escape(item["name"]),
                 "action_list_item_visual_trailing": "",
                 "action_list_item_action_trailing": action_buttons,
             }
