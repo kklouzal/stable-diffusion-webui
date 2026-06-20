@@ -3951,3 +3951,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from API server-info/listing endpoints into API extension listing and runtime/custom OpenClaw status endpoints, especially `get_extensions_list()`, `get_sdpa_backend()`, `set_sdpa_backend()`, `get_cuda_graphs()`, `set_cuda_graphs()`, `get_openclaw_generation_diagnostics()`, `get_precision_map()`, their route registrations, and adjacent contract tests, looking for stale response shaping or duplicated status wrappers while preserving extension-visible metadata, runtime toggles, queue-lock semantics, and public OpenClaw API compatibility.
+
+## Pass 108 - API extension listing and OpenClaw runtime status endpoints (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registrations for `/sdapi/v1/extensions`, `/sdapi/v1/openclaw/sdpa-backend`, `/sdapi/v1/openclaw/cuda-graphs`, `/sdapi/v1/openclaw/generation-diagnostics`, `/sdapi/v1/openclaw/precision-map`, and `/sdapi/v1/precision-map`; `Api.get_extensions_list()`, `get_sdpa_backend()`, `set_sdpa_backend()`, `get_cuda_graphs()`, `set_cuda_graphs()`, `get_openclaw_generation_diagnostics()`, `get_precision_map()`, `apply_openclaw_runtime_defaults()`, and `_env_flag()`.
+- `modules/api/models.py`: `ExtensionItem` response contract and adjacent public API model surface.
+- Runtime helper modules adjacent to the route wrappers: `modules/sd_hijack_optimizations.py` SDPA backend status/set helpers, `modules/openclaw_cuda_graphs.py` status/toggle surface, and `modules/openclaw_generation_diagnostics.py` last-diagnostics fallback/delegation surface.
+- Adjacent contract tests: `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py`, and `tests/test_api_extension_item_contract.py`.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `get_extensions_list()` as the public extension metadata endpoint. It intentionally refreshes extension discovery, calls `read_info_from_repo()` for all known extensions, and only returns remote-backed extension rows with `name`, `remote`, `branch`, `commit_hash`, `commit_date`, `version`, and `enabled`; the focused contract test covers this shape and confirms local-only extensions remain filtered out while still being read.
+- Preserved the OpenClaw SDPA and CUDA graph methods as thin route wrappers. They are public route bindings over distinct runtime subsystems, and their fallback/coercion behavior is covered by focused contract tests.
+- Preserved `get_openclaw_generation_diagnostics()` returning `{}` when no last generation diagnostics exist. That public empty-object fallback is distinct from the internal `None` sentinel returned by `last_generation_diagnostics()`.
+- Preserved both precision-map routes and the direct `queue_lock` use in `get_precision_map()`. The implementation walks `shared.sd_model`, LoRA state, dtype flags, quantization stats, and skip-reason helpers; keeping it serialized with generation/model reload remains intentional.
+- A broad earlier read appeared to show duplicate `result = {` and duplicate `if not self.default_script_arg_txt2img:` lines in `modules/api/api.py`, but targeted line-number reads and an exact scan confirmed the committed file has one occurrence of each. No edit was warranted.
+
+### Static/dynamic audit map notes
+- Extension listing chain remains: `/sdapi/v1/extensions` -> `extensions.list_extensions()` -> each extension `read_info_from_repo()` -> remote-only `ExtensionItem` dictionaries. Extension-visible git metadata fields are intentionally preserved even when values are `None`.
+- Runtime status/control chain remains: `/sdapi/v1/openclaw/sdpa-backend` -> `sd_hijack_optimizations.sdpa_backend_status()` / `set_sdpa_backend()`; `/sdapi/v1/openclaw/cuda-graphs` -> `openclaw_cuda_graphs.status()` / `set_enabled(enabled, clear=clear)`; `/sdapi/v1/openclaw/generation-diagnostics` -> `openclaw_generation_diagnostics.last_generation_diagnostics() or {}`.
+- Precision-map chain remains: OpenClaw namespaced route plus legacy alias -> `self.queue_lock` -> `build_precision_map()` -> model/LoRA/device/quantization inspection and cache update.
+- Compatibility surfaces kept conservative: route paths/methods, extension metadata field names and remote-only filtering, SDPA backend request key `sdpa_backend`, CUDA graph request keys `enabled` and `clear`, diagnostics empty-object fallback, precision-map alias path, precision-map response fields, runtime default environment variables, and queue-lock semantics.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass108.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/openclaw_generation_diagnostics.py modules/openclaw_cuda_graphs.py modules/sd_hijack_optimizations.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py tests/test_api_extension_item_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass108.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py tests/test_api_extension_item_contract.py` - passed: 15 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact occurrence scan confirmed only one committed `result = {` in `build_precision_map()`, one `if not self.default_script_arg_txt2img:` guard in API initialization, the expected OpenClaw/precision-map route registrations, and the expected endpoint method definitions.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/openclaw_generation_diagnostics.py`, `modules/openclaw_cuda_graphs.py`, `modules/sd_hijack_optimizations.py`, `tests/test_api_listing_contract.py`, and `tests/test_api_server_control_contract.py` reported no duplicate nontrivial function bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real HTTP calls to the extension/OpenClaw runtime endpoints, actual extension git metadata reads against installed repositories, SDPA backend switching under a loaded model, CUDA graph toggling during generation, and live precision-map model walking were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from API extension/runtime status endpoints into API create/train and refresh-adjacent lifecycle endpoints, especially `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `_run_create_task()`, `_run_training_task()`, `_create_response()`, `_train_response()`, route registrations for `/sdapi/v1/create/*` and `/sdapi/v1/train/*`, and adjacent API training/creation tests, looking for duplicated task wrappers or stale response helpers while preserving public response strings, queue/runtime side effects, and optimization restore semantics.
