@@ -529,12 +529,9 @@ def api_middleware(app: FastAPI):
         except Exception as e:
             return handle_exception(request, e)
 
-    @app.exception_handler(Exception)
-    async def fastapi_exception_handler(request: Request, e: Exception):
-        return handle_exception(request, e)
-
     @app.exception_handler(HTTPException)
-    async def http_exception_handler(request: Request, e: HTTPException):
+    @app.exception_handler(Exception)
+    async def api_exception_handler(request: Request, e: Exception):
         return handle_exception(request, e)
 
 

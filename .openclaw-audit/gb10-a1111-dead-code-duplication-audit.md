@@ -1142,3 +1142,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: API process/control and server lifecycle utility surfaces around auth/middleware, route registration wrappers, `/sdapi/v1/interrupt`, `/sdapi/v1/skip`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, launch/kill/restart/stop handlers, URL/base64 helpers, and remaining low-level API utility functions in `modules/api/api.py` plus adjacent tests.
+
+
+## Pass 27 - API process/control and server lifecycle utility surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: auth credential parsing and `auth`, `api_middleware` request timing/error handling, `add_api_route` auth wrapper, `/sdapi/v1/interrupt`, `/sdapi/v1/skip`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, `/sdapi/v1/server-kill`, `/sdapi/v1/server-restart`, `/sdapi/v1/server-stop`, `launch`, URL/base64 helpers `verify_url`, `decode_base64_to_image`, `decode_extras_batch_images`, `encode_pil_to_base64`, low-level API utility helpers adjacent to process/control routes, and route-registration context around these endpoints.
+- `modules/restart.py`: `is_restartable`, `restart_program`, `stop_program`.
+- Lifecycle overlap checked in `modules/shared_state.py` (`server_command`, `wait_for_server_command`, `request_restart`, `interrupt`, `skip`), `webui.py` API launch path, `modules/initialize_util.py` middleware setup overlap, and `modules/progress.py` internal route registration shape.
+- Adjacent tests checked/run as feasible: `tests/test_api_extension_item_contract.py`, `tests/test_api_progress_contract.py`, and relevant API helper tests in `test/test_postprocessing_api_defaults.py`.
+- `modules/server.py` was requested for overlap but is not present in this checkout; lifecycle behavior is carried by `webui.py`, `modules/restart.py`, and `modules/shared_state.py`.
+
+### Findings and fixes
+- Removed one exact duplicate exception-handler wrapper in `api_middleware()`. `fastapi_exception_handler()` and `http_exception_handler()` both returned `handle_exception(request, e)`; a single `api_exception_handler()` is now registered for both `Exception` and `HTTPException` with stacked FastAPI decorators.
+- No safe deletion was found for `Api.add_api_route()`: it centralizes Basic Auth dependency injection for every API route and preserves the unauthenticated path when `--api-auth` is unset.
+- `/interrupt` and `/skip` handlers intentionally map to different `shared.state` flags and log messages; their small bodies are not duplicate behavior.
+- `/unload-checkpoint` and `/reload-checkpoint` are intentionally distinct model-memory controls (`unload_model_weights()` versus `send_model_to_device(shared.sd_model)`) and remain public API hooks.
+- `/server-kill`, `/server-restart`, and `/server-stop` are gated by `--api-server-stop` and encode different lifecycle semantics: process exit, restart-file-plus-exit when restartable, and graceful API loop command via `shared.state.server_command`. No route wrapper was dead.
+- `restart.restart_program()` and `restart.stop_program()` are live through API server-control endpoints and UI extension apply/restart flows. `is_restartable()` is live through API/UI control decisions and mirrors the `SD_WEBUI_RESTART` launcher contract.
+- URL/base64 helpers were preserved: `decode_base64_to_image()` is used by img2img, extras, png-info, and interrogate APIs; `decode_extras_batch_images()` intentionally skips only corrupt batch images; `encode_pil_to_base64()` centralizes response encoding and metadata preservation; `verify_url()` enforces the local-resource request guard.
+- `api_middleware()` and `initialize_util.setup_middleware()` both add middleware, but they cover different layers: API timing/logging/error normalization versus CORS/GZip/proxy/static-asset setup. No dedupe was safe.
+
+### Static/dynamic audit map notes
+- API server launch chain: `launch_utils.start()` or `webui.__main__` -> `webui.api_only()` -> `initialize.initialize()` -> FastAPI app -> `initialize_util.setup_middleware(app)` -> `Api(app, queue_lock)` -> `api_middleware(app)` and `Api.add_api_route()` registration -> `Api.launch()`/`uvicorn.run()`.
+- Control route chain: API route -> `shared.state.interrupt()`/`skip()` or `sd_models` checkpoint memory helpers or `modules.restart` process helpers. Graceful server stop is signaled through `shared.state.server_command` for the server loop path.
+- Dynamic/public surfaces to continue treating conservatively: API route method names, `Api.add_api_route`, auth/middleware behavior, image URL/base64 helpers, server-control endpoints gated by `--api-server-stop`, and restart helpers used by UI/extensions.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass27 python3 -m py_compile modules/api/api.py modules/restart.py modules/shared_state.py webui.py modules/initialize_util.py modules/progress.py` - passed.
+- `python3 -m pytest tests/test_api_extension_item_contract.py tests/test_api_progress_contract.py -q` - passed: 2 passed, 1 warning about unknown `base_url` config.
+- `python3 -m pytest tests/test_api_extension_item_contract.py tests/test_api_progress_contract.py test/test_postprocessing_api_defaults.py -q` - partial: 9 passed before `test_postprocessing_runner_order_override_preserves_script_defaults` failed at import because this bare Python environment lacks `fastapi`; extension preload also reported missing `torch`. This appears environment-related rather than caused by the handler dedupe.
+- Exact AST duplicate-body scan over `modules/api/api.py`, `modules/restart.py`, `modules/shared_state.py`, `webui.py`, `modules/initialize_util.py`, and `modules/progress.py` - clean: no exact duplicate function bodies in the pass-27 scan set.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- Continue with API/data-listing and metadata helper surfaces not yet fully audited in this API pass: `/sdapi/v1/options`, `/cmd-flags`, samplers/schedulers/upscalers/latent-upscale-modes, model/VAE/hypernetwork/face-restorer/realesrgan/prompt-style/embedding list helpers, refresh/create/train endpoints, memory reporting, and adjacent `modules/api/models.py` response contracts.
