@@ -2477,3 +2477,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into infotext option inventory and option-name discovery surfaces, especially `modules/shared_items.py` `get_infotext_names()`, `modules/shared_options.py` infotext-bearing options, settings UI skip-pasting choices, and any duplicated option-to-infotext registries, looking for stale option mappings while preserving old import names and settings/API compatibility.
+
+
+## Pass 65 - Infotext option inventory and option-name discovery surfaces (2026-06-20)
+
+### Checked scope
+- `modules/shared_items.py`: `get_infotext_names()` settings-option label inventory, paste-field label inventory, ordering/dedup behavior, and settings UI choice supplier for skipped pasted fields.
+- `modules/shared_options.py`: `OptionInfo(..., infotext=...)` labels, `infotext_skip_pasting`, `infotext_styles`, `disable_weights_auto_swap`, backcompat infotext-bearing options, sampler/optimization infotext-bearing options, and adjacent settings/UI option choices.
+- `modules/infotext_utils.py`: `infotext_to_setting_name_mapping`, `infotext_setting_name_mapping()`, `parse_generation_parameters()` skip-field removal, `get_override_settings()` skip-field handling, and override dropdown already-handled field filtering.
+- Paste-field and script label producers adjacent to option-name discovery: `modules/ui.py` txt2img/img2img paste fields, `modules/scripts.py` script metadata aggregation, `modules/processing_scripts/sampler.py`, `modules/processing_scripts/seed.py`, `modules/processing_scripts/refiner.py`, `scripts/xyz_grid.py`, and built-in extension option/script infotext declarations found by targeted scans.
+- Focused tests/contracts: `test/test_infotext_api_mappings.py`, `test/test_infotext_paste_bindings.py`, and prior pass contracts around paste-field/API mapping behavior.
+
+### Findings and fixes
+- Consolidated `shared_items.get_infotext_names()` to use `infotext_utils.infotext_setting_name_mapping()` for settings-derived labels instead of directly walking `shared.opts.data_labels`. This removes a duplicated option-to-infotext registry walk and makes the skip-pasting settings dropdown include labels added through the legacy `infotext_to_setting_name_mapping` compatibility list as well as modern `OptionInfo(..., infotext=...)` labels.
+- Added a focused AST-based regression test proving `get_infotext_names()` combines canonical option/legacy setting mappings with string paste-field labels while deduplicating labels already present in both sources.
+- Preserved `infotext_to_setting_name_mapping` despite being empty in-tree. It remains a documented extension/backcompat mutation point, is consumed by `infotext_setting_name_mapping()`, and now feeds the skip-pasting choice inventory too.
+- Preserved the settings UI `infotext_skip_pasting` option and its dynamic `shared_items.get_infotext_names()` choices. It is active parser behavior: `parse_generation_parameters()` removes user-selected labels after compatibility/default fill-ins.
+- Preserved duplicate-looking txt2img/img2img paste labels such as `Prompt`, `Negative prompt`, `CFG scale`, `Size-1`, `Size-2`, `Batch size`, and `Denoising strength`. They are duplicated across tab-specific live components by design and are used for tab paste/API mapping and send-to same-name copying; they are not a safe static registry consolidation.
+- Preserved extension infotext-bearing option registrations, especially Hypertile and Extra Options Section integration. These are dynamic settings/script surfaces and must remain extension-visible.
+
+### Static/dynamic audit map notes
+- Skip-pasting choice chain now remains: settings UI calls `shared_items.get_infotext_names()` -> canonical `infotext_setting_name_mapping()` supplies modern `OptionInfo.infotext` labels plus legacy mapping entries -> registered tab paste fields add live UI/script labels -> `infotext_skip_pasting` stores selected labels -> `parse_generation_parameters()` removes those keys from parsed infotext.
+- Override-setting chain remains: `infotext_setting_name_mapping()` is the single settings label registry for UI dropdown override parsing, paste/API override detection, Extra Options Section script paste metadata, and now skip-pasting choice inventory.
+- Paste-field label chain remains: tab registration exposes only string labels to the skip-pasting dropdown; callable paste functions are intentionally excluded because they do not map to a stable pasted infotext field name.
+- Compatibility surfaces to keep conservative: `OptionInfo.infotext`, empty-but-mutable `infotext_to_setting_name_mapping`, `infotext_setting_name_mapping()` ordering, `paste_fields` tuple shape, `infotext_skip_pasting` stored values, old infotext labels/defaults, and extension-added settings/script infotext fields.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass65.XXXXXX) python3 -m py_compile modules/shared_items.py modules/shared_options.py modules/infotext_utils.py modules/ui.py modules/ui_common.py modules/scripts.py modules/processing_scripts/sampler.py modules/processing_scripts/seed.py modules/processing_scripts/refiner.py test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass65.XXXXXX) python3 -m pytest -q test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/shared_items.py`, `modules/shared_options.py`, `modules/infotext_utils.py`, `test/test_infotext_api_mappings.py`, and `test/test_infotext_paste_bindings.py` reported no duplicate nontrivial function body groups.
+- Targeted AST/static scans found 42 unique in-tree `OptionInfo(..., infotext=...)` labels in `modules/shared_options.py` and no duplicate labels there; duplicate string `PasteField` labels were limited to expected txt2img/img2img tab-paired fields.
+- `git diff --check` - passed.
+- Live settings UI dropdown behavior was not exercised because it requires a running WebUI session; behavior is covered by the focused inventory unit test and py_compile.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into infotext/style/prompt parsing and prompt-style extraction surfaces, especially `modules/infotext_utils.py` style extraction in `parse_generation_parameters()`, `modules/styles.py`, prompt/style UI controls, and any duplicated style-name/prompt parsing helpers, while preserving `infotext_styles` behavior and old prompt/style import contracts.

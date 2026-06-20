@@ -90,9 +90,8 @@ def get_infotext_names():
     from modules import infotext_utils, shared
     res = {}
 
-    for info in shared.opts.data_labels.values():
-        if info.infotext:
-            res[info.infotext] = 1
+    for infotext_name, _setting_name in infotext_utils.infotext_setting_name_mapping():
+        res[infotext_name] = 1
 
     for tab_data in infotext_utils.paste_fields.values():
         for _, name in tab_data.get("fields") or []:

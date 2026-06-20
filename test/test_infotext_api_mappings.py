@@ -171,3 +171,34 @@ def test_infotext_setting_name_mapping_combines_optioninfo_and_legacy_entries():
         ("Clip skip", "CLIP_stop_at_last_layers"),
         ("Legacy field", "legacy_setting"),
     ]
+
+
+def test_get_infotext_names_uses_option_and_legacy_setting_mappings():
+    source = Path("modules/shared_items.py").read_text()
+    tree = ast.parse(source)
+    module = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_infotext_names"],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+
+    infotext_utils = types.SimpleNamespace(
+        infotext_setting_name_mapping=lambda: [
+            ("Clip skip", "CLIP_stop_at_last_layers"),
+            ("Legacy field", "legacy_setting"),
+        ],
+        paste_fields={
+            "txt2img": {"fields": [(object(), "Prompt"), (object(), lambda _params: None)]},
+            "img2img": {"fields": [(object(), "Clip skip")]},
+        },
+    )
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "modules" and set(fromlist) == {"infotext_utils", "shared"}:
+            return types.SimpleNamespace(infotext_utils=infotext_utils, shared=types.SimpleNamespace())
+        return __import__(name, globals, locals, fromlist, level)
+
+    namespace = {"__builtins__": {**vars(__import__("builtins")), "__import__": fake_import}}
+    exec(compile(module, "modules/shared_items.py", "exec"), namespace)
+
+    assert namespace["get_infotext_names"]() == ["Clip skip", "Legacy field", "Prompt"]
