@@ -844,6 +844,11 @@ def fix_seed(p):
     p.subseed = get_fixed_seed(p.subseed)
 
 
+def _batch_slice_range(batch_number, batch_size):
+    batch_start = batch_number * batch_size
+    return batch_start, batch_start + batch_size
+
+
 def program_version():
     import launch
 
@@ -1098,10 +1103,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             sd_models.reload_model_weights()  # model can be changed for example by refiner
 
-            p.prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-            p.negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-            p.seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
-            p.subseeds = p.all_subseeds[n * p.batch_size:(n + 1) * p.batch_size]
+            batch_start, batch_end = _batch_slice_range(n, p.batch_size)
+            p.prompts = p.all_prompts[batch_start:batch_end]
+            p.negative_prompts = p.all_negative_prompts[batch_start:batch_end]
+            p.seeds = p.all_seeds[batch_start:batch_end]
+            p.subseeds = p.all_subseeds[batch_start:batch_end]
 
             latent_channels = getattr(shared.sd_model, 'latent_channels', opt_C)
             p.rng = rng.ImageRNG((latent_channels, p.height // opt_f, p.width // opt_f), p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, seed_resize_from_h=p.seed_resize_from_h, seed_resize_from_w=p.seed_resize_from_w)
@@ -1179,8 +1185,9 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if p.scripts is not None:
                 p.scripts.postprocess_batch(p, x_samples_ddim, batch_number=n)
 
-                p.prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-                p.negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
+                batch_start, batch_end = _batch_slice_range(n, p.batch_size)
+                p.prompts = p.all_prompts[batch_start:batch_end]
+                p.negative_prompts = p.all_negative_prompts[batch_start:batch_end]
 
                 batch_params = scripts.PostprocessBatchListArgs(list(x_samples_ddim))
                 p.scripts.postprocess_batch_list(p, batch_params, batch_number=n)

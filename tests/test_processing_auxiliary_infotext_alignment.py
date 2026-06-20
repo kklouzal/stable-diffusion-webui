@@ -100,6 +100,29 @@ def test_processing_branch_shape_helpers_keep_sensitive_semantics_local():
     assert source.count("self.add_vae_encoder_generation_param()") == 3
 
 
+def test_processing_loop_reuses_batch_slice_boundaries_without_resetting_seed_state():
+    source = Path("modules/processing.py").read_text()
+
+    helper_at = source.index("def _batch_slice_range")
+    helper_body = source[helper_at:source.index("def program_version", helper_at)]
+    assert "batch_start = batch_number * batch_size" in helper_body
+    assert "return batch_start, batch_start + batch_size" in helper_body
+
+    first_setup_at = source.index("p.seeds = p.all_seeds[batch_start:batch_end]")
+    first_setup_block = source[source.rfind("batch_start, batch_end = _batch_slice_range", 0, first_setup_at):source.index("latent_channels =", first_setup_at)]
+    assert "p.prompts = p.all_prompts[batch_start:batch_end]" in first_setup_block
+    assert "p.negative_prompts = p.all_negative_prompts[batch_start:batch_end]" in first_setup_block
+    assert "p.seeds = p.all_seeds[batch_start:batch_end]" in first_setup_block
+    assert "p.subseeds = p.all_subseeds[batch_start:batch_end]" in first_setup_block
+
+    reset_at = source.index("batch_params = scripts.PostprocessBatchListArgs")
+    reset_block = source[source.rfind("batch_start, batch_end = _batch_slice_range", 0, reset_at):reset_at]
+    assert "p.prompts = p.all_prompts[batch_start:batch_end]" in reset_block
+    assert "p.negative_prompts = p.all_negative_prompts[batch_start:batch_end]" in reset_block
+    assert "p.seeds =" not in reset_block
+    assert "p.subseeds =" not in reset_block
+
+
 def test_img2img_init_cache_helpers_share_payload_and_stats_boundaries():
     source = Path("modules/processing.py").read_text()
 

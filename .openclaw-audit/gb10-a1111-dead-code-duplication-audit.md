@@ -1710,3 +1710,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` process loop state assembly after cache helpers, especially prompt/seed/batch list setup, comments/infotext construction around `Processed(...)`, grid and `index_of_first_image` behavior, and callback-visible generation diagnostics/history propagation.
+
+## Pass 43 - processing process-loop state assembly and Processed output boundaries (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `process_images_inner()` prompt/seed/subseed list initialization, per-batch prompt/negative/seed/subseed slicing, script callback-visible prompt reset before `postprocess_batch_list()`, params.txt infotext construction through `Processed(p, [])`, model hijack comment propagation, OpenClaw generation diagnostics `before_sample()`/`after_sample()` history propagation, per-image infotext append behavior, grid prepend/save behavior, `index_of_first_image`, and final `Processed(...)` assembly.
+- `modules/processing.py`: `Processed.__init__()`, `Processed.js()`, and `Processed.infotext()` field/JSON boundaries as consumers of process-loop state.
+- `modules/openclaw_generation_diagnostics.py`: request summary, diagnostics history append, and last-diagnostics copy behavior adjacent to the process-loop sample wrapper.
+- Adjacent consumers/contracts: `modules/ui_common.py` save-selected/index handling, `modules/txt2img.py` gallery infotext replacement, `modules/img2img.py` batch-result infotext accumulation, `modules/processing_scripts/seed.py` infotext index lookup, `tests/test_processing_auxiliary_infotext_alignment.py`, and `tests/test_save_serialization_contract.py`.
+
+### Findings and fixes
+- Consolidated duplicated per-batch slice-boundary arithmetic in `process_images_inner()` into `_batch_slice_range()`. The first batch setup still assigns prompts, negative prompts, seeds, and subseeds before script callbacks; the later reset after `postprocess_batch()` still restores only prompts and negative prompts before `postprocess_batch_list()`, preserving callback-visible seed/subseed state.
+- Added a focused source-contract test asserting both helper use sites and guarding that the post-`postprocess_batch()` reset does not start resetting seed/subseed lists.
+- No safe removal or broad consolidation was found for prompt/seed/all-list setup. `setup_prompts()`, list seeds, scalar seeds with subseed-strength behavior, and prompt/negative prompt length checks are user/API/script-visible generation contracts.
+- No safe consolidation was made for params.txt infotext generation or final `Processed(...)` construction. The empty-image `Processed(p, [])` path intentionally reuses the public infotext method after script batch processing can mutate generation params, while the final `Processed` object carries returned-image ordering, infotexts, first-image index, and public JSON fields.
+- No safe changes were made to grid insertion or `index_of_first_image`. UI save-selected and save-all paths depend on the grid prefix being counted as non-sample only when `opts.return_grid` inserts it into returned images.
+- No safe removal or consolidation was found for OpenClaw diagnostics/history propagation. `after_sample()` updates the current processing object, appends history, and stores a deepcopy for the diagnostics API; `Processed` mirrors those fields into the existing UI/API JSON surface.
+
+### Static/dynamic audit map notes
+- Batch-list lifecycle remains: `setup_prompts()` creates full prompt lists -> seed/subseed lists are derived from scalar/list seeds -> each iteration slices all four lists with the shared bounds -> scripts may see and mutate current batch state -> after `postprocess_batch()` only prompt lists are restored before list-style postprocessing.
+- Infotext lifecycle remains: params history writes after `process_batch()` via `Processed(p, []).infotext()` -> per-image saves and returned images use the per-batch `infotext()` closure -> returned auxiliary images reuse the already-computed sample text -> fallback interrupted/no-output runs still append one `Processed(p, []).infotext()`.
+- Grid lifecycle remains: grid may be created when return/save options allow it and image count is sufficient -> returned grid prepends one main-prompt infotext and sets `index_of_first_image = 1` -> saved-only grid does not alter returned image ordering or first-image index.
+- Diagnostics lifecycle remains: process loop wraps `p.sample()` with `before_sample()`/`after_sample()` in `finally` -> diagnostics fields are attached before `Processed` construction -> `Processed.js()` exposes current diagnostics/history and img2img init-cache stats.
+- Compatibility surfaces to continue treating conservatively: `p.prompts`, `p.negative_prompts`, `p.seeds`, `p.subseeds`, `p.all_*` list fields, params.txt timing, model hijack comments, `Processed` constructor fields, `Processed.js()` keys, `infotexts` ordering, `index_of_first_image`, returned grid placement, and OpenClaw diagnostics field names/history shape.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass43.XXXXXX) python3 -m py_compile modules/processing.py modules/openclaw_generation_diagnostics.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass43-source.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass43-save.XXXXXX) python3 -m pytest -q tests/test_save_serialization_contract.py` - passed: 3 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/processing.py`, `modules/openclaw_generation_diagnostics.py`, and `tests/test_processing_auxiliary_infotext_alignment.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` subclasses after the main loop, especially `StableDiffusionProcessingTxt2Img` hires setup/sample/sample_hr_pass state assembly, duplicated HR prompt/negative prompt/conditioning transitions, firstpass image handling, and script-visible hires metadata boundaries.
