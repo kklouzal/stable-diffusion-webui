@@ -1486,3 +1486,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: script/paste-field API consumers and infotext callbacks beyond the core UI path, especially `modules/ui_common.py` output-panel Send-to behavior, `modules/script_callbacks.py` infotext callback registration/callers, Lora `infotext_pasted` compatibility handling, and any duplicated paste-field filtering or script-arg mapping between UI/API callback paths.
+
+
+## Pass 36 - script/paste-field API consumers and infotext callbacks beyond core UI (2026-06-20)
+
+### Checked scope
+- `modules/ui_common.py`: `create_output_panel()` Send-to button construction, output-panel `ParamBinding` registration, `paste_field_names` derivation from script runners, gallery save inputs, and `update_generation_info()` infotext selection behavior.
+- `modules/infotext_utils.py`: `ParamBinding`, compatibility `bind_buttons()`, `register_paste_params_button()`, `connect_paste_params_buttons()`, source-tab paste-field copy wiring, text paste `connect_paste()`, and the `modules.generation_parameters_copypaste` alias.
+- `modules/script_callbacks.py`: `callbacks_infotext_pasted`, `infotext_pasted_callback()`, `on_infotext_pasted()`, ordered callback preservation, and caller reachability.
+- `modules/api/api.py`: API infotext application into script args via `apply_infotext()`, default script-arg initialization, always-on script-arg override/persistence handling, and `/sdapi/v1/png-info` callback invocation.
+- Lora callback consumers: `extensions-builtin/Lora/scripts/lora_script.py` Lora hash alias replacement callback and `extensions-builtin/Lora/networks.py` AddNet compatibility callback.
+- Adjacent tests: existing `test/test_infotext_api_mappings.py` plus new focused coverage for source-tab paste binding field filtering.
+
+### Findings and fixes
+- Consolidated duplicated source/destination paste-field filtering in `connect_paste_params_buttons()` into one local `paste_fields_with_names()` helper. This removes the duplicated inline list-comprehension logic used by output-panel Send-to source-tab copy bindings while keeping the public `ParamBinding`/paste-field data shape unchanged.
+- Added `test/test_infotext_paste_bindings.py` to lock the source-tab Send-to filtering contract: prompt, seed, and steps are copied when allowed, while unrelated fields are excluded from both inputs and outputs through the same helper path.
+- No safe dead callback removal was found. `on_infotext_pasted()`/`infotext_pasted_callback()` remain public extension hooks and are reached from both UI paste (`connect_paste()`) and API PNG-info parsing (`pnginfoapi()`).
+- No safe Lora infotext alias/backcompat removal was found. `lora_script.infotext_pasted()` rewrites `<lora:alias:...>` tokens from `Lora hashes`, while `networks.infotext_pasted()` converts historical AddNet parameters unless the AddNet extension already exposes corresponding infotext fields.
+- No safe API/UI script-arg mapping consolidation was found. UI paste returns Gradio updates and recalculate JS; API paste mutates unset pydantic request fields, override settings, and script args by component identity, so their shared contract remains the paste-field metadata and parsed infotext dictionary rather than a single caller helper.
+
+### Static/dynamic audit map notes
+- Output-panel Send-to chain: `ui_common.create_output_panel()` builds tab buttons -> resolves script runner `paste_field_names` for txt2img/img2img output panels -> registers `ParamBinding` with `source_tabname="txt2img"` for txt2img output copy and gallery image source for all send targets -> `infotext_utils.connect_paste_params_buttons()` wires image copy, source-tab field copy, and tab switch JS.
+- Infotext callback chain: UI text paste -> `parse_generation_parameters()` -> `script_callbacks.infotext_pasted_callback()` -> registered Lora/AddNet/extension callbacks can mutate parsed params before field application. API PNG-info uses the same callback after image metadata parse so callback consumers see non-UI imports too.
+- Lora callback chain: `extensions-builtin/Lora/scripts/lora_script.py` registers both `networks.infotext_pasted` and its local hash-alias callback; the former preserves AddNet-era infotext compatibility, while the latter resolves short hashes to current on-disk aliases.
+- Compatibility surfaces to continue treating conservatively: `on_infotext_pasted()`, `callbacks_infotext_pasted`, callback ordering/user priority, `ParamBinding` constructor parameters, paste-field tuple/PasteField shape, `modules.generation_parameters_copypaste` alias, Lora `Lora hashes`, historical AddNet infotext keys, and script runner `infotext_fields`/`paste_field_names`.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/a1111-pyc-s36 pytest -q test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass36.XXXXXX) python3 -m py_compile modules/ui_common.py modules/infotext_utils.py modules/script_callbacks.py modules/api/api.py extensions-builtin/Lora/scripts/lora_script.py extensions-builtin/Lora/networks.py test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass36.XXXXXX) python3 -m pytest -q test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/ui_common.py`, `modules/infotext_utils.py`, `modules/script_callbacks.py`, `modules/api/api.py`, `extensions-builtin/Lora/scripts/lora_script.py`, `extensions-builtin/Lora/networks.py`, `test/test_infotext_paste_bindings.py`, and `test/test_infotext_api_mappings.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: callback and paste-field consumers adjacent to script lifecycle/runtime behavior, especially `modules/scripts.py` script field registration/exposure, processing script infotext-field producers after paste consumers, and extension callback ordering/priority surfaces outside `infotext_pasted`.

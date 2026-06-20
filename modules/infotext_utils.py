@@ -142,6 +142,9 @@ def connect_paste_params_buttons():
         fields = paste_fields[binding.tabname]["fields"]
         override_settings_component = binding.override_settings_component or paste_fields[binding.tabname]["override_settings_component"]
 
+        def paste_fields_with_names(tabname, names):
+            return [field for field, name in paste_fields[tabname]["fields"] if name in names]
+
         destination_width_component = next(iter([field for field, name in fields if name == "Size-1"] if fields else []), None)
         destination_height_component = next(iter([field for field, name in fields if name == "Size-2"] if fields else []), None)
 
@@ -169,8 +172,8 @@ def connect_paste_params_buttons():
             paste_field_names = ['Prompt', 'Negative prompt', 'Steps', 'Face restoration'] + (["Seed"] if shared.opts.send_seed else []) + binding.paste_field_names
             binding.paste_button.click(
                 fn=lambda *x: x,
-                inputs=[field for field, name in paste_fields[binding.source_tabname]["fields"] if name in paste_field_names],
-                outputs=[field for field, name in fields if name in paste_field_names],
+                inputs=paste_fields_with_names(binding.source_tabname, paste_field_names),
+                outputs=paste_fields_with_names(binding.tabname, paste_field_names),
                 show_progress=False,
             )
 
