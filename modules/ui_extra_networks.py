@@ -689,6 +689,13 @@ class ExtraNetworksPage:
     def create_user_metadata_editor(self, ui, tabname):
         return ui_extra_networks_user_metadata.UserMetadataEditor(ui, tabname, self)
 
+    def list_items_from_names(self, names):
+        # Instantiate a list to protect against concurrent modification.
+        for index, name in enumerate(list(names)):
+            item = self.create_item(name, index)
+            if item is not None:
+                yield item
+
 
 def initialize():
     extra_pages.clear()

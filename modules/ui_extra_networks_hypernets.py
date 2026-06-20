@@ -36,12 +36,7 @@ class ExtraNetworksPageHypernetworks(ui_extra_networks.ExtraNetworksPage):
         }
 
     def list_items(self):
-        # instantiate a list to protect against concurrent modification
-        names = list(shared.hypernetworks)
-        for index, name in enumerate(names):
-            item = self.create_item(name, index)
-            if item is not None:
-                yield item
+        yield from self.list_items_from_names(shared.hypernetworks)
 
     def allowed_directories_for_previews(self):
         return [shared.cmd_opts.hypernetwork_dir]

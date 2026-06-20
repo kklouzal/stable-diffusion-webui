@@ -37,12 +37,7 @@ class ExtraNetworksPageCheckpoints(ui_extra_networks.ExtraNetworksPage):
         }
 
     def list_items(self):
-        # instantiate a list to protect against concurrent modification
-        names = list(sd_models.checkpoints_list)
-        for index, name in enumerate(names):
-            item = self.create_item(name, index)
-            if item is not None:
-                yield item
+        yield from self.list_items_from_names(sd_models.checkpoints_list)
 
     def allowed_directories_for_previews(self):
         return [v for v in [shared.cmd_opts.ckpt_dir, sd_models.model_path] if v is not None]

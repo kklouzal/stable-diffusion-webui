@@ -76,12 +76,7 @@ class ExtraNetworksPageLora(ui_extra_networks.ExtraNetworksPage):
         return item
 
     def list_items(self):
-        # instantiate a list to protect against concurrent modification
-        names = list(networks.available_networks)
-        for index, name in enumerate(names):
-            item = self.create_item(name, index)
-            if item is not None:
-                yield item
+        yield from self.list_items_from_names(networks.available_networks)
 
     def allowed_directories_for_previews(self):
         return [shared.cmd_opts.lora_dir, shared.cmd_opts.lyco_dir_backcompat]
