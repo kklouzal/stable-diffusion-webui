@@ -18,6 +18,7 @@ def load_api_control_class():
         "set_cuda_graphs",
         "get_openclaw_generation_diagnostics",
         "get_memory",
+        "_memory_counter_pair",
         "refresh_embeddings",
         "refresh_checkpoints",
         "refresh_vae",

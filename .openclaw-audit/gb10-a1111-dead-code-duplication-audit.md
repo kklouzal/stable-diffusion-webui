@@ -3817,3 +3817,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from API model metadata listings into API refresh/create/train model-management endpoints and their adjacent request/response helpers, especially `refresh_checkpoints()`, `unloadapi()`, `reloadapi()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `refresh_embeddings()`, `refresh_loras()`, `get_memory()`, and adjacent training/server-control contract tests, looking for stale task wrappers or duplicate create/train response handling while preserving public API behavior and runtime queue semantics.
+
+
+## Pass 104 - API refresh/create/train model-management endpoints (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: `Api.refresh_checkpoints()`, `unloadapi()`, `reloadapi()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `refresh_embeddings()`, `refresh_vae()`, `get_memory()`, shared create/train helpers, response helpers, queue-lock wrapper, and adjacent route registrations.
+- `extensions-builtin/Lora/scripts/lora_script.py`: extension-owned `/sdapi/v1/refresh-loras` route and `refresh_loras()` callback shape.
+- Adjacent tests: `tests/test_api_server_control_contract.py` and `tests/test_api_training_contract.py` covering refresh queue locking, reload/unload response shape, memory response shape, create/train helper dispatch, hypernetwork training device hooks, and state-end behavior.
+
+### Findings / fixes
+- Consolidated repeated CUDA memory current/peak bucket shaping in `Api.get_memory()` into `Api._memory_counter_pair()`. The public `MemoryResponse` shape is unchanged; `allocated`, `reserved`, `active`, and `inactive` still expose `current` and `peak` using the same torch memory-stat keys.
+- Updated the focused AST-based API server-control contract loader to include `_memory_counter_pair()` so `get_memory()` continues to execute through the real helper path in isolated tests.
+- Preserved `refresh_embeddings()`, `refresh_checkpoints()`, and `refresh_vae()` as explicit queue-locked endpoint methods. They target different reload functions and their route names are public API surfaces.
+- Preserved `unloadapi()` and `reloadapi()` as separate public control endpoints with empty dict responses and distinct model side effects.
+- Preserved `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, and `train_hypernetwork()` wrappers. The shared helpers already centralize create/train response handling; endpoint wrappers still carry distinct job names, success/error text, post-create embedding reload, and hypernetwork training device hooks.
+- Preserved the LoRA extension `refresh_loras()` route outside `Api`; it is registered by the extension app-start callback and returns the extension network refresh result directly.
+
+### Static/dynamic audit map notes
+- Refresh/control chain remains: route registration -> endpoint method -> `_call_with_queue_lock()` for refresh endpoints or direct model side effect for unload/reload -> existing empty or extension-specific response shape.
+- Create chain remains: route registration -> create endpoint wrapper -> `_run_create_task()` -> `shared.state.begin()` -> create function -> optional embedding DB reload -> `CreateResponse(info=...)` -> `shared.state.end()`.
+- Training chain remains: route registration -> train endpoint wrapper -> `_run_training_task()` -> optional hypernetwork pre-hook -> xattention optimization toggle handling -> train function -> optional hypernetwork device restore -> `TrainResponse(info=...)` -> one `shared.state.end()`.
+- Memory chain remains: psutil process RSS totals for RAM; torch CUDA availability check, `mem_get_info()`, `memory_stats(shared.device)`, bucket shaping, retry/OOM event shaping, and `MemoryResponse(ram=..., cuda=...)`.
+- Compatibility surfaces kept conservative: public endpoint paths, response-model bindings, exact info string prefixes, queue-lock semantics, training state lifecycle, post-create embedding reload, hypernetwork device restore, LoRA extension callback route, and CUDA memory response keys.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass104.XXXXXX) python3 -m py_compile modules/api/api.py tests/test_api_server_control_contract.py tests/test_api_training_contract.py extensions-builtin/Lora/scripts/lora_script.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass104.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py tests/test_api_training_contract.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Reference scan confirmed the targeted API methods, `_memory_counter_pair()`, and extension-owned `/sdapi/v1/refresh-loras` route are limited to the expected source/tests in this slice.
+- Exact AST duplicate function/class scan across `modules/api/api.py`, `tests/test_api_server_control_contract.py`, `tests/test_api_training_contract.py`, and `extensions-builtin/Lora/scripts/lora_script.py` reported no duplicate function/class bodies.
+- `git diff --check` - will be run before commit.
+- Live WebUI/API startup, real HTTP calls to refresh/create/train/reload/unload/memory endpoints, actual model reloads, embedding/hypernetwork creation/training, CUDA memory probing on the running server process, and LoRA refresh through FastAPI were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from API model-management endpoints into API script/default-argument and selectable-script request handling, especially `Api.init_default_script_args()`, `init_script_args()`, `text2imgapi()`, `img2imgapi()`, script arg override helpers, selectable always-on script handling, and adjacent API script contract tests, looking for stale compatibility branches or duplicated txt2img/img2img script argument plumbing while preserving public API request semantics and extension script behavior.

@@ -1235,6 +1235,10 @@ class Api:
     def _embedding_items(cls, embeddings):
         return {embedding.name: cls._embedding_item(embedding) for embedding in embeddings.values()}
 
+    @staticmethod
+    def _memory_counter_pair(stats, key):
+        return {"current": stats[f"{key}.current"], "peak": stats[f"{key}.peak"]}
+
     def get_sd_models(self):
         import modules.sd_models as sd_models
         return [{"title": x.title, "model_name": x.model_name, "hash": x.shorthash, "sha256": x.sha256, "filename": x.filename, "config": find_checkpoint_config_near_filename(x)} for x in sd_models.checkpoints_list.values()]
@@ -1338,10 +1342,10 @@ class Api:
                 s = torch.cuda.mem_get_info()
                 system = { 'free': s[0], 'used': s[1] - s[0], 'total': s[1] }
                 s = dict(torch.cuda.memory_stats(shared.device))
-                allocated = { 'current': s['allocated_bytes.all.current'], 'peak': s['allocated_bytes.all.peak'] }
-                reserved = { 'current': s['reserved_bytes.all.current'], 'peak': s['reserved_bytes.all.peak'] }
-                active = { 'current': s['active_bytes.all.current'], 'peak': s['active_bytes.all.peak'] }
-                inactive = { 'current': s['inactive_split_bytes.all.current'], 'peak': s['inactive_split_bytes.all.peak'] }
+                allocated = self._memory_counter_pair(s, 'allocated_bytes.all')
+                reserved = self._memory_counter_pair(s, 'reserved_bytes.all')
+                active = self._memory_counter_pair(s, 'active_bytes.all')
+                inactive = self._memory_counter_pair(s, 'inactive_split_bytes.all')
                 warnings = { 'retries': s['num_alloc_retries'], 'oom': s['num_ooms'] }
                 cuda = {
                     'system': system,
