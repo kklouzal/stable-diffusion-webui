@@ -3497,3 +3497,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from UI wrapper/export surfaces into remaining UI-adjacent configuration and settings helper surfaces, especially `modules/ui_settings.py`, `modules/shared_options.py`, `modules/shared_items.py`, and option-component factory paths, looking for stale settings wrappers or duplicate option helper logic while preserving saved config keys, option metadata, refresh hooks, and extension-facing option APIs.
+
+## Pass 95 - UI-adjacent settings and option helper surfaces (2026-06-20)
+
+### Scope checked
+- `modules/ui_settings.py`: `get_setting_component_args()`, `get_value_for_setting()`, removed `refreshed_setting_component_args()`, `create_setting_component()`, `UiSettings.run_settings()`, `run_settings_single()`, `register_settings()`, `create_ui()`, `add_quicksettings()`, `add_functionality()`, and `search()`.
+- `modules/shared_options.py`: option template registration, category registration, restricted option key list, component factories, refresh hooks, API-restricted settings, UI reordering/infotext/postprocessing settings, and saved config key metadata.
+- `modules/shared_items.py`: model/upscaler/VAE/UNet/checkpoint/sampler listing helpers, dropdown-args helpers, refresh/list wrappers, hypernetwork reload, infotext-name collection, UI reorder categories, and callback priority option generation.
+- Option component factory/caller paths: `modules/options.py` `OptionInfo`/`OptionHTML`/`options_section()`, `modules/ui_common.py` `create_refresh_button()`, `modules/ui.py` `apply_setting()`/refresh-button callers, `extensions-builtin/extra-options-section/scripts/extra_options_section.py`, API refresh routes, and focused tests covering API refresh/control and infotext option names.
+
+### Findings / fixes
+- Removed the private `modules.ui_settings.refreshed_setting_component_args()` wrapper. It only delegated to `get_setting_component_args()` and had no tracked callers outside `modules/ui_settings.py`; settings refresh buttons now call the existing helper directly through their lazy lambda, preserving dynamic `component_args` recomputation after refresh.
+- Preserved `get_setting_component_args()`, including its `precision` filtering. It is shared by settings value updates, component construction, and refresh-button argument recomputation, and preserves Gradio/headless component behavior for numeric settings.
+- Preserved `get_value_for_setting()` and `create_setting_component()` as extension-facing settings helpers. The bundled extra-options extension imports both, and third-party scripts may use the same public `modules.ui_settings` surface.
+- Preserved `shared_options.options_templates`, `restricted_opts`, category registration, saved option keys, option metadata, refresh hooks, onchange hooks, and API restriction flags. Deleting or consolidating these would alter saved config compatibility, generated API config behavior, or settings freeze/restrict semantics.
+- Preserved `shared_items` list/refresh helpers and dropdown-args helpers despite similar shapes. Reference scans confirmed live tracked callers, and these helpers are public compatibility surfaces re-exported through `modules.shared` or used by bundled UI/extension code.
+- No additional safe duplicate helper consolidation was found. The exact duplicate scan over this slice reported no duplicate function bodies after the wrapper removal.
+
+### Static/dynamic audit map notes
+- Settings component chain remains: `OptionInfo.component_args` may be a dict or callable -> `get_setting_component_args()` evaluates it lazily and strips unsupported `precision` -> `create_setting_component()` constructs the correct headless/Gradio component -> `create_refresh_button()` recomputes choices/args after the refresh method runs.
+- Quicksettings and extra-options chain remains: normal settings tabs skip quicksettings into `dummy_component`; `add_quicksettings()` creates them later; `extensions-builtin/extra-options-section` uses `create_setting_component()` and `get_value_for_setting()` for embedded option controls.
+- Settings save chain remains: `run_settings()` validates each submitted value against `opts.data_labels` defaults before `opts.set()` and save; `run_settings_single()` preserves value restoration and `opts.dumpjson()` output for the hidden generated API/config text.
+- Shared option metadata chain remains: `shared_options.options_templates` builds stable option keys and metadata; `options_section()` assigns settings sections/categories; `Options` enforces frozen/restricted settings and API restriction behavior elsewhere.
+- Shared item helper chain remains: checkpoint/VAE/UNet/hypernetwork/sampler/postprocessing helpers feed option component choices, API refresh routes, UI refresh buttons, metadata dialogs, and `modules.shared` compatibility re-exports.
+- Compatibility surfaces kept conservative: saved config keys, option section/category IDs, `OptionInfo` constructor fields and fluent metadata methods, refresh/onchange hooks, `restrict_api`, generated `opts.dumpjson()` behavior, `modules.shared` helper aliases, extension imports from `modules.ui_settings` and `modules.shared_items`, and dynamic callable component args.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass95.XXXXXX) python3 -m py_compile modules/ui_settings.py modules/shared_options.py modules/shared_items.py modules/options.py modules/ui_common.py modules/ui.py extensions-builtin/extra-options-section/scripts/extra_options_section.py test/test_infotext_api_mappings.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass95.XXXXXX) python3 -m pytest -q test/test_infotext_api_mappings.py tests/test_api_server_control_contract.py` - passed: 16 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Reference scan for `refreshed_setting_component_args`, `get_setting_component_args`, `get_value_for_setting`, and `create_setting_component()` confirmed the removed wrapper has no remaining references, while the public settings helpers remain live in core settings and the bundled extra-options extension.
+- Reference scans confirmed live tracked callers for shared item dropdown/list/refresh helpers, `callbacks_order_settings()`, `get_infotext_names()`, `ui_reorder_categories()`, and postprocessing script option helpers.
+- Exact AST duplicate function scan across `modules/ui_settings.py`, `modules/shared_options.py`, `modules/shared_items.py`, `modules/options.py`, and `modules/ui_common.py` reported no duplicate function bodies after the helper removal.
+- `git diff --check` - passed after the production and ledger edits.
+- Live browser UI, API runtime startup, third-party extension imports outside the checked tree, and actual model/metadata refresh button clicks were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from settings helper surfaces into script/default metadata extraction and option override plumbing, especially `modules/scripts.py`, `modules/scripts_auto_postprocessing.py`, `modules/scripts_postprocessing.py`, `modules/infotext_utils.py`, and override-settings UI/API paths, looking for stale script-control/default wrappers or duplicate override mapping logic while preserving extension callback/script APIs and infotext/API compatibility.

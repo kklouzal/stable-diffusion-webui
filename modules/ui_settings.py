@@ -23,10 +23,6 @@ def get_value_for_setting(key):
     return gr.update(value=value, **args)
 
 
-def refreshed_setting_component_args(key):
-    return get_setting_component_args(key)
-
-
 def create_setting_component(key, is_quicksettings=False):
     def fun():
         return opts.data[key] if key in opts.data else opts.data_labels[key].default
@@ -52,11 +48,11 @@ def create_setting_component(key, is_quicksettings=False):
     if info.refresh is not None:
         if is_quicksettings:
             res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
-            ui_common.create_refresh_button(res, info.refresh, lambda: refreshed_setting_component_args(key), f"refresh_{key}")
+            ui_common.create_refresh_button(res, info.refresh, lambda: get_setting_component_args(key), f"refresh_{key}")
         else:
             with FormRow():
                 res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
-                ui_common.create_refresh_button(res, info.refresh, lambda: refreshed_setting_component_args(key), f"refresh_{key}")
+                ui_common.create_refresh_button(res, info.refresh, lambda: get_setting_component_args(key), f"refresh_{key}")
     else:
         res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
 
