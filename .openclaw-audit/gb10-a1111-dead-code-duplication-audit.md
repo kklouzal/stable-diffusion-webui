@@ -1838,3 +1838,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into adjacent API request assembly outside img2img, especially shared txt2img/img2img API helper boundaries (`apply_infotext()`, selectable/always-on script arg population, sampler/scheduler normalization, task queue cleanup), and extras/png-info decode helpers where duplicate request/response population may be safely reducible without breaking public API compatibility.
+
+## Pass 47 - API request helper boundaries outside img2img (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: `validate_sampler_name()`, `decode_base64_to_image()`, `decode_extras_batch_images()`, `Api.get_selectable_script()`, `Api.get_script()`, `Api.init_default_script_args()`, `Api.persist_openclaw_denoise_ramp_args()`, `Api.init_script_args()`, `Api.apply_infotext()`, `Api.text2imgapi()`, `Api.img2imgapi()`, `_run_extras()`, `extras_single_image_api()`, `extras_batch_images_api()`, and `pnginfoapi()`.
+- `modules/api/models.py`: generated txt2img/img2img API request fields for sampler index/name compatibility, script selection, script args, `alwayson_scripts`, `send_images`, `save_images`, `force_task_id`, `infotext`, img2img `init_images`/`mask`, and `include_init_images`.
+- Adjacent tests/contracts: `test/test_api_script_defaults.py`, `test/test_infotext_paste_bindings.py`, server-backed `test/test_txt2img.py`, `test/test_img2img.py`, and `test/test_extras.py` API coverage shape.
+
+### Findings and fixes
+- Extracted duplicated txt2img/img2img request-preparation logic into `Api._prepare_generation_api_request()`. The helper now owns infotext application, selectable-script lookup, sampler/scheduler normalization, pydantic request copy/save flag population, common API-only field removal, script-arg initialization, script-arg override extraction, and `send_images`/`save_images` handling.
+- Kept endpoint-specific behavior at each public API entry point. `img2imgapi()` still validates missing init images before any queue registration, decodes masks before queue registration, decodes init images before queue registration, records img2img API timing fields, injects decoded init images on the processing object inside the queue lock, and applies `include_init_images` response mutation after processing.
+- Preserved task queue cleanup ordering. The duplicated `add_task_to_queue()`/`start_task()`/`finish_task()`/`pending_tasks.pop()` patterns remain explicit in `text2imgapi()` and `img2imgapi()` because combining them would have crossed processing-object setup, script runner selection, timing, and init-image injection differences.
+- No dead API helper wrappers were removed. `validate_sampler_name()`, `get_selectable_script()`, `get_script()`, `init_default_script_args()`, and script arg helpers remain live across public API calls and extension/script compatibility paths.
+- No extras/png-info decode extraction was made. `decode_base64_to_image()` is already shared; `decode_extras_batch_images()` intentionally ignores invalid encoded images/URLs for batch extras while `pnginfoapi()` and single extras keep normal decode failure behavior, so their apparent similarity is not safely reducible.
+- No `apply_infotext()` split was made. Its field population, override-setting merge, and script-argument mention capture share parsed generation parameters and paste-field bindings; extracting only one loop would not remove meaningful duplication and could obscure pydantic v1/v2 compatibility behavior.
+
+### Static/dynamic audit map notes
+- Generation API request setup now flows: endpoint pre-validation/decode where needed -> `_prepare_generation_api_request()` mutates request from infotext, normalizes sampler/scheduler, creates processing args, initializes selectable/always-on script args -> endpoint queue lock builds the right processing object and runs either selected script or `process_images()`.
+- Script API contracts remain conservative: selectable scripts still occupy `script_args[0]`, always-on script payloads still extend sparse vectors and record OpenClaw override bounds, and `OpenClaw Denoise Ramp` requested args still persist back into default script args.
+- Sampler/scheduler compatibility remains unchanged: callers may provide `sampler_name` or legacy `sampler_index`; normalized sampler names still clear `sampler_index`, and non-automatic schedulers still populate empty request scheduler fields.
+- Compatibility surfaces to continue treating conservatively: `StableDiffusionTxt2ImgProcessingAPI`/`StableDiffusionImg2ImgProcessingAPI` generated field names/defaults, pydantic `copy()` semantics, `script_name`/`script_args`/`alwayson_scripts`, `infotext`, `force_task_id`, `send_images`, `save_images`, `include_init_images`, task queue state, response `parameters`, and `processed_js_with_image_paths()` fields.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass47.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass47-api.XXXXXX) python3 -m pytest -q test/test_api_script_defaults.py test/test_infotext_paste_bindings.py` - passed: 5 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py` and `modules/api/models.py` reported no duplicate nontrivial function bodies.
+- `git diff --check` - passed.
+- Server-backed `test/test_txt2img.py`, `test/test_img2img.py`, and `test/test_extras.py` API tests were inspected but not run because they require a live WebUI/API server fixture.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue to adjacent API surfaces after generation/extras helpers, especially progress/interrogate/options/reload/refresh endpoint helpers, model/listing APIs, and any remaining response serialization or queue/status helper duplication that can be reduced without changing public endpoint fields.

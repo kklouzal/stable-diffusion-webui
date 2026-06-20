@@ -843,22 +843,22 @@ class Api:
 
         return params
 
-    def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
-        task_id = txt2imgreq.force_task_id or create_task_id("txt2img")
-
-        script_runner = scripts.scripts_txt2img
-
+    def _prepare_generation_api_request(self, request, tabname, script_runner, default_script_args, update=None, extra_pop_fields=()):
         infotext_script_args = {}
-        self.apply_infotext(txt2imgreq, "txt2img", script_runner=script_runner, mentioned_script_args=infotext_script_args)
+        self.apply_infotext(request, tabname, script_runner=script_runner, mentioned_script_args=infotext_script_args)
 
-        selectable_scripts, selectable_script_idx = self.get_selectable_script(txt2imgreq.script_name, script_runner)
-        sampler, scheduler = sd_samplers.get_sampler_and_scheduler(txt2imgreq.sampler_name or txt2imgreq.sampler_index, txt2imgreq.scheduler)
+        selectable_scripts, selectable_script_idx = self.get_selectable_script(request.script_name, script_runner)
+        sampler, scheduler = sd_samplers.get_sampler_and_scheduler(request.sampler_name or request.sampler_index, request.scheduler)
 
-        populate = txt2imgreq.copy(update={  # Override __init__ params
+        populate_update = {
             "sampler_name": validate_sampler_name(sampler),
-            "do_not_save_samples": not txt2imgreq.save_images,
-            "do_not_save_grid": not txt2imgreq.save_images,
-        })
+            "do_not_save_samples": not request.save_images,
+            "do_not_save_grid": not request.save_images,
+        }
+        if update:
+            populate_update.update(update)
+
+        populate = request.copy(update=populate_update)
         if populate.sampler_name:
             populate.sampler_index = None  # prevent a warning later on
 
@@ -866,16 +866,28 @@ class Api:
             populate.scheduler = scheduler
 
         args = vars(populate)
-        args.pop('script_name', None)
-        args.pop('script_args', None) # will refeed them to the pipeline directly after initializing them
-        args.pop('alwayson_scripts', None)
-        args.pop('infotext', None)
+        for field in (*extra_pop_fields, 'script_name', 'script_args', 'alwayson_scripts', 'infotext'):
+            args.pop(field, None)
 
-        script_args = self.init_script_args(txt2imgreq, self.default_script_arg_txt2img, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
+        script_args = self.init_script_args(request, default_script_args, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
         script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
 
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
+
+        return args, send_images, selectable_scripts, script_args, script_args_to_overrides
+
+    def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
+        task_id = txt2imgreq.force_task_id or create_task_id("txt2img")
+
+        script_runner = scripts.scripts_txt2img
+
+        args, send_images, selectable_scripts, script_args, script_args_to_overrides = self._prepare_generation_api_request(
+            txt2imgreq,
+            "txt2img",
+            script_runner,
+            self.default_script_arg_txt2img,
+        )
 
         add_task_to_queue(task_id)
         task_finished = False
@@ -924,36 +936,14 @@ class Api:
 
         script_runner = scripts.scripts_img2img
 
-        infotext_script_args = {}
-        self.apply_infotext(img2imgreq, "img2img", script_runner=script_runner, mentioned_script_args=infotext_script_args)
-
-        selectable_scripts, selectable_script_idx = self.get_selectable_script(img2imgreq.script_name, script_runner)
-        sampler, scheduler = sd_samplers.get_sampler_and_scheduler(img2imgreq.sampler_name or img2imgreq.sampler_index, img2imgreq.scheduler)
-
-        populate = img2imgreq.copy(update={  # Override __init__ params
-            "sampler_name": validate_sampler_name(sampler),
-            "do_not_save_samples": not img2imgreq.save_images,
-            "do_not_save_grid": not img2imgreq.save_images,
-            "mask": mask,
-        })
-        if populate.sampler_name:
-            populate.sampler_index = None  # prevent a warning later on
-
-        if not populate.scheduler and scheduler != "Automatic":
-            populate.scheduler = scheduler
-
-        args = vars(populate)
-        args.pop('include_init_images', None)  # this is meant to be done by "exclude": True in model, but it's for a reason that I cannot determine.
-        args.pop('script_name', None)
-        args.pop('script_args', None)  # will refeed them to the pipeline directly after initializing them
-        args.pop('alwayson_scripts', None)
-        args.pop('infotext', None)
-
-        script_args = self.init_script_args(img2imgreq, self.default_script_arg_img2img, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
-        script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
-
-        send_images = args.pop('send_images', True)
-        args.pop('save_images', None)
+        args, send_images, selectable_scripts, script_args, script_args_to_overrides = self._prepare_generation_api_request(
+            img2imgreq,
+            "img2img",
+            script_runner,
+            self.default_script_arg_img2img,
+            update={"mask": mask},
+            extra_pop_fields=('include_init_images',),  # pydantic exclude is not enough for processing construction here.
+        )
 
         api_timing_start = time.perf_counter()
         decoded_init_images = [decode_base64_to_image(x) for x in init_images]
