@@ -3285,3 +3285,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue after memory into extension/script-control and remaining API utility response surfaces, especially `get_extensions_list()`, script-info/list coverage boundaries not already covered by pass 81/87, launch-info/help-style responses if present, and any trailing `modules/api/models.py` response classes after `MemoryResponse`, looking for stale public fields or duplicated serializers while preserving OpenAPI schema identities and registry refresh side effects.
+
+## Pass 89 - API script/extension utility response tail (2026-06-20)
+
+### Scope checked
+- `modules/api/models.py`: trailing response models after `MemoryResponse`: `ScriptsList`, `ScriptArg`, `ScriptInfo`, and `ExtensionItem`.
+- `modules/api/api.py`: route registrations for `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions`; `_script_lists()`, `get_scripts_list()`, `get_script_info()`, and `get_extensions_list()`.
+- Adjacent route/control boundaries around `/sdapi/v1/memory`, unload/reload checkpoint routes, server stop route registration, and `Api.launch()`; searched for launch-info/help-style API response surfaces and found no separate launch-info/help-style response classes or routes in this fork.
+- Focused contract tests: `tests/test_api_listing_contract.py` script-list/script-info and extension-list coverage, plus `tests/test_api_server_control_contract.py` route registration coverage.
+
+### Findings / fixes
+- No safe production-code deletion or consolidation was found in this slice. The remaining post-memory model classes are all live public schema/registry surfaces: `ScriptsList` is the `/sdapi/v1/scripts` response model, `ScriptArg` is nested in `ScriptInfo`, `ScriptInfo` is produced by the script registry for `/sdapi/v1/script-info`, and `ExtensionItem` is the `/sdapi/v1/extensions` response model.
+- Preserved `_script_lists()` as the small shared boundary between `/sdapi/v1/scripts` and `/sdapi/v1/script-info`. It is already the useful deduplication point and keeps both endpoints tied to the same txt2img/img2img runner sources.
+- Preserved separate `get_scripts_list()` and `get_script_info()` shaping. The first filters `None` script names and returns a `ScriptsList` model; the second preserves script registry `api_info` objects and filters `None` API records. Combining them would add branching around two public endpoint shapes without removing dead code.
+- Preserved `get_extensions_list()` as an explicit route-local serializer. Its `extensions.list_extensions()` refresh, per-extension `read_info_from_repo()` calls, remote-only filtering, and omission of filesystem paths are observable compatibility and privacy boundaries already pinned by tests.
+- Preserved route response model identities and field names for `ScriptsList`, `ScriptArg`, `ScriptInfo`, and `ExtensionItem`; no stale public fields had strong enough evidence for removal.
+
+### Static/dynamic audit map notes
+- Script list chain remains: `/sdapi/v1/scripts` -> `_script_lists()` -> `scripts.scripts_txt2img.scripts` and `scripts.scripts_img2img.scripts` -> filter non-`None` `script.name` -> `ScriptsList(txt2img=..., img2img=...)`.
+- Script info chain remains: `/sdapi/v1/script-info` -> `_script_lists()` -> preserve non-`None` `script.api_info` records generated in `modules/scripts.py` as `models.ScriptInfo` with nested `ScriptArg` controls.
+- Extension list chain remains: `/sdapi/v1/extensions` -> `extensions.list_extensions()` -> iterate `extensions.extensions` -> `ext.read_info_from_repo()` for every extension -> include only remote-backed extensions with `name`, `remote`, `branch`, `commit_hash`, `commit_date`, `version`, and `enabled`.
+- Launch/help-style check: this fork exposes dynamic command flags through `FlagsModel` and `/sdapi/v1/cmd-flags`; no distinct launch-info/help-style response model exists after `MemoryResponse` or in adjacent API routes.
+- Compatibility surfaces to keep conservative: route paths/methods, OpenAPI component names, script ordering, `None` filtering semantics, registry side effects, extension remote-only filtering, per-extension git metadata refresh, and non-exposure of extension filesystem paths.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass89.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass89.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py -k "script or extension or route"` - passed: 3 passed, 11 deselected, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate class/function scan across `modules/api/models.py`, `modules/api/api.py`, `tests/test_api_listing_contract.py`, and `tests/test_api_server_control_contract.py` reports only intentional empty wrapper/marker classes from earlier passes: `TextToImageResponse`, `ImageToImageResponse`, `ExtrasSingleImageRequest`, `ScriptArgsList`, and the test-local `Extension` marker used by the extension listing contract.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions` requests were not exercised because this bounded slice did not start a WebUI/model runtime or refresh live extension repositories outside the unit contract.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue past the API utility tail into adjacent server-control/runtime utility handlers after `Api.launch()`, especially `kill_webui()`, `restart_webui()`, `stop_webui()`, unload/reload checkpoint handlers, and any remaining OpenClaw runtime utility endpoints in `modules/api/api.py`, looking for stale wrappers or duplicated control responses while preserving route gating, restart/stop side effects, queue/runtime locking, and public API behavior.
