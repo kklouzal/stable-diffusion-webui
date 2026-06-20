@@ -4,11 +4,11 @@ from pathlib import Path
 
 
 def load_path_is_parent():
-    source = Path("modules/ui_extra_networks.py").read_text()
+    source = Path("modules/util.py").read_text()
     tree = ast.parse(source)
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "path_is_parent")
     namespace = {"os": os}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "modules/ui_extra_networks.py", "exec"), namespace)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "modules/util.py", "exec"), namespace)
     return namespace["path_is_parent"]
 
 

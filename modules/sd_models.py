@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -36,13 +36,7 @@ class ModelType(enum.Enum):
     SD3 = 5
 
 
-def path_is_parent(parent_path, child_path):
-    parent_path = os.path.abspath(parent_path)
-    child_path = os.path.abspath(child_path)
-    try:
-        return os.path.commonpath([parent_path, child_path]) == parent_path
-    except ValueError:
-        return False
+path_is_parent = util.path_is_parent
 
 
 def replace_key(d, key, new_key, value):

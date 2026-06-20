@@ -13,7 +13,7 @@ def test_cover_image_metadata_defaults_to_empty_list_and_rejects_negative_index(
 def test_extra_network_paths_use_commonpath_parent_check():
     source = Path("modules/ui_extra_networks.py").read_text()
 
-    assert "def path_is_parent(parent_path, child_path):" in source
+    assert "path_is_parent = util.path_is_parent" in source
     assert "if path_is_parent(parentdir, abspath):" in source
     assert "if path_is_parent(absdir, filename):" in source
     assert "abspath.startswith(parentdir)" not in source

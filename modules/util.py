@@ -59,13 +59,19 @@ def ldm_print(*args, **kwargs):
     print(*args, **kwargs)
 
 
+def path_is_parent(parent_path, child_path):
+    parent_path = os.path.abspath(parent_path)
+    child_path = os.path.abspath(child_path)
+    try:
+        return os.path.commonpath([parent_path, child_path]) == parent_path
+    except ValueError:
+        return False
+
+
 def truncate_path(target_path, base_path=cwd):
     abs_target, abs_base = os.path.abspath(target_path), os.path.abspath(base_path)
-    try:
-        if os.path.commonpath([abs_target, abs_base]) == abs_base:
-            return os.path.relpath(abs_target, abs_base)
-    except ValueError:
-        pass
+    if path_is_parent(abs_base, abs_target):
+        return os.path.relpath(abs_target, abs_base)
     return abs_target
 
 

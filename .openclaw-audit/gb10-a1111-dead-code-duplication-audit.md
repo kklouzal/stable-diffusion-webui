@@ -3748,3 +3748,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from server/static/path-safety into model/path parent-check and metadata exposure helpers, especially `modules/sd_models.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/modelloader.py`, and adjacent tests, looking for duplicate parent-path checks or stale metadata path wrappers while preserving checkpoint discovery, preview serving, extension metadata, and traversal protections.
+
+## Pass 102 - Model/path parent-check and metadata exposure helpers (2026-06-20)
+
+### Scope checked
+- `modules/sd_models.py`: `path_is_parent` checkpoint root classification, `CheckpointInfo.__init__()`, safetensors metadata read/cache path, checkpoint alias registration, `list_models()`, `read_metadata_from_safetensors()`, checkpoint load path dispatch, and adjacent checkpoint contract tests.
+- `modules/ui_extra_networks.py`: preview extension allow-list helpers, preview/cover/metadata/single-card API routes, extra-network item rendering, search/local path derivation, tree/dirs/card HTML generation, preview/embedded-preview/description discovery, save-preview parent checks, and extra-network path contract tests.
+- `modules/ui_extra_networks_user_metadata.py`: user metadata editor path display, metadata JSON write path, preview refresh/save behavior, and relative path handling through the extra-network parent check.
+- `modules/modelloader.py`: `load_models()`, model URL/download fallback, command path vs model path discovery, extension allow/blacklist filtering, broken symlink skip, duplicate output suppression, `friendly_name()`, and upscaler model loader callers.
+- Adjacent callers/tests: `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`, `extensions-builtin/Lora/ui_extra_networks_lora.py`, `modules/upscaler.py`, model-specific loader callers, `tests/test_sd_models_checkpoint_info_contract.py`, `tests/test_extra_networks_metadata_contract.py`, and `tests/test_extra_networks_path_contract.py`.
+
+### Findings / fixes
+- Consolidated the duplicated `commonpath` parent-check implementation from `modules/sd_models.py` and `modules/ui_extra_networks.py` into shared `modules.util.path_is_parent()`.
+- Kept `sd_models.path_is_parent` and `ui_extra_networks.path_is_parent` as compatibility aliases to preserve existing internal callers, tests, and possible extension imports while removing the duplicated implementation body.
+- Updated `util.truncate_path()` to use the shared helper, removing its separate inline `commonpath` check and preserving the same fallback-to-absolute behavior for paths outside the base or on incompatible path roots.
+- Updated focused path contract tests to assert the shared helper/alias shape and continue proving sibling-prefix rejection without importing full WebUI modules that parse CLI arguments or require optional runtime dependencies.
+- No stale preview, cover-image, metadata, user-metadata, or model-loader branches were removed. The inspected branches remain live UI/API/extension compatibility or security behavior.
+
+### Static/dynamic audit map notes
+- Checkpoint discovery chain remains: `sd_models.list_models()` calls `modelloader.load_models()` with checkpoint extensions and VAE blacklists -> `CheckpointInfo.__init__()` classifies names relative to `--ckpt-dir` or the default model root through the shared parent helper -> metadata/hash/cache keys keep the same relative-name semantics.
+- Extra-network preview chain remains: pages expose their preview roots -> `register_page()` populates global allowed dirs -> `/sd_extra_networks/thumb` enforces allowed directories and preview extensions -> card/user metadata code uses `find_preview()` and `link_preview()` URLs with lister mtime cache busting.
+- Embedded metadata chain remains: LoRA cards can use `find_embedded_preview()` when safetensors metadata has `ssmd_cover_images`; `/sd_extra_networks/cover-images` still filters missing/non-list/negative indexes and decodes only selected cover image payloads.
+- User metadata chain remains: editor relative-path display uses `ui_extra_networks.path_is_parent` compatibility alias; save writes `<model basename>.json` beside the item and updates the page lister cache; preview replacement saves through `item["local_preview"]` and refreshes the single card.
+- Model loader chain remains: command path is searched before default model path, legacy `experiments/pretrained_models` is honored, broken symlinks are skipped, extension blacklists are applied after allow-list filtering, duplicates are suppressed, and URL/download fallback only occurs when no local output exists.
+- Compatibility/security surfaces kept conservative: external imports of `sd_models.path_is_parent`/`ui_extra_networks.path_is_parent`, checkpoint title/name semantics, extra-network route names and response shapes, user metadata file placement, preview extension allow-list, hidden-directory handling, embedded cover-image metadata, command-line model path discovery, and upscaler/model loader behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass102-final.XXXXXX) python3 -m py_compile modules/sd_models.py modules/ui_extra_networks.py modules/ui_extra_networks_user_metadata.py modules/modelloader.py modules/util.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_textual_inversion.py modules/ui_extra_networks_hypernets.py extensions-builtin/Lora/ui_extra_networks_lora.py tests/test_sd_models_checkpoint_info_contract.py tests/test_extra_networks_metadata_contract.py tests/test_extra_networks_path_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass102-fix.XXXXXX) python3 -m pytest -q tests/test_sd_models_checkpoint_info_contract.py tests/test_extra_networks_metadata_contract.py tests/test_extra_networks_path_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate function/class scan across the pass 102 modules/tests reported only abstract/no-op method bodies (`refresh`, `create_extra_default_items_in_left_column`, small fallback `tqdm` methods, `create_item`, `list_items`), not duplicated model/path or metadata logic.
+- Reference scan confirmed the shared parent helper feeds `sd_models` checkpoint classification, extra-network relative/search/local path handling, user metadata display, and save-preview allow checks; model loader references remain expected model/upscaler callers.
+- `git diff --check` - passed.
+- Live WebUI/API startup, actual checkpoint discovery against full model directories, real `/sd_extra_networks/*` HTTP requests, browser preview serving, safetensors cover-image rendering, and real user metadata writes were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from model/path metadata helpers into checkpoint/extra-network page specializations and model-listing API surfaces, especially `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`, `extensions-builtin/Lora/ui_extra_networks_lora.py`, `modules/api/api.py` model metadata listing methods, and adjacent response-model tests, looking for duplicate item-shape construction or stale metadata exposure wrappers while preserving extension compatibility and public API response shapes.

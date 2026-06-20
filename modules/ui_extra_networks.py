@@ -802,14 +802,7 @@ def create_ui(interface: gr.Blocks, unrelated_tabs, tabname):
     return ui
 
 
-def path_is_parent(parent_path, child_path):
-    parent_path = os.path.abspath(parent_path)
-    child_path = os.path.abspath(child_path)
-
-    try:
-        return os.path.commonpath([parent_path, child_path]) == parent_path
-    except ValueError:
-        return False
+path_is_parent = util.path_is_parent
 
 
 def read_gallery_image_metadata(gallery, index):
