@@ -1,9 +1,17 @@
 // various functions for interaction with ui.py not large enough to warrant putting them in separate files
 
+function make_theme_url(url, theme) {
+    var gradioURL = new URL(url);
+    if (!gradioURL.searchParams.has('__theme')) {
+        gradioURL.searchParams.set('__theme', theme);
+    }
+    return gradioURL.toString();
+}
+
 function set_theme(theme) {
-    var gradioURL = window.location.href;
-    if (!gradioURL.includes('?__theme=')) {
-        window.location.replace(gradioURL + '?__theme=' + theme);
+    var gradioURL = make_theme_url(window.location.href, theme);
+    if (gradioURL != window.location.href) {
+        window.location.replace(gradioURL);
     }
 }
 

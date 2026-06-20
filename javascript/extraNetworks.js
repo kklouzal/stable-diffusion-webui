@@ -10,7 +10,7 @@ function toggleCss(key, css, enable) {
         document.head.removeChild(style);
     }
     if (style) {
-        style.innerHTML == '';
+        style.textContent = '';
         style.appendChild(document.createTextNode(css));
     }
 }
