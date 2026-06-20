@@ -588,8 +588,12 @@ def is_mxfp8_weight(weight):
     return type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
 
 
-def network_mxfp8_wanted_names():
+def network_wanted_names():
     return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+
+
+def network_mxfp8_wanted_names():
+    return network_wanted_names()
 
 
 def network_lora_source_signature(network_on_disk, net=None):
@@ -667,21 +671,21 @@ def network_mxfp8_is_model_prepared(model=None):
     return bool(getattr(model, "network_mxfp8_active_config_ready", False))
 
 
-network_mxfp8_missing = object()
+network_quant_missing = object()
 
 
-def network_mxfp8_snapshot_state(module):
+def network_quant_snapshot_state(module, merged_attr):
     return (
         module,
         module._parameters.get("weight"),
         module._parameters.get("bias"),
-        getattr(module, "network_current_names", network_mxfp8_missing),
-        getattr(module, "network_mxfp8_merged_lora_applied", network_mxfp8_missing),
+        getattr(module, "network_current_names", network_quant_missing),
+        getattr(module, merged_attr, network_quant_missing),
     )
 
 
-def network_mxfp8_restore_attr(module, attr, value):
-    if value is network_mxfp8_missing:
+def network_quant_restore_attr(module, attr, value):
+    if value is network_quant_missing:
         try:
             delattr(module, attr)
         except Exception:
@@ -690,7 +694,7 @@ def network_mxfp8_restore_attr(module, attr, value):
         setattr(module, attr, value)
 
 
-def network_mxfp8_restore_state(snapshot):
+def network_quant_restore_state(snapshot, merged_attr):
     module, weight, bias, current_names, merged_lora = snapshot
     if weight is not None:
         module._parameters["weight"] = weight
@@ -698,8 +702,16 @@ def network_mxfp8_restore_state(snapshot):
         module._parameters["bias"] = bias
     elif "bias" in module._parameters:
         module._parameters["bias"] = None
-    network_mxfp8_restore_attr(module, "network_current_names", current_names)
-    network_mxfp8_restore_attr(module, "network_mxfp8_merged_lora_applied", merged_lora)
+    network_quant_restore_attr(module, "network_current_names", current_names)
+    network_quant_restore_attr(module, merged_attr, merged_lora)
+
+
+def network_mxfp8_snapshot_state(module):
+    return network_quant_snapshot_state(module, "network_mxfp8_merged_lora_applied")
+
+
+def network_mxfp8_restore_state(snapshot):
+    network_quant_restore_state(snapshot, "network_mxfp8_merged_lora_applied")
 
 
 def prepare_mxfp8_active_config():
@@ -799,12 +811,12 @@ def prepare_mxfp8_active_config():
     return False
 
 
-def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
-    """Return LoRA operations for an MXFP8-managed Linear.
+def network_quant_lora_ops_for_layer(self, network_layer_name):
+    """Return LoRA operations for a quantized LoRA-managed Linear.
 
     This mirrors A1111's normal direct-module and SD3 QkvLinear split q/k/v
-    handling closely enough that MXFP8-managed layers do not silently mark a
-    LoRA set current while skipping a supported split projection mutation.
+    handling closely enough that quantized LoRA-managed layers do not silently
+    mark a LoRA set current while skipping a supported split projection mutation.
     """
     ops = []
     unsupported = []
@@ -827,6 +839,10 @@ def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
             unsupported.append((net, tuple(name for name, value in (("q_proj", module_q), ("k_proj", module_k), ("v_proj", module_v), ("out_proj", module_out)) if value is not None)))
 
     return ops, unsupported
+
+
+def network_mxfp8_lora_ops_for_layer(self, network_layer_name):
+    return network_quant_lora_ops_for_layer(self, network_layer_name)
 
 
 def network_apply_mxfp8_merged_lora(self, quantize_config=None, quantize_fn=None):
@@ -906,7 +922,7 @@ def is_nvfp4_weight(weight):
 
 
 def network_nvfp4_wanted_names():
-    return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    return network_wanted_names()
 
 
 def network_nvfp4_active_config_signature():
@@ -968,39 +984,12 @@ def network_nvfp4_is_model_prepared(model=None):
     return bool(getattr(model, "network_nvfp4_active_config_ready", False))
 
 
-network_nvfp4_missing = object()
-
-
 def network_nvfp4_snapshot_state(module):
-    return (
-        module,
-        module._parameters.get("weight"),
-        module._parameters.get("bias"),
-        getattr(module, "network_current_names", network_nvfp4_missing),
-        getattr(module, "network_nvfp4_merged_lora_applied", network_nvfp4_missing),
-    )
-
-
-def network_nvfp4_restore_attr(module, attr, value):
-    if value is network_nvfp4_missing:
-        try:
-            delattr(module, attr)
-        except Exception:
-            pass
-    else:
-        setattr(module, attr, value)
+    return network_quant_snapshot_state(module, "network_nvfp4_merged_lora_applied")
 
 
 def network_nvfp4_restore_state(snapshot):
-    module, weight, bias, current_names, merged_lora = snapshot
-    if weight is not None:
-        module._parameters["weight"] = weight
-    if bias is not None:
-        module._parameters["bias"] = bias
-    elif "bias" in module._parameters:
-        module._parameters["bias"] = None
-    network_nvfp4_restore_attr(module, "network_current_names", current_names)
-    network_nvfp4_restore_attr(module, "network_nvfp4_merged_lora_applied", merged_lora)
+    network_quant_restore_state(snapshot, "network_nvfp4_merged_lora_applied")
 
 
 def prepare_nvfp4_active_config():
@@ -1101,33 +1090,7 @@ def prepare_nvfp4_active_config():
 
 
 def network_nvfp4_lora_ops_for_layer(self, network_layer_name):
-    """Return LoRA operations for an NVFP4-managed Linear.
-
-    This mirrors A1111's normal direct-module and SD3 QkvLinear split q/k/v
-    handling closely enough that NVFP4-managed layers do not silently mark a
-    LoRA set current while skipping a supported split projection mutation.
-    """
-    ops = []
-    unsupported = []
-    for net in loaded_networks:
-        module = net.modules.get(network_layer_name, None)
-        if module is not None:
-            ops.append(("direct", net, module))
-            continue
-
-        module_q = net.modules.get(network_layer_name + "_q_proj", None)
-        module_k = net.modules.get(network_layer_name + "_k_proj", None)
-        module_v = net.modules.get(network_layer_name + "_v_proj", None)
-        module_out = net.modules.get(network_layer_name + "_out_proj", None)
-
-        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v and module_out is None:
-            ops.append(("qkv", net, (module_q, module_k, module_v)))
-            continue
-
-        if module_q or module_k or module_v or module_out:
-            unsupported.append((net, tuple(name for name, value in (("q_proj", module_q), ("k_proj", module_k), ("v_proj", module_v), ("out_proj", module_out)) if value is not None)))
-
-    return ops, unsupported
+    return network_quant_lora_ops_for_layer(self, network_layer_name)
 
 
 def network_apply_nvfp4_merged_lora(self, quantize_config=None, quantize_fn=None):
