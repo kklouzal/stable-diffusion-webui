@@ -25,7 +25,10 @@ class ExtraOptionsSection(scripts.Script):
         extra_options = shared.opts.extra_options_img2img if is_img2img else shared.opts.extra_options_txt2img
         elem_id_tabname = "extra_options_" + ("img2img" if is_img2img else "txt2img")
 
-        mapping = {k: v for v, k in infotext_utils.infotext_to_setting_name_mapping}
+        mapping = {
+            setting_name: infotext_name
+            for infotext_name, setting_name in infotext_utils.infotext_setting_name_mapping()
+        }
 
         with gr.Blocks() as interface:
             with gr.Accordion("Options", open=False, elem_id=elem_id_tabname) if shared.opts.extra_options_accordion and extra_options else gr.Group(elem_id=elem_id_tabname):

@@ -1453,3 +1453,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: parser/backcompat consumers just outside infotext_utils, especially `modules/shared_items.py` infotext-name enumeration, `modules/shared_options.py` `OptionInfo.infotext` coverage and duplicates, UI settings/extra-options setting surfacing, and focused checks for stale or duplicate infotext labels across `modules/ui.py`, processing scripts, and built-in extensions.
+
+## Pass 35 - infotext parser/backcompat consumers outside infotext_utils (2026-06-20)
+
+### Checked scope
+- `modules/shared_items.py`: `get_infotext_names()` enumeration of `OptionInfo.infotext` labels and registered paste-field names for the `infotext_skip_pasting` settings dropdown.
+- `modules/shared_options.py`: current `OptionInfo(..., infotext=...)` labels and settings UI option coverage, especially labels used by override settings and extra-options paste fields.
+- `modules/ui.py`: txt2img/img2img paste-field construction, override-settings dropdown surfacing, PNG-info send-to bindings, script infotext field splicing, and inpaint backcompat paste helpers.
+- `modules/processing_scripts/seed.py`, `modules/processing_scripts/sampler.py`, and `modules/processing_scripts/refiner.py`: built-in processing script `infotext_fields` and labels surfaced through `scripts.scripts_*` into paste behavior.
+- `modules/scripts.py`: script-runner accumulation of `infotext_fields`/`paste_field_names`, selectable script visibility paste fields, and public script field compatibility surfaces.
+- Built-in extensions with infotext/backcompat consumers: `extensions-builtin/extra-options-section/scripts/extra_options_section.py`, `extensions-builtin/hypertile/scripts/hypertile_script.py`, `extensions-builtin/soft-inpainting/scripts/soft_inpainting.py`, and Lora infotext callback references.
+
+### Findings and fixes
+- Fixed a stale duplicate mapping consumer in `extensions-builtin/extra-options-section/scripts/extra_options_section.py`. The extra-options script still inverted `infotext_utils.infotext_to_setting_name_mapping` directly, but that list is now only the legacy backcompat hook and is empty in-tree. It now inverts `infotext_utils.infotext_setting_name_mapping()`, so extra-options can surface paste fields for current `OptionInfo.infotext` settings while still preserving legacy extension-added mappings.
+- No duplicate `OptionInfo.infotext` labels were found in the scanned core and built-in option providers. The exact AST scan covered `modules/shared_options.py` and `extensions-builtin/hypertile/scripts/hypertile_script.py` and reported 51 labels, 0 duplicates.
+- No safe stale wrapper removal was found in `modules/shared_items.get_infotext_names()`. It intentionally combines current settings labels and currently registered paste fields so `infotext_skip_pasting` can show both option-backed labels and UI/script labels such as seed, sampler, inpaint, refiner, and extension fields.
+- No safe consolidation was found for txt2img/img2img paste-field lists in `modules/ui.py`. They share common labels, but the tab-specific fields differ by hires-fix, img2img-only image CFG/inpaint fields, source image handling, API names, and registered target tabs (`txt2img`, `img2img`, `inpaint`).
+- Preserved processing-script and built-in extension `infotext_fields`/`paste_field_names` surfaces because they are the public contract by which scripts participate in paste/send-to behavior.
+
+### Static/dynamic audit map notes
+- Settings label chain: `OptionInfo.infotext` and legacy `infotext_to_setting_name_mapping` -> `infotext_setting_name_mapping()` -> override settings and extra-options paste field lookup.
+- Skip-pasting choices chain: `shared_items.get_infotext_names()` -> current `shared.opts.data_labels` plus registered `infotext_utils.paste_fields` -> `shared_options.infotext_skip_pasting` dropdown choices.
+- UI paste chain outside infotext_utils: `modules/ui.py` tab paste lists and processing/built-in script `infotext_fields` -> `parameters_copypaste.add_paste_fields()` -> paste/send-to behavior and override dropdown fanout.
+- Extension compatibility chain: script classes expose `infotext_fields`/`paste_field_names`; `modules/scripts.py` aggregates them and `modules/ui_common.py` passes names for output-panel Send-to buttons.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass35.XXXXXX) python3 -m py_compile modules/shared_items.py modules/shared_options.py modules/ui.py modules/processing_scripts/seed.py modules/processing_scripts/sampler.py modules/processing_scripts/refiner.py modules/scripts.py modules/infotext_utils.py extensions-builtin/extra-options-section/scripts/extra_options_section.py extensions-builtin/hypertile/scripts/hypertile_script.py extensions-builtin/soft-inpainting/scripts/soft_inpainting.py test/test_infotext_api_mappings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass35.XXXXXX) python3 -m pytest -q test/test_infotext_api_mappings.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST `OptionInfo.infotext` duplicate-label scan across `modules/shared_options.py` and `extensions-builtin/hypertile/scripts/hypertile_script.py` reported `OptionInfo infotext labels scanned: 51; duplicates: 0`.
+- Exact AST duplicate-body scan across `modules/shared_items.py`, `modules/shared_options.py`, `modules/ui.py`, `modules/processing_scripts/seed.py`, `modules/processing_scripts/sampler.py`, `modules/processing_scripts/refiner.py`, `modules/scripts.py`, `extensions-builtin/extra-options-section/scripts/extra_options_section.py`, `extensions-builtin/hypertile/scripts/hypertile_script.py`, and `extensions-builtin/soft-inpainting/scripts/soft_inpainting.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: script/paste-field API consumers and infotext callbacks beyond the core UI path, especially `modules/ui_common.py` output-panel Send-to behavior, `modules/script_callbacks.py` infotext callback registration/callers, Lora `infotext_pasted` compatibility handling, and any duplicated paste-field filtering or script-arg mapping between UI/API callback paths.
