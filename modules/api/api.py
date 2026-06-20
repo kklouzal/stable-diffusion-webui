@@ -1390,6 +1390,6 @@ class Api:
             restart.restart_program()
         return Response(status_code=501)
 
-    def stop_webui(request):
+    def stop_webui(self):
         shared.state.server_command = "stop"
         return Response("Stopping.")

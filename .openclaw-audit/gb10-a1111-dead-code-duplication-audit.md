@@ -2994,3 +2994,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API refresh/checkpoint reload and server-control endpoints, especially `refresh_embeddings()`, `refresh_checkpoints()`, `refresh_vae()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, `stop_webui()`, route gating by `api_server_stop`, and adjacent response/side-effect tests, looking for stale wrappers or duplicate command-control logic while preserving public route behavior and runtime side effects.
+
+## Pass 80 - API refresh/checkpoint reload and server-control endpoints (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration for `/sdapi/v1/refresh-embeddings`, `/sdapi/v1/refresh-checkpoints`, `/sdapi/v1/refresh-vae`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, and route-gated `/sdapi/v1/server-kill`, `/sdapi/v1/server-restart`, `/sdapi/v1/server-stop`; `refresh_embeddings()`, `refresh_checkpoints()`, `refresh_vae()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, `stop_webui()`, `add_api_route()`, and the `api_server_stop` gate in `Api.__init__()`.
+- Adjacent side-effect helpers: `modules/shared_items.py` refresh wrappers, `modules/sd_models.py` checkpoint unload/reload/send-to-device surface, `modules/restart.py` restartability and stop/restart helpers, and API queue-lock serialization via `_call_with_queue_lock()`.
+- Focused tests: new `tests/test_api_server_control_contract.py` plus adjacent listing contract smoke for route/list regression context.
+
+### Findings and fixes
+- Renamed the bound endpoint parameter in `Api.stop_webui()` from `request` to `self`. The method never accepted or used a FastAPI request object; the old name was stale and obscured that this is a normal instance route handler. Runtime behavior is unchanged: it still sets `shared.state.server_command = "stop"` and returns `Response("Stopping.")`.
+- Added focused AST-isolated contracts for this API surface. The tests pin queue-lock use and side-effect targets for the three refresh endpoints, empty `{}` responses for checkpoint unload/reload, route gating by `shared.cmd_opts.api_server_stop`, and server-control side effects/status behavior without starting WebUI or invoking real process exits.
+- Preserved `refresh_embeddings()`, `refresh_checkpoints()`, and `refresh_vae()` as separate route handlers despite similar queue-lock wrappers. They bind distinct public route paths and distinct runtime refresh targets, and folding them into a generic dispatch table would not remove dead code.
+- Preserved `unloadapi()` and `reloadapi()` as separate public checkpoint command endpoints. They intentionally differ: unload delegates to `sd_models.unload_model_weights()` while reload sends the current `shared.sd_model` back to device through `sd_models.send_model_to_device()`.
+- Preserved `kill_webui()`, `restart_webui()`, and `stop_webui()` as distinct server-control commands behind `--api-server-stop`. Their side effects and response semantics differ, and `kill_webui()`/restartable `restart_webui()` intentionally reach process-control helpers that tests must stub rather than execute.
+- Preserved the `restart_webui()` 501 response even after a restartable restart command. This is existing public status behavior and changing it would be API churn outside a dead-code/duplication cleanup.
+
+### Static/dynamic audit map notes
+- Refresh chains remain: `/sdapi/v1/refresh-embeddings` -> queue lock -> `sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)`; `/sdapi/v1/refresh-checkpoints` -> queue lock -> `shared.refresh_checkpoints()` -> `shared_items.refresh_checkpoints()` -> `sd_models.list_models()`; `/sdapi/v1/refresh-vae` -> queue lock -> `shared_items.refresh_vae_list()` -> `sd_vae.refresh_vae_list()`.
+- Checkpoint command chains remain: `/sdapi/v1/unload-checkpoint` -> `sd_models.unload_model_weights()` -> `{}`; `/sdapi/v1/reload-checkpoint` -> `sd_models.send_model_to_device(shared.sd_model)` -> `{}`.
+- Server-control chains remain gated by `shared.cmd_opts.api_server_stop`: `/sdapi/v1/server-kill` -> `restart.stop_program()`; `/sdapi/v1/server-restart` -> `restart.restart_program()` only when `restart.is_restartable()` is true, then `Response(status_code=501)`; `/sdapi/v1/server-stop` -> `shared.state.server_command = "stop"` and `Response("Stopping.")`.
+- Compatibility surfaces to keep conservative: route paths, POST methods, route absence when `--api-server-stop` is not enabled, queue-lock serialization for refresh endpoints, force-reload embedding refresh flag, empty dict checkpoint command responses, server-stop response body, restart 501 status, and process-control side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass80.XXXXXX) python3 -m py_compile modules/api/api.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass80.XXXXXX) python3 -m py_compile modules/api/api.py modules/shared_items.py modules/sd_models.py modules/restart.py tests/test_api_server_control_contract.py tests/test_api_listing_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass80.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py` - passed: 4 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass80.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py tests/test_api_listing_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/shared_items.py`, `modules/sd_models.py`, `modules/restart.py`, `tests/test_api_server_control_contract.py`, and `tests/test_api_listing_contract.py` found no duplicate function bodies.
+- `git diff --check` - passed.
+- Live refresh/checkpoint/server-control API requests were not exercised because this bounded slice did not start a WebUI/model runtime and must not invoke real process-stop/restart helpers.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API scripts/extensions metadata surfaces, especially `get_scripts_list()`, `get_script_info()`, `get_extensions_list()`, extension enabled/path metadata, and adjacent script API info helpers, looking for stale wrappers or duplicate list shaping while preserving public route schemas and extension/script compatibility.
