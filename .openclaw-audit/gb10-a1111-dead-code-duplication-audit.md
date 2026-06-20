@@ -3570,3 +3570,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from script/default metadata extraction into generation parameter parsing and processing override application internals, especially `modules/processing.py` option override apply/restore blocks, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py` generation request preparation, and bundled scripts that mutate `p.override_settings`, looking for duplicate override/default handling while preserving infotext/API compatibility and generation behavior.
+
+## Pass 97 - Processing/generation override application internals (2026-06-20)
+
+### Scope checked
+- `modules/processing.py`: `StableDiffusionProcessing.override_settings`, `override_settings_restore_afterwards`, `__post_init__()`, `process_images()` override snapshot/apply/restore path, checkpoint override validation, VAE reload side effects, token-merging reset, and invalid sampler/scheduler compatibility fix placement.
+- `modules/txt2img.py`: `txt2img_create_processing()`, UI override dropdown parsing via `create_override_settings_dict()`, highres-fix override coercions, and `txt2img_upscale()` mutation of `p.override_settings`.
+- `modules/img2img.py`: `img2img()` processing construction, `process_batch()` PNG-info override propagation, batch output filename/save overrides, and per-image checkpoint override fallback/removal.
+- `modules/api/api.py`: `apply_infotext()`, `_prepare_generation_api_request()`, API request copy/pop preparation, infotext-derived override merging, and script-arg overlay ordering from pass 96.
+- `modules/infotext_utils.py`: `create_override_settings_dict()`, `get_override_settings()`, override dropdown paste population, current-value filtering, legacy infotext mapping, and disable-weights-auto-swap guard.
+- Bundled scripts mutating `p.override_settings`: `scripts/xyz_grid.py` override axes and `scripts/prompts_from_file.py` sd-model job override handling.
+
+### Findings / fixes
+- Extracted the inline `process_images()` override lifecycle into `store_processing_override_settings()`, `apply_processing_override_settings()`, and `restore_processing_override_settings()` in `modules/processing.py`.
+- Preserved existing behavior exactly: scripts still run `before_process()` before the snapshot, invalid checkpoint overrides are still removed before applying overrides, checkpoint and VAE reload side effects stay in the same order, `override_settings_restore_afterwards=False` still skips restoration, and restore still uses direct `setattr(opts, ...)` plus the existing VAE reload behavior.
+- Preserved UI/API split override parsing. `create_override_settings_dict()` remains the UI multiselect parser for `Label: value` pairs, while `get_override_settings()` remains the infotext/API/paste helper that filters current values, handled fields, and disable-weights-auto-swap.
+- Preserved script mutation behavior in `txt2img_upscale()`, img2img batch processing, XYZ Grid axes, and Prompts From File. These are live generation behaviors and not dead wrappers.
+- No safe removal was found for `override_settings_restore_afterwards`, API `request.override_settings is None` initialization, or the legacy infotext mapping list. They are compatibility and public/dynamic behavior surfaces.
+
+### Static/dynamic audit map notes
+- Processing override chain is now explicit: scripts may mutate `p.override_settings` in `before_process()` -> `store_processing_override_settings()` snapshots current option values for override keys -> `apply_processing_override_settings()` validates/removes stale checkpoint overrides and applies settings with reload side effects -> generation runs -> token merging resets -> `restore_processing_override_settings()` restores saved option values only when `p.override_settings_restore_afterwards` is true.
+- UI generation chain remains: txt2img/img2img paste dropdown choices are submitted as `Label: value` strings -> `create_override_settings_dict()` casts to option values -> `StableDiffusionProcessing.override_settings` carries them into processing.
+- API generation chain remains: `apply_infotext()` fills unset request fields and merges infotext-derived overrides only when a caller did not already set the same override key -> `_prepare_generation_api_request()` copies the request into processing kwargs and strips API-only script/infotext fields.
+- Script mutation chain remains: XYZ Grid and Prompts From File copy or mutate processing objects and set `p.override_settings` before `process_images()` sees them; img2img batch mutates save/checkpoint overrides per input image.
+- Compatibility surfaces kept conservative: override setting key names, UI dropdown string format, API request/response shapes, infotext setting names and legacy extension mapping, `disable_weights_auto_swap`, script-visible `p.override_settings`, and restore semantics.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/processing.py modules/txt2img.py modules/img2img.py modules/api/api.py modules/infotext_utils.py scripts/xyz_grid.py scripts/prompts_from_file.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m pytest -q test/test_infotext_api_mappings.py tests/test_processing_auxiliary_infotext_alignment.py` - passed: 19 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m pytest -q test/test_infotext_api_mappings.py tests/test_processing_auxiliary_infotext_alignment.py test/test_img2img.py` - blocked by the existing missing `base_url` fixture/live server harness in `test/test_img2img.py`; the first 19 tests passed before the 7 fixture errors.
+- Exact AST duplicate function scan across `modules/processing.py`, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py`, `modules/infotext_utils.py`, `scripts/xyz_grid.py`, and `scripts/prompts_from_file.py` reported only trivial no-op/property duplicates: `modules/processing.py:344:sd_model`, `modules/processing.py:480:init`, `scripts/xyz_grid.py:187:do_nothing`, and `scripts/xyz_grid.py:402:__enter__`.
+- Reference scan confirmed the new processing override helpers are only used by `process_images()` and tracked override-setting mutation paths remain live in UI/API/bundled scripts.
+- `git diff --check` - passed.
+- Live WebUI/API server startup, actual model checkpoint/VAE reloads, and real txt2img/img2img generations with override selections were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from processing override application into generation parameter parsing and infotext serialization internals, especially `modules/processing.py` `create_infotext()`/`Processed.js()` metadata emission, `modules/infotext_utils.py` parsing/default normalization, save-path infotext consumers, and API pnginfo handling, looking for duplicate metadata/default handling while preserving old infotext labels, extension callbacks, and image metadata compatibility.
