@@ -167,8 +167,12 @@ class ExtrasBaseRequest(BaseModel):
 class ExtraBaseResponse(BaseModel):
     html_info: str = Field(title="HTML info", description="A series of HTML tags containing the process info.")
 
-class ExtrasSingleImageRequest(ExtrasBaseRequest):
+class _Base64ImageRequest(BaseModel):
     image: str = Field(default="", title="Image", description="Image to work on, must be a Base64 string containing the image's data.")
+
+
+class ExtrasSingleImageRequest(ExtrasBaseRequest, _Base64ImageRequest):
+    pass
 
 class ExtrasSingleImageResponse(ExtraBaseResponse):
     image: Optional[str] = Field(default=None, title="Image", description="The generated image in base64 format.")
@@ -202,8 +206,7 @@ class ProgressResponse(BaseModel):
     textinfo: str = Field(default=None, title="Info text", description="Info text used by WebUI.")
     current_task: Optional[str] = Field(default=None, title="Current Task", description="The active API task id, when one is running.")
 
-class InterrogateRequest(BaseModel):
-    image: str = Field(default="", title="Image", description="Image to work on, must be a Base64 string containing the image's data.")
+class InterrogateRequest(_Base64ImageRequest):
     model: str = Field(default="clip", title="Model", description="The interrogate model used.")
 
 class InterrogateResponse(BaseModel):

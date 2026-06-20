@@ -60,3 +60,11 @@ def test_interrogate_api_preserves_model_dispatch_under_queue_lock():
 
     assert api.interrogateapi(SimpleNamespace(image="input", model="deepdanbooru")) == {"caption": "booru tags"}
     assert calls == ["interrogate_image", "interrogate_image"]
+
+def test_interrogate_request_reuses_shared_base64_image_field():
+    model_source = (Path(__file__).resolve().parents[1] / "modules/api/models.py").read_text(encoding="utf8")
+
+    assert "class _Base64ImageRequest(BaseModel):" in model_source
+    assert 'image: str = Field(default="", title="Image"' in model_source
+    assert "class ExtrasSingleImageRequest(ExtrasBaseRequest, _Base64ImageRequest):" in model_source
+    assert "class InterrogateRequest(_Base64ImageRequest):" in model_source

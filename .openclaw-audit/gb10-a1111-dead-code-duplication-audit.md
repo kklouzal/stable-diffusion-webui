@@ -3158,3 +3158,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue down `modules/api/models.py` after the extras response models into `PNGInfoRequest`/`PNGInfoResponse`, `ProgressRequest`/`ProgressResponse`, `InterrogateRequest`/`InterrogateResponse`, and adjacent API handlers (`pnginfoapi()`, `progressapi()`, `interrogateapi()`), looking for stale response fields, duplicate request/response field declarations, or safe helper consolidation while preserving public OpenAPI schemas and runtime side effects.
+
+## Pass 85 - API PNG info/progress/interrogate request and response models (2026-06-20)
+
+### Checked scope
+- `modules/api/models.py`: `PNGInfoRequest`, `PNGInfoResponse`, `ProgressRequest`, `ProgressResponse`, `InterrogateRequest`, `InterrogateResponse`, and adjacent single-image request model overlap with `ExtrasSingleImageRequest`.
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/png-info`, `/sdapi/v1/progress`, and `/sdapi/v1/interrogate`, including `pnginfoapi()`, `progressapi()`, and `interrogateapi()`.
+- Focused adjacent tests: `test/test_api_info_interrogate_admin_contract.py`, `tests/test_api_progress_contract.py`, and the progress/extras source-level coverage in `test/test_postprocessing_api_defaults.py`.
+
+### Findings and fixes
+- Consolidated the duplicated base64 `image` request field used by `ExtrasSingleImageRequest` and `InterrogateRequest` into a private `_Base64ImageRequest` base model. Public request class names are preserved, the `image` field default/title/description are preserved, and `InterrogateRequest.model` remains the only interrogate-specific field.
+- Added focused source-contract coverage in `test/test_api_info_interrogate_admin_contract.py` to pin the shared base64 image field and both public request model inheritance points.
+- Preserved `PNGInfoRequest.image` as a separate required field. It has a different public contract from the optional/default-empty base64 image request used by extras/interrogate.
+- Preserved `PNGInfoResponse.info/items/parameters` as the public response shape. The empty-image fallback in `pnginfoapi()` is conservative legacy code; `decode_base64_to_image()` normally raises `HTTPException` for invalid input, and broadening/removing response fields would be public API churn.
+- Preserved `ProgressRequest.skip_current_image` and every `ProgressResponse` field, including `current_task`. These fields directly control current-image serialization and expose live task/progress state; no stale response field was proven dead.
+- Preserved `interrogateapi()` model dispatch and queue-lock helper usage. The handler still supports `clip` and `deepdanbooru` paths and raises the existing 404 for unknown models.
+
+### Static/dynamic audit map notes
+- PNG info chain remains: `/sdapi/v1/png-info` -> `Api.pnginfoapi()` -> `decode_base64_to_image(req.image.strip())` -> `images.read_info_from_image()` -> `infotext_utils.parse_generation_parameters()` -> `script_callbacks.infotext_pasted_callback()` -> `PNGInfoResponse(info=..., items=..., parameters=...)`.
+- Progress chain remains: `/sdapi/v1/progress` GET query params -> `ProgressRequest(skip_current_image=False)` -> `progress_module.calculate_progress_and_eta()` -> optional `shared.state.set_current_image()` and base64 current image encoding -> `ProgressResponse(progress, eta_relative, state, current_image, textinfo, current_task)`.
+- Interrogate chain remains: `/sdapi/v1/interrogate` -> `InterrogateRequest(image, model="clip")` -> decode and RGB conversion -> queued `shared.interrogator.interrogate()` or `deepbooru.model.tag()` -> `InterrogateResponse(caption=...)`.
+- Compatibility surfaces to keep conservative: route paths/methods, request class names, inherited `image` field metadata/defaults, PNG info required image contract, progress query default and skip-current-image behavior, progress state/current_task/textinfo fields, queue locking, CLIP/deepdanbooru dispatch, and image decode/interrogate side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass85.XXXXXX) python3 -m py_compile modules/api/models.py modules/api/api.py test/test_api_info_interrogate_admin_contract.py tests/test_api_progress_contract.py test/test_postprocessing_api_defaults.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass85.XXXXXX) python3 -m pytest -q test/test_api_info_interrogate_admin_contract.py tests/test_api_progress_contract.py` - passed: 4 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Runtime Pydantic schema introspection was not available in the system Python environment because importing `modules.api.models` failed with `ModuleNotFoundError: No module named pydantic`; validation used py_compile and source-level contract tests instead.
+- Exact AST duplicate class/function scan across `modules/api/models.py`, `modules/api/api.py`, `test/test_api_info_interrogate_admin_contract.py`, and `tests/test_api_progress_contract.py` now reports only intentional empty public wrapper classes (`TextToImageResponse`, `ImageToImageResponse`, `ExtrasSingleImageRequest`) plus the pre-existing `ScriptArgsList` shape match.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/png-info`, `/sdapi/v1/progress`, and `/sdapi/v1/interrogate` requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue down `modules/api/models.py` after `TrainResponse`/`CreateResponse` into flags/options/sampler/upscaler/model-list and embedding response models plus adjacent API handlers (`get_config()`, `set_config()`, `get_cmd_flags()`, list endpoints, `get_embeddings()`), looking for stale public fields, duplicate list-item serializers, or safe helper consolidation while preserving OpenAPI schemas and runtime refresh/config side effects.
