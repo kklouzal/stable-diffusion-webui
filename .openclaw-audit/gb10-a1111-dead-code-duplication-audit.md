@@ -1647,3 +1647,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: nearby `modules/processing.py` branch-shape duplication outside the just-checked output loop, especially txt2img/img2img image conditioning branches, hires resize target calculations, VAE encoder metadata branches, and hires/img2img init mask/latent setup where behavior-sensitive duplication may or may not be safely extractable.
+
+
+## Pass 41 - processing conditioning, VAE metadata, and branch-shape audit (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `txt2img_image_conditioning()`, `StableDiffusionProcessing.txt2img_image_conditioning()`, `StableDiffusionProcessing.img2img_image_conditioning()`, hires resize target calculations in `StableDiffusionProcessingTxt2Img.calculate_target_resolution()`, firstpass/hires VAE encode paths in `sample()` and `sample_hr_pass()`, hires conditioning activation in `sample_hr_pass()` and `setup_conds()`, and img2img init mask/latent/cache setup in `StableDiffusionProcessingImg2Img.init()`.
+- Adjacent tests/contracts: `tests/test_processing_auxiliary_infotext_alignment.py`, `test/test_openclaw_cache_invalidation.py`, and `tests/test_image_mask_fix_contract.py`.
+
+### Findings and fixes
+- Consolidated duplicated txt2img full-mask inpainting conditioning construction into `_full_masked_image_conditioning()`. The hybrid/concat and SDXL-inpaint branches still choose the same branches as before, and the helper preserves the all-0.5 image tensor, VAE approximation selection, fake full mask padding, and output dtype conversion.
+- Consolidated repeated `VAE Encoder` metadata assignment into `StableDiffusionProcessing.add_vae_encoder_generation_param()`, used by firstpass image VAE encode, hires image-resize encode, and img2img init encode paths without changing when the metadata is emitted.
+- Added a source-contract test for the two helper boundaries so future duplicate-remediation passes preserve the sensitive tensor construction and metadata-call counts.
+- No safe extraction was made for hires resize target calculations. The duplicated width/height ratio assignments are small arithmetic branches coupled to `hr_resize_x`, `hr_resize_y`, `target_w`, `target_h`, and truncate calculations; extracting them would add indirection with little risk reduction.
+- No safe extraction was made for hires/img2img init mask and latent setup. `image_mask`, `latent_mask`, `mask_for_overlay`, `overlay_images`, `paste_to`, cache keys, inpainting fill metadata, and script-visible mask behavior share branch shapes but feed distinct downstream contracts.
+- No dead branch variables were proven. Public/dynamic model fields and extension-observable generation params remain conservative.
+
+### Static/dynamic audit map notes
+- Txt2img conditioning branch map remains: hybrid/concat -> full masked inpaint conditioning; crossattn-adm -> UnCLIP zero ADM conditioning; SDXL inpaint under non-hybrid/non-UnCLIP -> full masked inpaint conditioning; otherwise -> dummy 5-channel zero conditioning.
+- VAE Encoder metadata remains tied to `opts.sd_vae_encode_method != 'Full'` and is recorded before every image-to-latent encode path that uses `approximation_indexes.get(opts.sd_vae_encode_method)` in this scope.
+- Hires resize target branch map remains deliberately local: no explicit resize uses `hr_scale`; one zero dimension preserves source aspect ratio; two explicit dimensions choose the source-ratio-constrained side and compute latent truncation.
+- Img2img init mask setup remains deliberately local because overlay composition, latent fill modes, cache restore/store payloads, color correction, and mask return/save behavior all depend on the exact state assembled there.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass41.XXXXXX) python3 -m py_compile modules/processing.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass41-source.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass41.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py test/test_openclaw_cache_invalidation.py tests/test_image_mask_fix_contract.py` - blocked during collection because this shell's `/usr/bin/python3` lacks `numpy` (`ModuleNotFoundError: No module named 'numpy'`); no repo `venv`/`.venv` was present on GB10 for rerun.
+- Exact AST duplicate-body scan across `modules/processing.py` and `tests/test_processing_auxiliary_infotext_alignment.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` generation-state/cache helpers outside the branch-shape groups, especially cache key/clone/restore/store helper duplication, `Processed` metadata assembly, and remaining conditioning/cache lifecycle boundaries where public extension hooks should stay conservative.

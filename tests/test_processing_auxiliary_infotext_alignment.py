@@ -82,3 +82,19 @@ def test_xyz_grid_drops_stale_lone_image_infotexts():
     trim_block = source[trim_at:source.index("if draw_grid and opts.grid_save:", trim_at)]
 
     assert "processed.infotexts = processed.infotexts[:z_count + 1] if draw_grid else []" in trim_block
+
+
+def test_processing_branch_shape_helpers_keep_sensitive_semantics_local():
+    source = Path("modules/processing.py").read_text()
+
+    helper_at = source.index("def _full_masked_image_conditioning")
+    helper_body = source[helper_at:source.index("def txt2img_image_conditioning", helper_at)]
+    assert "torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5" in helper_body
+    assert "torch.nn.functional.pad" in helper_body
+    assert source.count("return _full_masked_image_conditioning(sd_model, x, width, height)") == 2
+
+    vae_helper_at = source.index("def add_vae_encoder_generation_param(self):")
+    vae_helper_body = source[vae_helper_at:source.index("def setup_prompts", vae_helper_at)]
+    assert "opts.sd_vae_encode_method != 'Full'" in vae_helper_body
+    assert "self.extra_generation_params['VAE Encoder']" in vae_helper_body
+    assert source.count("self.add_vae_encoder_generation_param()") == 3

@@ -163,18 +163,21 @@ def _record_cache_stats_miss(stats, started_at):
     stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
 
 
+def _full_masked_image_conditioning(sd_model, x, width, height):
+    # The "masked-image" in this case will just be all 0.5 since the entire image is masked.
+    image_conditioning = torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5
+    image_conditioning = images_tensor_to_samples(image_conditioning, approximation_indexes.get(opts.sd_vae_encode_method))
+
+    # Add the fake full 1s mask to the first dimension.
+    image_conditioning = torch.nn.functional.pad(image_conditioning, (0, 0, 0, 0, 1, 0), value=1.0)
+    image_conditioning = image_conditioning.to(x.dtype)
+
+    return image_conditioning
+
+
 def txt2img_image_conditioning(sd_model, x, width, height):
     if sd_model.model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
-
-        # The "masked-image" in this case will just be all 0.5 since the entire image is masked.
-        image_conditioning = torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5
-        image_conditioning = images_tensor_to_samples(image_conditioning, approximation_indexes.get(opts.sd_vae_encode_method))
-
-        # Add the fake full 1s mask to the first dimension.
-        image_conditioning = torch.nn.functional.pad(image_conditioning, (0, 0, 0, 0, 1, 0), value=1.0)
-        image_conditioning = image_conditioning.to(x.dtype)
-
-        return image_conditioning
+        return _full_masked_image_conditioning(sd_model, x, width, height)
 
     elif sd_model.model.conditioning_key == "crossattn-adm": # UnCLIP models
 
@@ -182,16 +185,7 @@ def txt2img_image_conditioning(sd_model, x, width, height):
 
     else:
         if sd_model.is_sdxl_inpaint:
-            # The "masked-image" in this case will just be all 0.5 since the entire image is masked.
-            image_conditioning = torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5
-            image_conditioning = images_tensor_to_samples(image_conditioning,
-                                                            approximation_indexes.get(opts.sd_vae_encode_method))
-
-            # Add the fake full 1s mask to the first dimension.
-            image_conditioning = torch.nn.functional.pad(image_conditioning, (0, 0, 0, 0, 1, 0), value=1.0)
-            image_conditioning = image_conditioning.to(x.dtype)
-
-            return image_conditioning
+            return _full_masked_image_conditioning(sd_model, x, width, height)
 
         # Dummy zero conditioning if we're not using inpainting or unclip models.
         # Still takes up a bit of memory, but no encoder call.
@@ -491,6 +485,10 @@ class StableDiffusionProcessing:
             return self.token_merging_ratio_hr or opts.token_merging_ratio_hr or self.token_merging_ratio or opts.token_merging_ratio
 
         return self.token_merging_ratio or opts.token_merging_ratio
+
+    def add_vae_encoder_generation_param(self):
+        if opts.sd_vae_encode_method != 'Full':
+            self.extra_generation_params['VAE Encoder'] = opts.sd_vae_encode_method
 
     def setup_prompts(self):
         if isinstance(self.prompt,list):
@@ -1491,8 +1489,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 image = torch.from_numpy(np.expand_dims(image, axis=0))
                 image = image.to(shared.device, dtype=devices.dtype_vae)
 
-                if opts.sd_vae_encode_method != 'Full':
-                    self.extra_generation_params['VAE Encoder'] = opts.sd_vae_encode_method
+                self.add_vae_encoder_generation_param()
 
                 samples = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
                 decoded_samples = None
@@ -1582,8 +1579,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             decoded_samples = torch.from_numpy(np.array(batch_images))
             decoded_samples = decoded_samples.to(shared.device, dtype=devices.dtype_vae)
 
-            if opts.sd_vae_encode_method != 'Full':
-                self.extra_generation_params['VAE Encoder'] = opts.sd_vae_encode_method
+            self.add_vae_encoder_generation_param()
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
 
             image_conditioning = self.img2img_image_conditioning(decoded_samples, samples)
@@ -2028,8 +2024,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         else:
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
 
-        if opts.sd_vae_encode_method != 'Full':
-            self.extra_generation_params['VAE Encoder'] = opts.sd_vae_encode_method
+        self.add_vae_encoder_generation_param()
 
         if image_mask is not None and self.inpainting_fill == 3:
             self.extra_generation_params["Masked content"] = 'latent nothing'
