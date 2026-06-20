@@ -3095,3 +3095,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API training/create response helpers adjacent to the same class region, especially `_create_response()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, and `tests/test_api_training_contract.py`, looking for stale wrapper names or duplicate task response shaping while preserving public response bodies and training side effects.
+
+## Pass 83 - API training/create response helper names and task response shaping (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registrations for create/train embedding and hypernetwork endpoints; `_create_response()`, `_train_response()`, `_run_create_task()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `_prepare_hypernetwork_training()`, `_restore_hypernetwork_training_devices()`, `train_embedding()`, and `train_hypernetwork()`.
+- `modules/api/models.py`: `CreateResponse` and `TrainResponse` response schemas.
+- `tests/test_api_training_contract.py`: source-level contract coverage for create/train helper selection, hypernetwork response strings, and single training state-end lifecycle.
+- Adjacent checked references: API route response-model fanout, focused training/create response strings, and related hypernetwork/textual-inversion create/train tests from prior passes.
+
+### Findings and fixes
+- No production dead code or safe duplicate-response consolidation was found in this bounded slice.
+- Preserved `_create_response()` and `_train_response()` as intentionally separate schema constructors. They are tiny wrappers, but their names make create/train response-model boundaries explicit and are pinned by focused contract coverage; a generic `info` response helper would be cosmetic and would weaken the source-level guard against response-class mixups.
+- Preserved `_run_create_task()` and `_run_training_task()` as separate lifecycle helpers. The create helper owns begin/end state, creator invocation, optional post-create refresh, and `AssertionError` create-string handling; the training helper additionally owns before/after training hooks, xattention optimization toggling, broad training exception capture, and the historical `error: {error}` success-path suffix.
+- Preserved `create_embedding()` post-create embedding reload, hypernetwork pre/post training hooks, and exact public response prefixes. No stale wrapper name or dead helper parameter was identified.
+- Left `tests/test_api_training_contract.py` unchanged. Its helper-name tests are still useful for this public API seam and do not duplicate lower-level runtime training tests.
+
+### Static/dynamic audit map notes
+- Create embedding chain remains: `/sdapi/v1/create/embedding` -> `Api.create_embedding()` -> `_run_create_task("create_embedding", textual_inversion.create_embedding, ..., after_create=embedding_db.load_textual_inversion_embeddings)` -> `CreateResponse(info="create embedding filename: ..." | "create embedding error: ...")`.
+- Create hypernetwork chain remains: `/sdapi/v1/create/hypernetwork` -> `Api.create_hypernetwork()` -> `_run_create_task("create_hypernetwork", hypernetwork.create_hypernetwork, ...)` -> `CreateResponse(info="create hypernetwork filename: ..." | "create hypernetwork error: ...")`.
+- Training chains remain: `/sdapi/v1/train/embedding` and `/sdapi/v1/train/hypernetwork` -> `_run_training_task(...)` -> optional optimization undo/apply and model-specific hooks -> `TrainResponse(info="train ... complete: filename: ... error: ..." | "train ... error: ...")` with one `shared.state.end()` in the helper.
+- Compatibility surfaces to keep conservative: route paths, response model class names, `info` field name, exact response prefixes/suffixes, create `AssertionError` handling, inclusion of `error: None` on successful training, job names passed to `shared.state.begin()`, post-create embedding reload, hypernetwork loaded-list clearing, device restoration, and `training_xattention_optimizations` gating.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass83.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_training_contract.py tests/test_hypernetwork_creation_contract.py tests/test_textual_inversion_preview_save_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass83.XXXXXX) python3 -m pytest -q tests/test_api_training_contract.py tests/test_hypernetwork_creation_contract.py tests/test_textual_inversion_preview_save_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, and `tests/test_api_training_contract.py` found only the pre-existing adjacent `TextToImageResponse`/`ImageToImageResponse` response-model twins in `modules/api/models.py`, outside this create/train response-helper target.
+- `git diff --check` - passed.
+- Live create/train embedding and hypernetwork API requests were not exercised because they require a running WebUI/model runtime, training assets, and provisioned ML dependencies.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into remaining API response-model twins and generated model surfaces near `modules/api/models.py`, especially `TextToImageResponse`/`ImageToImageResponse`, extras response models, and adjacent route response construction, looking for safe schema-helper consolidation while preserving public response fields and OpenAPI schemas.
