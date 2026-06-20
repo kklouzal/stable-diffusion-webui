@@ -415,6 +415,17 @@ def validate_train_inputs(model_name, learn_rate, batch_size, gradient_step, dat
         assert log_directory, "Log directory is empty"
 
 
+def apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height):
+    p.prompt = preview_prompt
+    p.negative_prompt = preview_negative_prompt
+    p.steps = preview_steps
+    p.sampler_name = sd_samplers.samplers_map[preview_sampler_name.lower()]
+    p.cfg_scale = preview_cfg_scale
+    p.seed = preview_seed
+    p.width = preview_width
+    p.height = preview_height
+
+
 def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_step, data_root, log_directory, training_width, training_height, varsize, steps, clip_grad_mode, clip_grad_value, shuffle_tags, tag_drop_out, latent_sampling_method, use_weight, create_image_every, save_embedding_every, template_filename, save_image_with_stored_embedding, preview_from_txt2img, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height):
     from modules import processing
 
@@ -620,14 +631,7 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
                     )
 
                     if preview_from_txt2img:
-                        p.prompt = preview_prompt
-                        p.negative_prompt = preview_negative_prompt
-                        p.steps = preview_steps
-                        p.sampler_name = sd_samplers.samplers_map[preview_sampler_name.lower()]
-                        p.cfg_scale = preview_cfg_scale
-                        p.seed = preview_seed
-                        p.width = preview_width
-                        p.height = preview_height
+                        apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height)
                     else:
                         p.prompt = batch.cond_text[0]
                         p.steps = 20

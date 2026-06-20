@@ -2620,3 +2620,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into textual-inversion training helpers and hypernetwork training reuse surfaces, especially shared training validation/logging/tensorboard helpers in `modules/textual_inversion/textual_inversion.py` versus `modules/hypernetworks/hypernetwork.py`, embedding save/preview image contracts, and adjacent training UI/API task wrappers, while preserving training output formats and old embedding/hypernetwork compatibility.
+
+## Pass 69 - Textual-inversion training helpers and hypernetwork training reuse surfaces (2026-06-20)
+
+### Checked scope
+- `modules/textual_inversion/textual_inversion.py`: shared training helpers `write_loss()`, `tensorboard_setup()`, `tensorboard_add()`, `tensorboard_add_scaler()`, `tensorboard_add_image()`, `validate_train_inputs()`, textual-inversion `train_embedding()` save/log/preview/image-embedding path, and `save_embedding()` compatibility state restoration.
+- `modules/hypernetworks/hypernetwork.py`: `train_hypernetwork()` validation/logging/tensorboard reuse, hypernetwork checkpoint/optimizer save path, preview generation path, RNG/device restoration, and `save_hypernetwork()` compatibility state restoration.
+- Training UI/API wrappers: `modules/textual_inversion/ui.py`, `modules/hypernetworks/ui.py`, `modules/api/api.py` create/train task wrappers, hypernetwork pre/post training hooks, lowvram checks, optimization toggles, and response contracts.
+- Focused contracts/tests: `tests/test_textual_inversion_preview_save_contract.py`, `tests/test_api_training_contract.py`, and `tests/test_hypernetwork_creation_contract.py`.
+
+### Findings and fixes
+- Consolidated the duplicate txt2img-preview parameter assignment block used by both textual-inversion and hypernetwork training into `textual_inversion.apply_txt2img_preview_params()`.
+- Updated `train_embedding()` and `train_hypernetwork()` to call the shared helper while preserving their separate preview-generation contracts: embedding training still uses `do_not_reload_embeddings=True`, optional embedded-image PNG chunks, and tensorboard image writes; hypernetwork training still disables extra networks, preserves/restores RNG state, switches hypernetwork train/eval state, and manages cond/first-stage devices.
+- Added a focused AST contract to keep both training loops on the shared preview helper and prevent direct duplicate `p.sampler_name` assignment from reappearing in those loops.
+- Preserved `write_loss()` and tensorboard helpers in `textual_inversion.py` as the existing shared training helper surface used by hypernetwork training; no separate duplicate logging/tensorboard helpers remained to remove.
+- Preserved `validate_train_inputs()` despite generic wording quirks such as the literal `Save {name}` assertion text. The helper is shared by embedding and hypernetwork training and its exact assertion strings can surface through UI/API error paths.
+- Preserved `save_embedding()` and `save_hypernetwork()` as separate compatibility save wrappers. They restore different model metadata and optimizer/cache fields, and textual-inversion save additionally controls cached checksum invalidation and optimizer state through the embedding object.
+- Preserved training UI/API wrappers. Their duplicate-looking shape is callback/task-contract plumbing with distinct lowvram text, optimization/device cleanup, API route names, progress task names, and train response messages.
+
+### Static/dynamic audit map notes
+- Shared training validation/logging chain remains: UI/API wrapper -> `train_embedding()` or `train_hypernetwork()` -> `validate_train_inputs()` -> dataset construction -> `write_loss()` CSV output and optional tensorboard scalar/image helpers.
+- Preview chain now shares only txt2img parameter transfer: preview UI/API values -> `apply_txt2img_preview_params()` -> model-specific preview processing in each training loop -> image save/tensorboard/update-current-image behavior remains local to each model type.
+- Embedding save chain remains: periodic/final `save_embedding()` sets checkpoint metadata, name, optimizer state, and cached-checksum behavior -> `.pt` and optional `.optim` output -> optional PNG chunk embedding uses the last periodic embedding file.
+- Hypernetwork save chain remains: periodic/final training writes optimizer metadata only when enabled, dereferences optimizer state after save, and preserves old hypernetwork metadata branches.
+- Compatibility surfaces to keep conservative: `textual_inversion_loss.csv` and `hypernetwork_loss.csv` field order, tensorboard tag names, preview image filenames/prompts, embedded PNG chunk keys, old embedding/hypernetwork checkpoint metadata fields, optimizer `.optim` sidecars, UI wrapper return strings, API task names/messages, and progress `shared.state` updates.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass69.XXXXXX) python3 -m py_compile modules/textual_inversion/textual_inversion.py modules/hypernetworks/hypernetwork.py modules/textual_inversion/ui.py modules/hypernetworks/ui.py modules/api/api.py modules/textual_inversion/dataset.py modules/textual_inversion/learn_schedule.py modules/textual_inversion/saving_settings.py tests/test_textual_inversion_preview_save_contract.py tests/test_api_training_contract.py tests/test_hypernetwork_creation_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass69.XXXXXX) python3 -m pytest -q tests/test_textual_inversion_preview_save_contract.py tests/test_api_training_contract.py tests/test_hypernetwork_creation_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/textual_inversion/textual_inversion.py`, `modules/hypernetworks/hypernetwork.py`, `modules/textual_inversion/ui.py`, `modules/hypernetworks/ui.py`, `modules/api/api.py`, and the focused training contract tests reported no duplicate nontrivial function body groups.
+- `git diff --check` - passed.
+- Live WebUI/API training and model-backed preview generation were not exercised because they require a running WebUI/model training runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into textual-inversion dataset/preprocessing/autocrop training-data helpers, especially `modules/textual_inversion/dataset.py`, `modules/textual_inversion/preprocess.py`, `modules/textual_inversion/autocrop.py`, preprocessing UI/API wrappers, caption/tag handling, and focused autocrop/preprocess contracts, while preserving generated dataset formats and old preprocessing behavior.

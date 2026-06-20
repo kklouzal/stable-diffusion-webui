@@ -697,14 +697,7 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
                     p.disable_extra_networks = True
 
                     if preview_from_txt2img:
-                        p.prompt = preview_prompt
-                        p.negative_prompt = preview_negative_prompt
-                        p.steps = preview_steps
-                        p.sampler_name = sd_samplers.samplers_map[preview_sampler_name.lower()]
-                        p.cfg_scale = preview_cfg_scale
-                        p.seed = preview_seed
-                        p.width = preview_width
-                        p.height = preview_height
+                        textual_inversion.apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height)
                     else:
                         p.prompt = batch.cond_text[0]
                         p.steps = 20
