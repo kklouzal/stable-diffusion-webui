@@ -3984,3 +3984,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from API extension/runtime status endpoints into API create/train and refresh-adjacent lifecycle endpoints, especially `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `_run_create_task()`, `_run_training_task()`, `_create_response()`, `_train_response()`, route registrations for `/sdapi/v1/create/*` and `/sdapi/v1/train/*`, and adjacent API training/creation tests, looking for duplicated task wrappers or stale response helpers while preserving public response strings, queue/runtime side effects, and optimization restore semantics.
+
+
+## Pass 109 - API create/train lifecycle endpoints (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registrations for `/sdapi/v1/create/embedding`, `/sdapi/v1/create/hypernetwork`, `/sdapi/v1/train/embedding`, and `/sdapi/v1/train/hypernetwork`; `Api._create_response()`, `_train_response()`, `_run_create_task()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `_prepare_hypernetwork_training()`, `_restore_hypernetwork_training_devices()`, `train_embedding()`, and `train_hypernetwork()`.
+- `modules/api/models.py`: `CreateResponse` and `TrainResponse` public response models.
+- Adjacent training/creation contract tests: `tests/test_api_training_contract.py`, `tests/test_api_server_control_contract.py`, `tests/test_textual_inversion_preview_save_contract.py`, and `tests/test_hypernetwork_creation_contract.py`.
+- Adjacent UI wrappers for comparison only: `modules/textual_inversion/ui.py` and `modules/hypernetworks/ui.py` training/create wrappers.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `_create_response()` and `_train_response()` as intentionally separate helpers. They currently wrap the same `info` field shape, but they bind distinct public response models and the focused AST contract tests assert create paths use only the create response helper while training paths use only the train response helper.
+- Preserved `_run_create_task()` and `_run_training_task()` as separate lifecycle wrappers. Creation catches only `AssertionError`, reloads embeddings after embedding creation, and always ends `shared.state`; training has broader error capture, optional pre/post hooks, optimization disable/restore handling, and returns the historical `"... error: {error}"` training info string even when `error` is `None`.
+- Preserved `train_embedding()` and `train_hypernetwork()` as thin public endpoint wrappers over `_run_training_task()`. The hypernetwork endpoint intentionally carries `train_hypernetwork` job identity, hypernetwork-specific public response prefixes, clears `shared.loaded_hypernetworks`, and restores first/condition stage model devices after training.
+- Preserved apparent UI/API duplication. The UI wrappers in `modules/textual_inversion/ui.py` and `modules/hypernetworks/ui.py` share some optimization/device concepts, but their public outputs, exception behavior, Gradio update/html strings, and API response semantics differ enough that consolidation would risk compatibility.
+
+### Static/dynamic audit map notes
+- Create chain remains: API route -> endpoint wrapper -> `_run_create_task()` -> `shared.state.begin(job=...)` -> creation function -> optional post-create reload -> `CreateResponse(info=...)` -> `shared.state.end()`.
+- Training chain remains: API route -> endpoint wrapper -> `_run_training_task()` -> `shared.state.begin(job=...)` -> optional pre-train hook -> optional `sd_hijack.undo_optimizations()` -> training function -> optional post-train hook -> optional `sd_hijack.apply_optimizations()` -> `TrainResponse(info=...)`.
+- Compatibility surfaces kept conservative: public route paths/methods, response-model bindings, `info` strings, task job names, `AssertionError` create-task behavior, broad training exception capture, optimization restore semantics, hypernetwork loaded-list clearing, hypernetwork device restore, and embedding reload side effect.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass109.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_training_contract.py tests/test_api_server_control_contract.py tests/test_textual_inversion_preview_save_contract.py tests/test_hypernetwork_creation_contract.py` - passed.
+- First focused pytest attempt used a stale node id, `tests/test_api_server_control_contract.py::test_api_route_table_includes_server_control_and_openclaw_endpoints`, and was blocked by pytest collection with `not found`; this was a command selection error, not a source failure.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass109-focused.XXXXXX) python3 -m pytest -q tests/test_api_training_contract.py tests/test_api_server_control_contract.py::test_server_control_routes_are_gated_by_api_server_stop tests/test_textual_inversion_preview_save_contract.py tests/test_hypernetwork_creation_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed the create/train route registrations, response helpers, task wrappers, public response string prefixes, optimization toggles, hypernetwork loaded-list clearing, and hypernetwork device restore are limited to the expected API, UI, model, and focused test surfaces.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `tests/test_api_training_contract.py`, `tests/test_api_server_control_contract.py`, `tests/test_textual_inversion_preview_save_contract.py`, and `tests/test_hypernetwork_creation_contract.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real HTTP calls to `/sdapi/v1/create/*` or `/sdapi/v1/train/*`, actual embedding/hypernetwork file creation, and real model training were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from create/train lifecycle endpoints into API memory/checkpoint/server-control lifecycle endpoints and remaining low-frequency control routes, especially `get_memory()`, `_memory_counter_pair()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, `stop_webui()`, their route registrations, and adjacent server-control/memory contract tests, looking for stale response branches or duplicate lifecycle/status wrappers while preserving public empty responses, process command side effects, queue/runtime semantics, and memory counter compatibility.
