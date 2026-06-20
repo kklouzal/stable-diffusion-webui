@@ -22,6 +22,21 @@ def combine_caption(existing_caption, new_caption, action):
     return caption.strip()
 
 
+def save_caption_sidecar(image_filename, caption, action):
+    caption_filename = os.path.splitext(image_filename)[0] + ".txt"
+    existing_caption = ""
+    try:
+        with open(caption_filename, encoding="utf8") as file:
+            existing_caption = file.read().strip()
+    except FileNotFoundError:
+        pass
+
+    caption = combine_caption(existing_caption, caption, action)
+    if caption:
+        with open(caption_filename, "w", encoding="utf8") as file:
+            file.write(caption)
+
+
 def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True, scripts_order=None):
     devices.torch_gc()
 
@@ -120,19 +135,7 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
                 fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
 
                 if pp.caption:
-                    caption_filename = os.path.splitext(fullfn)[0] + ".txt"
-                    existing_caption = ""
-                    try:
-                        with open(caption_filename, encoding="utf8") as file:
-                            existing_caption = file.read().strip()
-                    except FileNotFoundError:
-                        pass
-
-                    action = shared.opts.postprocessing_existing_caption_action
-                    caption = combine_caption(existing_caption, pp.caption, action)
-                    if caption:
-                        with open(caption_filename, "w", encoding="utf8") as file:
-                            file.write(caption)
+                    save_caption_sidecar(fullfn, pp.caption, shared.opts.postprocessing_existing_caption_action)
 
             if extras_mode != 2 or show_extras_results:
                 outputs.append(pp.image)
