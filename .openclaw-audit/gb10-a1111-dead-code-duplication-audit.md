@@ -3351,3 +3351,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: leave the audited API utility tail and move into adjacent startup/runtime glue outside `modules/api/api.py`, especially `modules/restart.py`, `modules/initialize_util.py` queued onchange registration, and the UI/API checkpoint unload/reload callers, looking for stale wrappers or duplicated restart/reload utility paths while preserving process-control semantics and model reload locking.
+
+## Pass 91 - Startup/runtime restart and model reload glue (2026-06-20)
+
+### Scope checked
+- `modules/restart.py`: `is_restartable()`, `restart_program()`, and `stop_program()` process-control helpers.
+- `modules/initialize_util.py`: `restore_config_state_file()` and `configure_opts_onchange()` queued option-change registration for checkpoint, VAE, temp-dir, theme, attention optimization, FP8/MXFP8/NVFP4, and weight-cache settings.
+- `modules/sd_models.py`: `reload_model_weights()` TorchAO/forced-reload branches and `unload_model_weights()` references/side effects.
+- `modules/ui_settings.py`: Actions-tab checkpoint unload/reload and Reload UI callers.
+- `modules/ui_extensions.py`: `apply_and_restart()`, `restore_config_state()`, Installed-tab apply label, and restart/stop behavior after extension changes.
+- Adjacent state/control surfaces: `modules/shared_state.py` `request_restart()`, `server_command`, and compatibility `need_restart`; route callers in `modules/api/api.py` were reference-checked from pass 90 context.
+
+### Findings / fixes
+- No safe production-code deletion or helper consolidation was found in this slice. The scoped wrappers are short, but they are live public, UI, process-control, or startup/runtime side-effect surfaces.
+- Preserved `modules/restart.py` as the central process-control primitive. `restart_program()` creates `tmp/restart` before exiting so launch wrappers can restart; `stop_program()` intentionally exits immediately via `os._exit(0)`; `is_restartable()` reflects the `SD_WEBUI_RESTART` launcher contract.
+- Preserved `configure_opts_onchange()` registrations. The queued checkpoint/VAE/runtime reload callbacks are option side effects, not dead registration; the quantization-related callbacks intentionally force fresh reload paths for MXFP8/NVFP4/weight-cache changes while preserving model reload locking through `wrap_queued_call()`.
+- Preserved separate UI and API checkpoint unload/reload callers. UI settings return user-visible timing text and reload from RAM to VRAM through `send_model_to_device(shared.sd_model)`; API handlers preserve empty-object route responses; `unload_model_weights()` remains the shared unload side effect.
+- Preserved both restart paths in `ui_extensions.py`: extension apply/update must hard restart or quit through `modules.restart` after writing extension options, while config-state restore requests an in-process UI restart through `shared.state.request_restart()` after setting `restore_config_state_file`/webui config state.
+- Preserved `shared.state.request_restart()`/`server_command` behavior. UI reload and API stop/restart flows depend on distinct commands and compatibility `need_restart` access; no duplicate process-control helper could be removed without changing external behavior.
+
+### Static/dynamic audit map notes
+- Extension apply chain remains: Installed tab Apply -> `apply_and_restart()` -> validate extension access/list payloads -> optional update backup/fetch -> save extension options -> `restart.restart_program()` when restartable, otherwise `restart.stop_program()`.
+- Config restore chain remains: Extensions config-state restore -> set `shared.opts.restore_config_state_file` for extension restore and/or restore webui config -> `shared.state.request_restart()` -> startup `initialize_rest()` later calls `initialize_util.restore_config_state_file()` to apply extension state.
+- Settings checkpoint chain remains: Actions tab unload -> `sd_models.unload_model_weights()` -> timing text; Actions tab reload -> `sd_models.send_model_to_device(shared.sd_model)` -> timing text.
+- Option onchange chain remains: startup `initialize.initialize()` -> `initialize_util.configure_opts_onchange()` -> `Options.onchange()` callbacks -> `wrap_queued_call()` -> model/VAE/hijack reload side effects under `queue_lock`.
+- Compatibility surfaces to keep conservative: launcher `SD_WEBUI_RESTART` contract, `tmp/restart` marker, immediate process exit semantics, UI text/response shapes, API empty-object checkpoint responses, Gradio JS restart hooks, option onchange `call=False` behavior, queue locking, TorchAO forced-reload behavior, and extension/config restore side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass91.XXXXXX) python3 -m py_compile modules/restart.py modules/initialize_util.py modules/ui_extensions.py modules/sd_models.py modules/ui_settings.py modules/shared_state.py tests/test_api_server_control_contract.py tests/test_ui_extensions_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass91.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py tests/test_ui_extensions_contract.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate function scan across `modules/restart.py`, `modules/initialize_util.py`, `modules/ui_extensions.py`, `modules/sd_models.py`, `modules/ui_settings.py`, and `modules/shared_state.py` produced no duplicate function bodies.
+- Reference scans confirmed live callers for restart/stop helpers, queued onchange registration, checkpoint unload/reload, extension apply/restart, config restore restart, and API/UI server-command surfaces.
+- `git diff --check` - passed after the ledger-only checkpoint.
+- Live process restart/stop, UI reload, extension update/apply, and model checkpoint reload/unload actions were not exercised because this bounded slice did not start, stop, or mutate a WebUI runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from startup/runtime glue into UI startup/app reload orchestration around `webui.py`, `modules/ui.py` reload/restart hooks, and `modules/shared_state.py` command consumption, looking for stale restart compatibility shims or duplicated UI reload loop helpers while preserving launcher behavior, Gradio unload/reload hooks, server command semantics, and extension/config restore side effects.
