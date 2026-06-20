@@ -3126,3 +3126,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into remaining API response-model twins and generated model surfaces near `modules/api/models.py`, especially `TextToImageResponse`/`ImageToImageResponse`, extras response models, and adjacent route response construction, looking for safe schema-helper consolidation while preserving public response fields and OpenAPI schemas.
+
+## Pass 84 - API generation and extras response-model twins (2026-06-20)
+
+### Checked scope
+- `modules/api/models.py`: `TextToImageResponse`, `ImageToImageResponse`, `ExtrasBaseRequest`, `ExtraBaseResponse`, `ExtrasSingleImageRequest`, `ExtrasSingleImageResponse`, `FileData`, `ExtrasBatchImagesRequest`, and `ExtrasBatchImagesResponse`.
+- `modules/api/api.py`: route registrations for `/sdapi/v1/txt2img`, `/sdapi/v1/img2img`, `/sdapi/v1/extra-single-image`, and `/sdapi/v1/extra-batch-images`; response construction in `text2imgapi()`, `img2imgapi()`, `_run_extras()`, `extras_single_image_api()`, and `extras_batch_images_api()`.
+- Focused adjacent tests/references: `tests/test_api_server_control_contract.py` and `test/test_postprocessing_api_defaults.py` references to API response models and extras route construction.
+
+### Findings and fixes
+- Consolidated the pre-existing adjacent `TextToImageResponse`/`ImageToImageResponse` field duplication behind a private `_ImageGenerationResponse` base class. The public response class names, route `response_model` bindings, field names, field metadata, and response constructor call sites are preserved.
+- Preserved distinct `TextToImageResponse` and `ImageToImageResponse` classes instead of aliasing or merging them. They are public FastAPI response-model identities and should continue to produce distinct OpenAPI component names and route contracts.
+- No safe extras response-model deletion or consolidation was found. `ExtrasSingleImageResponse` and `ExtrasBatchImagesResponse` already share `ExtraBaseResponse.html_info`, and their payload fields differ intentionally (`image: Optional[str]` versus `images: list[str]`).
+- No safe route response-construction helper was extracted. `text2imgapi()` and `img2imgapi()` differ in processing setup, init image/mask handling, response timing metadata, and init-image redaction; extras single/batch differ in input decoding and response payload shape. Additional helpers would be cosmetic or risk changing public API behavior.
+- Generated request model surfaces (`StableDiffusionTxt2ImgProcessingAPI` and `StableDiffusionImg2ImgProcessingAPI`) were inspected near this scope and left unchanged; their overlap mirrors distinct processing classes and public request schemas.
+
+### Static/dynamic audit map notes
+- Txt2img response chain remains: `/sdapi/v1/txt2img` -> `Api.text2imgapi()` -> `TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed_js_with_image_paths(processed))`.
+- Img2img response chain remains: `/sdapi/v1/img2img` -> `Api.img2imgapi()` -> optional init-image/mask redaction and OpenClaw timing metadata -> `ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(...))`.
+- Extras single response chain remains: `/sdapi/v1/extra-single-image` -> decode one image -> `_run_extras(extras_mode=0, ...)` -> `ExtrasSingleImageResponse(image=..., html_info=...)`.
+- Extras batch response chain remains: `/sdapi/v1/extra-batch-images` -> decode `imageList` folder -> `_run_extras(extras_mode=1, ...)` -> `ExtrasBatchImagesResponse(images=..., html_info=...)`.
+- Compatibility surfaces to keep conservative: route paths/methods, response model class names, response field names and metadata, OpenAPI component identity, `parameters=vars(...)` behavior, img2img init-image redaction when `include_init_images` is false, OpenClaw timing metadata in img2img `info`, and extras single/batch payload cardinality.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass84.XXXXXX) python3 -m py_compile modules/api/models.py modules/api/api.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass84-api.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass84.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py test/test_postprocessing_api_defaults.py` - partially blocked by missing runtime dependencies in the system Python environment: API control tests passed, then `test/test_postprocessing_api_defaults.py::test_postprocessing_runner_order_override_preserves_script_defaults` failed on `ModuleNotFoundError: No module named fastapi`; extension preload stderr also reported missing `torch`.
+- Exact AST duplicate class/function scan across `modules/api/models.py` and `modules/api/api.py` now reports only intentional empty subclass bodies for `TextToImageResponse`/`ImageToImageResponse` plus the pre-existing `ScriptArgsList` shape match. The substantive duplicate field definitions were removed while retaining distinct response classes.
+- `git diff --check` - passed.
+- Live txt2img/img2img/extras API requests and full OpenAPI schema generation were not exercised because this bounded slice did not start a WebUI/model runtime and the system Python environment lacks FastAPI/Pydantic/Torch dependencies.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue down `modules/api/models.py` after the extras response models into `PNGInfoRequest`/`PNGInfoResponse`, `ProgressRequest`/`ProgressResponse`, `InterrogateRequest`/`InterrogateResponse`, and adjacent API handlers (`pnginfoapi()`, `progressapi()`, `interrogateapi()`), looking for stale response fields, duplicate request/response field declarations, or safe helper consolidation while preserving public OpenAPI schemas and runtime side effects.
