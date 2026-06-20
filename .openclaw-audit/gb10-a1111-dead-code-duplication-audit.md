@@ -2860,3 +2860,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API memory/progress/queue/status and task-control surfaces, especially `get_memory()`, `progressapi()`, `skip()`, `interrupt()`, task-id/state handling, queue-lock/precision-map interactions, `MemoryResponse`/`ProgressResponse`, and focused API progress/task tests, looking for dead response fields or duplicate status-shaping helpers while preserving public API schemas and live task semantics.
+
+## Pass 76 - API memory/progress/queue/status and task-control surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration for `/sdapi/v1/progress`, `/sdapi/v1/interrupt`, `/sdapi/v1/skip`, `/sdapi/v1/memory`, `/sdapi/v1/openclaw/precision-map`, and `/sdapi/v1/precision-map`; `get_precision_map()`, `_call_with_queue_lock()`, `_clear_pending_task_unless_finished()`, `_finish_generation_task()`, `text2imgapi()`, `img2imgapi()`, `progressapi()`, `interruptapi()`, `skip()`, and `get_memory()`.
+- `modules/api/models.py`: `ProgressRequest`, `ProgressResponse`, and `MemoryResponse` public API schemas.
+- `modules/progress.py`: `current_task`, `pending_tasks`, `finished_tasks`, `create_task_id()`, `add_task_to_queue()`, `start_task()`, `finish_task()`, `calculate_progress_and_eta()`, `/internal/pending-tasks`, `/internal/progress`, queue status shaping, live-preview encoding, and `restore_progress()`.
+- Focused contracts and live-test references: `tests/test_api_progress_contract.py`, `test/test_postprocessing_api_defaults.py::test_api_progress_reports_live_current_task_reference`, and `test/test_img2img.py` forced-task cleanup checks.
+
+### Findings and fixes
+- No safe production dead-code or duplication remediation was made in this slice. The apparent overlap between public `/sdapi/v1/progress` and internal `/internal/progress` is intentional: the public API returns the compatibility `ProgressResponse` with `progress`, `eta_relative`, `state`, optional raw base64 `current_image`, `textinfo`, and `current_task`; the internal endpoint returns task-centric queue state (`active`, `queued`, `completed`), data-URI live previews keyed by `id_live_preview`, and queue-position text for UI restore/polling.
+- Preserved `ProgressResponse.current_task`. Existing focused contracts pin that `Api.progressapi()` exposes `progress_module.current_task`, and removing it would break active task-id visibility for API clients.
+- Preserved separate base64 handling in `Api.progressapi()` and `modules.progress.progressapi()`. The public API uses `encode_pil_to_base64()` and honors `skip_current_image`; internal progress intentionally follows `opts.live_previews_enable`, `opts.live_previews_image_format`, preview ID deduplication, and `data:image/...;base64,...` response formatting.
+- Preserved `interruptapi()` and `skip()` as separate public task-control routes. They dispatch to different shared-state operations (`interrupt()` vs `skip()`), and the skip endpoint's empty/implicit response shape is a public compatibility surface.
+- Preserved `get_memory()` and `MemoryResponse` dictionary fields. RAM and CUDA payload subkeys are intentionally runtime-dependent and error-tolerant, so replacing them with stricter structured models would risk breaking clients and cross-platform behavior.
+- Preserved task-id handling in `text2imgapi()` and `img2imgapi()`: `force_task_id` support, `add_task_to_queue()`, `start_task()`, `finish_task()`, bounded `finished_tasks`, and pending cleanup through `_clear_pending_task_unless_finished()` are live semantics used by internal progress polling and forced-task regression tests.
+- Preserved `get_precision_map()`'s direct `queue_lock` use instead of folding it into task-control helpers. Precision-map generation walks `shared.sd_model` and must stay serialized with generation/model reload windows; it is not a stale task-control wrapper.
+
+### Static/dynamic audit map notes
+- Public progress chain remains: `/sdapi/v1/progress` -> `Api.progressapi()` -> `progress_module.calculate_progress_and_eta()` -> `shared.state.set_current_image()` when needed -> `models.ProgressResponse(...)` with `current_task=progress_module.current_task`.
+- Internal task progress chain remains: txt2img/img2img forced/generated task id -> `add_task_to_queue()` -> `start_task()` under `queue_lock` -> `finish_task()`/`shared.state.end()`/`shared.total_tqdm.clear()` -> `/internal/progress` and `/internal/pending-tasks` observe `current_task`, `pending_tasks`, and `finished_tasks`.
+- Memory chain remains: `/sdapi/v1/memory` -> `psutil.Process(...).memory_info()` plus calculated RAM total -> optional CUDA `torch.cuda.mem_get_info()` and `torch.cuda.memory_stats(shared.device)` -> `models.MemoryResponse(ram=..., cuda=...)`.
+- Compatibility surfaces to keep conservative: route paths, response field names, `skip_current_image`, `current_task`, task-id prefixes and `force_task_id`, pending/finished task semantics, live preview data-URI format, `interrupt`/`skip` empty response behavior, memory dict subkeys, and precision-map queue-lock serialization.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass76.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/progress.py test/test_postprocessing_api_defaults.py tests/test_api_progress_contract.py test/test_img2img.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass76.XXXXXX) python3 -m pytest -q tests/test_api_progress_contract.py test/test_postprocessing_api_defaults.py::test_api_progress_reports_live_current_task_reference` - passed: 2 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/progress.py`, `test/test_postprocessing_api_defaults.py`, `tests/test_api_progress_contract.py`, and `test/test_img2img.py` found no actionable production duplicate function bodies. Reported duplicates were test-only fake methods in `test/test_postprocessing_api_defaults.py` and one trivial test fake method overlap (`set_current_image()`/`nextjob()`).
+- `rg -n "pending_tasks|finished_tasks|current_task|force_task_id|start_task\\(|finish_task\\(|restore_progress\\(|/internal/progress|/internal/pending-tasks" modules test tests -S` - confirmed task state producers/consumers are limited and live in generation, internal progress, and focused task cleanup tests.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/progress`, `/sdapi/v1/memory`, `/sdapi/v1/interrupt`, `/sdapi/v1/skip`, `/internal/progress`, and `/internal/pending-tasks` requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API create/train embedding and hypernetwork task surfaces, especially `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `_run_create_task()`, `_run_training_task()`, training device restore/prepare helpers, `CreateResponse`/`TrainResponse`, and focused training/create tests, looking for stale wrappers or duplicate task lifecycle handling while preserving public response strings and training side effects.
