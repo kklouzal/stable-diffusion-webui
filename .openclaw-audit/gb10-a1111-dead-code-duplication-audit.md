@@ -2283,3 +2283,41 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into lower/adjacent image utility code and metadata consumers not deeply covered here, especially PNG Info/extras upload paths (`modules/extras.py`, `modules/img2img.py`, `modules/ui_toprow.py`, `modules/ui_extra_networks*.py`, `modules/api/api.py` image encode/decode metadata branches), looking for duplicated metadata extraction/encoding and dead image-info compatibility helpers while preserving UI/API response contracts.
+
+
+## Pass 60 - Adjacent metadata consumers and PNG Info/extras upload/API paths (2026-06-20)
+
+### Checked scope
+- `modules/extras.py`: `run_pnginfo()`, image metadata extraction/display, and model-merger metadata helpers adjacent to the PNG Info tab.
+- `modules/img2img.py`: batch image upload/directory handling, `use_png_info` metadata import, alternate PNG-info directory behavior, override-setting/model-hash handling, and init image/mask selection.
+- `modules/ui_toprow.py`: prompt-image upload metadata import through `modules.images.image_data()` and prompt file-change wiring.
+- `modules/ui_extra_networks.py`: extra-network preview save compatibility handler, metadata/cover-image endpoints, preview directory allow checks, and gallery preview metadata extraction.
+- `modules/ui_extra_networks_user_metadata.py` plus checkpoint/hypernetwork/textual inversion adjacent modules: user metadata editor preview replacement, local preview update, and page-specific metadata editor contracts.
+- `modules/api/api.py`: `decode_base64_to_image()`, `decode_extras_batch_images()`, `encode_pil_to_base64()`, extras single/batch upload paths, `pnginfoapi()`, `apply_infotext()`, and processed-image API response helpers.
+- Adjacent contracts/tests: `tests/test_extra_networks_path_contract.py`, `tests/test_extra_networks_metadata_contract.py`, `tests/test_api_extension_item_contract.py`, and prior pass notes for `modules/images.py` metadata helpers.
+
+### Findings and fixes
+- Extracted duplicated extra-network gallery preview metadata extraction into `ui_extra_networks.read_gallery_image_metadata()`. The legacy save-preview handler and the user-metadata preview replacement handler now share the same index clamping, Gradio gallery payload decode, and `read_info_from_image()` call.
+- Removed the now-unused `infotext_utils` import from `modules/ui_extra_networks_user_metadata.py`.
+- Preserved the extra-network preview compatibility wrapper and user-metadata editor method as separate UI handlers. They intentionally have different empty-gallery messages, output shapes, allow-directory checks, lister refresh behavior, card refresh behavior, and Gradio callback wiring.
+- Preserved `extras.run_pnginfo()` and `api.pnginfoapi()` as separate UI/API contract surfaces. Both read metadata from an image, but the UI path renders plaintext-safe HTML and returns the legacy three-value Gradio tuple, while the API path parses parameters, fires `infotext_pasted_callback()`, and returns the pydantic response shape with `info`, `items`, and `parameters`.
+- Preserved API image encode/decode helpers. `decode_base64_to_image()` owns URL/data/base64 request validation and HTTP errors; `decode_extras_batch_images()` intentionally skips only invalid batch entries; `encode_pil_to_base64()` preserves API-selected output format and metadata propagation for PNG/JPEG/WebP responses.
+- Preserved `images.image_data()` for prompt-image upload compatibility. It accepts raw file bytes from the hidden prompt upload control and falls back to UTF-8 text decode; this is distinct from API/base64 and Gradio gallery payload decoding.
+- Preserved img2img batch PNG-info import logic. It has batch-specific defaults, alternate metadata image directory support, selected-property filtering, prompt/negative-prompt append semantics, and checkpoint override fallback behavior that should not be merged with PNG Info/API parsing helpers.
+
+### Static/dynamic audit map notes
+- Prompt-image upload chain remains: hidden top-row file input -> `modules.images.image_data()` -> prompt textbox text plus prompt file reset.
+- PNG Info UI chain remains: image input -> `extras.run_pnginfo()` -> `images.read_info_from_image()` -> HTML infotext blocks plus geninfo text output.
+- API PNG-info chain remains: base64/URL image decode -> `images.read_info_from_image()` -> generation-parameter parse -> paste callback -> `PNGInfoResponse`.
+- Extra-network preview save chain now shares only gallery image/metadata extraction: selected gallery index -> `read_gallery_image_metadata()` -> caller-specific permission/update behavior -> `save_image_with_geninfo()`.
+- Compatibility surfaces to keep conservative: Gradio callback input/output tuple shapes, JavaScript selected-gallery index wiring, preview allow-directory assertions, API error details/status codes, API response field names, `infotext_pasted_callback()` side effects, and img2img batch PNG-info property semantics.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass60.XXXXXX) python3 -m py_compile modules/extras.py modules/img2img.py modules/ui_toprow.py modules/ui_extra_networks.py modules/ui_extra_networks_user_metadata.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_checkpoints_user_metadata.py modules/ui_extra_networks_hypernets.py modules/ui_extra_networks_textual_inversion.py modules/api/api.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass60.XXXXXX) python3 -m pytest -q tests/test_extra_networks_path_contract.py tests/test_extra_networks_metadata_contract.py tests/test_api_extension_item_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/extras.py`, `modules/img2img.py`, `modules/ui_toprow.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_checkpoints_user_metadata.py`, `modules/ui_extra_networks_hypernets.py`, `modules/ui_extra_networks_textual_inversion.py`, and `modules/api/api.py` reported no duplicate nontrivial function body groups.
+- `git diff --check` - passed.
+- Live browser/UI upload, paste/send-to, and API image upload calls were not exercised because they require a running WebUI/API session and runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into infotext/paste/send-to plumbing around `modules/infotext_utils.py`, `modules/ui.py`, `modules/ui_common.py`, `modules/generation_parameters_copypaste.py`, and txt2img/img2img paste-field registration, looking for duplicated paste-field mapping, stale compatibility wrappers, and dead image-info helpers while preserving extension-visible paste/send-to behavior and UI/API infotext contracts.

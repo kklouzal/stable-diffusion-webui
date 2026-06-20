@@ -5,7 +5,7 @@ import os.path
 
 from modules import headless_ui as gr
 
-from modules import infotext_utils, images, sysinfo, errors, ui_extra_networks
+from modules import images, sysinfo, errors, ui_extra_networks
 
 
 class UserMetadataEditor:
@@ -178,13 +178,7 @@ class UserMetadataEditor:
 
         item = self.page.items.get(name, {})
 
-        index = int(index)
-        index = 0 if index < 0 else index
-        index = len(gallery) - 1 if index >= len(gallery) else index
-
-        img_info = gallery[index if index >= 0 else 0]
-        image = infotext_utils.image_from_url_text(img_info)
-        geninfo, items = images.read_info_from_image(image)
+        image, geninfo = ui_extra_networks.read_gallery_image_metadata(gallery, index)
 
         images.save_image_with_geninfo(image, geninfo, item["local_preview"])
         self.page.lister.update_file_entry(item["local_preview"])

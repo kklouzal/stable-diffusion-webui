@@ -812,6 +812,18 @@ def path_is_parent(parent_path, child_path):
         return False
 
 
+def read_gallery_image_metadata(gallery, index):
+    index = int(index)
+    index = 0 if index < 0 else index
+    index = len(gallery) - 1 if index >= len(gallery) else index
+
+    image_info = gallery[index]
+    image = image_from_url_text(image_info)
+    geninfo, _ = read_info_from_image(image)
+
+    return image, geninfo
+
+
 def setup_ui(ui, gallery):
     def save_preview(index, images, filename):
         # this function is here for backwards compatibility and likely will be removed soon
@@ -820,13 +832,7 @@ def setup_ui(ui, gallery):
             print("There is no image in gallery to save as a preview.")
             return [page.create_html(ui.tabname) for page in ui.stored_extra_pages]
 
-        index = int(index)
-        index = 0 if index < 0 else index
-        index = len(images) - 1 if index >= len(images) else index
-
-        img_info = images[index if index >= 0 else 0]
-        image = image_from_url_text(img_info)
-        geninfo, items = read_info_from_image(image)
+        image, geninfo = read_gallery_image_metadata(images, index)
 
         is_allowed = False
         for extra_page in ui.stored_extra_pages:
