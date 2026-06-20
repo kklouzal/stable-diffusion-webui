@@ -223,3 +223,40 @@ Resumed-slice status:
 Next unchecked scope:
 - A final owner review can decide whether to broaden beyond generation-quality math/logic into non-generation surfaces, documentation, UI-only behavior, or full integration tests after installing/using an approved test surface with both `torch` and `pytest` available. Do not push until the owner reviews the ahead commits.
 
+
+
+### 2026-06-20 pass 9 - broadened UI/config/save/history HTML surfaces
+Preflight:
+- Rechecked `git status --short --branch`: `latest...origin/latest [ahead 9]` before edits.
+- Rechecked HEAD: `815237f3c64ae1b14539554912b5e673a44ce40f` before edits.
+- Read ledger tail; previous generation-adjacent pass had stopped at the audit boundary and explicitly left non-generation surfaces for owner-approved broadening.
+
+Checked:
+- `modules/options.py`, `modules/shared_options.py`: option registration, load migrations, bad-type warnings, restricted/frozen setting guards, save/load behavior; no data-loss or state-consistency defect found in the inspected paths.
+- `modules/config_states.py`: config-state discovery, webui/extension snapshot collection, webui restore, extension restore result aggregation; no source edit in this pass. Noted restore remains intentionally destructive because it is the feature contract for restoring a saved commit set.
+- `modules/ui_loadsave.py`: UI defaults load/save, component mapping, dropdown/radio validation, default review/apply flow. Found and fixed unescaped `gr.HTML` table rendering of saved/default UI paths and old/new values.
+- `modules/ui_common.py`: output-panel image save/download, `log.csv` header migration/padding, save-selected image handling, zip creation, and output-path message rendering; no defect found. Saved-path status uses `plaintext_to_html`, and CSV writes use `csv.writer`.
+- `modules/ui_tempdir.py`: temp-file registration/checking, PNG metadata preservation, custom temp dir registration, cleanup of PNG-only temp files, and temp-path detection; no defect found in this pass.
+- `modules/ui_extensions.py`: installed-extension table, commit links, backup/restore config-state table, install result output, and available-extension table escaping. Found and fixed unescaped HTML rendering for branch/status/version/config-backup fields and commit-link text/href.
+- `modules/styles.py`: style CSV loading/saving, backup file creation, prompt/style merge and extraction logic; no defect found in inspected paths.
+
+Findings/fixes:
+- Fixed UI defaults review HTML injection: `modules/ui_loadsave.py` now escapes table paths and old/new values while preserving the intentional `None` marker span.
+- Fixed extension/config backup table HTML injection: `modules/ui_extensions.py` now escapes commit-link text/href, extension status/version/branch, config backup name/path, webui branch, and saved extension branch fields.
+- Added focused contract tests in `tests/test_ui_loadsave_contract.py` and `tests/test_ui_extensions_contract.py` for the escaping behavior without requiring Torch or a full Gradio startup.
+
+Commits:
+- `15039ba3 Escape UI backup and defaults HTML`
+
+Validation:
+- `python3 -m py_compile modules/ui_loadsave.py modules/ui_extensions.py tests/test_ui_loadsave_contract.py tests/test_ui_extensions_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_ui_loadsave_contract.py tests/test_ui_extensions_contract.py` -> passed, 3 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `python3 -m py_compile modules/options.py modules/shared_options.py modules/config_states.py modules/ui_loadsave.py modules/ui_common.py modules/ui_tempdir.py modules/ui_extensions.py modules/styles.py tests/test_ui_loadsave_contract.py tests/test_ui_extensions_contract.py` -> passed.
+- `git diff --check` -> passed after setting this worktree's Git whitespace check to include `cr-at-eol`, matching the existing CRLF style of `modules/ui_extensions.py` and avoiding false positives on CRLF-added lines.
+
+References:
+- Python stdlib `html.escape` semantics for escaping `&`, `<`, `>`, and quotes in HTML text/attribute contexts.
+- Local existing escaping patterns in `modules/ui_common.py` and `modules/ui_extensions.py`.
+
+Next unchecked scope:
+- Continue broadened audit with API/runtime/state surfaces not already covered in generation passes: `modules/call_queue.py`, `modules/progress.py`, `modules/shared_state.py`, `modules/shared.py`, `modules/shared_items.py`, `modules/shared_init.py`, `modules/initialize.py`, `modules/initialize_util.py`, `modules/launch_utils.py`, `modules/restart.py`, `modules/sysinfo.py`, `modules/errors.py`, `modules/localization.py`, and then JavaScript frontend state/history files beginning with `javascript/ui.js`, `generationParams.js`, `localStorage.js`, `progressbar.js`, `imageviewer.js`, and `extensions.js`.
