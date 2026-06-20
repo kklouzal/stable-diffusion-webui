@@ -29,8 +29,6 @@ from modules.sd_models_config import find_checkpoint_config_near_filename
 from modules.realesrgan_model import get_realesrgan_models
 from modules import devices
 from typing import Any
-import piexif
-import piexif.helper
 from contextlib import closing
 from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
 
@@ -461,9 +459,7 @@ def encode_pil_to_base64(image):
             if image.mode in ("RGBA", "P"):
                 image = image.convert("RGB")
             parameters = image.info.get('parameters', None)
-            exif_bytes = piexif.dump({
-                "Exif": { piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(parameters or "", encoding="unicode") }
-            })
+            exif_bytes = images.geninfo_to_exif_bytes(parameters)
             if opts.samples_format.lower() in ("jpg", "jpeg"):
                 image.save(output_bytes, format="JPEG", exif = exif_bytes, quality=opts.jpeg_quality)
             else:

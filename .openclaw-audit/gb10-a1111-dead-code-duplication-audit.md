@@ -1019,3 +1019,46 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: remaining generation/result serialization and API/reporting surfaces adjacent to processing caches, especially `modules/api/api.py` txt2img/img2img response models and infotext overrides, `modules/images.py` metadata save/read helpers, `modules/infotext_utils.py` parse/paste mappings, `modules/generation_parameters_copypaste.py`, `modules/ui_common.py` save/download paths, and adjacent serialization/infotext tests.
+
+
+## Pass 24 - generation/result serialization and API/reporting surfaces adjacent to processing caches (2026-06-20)
+
+### Checked scope
+- API generation/result serialization in `modules/api/api.py` and `modules/api/models.py`, including txt2img/img2img request/response models, `text2imgapi()`, `img2imgapi()`, `apply_infotext()`, `api_infotext_value_for_field()`, `processed_js_with_image_paths()`, `encode_pil_to_base64()`, `decode_base64_to_image()`, and `pnginfoapi()`.
+- Image metadata save/read helpers in `modules/images.py`, including `save_image_with_geninfo()`, `save_image()`, EXIF/PNG/GIF metadata writing, `read_info_from_image()`, `image_data()`, and the `already_saved_as` path used by API response reporting.
+- Infotext parse/paste compatibility in `modules/infotext_utils.py`, including the `modules.generation_parameters_copypaste` alias, paste field registration, image-from-URL/file parsing, inpaint label conversion helpers, `parse_generation_parameters()`, override-setting mapping helpers, and paste connection logic.
+- UI save/download paths in `modules/ui_common.py`, including gallery generation-info switching, `save_files()`, CSV log update, selected-image vs save-all indexing, zip archive creation, and output panel save/download wiring.
+- Adjacent tests/contracts: `test/test_infotext_api_mappings.py`, `tests/test_save_serialization_contract.py`, `test/test_images_save.py`, and `tests/test_processing_auxiliary_infotext_alignment.py`.
+- Focused duplicate/reachability checks: grep fanout for response models, infotext aliases, metadata read/write helpers, save/download functions, and exact AST duplicate-body scan across the targeted API/images/infotext/UI files and adjacent tests.
+
+### Findings and fixes
+- Deduplicated generation-info EXIF user-comment serialization by adding `images.geninfo_to_exif_bytes()` and reusing it from `save_image_with_geninfo()` for JPEG/WebP/AVIF metadata and from API `encode_pil_to_base64()` for JPEG/WebP base64 responses.
+- Removed the now-unneeded direct `piexif` imports from `modules/api/api.py`; EXIF encoding details are centralized in `modules/images.py`, where image metadata read/write helpers already live.
+- No safe dead response-model, infotext, paste, or UI save/download deletion was found. The sparse-looking functions are public API/UI/extension compatibility surfaces or are covered by focused contract tests.
+- Exact duplicate-body scan across the pass-24 target set reported no remaining nontrivial duplicate function bodies at the 500-character threshold after remediation.
+
+### Preserved compatibility/dead-code decisions
+- `TextToImageResponse`, `ImageToImageResponse`, `PNGInfoResponse`, `send_images`, `save_images`, `include_init_images`, `force_task_id`, and `infotext` request fields remain stable API schema/behavior surfaces.
+- `processed_js_with_image_paths()` remains an API reporting wrapper because it augments `Processed.js()` with saved image paths and OpenClaw timing/cache diagnostics without changing the base UI JSON contract.
+- `apply_infotext()` and `api_infotext_value_for_field()` remain API-specific glue around shared paste mappings because they must coerce Pydantic field types and fill script args from Gradio components.
+- `modules.generation_parameters_copypaste` remains an alias to `modules.infotext_utils` for old extension imports; there is intentionally no real `modules/generation_parameters_copypaste.py` file.
+- `infotext_to_setting_name_mapping` remains an empty compatibility extension hook for older mapping-style overrides; current first-party settings use `OptionInfo(..., infotext=...)`.
+- Inpaint label conversion helpers remain separate named functions because tests and paste/API mappings rely on exact label-to-value behavior for mask mode, masked content, and inpaint area.
+- `save_files()` retains its UI-specific gallery/data-url handling, selected-index behavior, CSV append, and zip creation rather than sharing API response serialization code; the UI path works from already-rendered gallery payloads and generation-info JSON, not processing objects.
+- `read_info_from_image()` preserves PNG `parameters`, EXIF `UserComment`, GIF `comment`, and NovelAI compatibility parsing.
+
+### Static/dynamic audit map notes
+- API generation chain: txt2img/img2img requests may apply infotext first, resolve sampler/scheduler aliases, strip API-only fields before constructing processing objects, run under the API queue lock, optionally serialize images through `encode_pil_to_base64()`, and return `Processed.js()` augmented by OpenClaw path/cache/timing fields.
+- API image metadata chain: PNG base64 responses copy string metadata from `image.info`; JPEG/WebP responses now call `images.geninfo_to_exif_bytes()` with the image `parameters` string; decoded PNG-info requests call `images.read_info_from_image()` then parse/publish infotext callbacks.
+- UI save chain: output panel buttons pass generation-info JSON and gallery file data to `save_files()`, which reconstructs a lightweight processing-like object for filename patterns, parses per-image infotext, calls `images.save_image()`, updates CSV when enabled, and optionally zips saved files for the download component.
+- Infotext paste chain: UI registration stores per-tab paste fields, compatibility aliases update `modules.ui.*_paste_fields`, paste buttons can send images/dimensions or text fields, and API infotext application reuses the same field definitions with Pydantic type coercion.
+- Compatibility surfaces to continue treating conservatively: API response/request field names, `/sdapi/v1/png-info` response shape, `image.info['parameters']`, EXIF UserComment behavior, `modules.generation_parameters_copypaste`, paste field tuple shape, `ParamBinding` attributes, `infotext_to_setting_name_mapping`, UI `generation_info` JSON shape, save/download Gradio component behavior, and CSV log field order.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass24 python3 -m py_compile modules/api/api.py modules/api/models.py modules/images.py modules/infotext_utils.py modules/ui_common.py test/test_infotext_api_mappings.py tests/test_save_serialization_contract.py test/test_images_save.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `python3 -m pytest -q test/test_infotext_api_mappings.py tests/test_save_serialization_contract.py test/test_images_save.py tests/test_processing_auxiliary_infotext_alignment.py` - passed: 21 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across the pass-24 target files and adjacent tests reported no duplicate nontrivial function bodies after remediation.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: remaining progress/reporting and API utility surfaces around task state, progress previews, extras/postprocessing serialization, interrogate/png-info/reporting routes, and adjacent tests, especially the rest of `modules/api/api.py`, `modules/api/models.py`, `modules/progress.py`, `modules/ui.py` progress helpers, `modules/postprocessing.py`, and API progress/extras tests.
