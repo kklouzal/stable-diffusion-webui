@@ -3709,3 +3709,42 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from media exposure into remaining server/static-file and path-safety surfaces, especially `modules/server.py`, `modules/ui.py` static route setup, `modules/ui_html_extensions.py`, `modules/util.py` path/open helpers, `modules/safe.py`, and adjacent launch/API route wiring, looking for stale path-disclosure wrappers or duplicate local/remote resource guards while preserving extension compatibility and UI/API serving behavior.
+## Pass 101 - Server/static-file and path-safety surfaces (2026-06-20)
+
+### Scope checked
+- `modules/server.py`: confirmed absent in this GB10 `latest` checkout; server/API wiring is in `webui.py`, `modules/api/api.py`, `modules/ui.py`, and `modules/launch_utils.py`.
+- `webui.py`: `create_api()`, `api_only()`, `webui()` headless-only guard, `FastAPI()` construction, middleware setup, API callback launch flow, `root_path`/port/server-name handoff.
+- `modules/api/api.py`: `api_middleware()`, API route registration in `Api.__init__()`, `Api.launch()`, HTTP exception handling, request timing/log middleware, API base64 local/remote image guards in the adjacent decode/encode path.
+- `modules/ui.py`: MIME registrations, headless UI helper overrides, ngrok connection hook, `setup_ui_api()`, internal routes, and `/webui-assets` static mount setup.
+- `modules/ui_html_extensions.py`: `webpath()`, `javascript_html()`, `css_html()`, `reload_javascript()`, `UITemplateResponseOriginal` preservation, script/CSS injection, extension JS/MJS/style discovery, and `file=` cache-busted resource URLs.
+- `modules/util.py`: `truncate_path()`, `html_path()`, `html()`, `walk_files()`, `open_folder()`, `load_file_from_url()` path construction, and `MassFileLister` file metadata helpers.
+- `modules/safe.py`: `RestrictedUnpickler`, zip member allow-list validation, `check_pt()`, `load()`, `load_with_extra()`, `Extra`, and the `torch.load` monkeypatch surface.
+- Adjacent route/path tests and launch wiring: `tests/test_api_server_control_contract.py`, `test/test_safe.py`, `modules/cmd_args.py` `--gradio-allowed-path` compatibility option, `modules/initialize_util.py` TLS/server helper checks, and `modules/ui_common.py` `open_folder()` selected-gallery path handoff.
+
+### Findings / fixes
+- No source code changes were made. The inspected server/static/path-safety wrappers are live serving, compatibility, or security surfaces, and no safe dead-code removal or helper consolidation was found in this bounded slice.
+- Preserved `modules/ui_html_extensions.webpath()` and its `file={util.truncate_path(...)}?mtime` shape. It is the active script/CSS/profiling resource URL path used by `reload_javascript()` and `modules/profiling.py`, and changing it would affect Gradio static file serving/cache busting.
+- Preserved separate `util.truncate_path()` and path-parent logic elsewhere. `truncate_path()` is presentation/resource-URL oriented and intentionally falls back to absolute paths outside the repo; security-sensitive model/extra-network parent checks use `commonpath` locally at their trust boundaries and are not safe duplicates to merge in this slice.
+- Preserved `util.open_folder()` and `ui_common.create_output_panel()`'s selected-gallery open-folder wrapper. The UI wrapper filters temp gallery paths and honors `hide_ui_dir_config`; the utility wrapper performs OS-specific folder opening and non-directory warnings.
+- Preserved `modules/ui.setup_ui_api()` `/webui-assets` mount even though browser UI startup is disabled by `webui.webui()`. `setup_ui_api()` remains an extension/headless UI compatibility surface and internal route registration hook when UI construction is exercised by tests or external callers.
+- Preserved `webui.create_api()` as a small launch indirection. `api_only()` and `modules.launch_utils.start()` both depend on the current module-level API construction pattern, and tests load API control code by method names.
+- Preserved `modules.safe` helper layers and the `Extra` context manager. `load()`, `load_with_extra()`, `unsafe_torch_load`, and `torch.load = load` are extension-facing checkpoint load surfaces, while zip filename validation is a distinct model safety boundary.
+- Preserved `--gradio-allowed-path` even though no direct current source caller was found in this headless fork. It is documented as a legacy UI compatibility CLI option with a default `data_path`, and removing it would be a public argument break rather than safe dead code.
+
+### Static/dynamic audit map notes
+- API-only launch chain remains: `launch_utils.start()` -> `webui.api_only()` -> `initialize.initialize()` -> `FastAPI()` -> `initialize_util.setup_middleware()` -> `webui.create_api()` -> `Api.__init__()` route registration/middleware -> callbacks -> `Api.launch()` -> `uvicorn.run()` with server, port, root path, keep-alive, and TLS options.
+- Static UI asset chain remains: `ui.setup_ui_api()` adds internal helper routes and mounts `/webui-assets`; `ui_html_extensions.reload_javascript()` injects cache-busted `file=` URLs for core script, extension JavaScript/MJS, extension CSS, `user.css`, and theme background CSS.
+- Local open-folder chain remains: output-panel JS supplies selected gallery index -> `ui_common.open_folder()` chooses output or non-temp selected image directory -> `util.open_folder()` validates existence/directory and dispatches to the platform file manager.
+- Safe-load chain remains: module import stores original `torch.load` in `unsafe_torch_load` -> monkeypatches `torch.load` to `safe.load()` -> `safe.load_with_extra()` runs restricted pickle/zip validation unless disabled -> calls original torch loader with legacy `weights_only=False` default.
+- Compatibility/security surfaces kept conservative: extension JS/CSS discovery, `file=` URL semantics, Gradio template response monkeypatching, `shared.UITemplateResponseOriginal`, legacy browser UI/internal routes, `--gradio-allowed-path`, OS-specific open-folder behavior, TLS/root-path launch options, API error shape, API logging headers, and extension-safe unpickle customization.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass101.XXXXXX) python3 -m py_compile modules/ui.py modules/ui_html_extensions.py modules/util.py modules/safe.py modules/api/api.py webui.py modules/launch_utils.py tests/test_api_server_control_contract.py test/test_safe.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass101.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py test/test_safe.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Reference scan confirmed expected server/static/path-safety callers for `webpath`, `reload_javascript`, `truncate_path`, `open_folder`, `setup_ui_api`, `create_api`, `api_middleware`, `safe.load_with_extra`, and `unsafe_torch_load`; no tracked `modules/server.py` exists in this checkout.
+- Exact AST duplicate function/class scan across `modules/ui.py`, `modules/ui_html_extensions.py`, `modules/util.py`, `modules/safe.py`, `modules/api/api.py`, `webui.py`, and `modules/launch_utils.py` reported only empty/pass-style body collisions (`setup_progressbar`, tiny fallback context-manager methods, and API stub classes), not actionable duplicate logic.
+- `git diff --check` - passed before the ledger edit and will be re-run before commit.
+- Live WebUI startup, browser asset fetching, real `/webui-assets` HTTP requests, real Gradio `file=` resource serving, OS file-manager launch, and malicious checkpoint loading were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from server/static/path-safety into model/path parent-check and metadata exposure helpers, especially `modules/sd_models.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/modelloader.py`, and adjacent tests, looking for duplicate parent-path checks or stale metadata path wrappers while preserving checkpoint discovery, preview serving, extension metadata, and traversal protections.
