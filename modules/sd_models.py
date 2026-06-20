@@ -784,13 +784,15 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     remap_sdxl_clip_text_model_state_dict_if_needed(model, state_dict)
 
-    if shared.opts.sd_checkpoint_cache > 0 and not check_mxfp8(model) and not check_nvfp4(model):
+    mxfp8_enabled = check_mxfp8(model)
+    nvfp4_enabled = check_nvfp4(model)
+    if shared.opts.sd_checkpoint_cache > 0 and not mxfp8_enabled and not nvfp4_enabled:
         # cache newly loaded non-TorchAO-quantized model. MXFP8/NVFP4 reloads
         # need a pristine state_dict because LoadStateDictOnMeta intentionally
         # mutates its input and stale/meta cache entries can later fail with
         # "Cannot copy out of meta tensor; no data!".
         checkpoints_loaded[checkpoint_info] = state_dict.copy()
-    elif check_mxfp8(model) or check_nvfp4(model):
+    elif mxfp8_enabled or nvfp4_enabled:
         # TorchAO quantized paths must never retain checkpoint state-dict cache
         # entries: the optimized/meta loading path can mutate cached tensors
         # into meta placeholders, and later reloads need pristine disk reads.

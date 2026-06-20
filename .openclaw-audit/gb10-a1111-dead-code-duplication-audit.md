@@ -4118,3 +4118,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from registry refresh internals into checkpoint selection/load/cache internals, especially `sd_models.get_closet_checkpoint_match()`, `select_checkpoint()`, `get_checkpoint_state_dict()`, `load_model_weights()`, `reuse_model_from_already_loaded()`, `unload_model_weights()`, and adjacent cache/metadata tests, looking for stale cache invalidation branches or duplicate checkpoint lookup/loading paths while preserving model cache semantics, alias compatibility, and reload side effects.
+
+## Pass 113 - Checkpoint selection/load/cache internals (2026-06-20)
+
+### Scope checked
+- `modules/sd_models.py`: `get_closet_checkpoint_match()`, `select_checkpoint()`, `get_checkpoint_state_dict()`, `load_model_weights()`, `reuse_model_from_already_loaded()`, `reload_model_weights()` adjacency, `unload_model_weights()`, `CheckpointInfo.calculate_shorthash()`, checkpoint alias/cache globals, `SdModelData.set_sd_model()`, and adjacent TorchAO checkpoint-cache invalidation branches.
+- Adjacent public/API/UI/extension call sites: checkpoint override parsing in `modules/img2img.py`, `modules/processing.py`, `modules/processing_scripts/refiner.py`, `modules/ui.py`, `scripts/prompts_from_file.py`, `scripts/xyz_grid.py`, API unload/reload routes in `modules/api/api.py`, UI unload settings in `modules/ui_settings.py`, and OpenClaw clear-cond-cache wrappers around checkpoint load/reload hooks.
+- Adjacent tests: `tests/test_sd_models_checkpoint_info_contract.py`, checkpoint unload/reload contract coverage in `tests/test_api_server_control_contract.py`, and extension cache-wrapper tests by reference.
+
+### Findings / fixes
+- Consolidated duplicate MXFP8/NVFP4 policy checks in `load_model_weights()` by caching `check_mxfp8(model)` and `check_nvfp4(model)` results before checkpoint state-dict cache handling. This keeps the same cache-store/clear semantics while avoiding repeated policy/device option evaluation in the same branch.
+- Preserved `get_closet_checkpoint_match()` including the historical typo. It is the live public compatibility spelling used by scripts, processing, UI, and img2img parameter parsing; adding or renaming aliases would broaden the public surface without removing dead code.
+- Preserved `select_checkpoint()` fallback behavior and error text. It is the central options-to-registry lookup and no-checkpoints failure surface used by model loading, textual inversion training, and lowvram processing paths.
+- Preserved `get_checkpoint_state_dict()` returning cached state dicts by reference and moving cache entries to LRU tail. Existing reload/TorchAO branches depend on explicit invalidation rather than hidden copies, and changing this would alter memory/cache behavior.
+- Preserved `reuse_model_from_already_loaded()` branches. They enforce checkpoint limit eviction, CPU retention, stale TorchAO policy eviction, already-loaded VAE state restoration, and model reuse/new-load behavior that is externally controlled by options.
+- Preserved `unload_model_weights(sd_model=None, info=None)` signature despite the unused `info` parameter. The function is called by API/UI surfaces and extension code may rely on the permissive signature.
+
+### Static/dynamic audit map notes
+- Checkpoint selection chain remains: user/override string -> `checkpoint_aliases` / substring checksum-stripped match -> `CheckpointInfo` -> `select_checkpoint()` fallback when configured checkpoint is absent.
+- State-dict cache chain remains: `get_checkpoint_state_dict()` calculates shorthash -> reads `checkpoints_loaded` LRU by `CheckpointInfo` object -> reads disk on miss -> `load_model_weights()` stores a shallow copy only when `sd_checkpoint_cache > 0` and MXFP8/NVFP4 are inactive -> TorchAO quantized paths clear the cache.
+- Loaded-model cache chain remains: `reload_model_weights()` -> `reuse_model_from_already_loaded()` -> stale TorchAO policy eviction / sd_checkpoints_limit trimming / CPU or device migration / VAE state restoration -> either reuse, allocate another loaded model slot, or recycle an existing model instance.
+- Compatibility surfaces kept conservative: misspelled `get_closet_checkpoint_match`, `checkpoint_alisases`, `unload_model_weights(..., info=None)`, checkpoint alias keys/hash metadata, `sd_model_checkpoint` and `sd_checkpoint_hash` writes, checkpoint reload callbacks, VAE restoration, lowvram/offload behavior, and OpenClaw cache-wrapper hook names.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass113.XXXXXX) python3 -m py_compile modules/sd_models.py modules/sd_models_config.py modules/sd_models_types.py modules/sd_vae.py tests/test_sd_models_checkpoint_info_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass113.XXXXXX) python3 -m pytest -q tests/test_sd_models_checkpoint_info_contract.py` - passed: 2 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed scoped checkpoint selection/load/cache functions and aliases are referenced by expected scripts, processing, API/UI, extension wrapper, and focused test surfaces.
+- Exact AST duplicate-body scan across `modules/sd_models.py` and `tests/test_sd_models_checkpoint_info_contract.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, actual checkpoint file loading/reloading, CUDA memory/offload behavior, and real MXFP8/NVFP4 cache invalidation under a loaded model were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from checkpoint load/cache internals into checkpoint config/model-instantiation internals, especially `load_model()`, `instantiate_from_config()`, `sd_models_config.find_checkpoint_config()`, `repair_config()`, `set_model_type()`, `set_model_fields()`, and adjacent model-type/config tests, looking for duplicate config inference or stale compatibility branches while preserving checkpoint reload side effects, model-type metadata, config repair behavior, and extension callbacks.
