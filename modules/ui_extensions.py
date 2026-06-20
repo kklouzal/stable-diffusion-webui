@@ -426,16 +426,23 @@ def refresh_available_extensions(url, selected_tags, showing_type, filtering_typ
     return url, code, gr.CheckboxGroup.update(choices=tags), '', ''
 
 
-def refresh_available_extensions_for_tags(selected_tags, showing_type, filtering_type, sort_column, filter_text):
+def refresh_available_extensions_filtered(selected_tags, showing_type, filtering_type, sort_column, filter_text):
     code, _ = refresh_available_extensions_from_data(selected_tags, showing_type, filtering_type, sort_column, filter_text)
-
     return code, ''
+
+
+def refresh_available_extensions_for_tags(selected_tags, showing_type, filtering_type, sort_column, filter_text):
+    return refresh_available_extensions_filtered(selected_tags, showing_type, filtering_type, sort_column, filter_text)
 
 
 def search_extensions(filter_text, selected_tags, showing_type, filtering_type, sort_column):
-    code, _ = refresh_available_extensions_from_data(selected_tags, showing_type, filtering_type, sort_column, filter_text)
-
-    return code, ''
+    return refresh_available_extensions_filtered(
+        selected_tags=selected_tags,
+        showing_type=showing_type,
+        filtering_type=filtering_type,
+        sort_column=sort_column,
+        filter_text=filter_text,
+    )
 
 
 sort_ordering = [
