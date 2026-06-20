@@ -77,6 +77,7 @@ class Grid(namedtuple("_Grid", ["tiles", "tile_w", "tile_h", "image_w", "image_h
 
 def split_grid(image: Image.Image, tile_w: int = 512, tile_h: int = 512, overlap: int = 64) -> Grid:
     w, h = image.size
+    overlap = max(0, min(overlap, tile_w - 1, tile_h - 1, w - 1, h - 1))
 
     non_overlap_width = tile_w - overlap
     non_overlap_height = tile_h - overlap

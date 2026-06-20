@@ -105,6 +105,7 @@ def tiled_upscale_2(
 
     b, c, h, w = img.size()
     tile_size = min(tile_size, h, w)
+    tile_overlap = max(0, min(tile_overlap, tile_size - 1))
 
     if tile_size <= 0:
         logger.debug("Upscaling %s without tiling", img.shape)
