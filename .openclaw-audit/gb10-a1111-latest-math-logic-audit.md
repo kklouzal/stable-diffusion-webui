@@ -260,3 +260,38 @@ References:
 
 Next unchecked scope:
 - Continue broadened audit with API/runtime/state surfaces not already covered in generation passes: `modules/call_queue.py`, `modules/progress.py`, `modules/shared_state.py`, `modules/shared.py`, `modules/shared_items.py`, `modules/shared_init.py`, `modules/initialize.py`, `modules/initialize_util.py`, `modules/launch_utils.py`, `modules/restart.py`, `modules/sysinfo.py`, `modules/errors.py`, `modules/localization.py`, and then JavaScript frontend state/history files beginning with `javascript/ui.js`, `generationParams.js`, `localStorage.js`, `progressbar.js`, `imageviewer.js`, and `extensions.js`.
+
+
+### 2026-06-20 pass 10 - runtime queue/progress/shared init/error handling
+Checked:
+- `modules/call_queue.py`: queue lock usage, UI/GPU call wrappers, exception-to-HTML path, state reset, memmon/profiling HTML append; no defect found in inspected paths.
+- `modules/progress.py`: task queue state, pending/progress API models, active/queued/completed reporting, progress/ETA math, live preview encoding, and result restore window; no defect found in inspected paths.
+- `modules/shared_state.py`: job lifecycle, interrupt/skip/stop flags, restart command event, live preview image assignment, and state dict; no defect found in inspected paths.
+- `modules/errors.py`: exception recording/reporting/display helpers and wrapper `run`; found and fixed an argument-order bug in `run` that could make the error handler fail while trying to report a wrapped exception.
+- `modules/shared.py`, `modules/shared_items.py`, `modules/shared_init.py`: shared singleton setup, option/template wiring, dtype/device initialization, lazy model property, callback-order option generation; no non-generation runtime defect found in inspected paths.
+- `modules/initialize_util.py`: restart-config restore, TLS option validation, auth credential parsing, signal handler, options onchange registration, and CORS/GZip middleware setup; no defect found in inspected paths.
+- `modules/launch_utils.py`: version/source detection, subprocess wrapper, git clone/pull helpers, extension installer dispatch, requirements check, and extension list handling; no source edit in this pass.
+- `modules/restart.py`, `modules/localization.py`, `modules/sysinfo.py`, `modules/util.py`: restart marker/exit, localization JSON merge to JS, sysinfo checksum/env/config/package collection, file walking/sorting/open-folder helpers; no defect found in inspected paths.
+
+Findings/fixes:
+- Fixed `errors.run` to call `display(e, task)` instead of `display(task, e)`, preserving the intended error-reporting path when wrapped code raises.
+- Added `tests/test_errors_contract.py` to assert `errors.run` reports the wrapped exception without raising a secondary exception.
+- Follow-up commit restored `modules/errors.py` CRLF line endings so the net tree diff remains the intended one-line logic fix plus test.
+
+Commits:
+- `e6109dde Fix errors.run exception display`
+- `c7d0dc5e Restore errors module line endings`
+
+Validation:
+- `python3 -m py_compile modules/errors.py tests/test_errors_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_errors_contract.py` -> passed, 1 test; existing pytest warning remains `Unknown config option: base_url`.
+- `python3 -m py_compile modules/call_queue.py modules/progress.py modules/shared_state.py modules/errors.py modules/shared.py modules/shared_items.py modules/shared_init.py modules/initialize_util.py modules/launch_utils.py modules/restart.py modules/localization.py modules/sysinfo.py modules/util.py tests/test_errors_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_errors_contract.py tests/test_ui_loadsave_contract.py tests/test_ui_extensions_contract.py` -> passed, 4 tests; same existing `base_url` warning.
+- `git diff --check` -> passed.
+
+References:
+- Python `traceback.TracebackException.from_exception` call contract as used locally by `display(e, task)`.
+- Local wrapper pattern in `display_once(e, task)` confirmed the intended argument order.
+
+Next unchecked scope:
+- Continue broadened audit with JavaScript frontend state/history and browser-side save/send behavior: `javascript/ui.js`, `generationParams.js`, `localStorage.js`, `progressbar.js`, `imageviewer.js`, `imageviewerGamepad.js`, `extraNetworks.js`, `extensions.js`, `settings.js`, `token-counters.js`, `dragdrop.js`, and `edit-attention.js`; then return to remaining API/postprocessing/file-history surfaces not already covered.
