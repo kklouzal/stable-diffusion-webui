@@ -3533,3 +3533,40 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from settings helper surfaces into script/default metadata extraction and option override plumbing, especially `modules/scripts.py`, `modules/scripts_auto_postprocessing.py`, `modules/scripts_postprocessing.py`, `modules/infotext_utils.py`, and override-settings UI/API paths, looking for stale script-control/default wrappers or duplicate override mapping logic while preserving extension callback/script APIs and infotext/API compatibility.
+
+## Pass 96 - Script/default metadata extraction and option override plumbing (2026-06-20)
+
+### Scope checked
+- `modules/scripts.py`: `Script` public hook/default methods, `ScriptRunner.initialize_scripts()`, `create_script_ui()`, `create_script_ui_inner()`, script control metadata extraction, API `ScriptInfo` construction, script arg slicing/timing helpers, `set_named_arg()`, and reload compatibility alias.
+- `modules/scripts_auto_postprocessing.py`: `ScriptPostprocessingForMainUI`, `ui()`, `postprocess_image()`, and `create_auto_preprocessing_script_data()` bridge from postprocessing scripts into txt2img/img2img always-on scripts.
+- `modules/scripts_postprocessing.py`: `ScriptPostprocessing`, `ScriptPostprocessingRunner.create_script_ui()`, `scripts_in_preferred_order()`, `setup_ui()`, `run()`, and `create_args_for_run()` default-preserving postprocessing arg vector construction.
+- `modules/infotext_utils.py`: paste-field registration/binding, image/dimension paste, generation parameter parsing defaults, legacy infotext-to-option mapping, `create_override_settings_dict()`, `get_override_settings()`, and paste dropdown override population.
+- Override/API callers and tests: `modules/ui.py` override dropdown wiring, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py` script defaults/infotext override application, `modules/api/models.py` script arg metadata model, `modules/processing.py` override setting application/restore, bundled scripts that mutate `p.override_settings`, and focused tests for API script defaults, API listing, infotext mappings, and postprocessing defaults.
+
+### Findings / fixes
+- Consolidated script-control default extraction into `modules.scripts.script_controls_default_values()`. Normal API default-arg initialization now uses the same helper as the script metadata/control surface instead of carrying a separate implementation in `modules/api/api.py`.
+- Consolidated per-control API argument metadata extraction into `modules.scripts.script_control_api_arg()`. `ScriptRunner.create_script_ui_inner()` now delegates `ScriptArg` label/value/minimum/maximum/step/choices extraction to this helper, preserving the exact legacy choices tuple handling and generated `ScriptInfo` shape.
+- Kept the `modules.api.api.script_default_ui_values()` wrapper for compatibility with existing internal tests and any external code importing that helper. In normal API runtime it delegates to `modules.scripts.script_controls_default_values()` through the module global; in AST-isolated tests without the module global it retains the old lightweight fallback to avoid importing the full runtime stack.
+- Preserved all `Script` no-op hook/default methods, `describe()`, `elem_id()` helpers, `reload_scripts` alias, and `set_named_arg()`. They are extension-facing script APIs even when some bodies are default no-ops or duplicate-shaped.
+- Preserved `scripts_auto_postprocessing.py` bridge logic. The lambda constructor default argument is intentional to bind each postprocessing script class; changing it risks always-on main UI postprocessing behavior.
+- Preserved `scripts_postprocessing.py` default arg vector behavior. Existing tests cover omitted-key default preservation, explicit operation order, filtered scripts, and postprocessing API default ordering.
+- Preserved infotext override mapping helpers and the empty legacy `infotext_to_setting_name_mapping` list. The list is intentionally mutable/public for backward compatibility, while current option mappings come from `OptionInfo(..., infotext=...)`; tests cover combining both sources.
+- No override-settings behavior was changed. `create_override_settings_dict()` remains the UI multiselect-to-processing mapping for txt2img/img2img, while `get_override_settings()` remains the infotext paste/API helper that filters current values and disable-weights-auto-swap.
+
+### Static/dynamic audit map notes
+- Script metadata chain now centralizes: `ScriptRunner.create_script_ui_inner()` calls each script `ui()` once -> stores `script.controls` -> assigns `custom_script_source` -> builds `ScriptInfo.args` with `script_control_api_arg()` -> API default initialization reads defaults with `script_controls_default_values()`.
+- API request chain remains: `Api.init_default_script_args()` builds default vectors from finalized script controls; `Api.init_script_args()` overlays selectable, always-on, and infotext-provided script args; `openclaw_script_args_to_overrides` still preserves extended always-on payloads.
+- Infotext override chain remains: `parse_generation_parameters()` normalizes old/default generation labels -> `get_override_settings()` maps infotext labels to option names from `OptionInfo.infotext` plus legacy mutable mappings -> API/paste paths only apply non-current, non-skipped values.
+- UI override dropdown chain remains: txt2img/img2img UI creates hidden multiselect dropdowns -> paste populates visible override choices through `get_override_settings()` -> generation submits selected `Label: value` strings -> `create_override_settings_dict()` casts them into `p.override_settings`.
+- Postprocessing defaults chain remains: extras/API postprocessing builds per-script UI controls on demand -> `create_args_for_run()` pre-fills defaults and overlays requested script args by script name/order -> runner dispatches firstpass/process in preferred order.
+- Compatibility surfaces kept conservative: script hook method names/signatures, script control `value`/`label`/`choices` metadata, `ScriptInfo` API shape, script arg vector indexes, `custom_script_source`, postprocessing script names/order filters, paste field tuple compatibility, legacy infotext mapping mutability, override settings cast/filter behavior, and disable-weights-auto-swap handling.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/scripts.py modules/scripts_auto_postprocessing.py modules/scripts_postprocessing.py modules/infotext_utils.py modules/api/api.py modules/txt2img.py modules/img2img.py modules/processing.py` - passed.
+- `pytest -q test/test_api_script_defaults.py test/test_infotext_api_mappings.py test/test_postprocessing_script_args.py test/test_postprocessing_api_defaults.py tests/test_api_listing_contract.py` - passed: 33 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `git diff --check` - passed.
+- Reference scans confirmed the old API helper name remains only as the compatibility wrapper plus focused tests, `ScriptArg` construction now occurs through the new script helper, and tracked override-settings callers continue through the existing UI/API/processing paths.
+- Live WebUI/API server startup, third-party extension imports outside the checked tree, and real txt2img/img2img generation with override dropdown selections were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from script/default metadata extraction into generation parameter parsing and processing override application internals, especially `modules/processing.py` option override apply/restore blocks, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py` generation request preparation, and bundled scripts that mutate `p.override_settings`, looking for duplicate override/default handling while preserving infotext/API compatibility and generation behavior.

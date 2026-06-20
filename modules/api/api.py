@@ -317,7 +317,10 @@ def _set_script_arg(script_args, index, value):
 
 
 def script_default_ui_values(script):
-    """Return default script arg values from finalized UI controls when possible."""
+    script_helpers = globals().get("scripts")
+    if script_helpers is not None:
+        return script_helpers.script_controls_default_values(script)
+
     controls = getattr(script, "controls", None)
     if controls is None:
         controls = script.ui(script.is_img2img)

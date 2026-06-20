@@ -542,6 +542,34 @@ def wrap_call(func, filename, funcname, *args, default=None, **kwargs):
     return default
 
 
+def script_controls_default_values(script, controls=None):
+    """Return default script arg values from finalized UI controls when possible."""
+    if controls is None:
+        controls = getattr(script, "controls", None)
+    if controls is None:
+        controls = script.ui(script.is_img2img)
+    if controls is None:
+        return []
+    return [elem.value for elem in controls]
+
+
+def script_control_api_arg(control):
+    import modules.api.models as api_models
+
+    arg_info = api_models.ScriptArg(label=control.label or "")
+
+    for field in ("value", "minimum", "maximum", "step"):
+        v = getattr(control, field, None)
+        if v is not None:
+            setattr(arg_info, field, v)
+
+    choices = getattr(control, 'choices', None)  # legacy component choices may be strings or tuples where the first item is the string
+    if choices is not None:
+        arg_info.choices = [x[0] if isinstance(x, tuple) else x for x in choices]
+
+    return arg_info
+
+
 class ScriptRunner:
     def __init__(self):
         self.scripts = []
@@ -650,29 +678,14 @@ class ScriptRunner:
 
         script.name = wrap_call(script.title, script.filename, "title", default=script.filename).lower()
 
-        api_args = []
-
         for control in controls:
             control.custom_script_source = os.path.basename(script.filename)
-
-            arg_info = api_models.ScriptArg(label=control.label or "")
-
-            for field in ("value", "minimum", "maximum", "step"):
-                v = getattr(control, field, None)
-                if v is not None:
-                    setattr(arg_info, field, v)
-
-            choices = getattr(control, 'choices', None)  # legacy component choices may be strings or tuples where the first item is the string
-            if choices is not None:
-                arg_info.choices = [x[0] if isinstance(x, tuple) else x for x in choices]
-
-            api_args.append(arg_info)
 
         script.api_info = api_models.ScriptInfo(
             name=script.name,
             is_img2img=script.is_img2img,
             is_alwayson=script.alwayson,
-            args=api_args,
+            args=[script_control_api_arg(control) for control in controls],
         )
 
         if script.infotext_fields is not None:
