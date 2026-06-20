@@ -1804,3 +1804,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue past the processing subclasses into adjacent img2img entry/API assembly, especially `modules/img2img.py` mode-specific init image/mask selection, batch img2img setup, duplicate mask construction between UI modes, API img2img request population, and boundaries where scripts/API compatibility should stay conservative.
+
+## Pass 46 - img2img entry/API assembly (2026-06-20)
+
+### Checked scope
+- `modules/img2img.py`: UI `img2img()` mode-specific init-image/mask selection for modes 0-5, inpaint binary mask creation, inpaint-sketch diff-mask construction, upload-mask pass-through, fixed image/mask normalization, scale-by behavior, `StableDiffusionProcessingImg2Img` request assembly, script runner invocation, and batch upload/from-dir setup through `process_batch()`.
+- `modules/img2img.py`: `process_batch()` input discovery, upload-vs-directory batch handling, inpaint mask directory matching, PNG-info parameter restoration, output filename override setup, and batch result accumulation/limit behavior.
+- `modules/api/api.py`: `img2imgapi()` init image presence validation, mask decode timing relative to task queue registration, infotext application, selectable/always-on script argument setup, sampler/scheduler normalization, pydantic request population, decoded init-image injection, queue/task cleanup boundaries, response timing metadata, and `include_init_images` response mutation.
+- `modules/api/models.py`: generated `StableDiffusionImg2ImgProcessingAPI` fields for `init_images`, `mask`, `include_init_images`, script args, `alwayson_scripts`, `force_task_id`, and `infotext`.
+- Adjacent tests/contracts: `test/test_img2img.py`, `test/conftest.py`, `tests/test_image_mask_fix_contract.py`, and API/server requirements around img2img request error cleanup.
+
+### Findings and fixes
+- Extracted duplicated UI img2img mode image/mask selection from `img2img()` into `_select_img2img_init_image_and_mask()`. This keeps the same mode-specific behavior while separating init-image/mask assembly from request population, scaling, script dispatch, and batch handling.
+- Preserved inpaint mode binary mask conversion exactly at the UI mode-selection boundary. API-supplied masks still decode to PIL images in `img2imgapi()` and flow through `StableDiffusionProcessingImg2Img.__post_init__()`/processing mask preparation, so no shared UI/API mask-construction helper was introduced.
+- Preserved inpaint-sketch mask construction as a UI-only behavior: it derives a diff mask from the sketch image versus original image, applies mask-alpha brightness, and composites blurred edits before processing. This is not duplicate API behavior.
+- Preserved batch upload/from-dir branching. Upload mode intentionally clears output and inpaint mask directories and honors hidden-dir config for PNG-info source, while directory mode enforces `--hide-ui-dir-config` and passes user-selected input/output/mask dirs.
+- No dead mode branches were removed. Modes 0-4 are live UI tabs, and mode 5 is batch mode; the default `image = None, mask = None` fallback remains conservative for unexpected mode values and existing assertion/error behavior.
+- No API request-population extraction was made. `text2imgapi()` and `img2imgapi()` share sampler/save/script setup patterns, but img2img has behavior-specific early init-image validation, mask decode before queue registration, decoded init-image timing metrics, include-init response mutation, and processing-object `init_images` injection. Collapsing these would be broader than this safe slice.
+- No `include_init_images` model/API compatibility cleanup was made. The explicit `args.pop('include_init_images', None)` and response-side mutation are kept because the code already documents pydantic exclude uncertainty and external API clients may depend on the current response shape.
+
+### Static/dynamic audit map notes
+- UI img2img lifecycle remains: mode selects raw image/mask -> `images.fix_image()` normalizes both -> optional scale-by reads image dimensions for non-batch requests -> `StableDiffusionProcessingImg2Img` receives `init_images=[image]` and `mask=mask` -> script runner may handle request before `process_images()` fallback.
+- Batch img2img lifecycle remains: initial processing object is constructed before batch dispatch, then `process_batch()` replaces `p.init_images` for each input image, optionally sets `p.image_mask` from mask directory matching, restores PNG-info-selected fields, and accumulates/limits results.
+- API img2img lifecycle remains: request validates `init_images` before queue registration -> optional mask decodes before queue registration so invalid masks do not leak pending tasks -> pydantic copy carries decoded mask and save/sampler overrides -> init images decode and are assigned to `p.init_images` inside the queue lock -> response optionally strips original init images/mask from returned parameters.
+- Compatibility surfaces to continue treating conservatively: `img2img()` positional signature and mode numbers, `process_batch()` source-type behavior, inpaint-sketch mask-alpha semantics, `StableDiffusionImg2ImgProcessingAPI` generated field names/defaults, `include_init_images`, `script_name`/`script_args`, `alwayson_scripts`, `force_task_id`, and img2img API pending-task cleanup ordering.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass46 python3 -m py_compile modules/img2img.py modules/api/api.py modules/api/models.py test/test_img2img.py test/conftest.py tests/test_image_mask_fix_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass46-mask.XXXXXX) python3 -m pytest -q tests/test_image_mask_fix_contract.py` - passed: 1 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/img2img.py`, `modules/api/api.py`, and `modules/api/models.py` reported no duplicate function bodies.
+- `git diff --check` - passed.
+- Server-backed `test/test_img2img.py` API tests were inspected but not run because they require a live WebUI/API server fixture.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into adjacent API request assembly outside img2img, especially shared txt2img/img2img API helper boundaries (`apply_infotext()`, selectable/always-on script arg population, sampler/scheduler normalization, task queue cleanup), and extras/png-info decode helpers where duplicate request/response population may be safely reducible without breaking public API compatibility.
