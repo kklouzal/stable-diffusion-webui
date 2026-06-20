@@ -1869,3 +1869,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue to adjacent API surfaces after generation/extras helpers, especially progress/interrogate/options/reload/refresh endpoint helpers, model/listing APIs, and any remaining response serialization or queue/status helper duplication that can be reduced without changing public endpoint fields.
+
+
+## Pass 48 - API progress/options/reload/refresh/listing helpers (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: OpenClaw runtime/default endpoints adjacent to API helpers, `get_precision_map()`, generation diagnostics, task cleanup around `text2imgapi()`/`img2imgapi()`, extras queue locking, `progressapi()`, `interrogateapi()`, `interruptapi()`, `unloadapi()`, `reloadapi()`, `skip()`, `get_config()`, `set_config()`, model/listing endpoints (`get_samplers()`, `get_schedulers()`, `get_upscalers()`, `get_latent_upscale_modes()`, `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_embeddings()`), refresh endpoints, memory/extensions/server-control helpers.
+- `modules/api/models.py`: response contracts for progress, options/flags, sampler/scheduler/upscaler/model/VAE/hypernetwork/face-restorer/RealESRGAN/style/embedding/memory/extension items.
+- Adjacent contracts/tests: existing source-level API script/infotext tests, API training contract tests, and server-backed API suites inspected as compatibility surfaces.
+
+### Findings and fixes
+- Extracted repeated queue-lock call wrappers into `Api._call_with_queue_lock()` and routed extras execution plus `refresh_embeddings()`, `refresh_checkpoints()`, and `refresh_vae()` through it. This preserves the same lock boundary and return behavior while removing repeated `with self.queue_lock:` one-call endpoint bodies.
+- Extracted duplicated generation task cleanup into `Api._finish_generation_task()` and `Api._clear_pending_task_unless_finished()`. `text2imgapi()` and `img2imgapi()` still add/start/finish tasks in the same order, keep endpoint-specific processing-object setup and timing behavior local, and only remove pending tasks on unfinished exceptions.
+- No safe consolidation was made for `progressapi()` and `modules/progress.progressapi()`. They look adjacent but serve different APIs and response models: `/sdapi/v1/progress` reports WebUI state/current image/current task, while `/internal/progress` reports per-task queue/active/completed/live-preview fields.
+- No safe consolidation was made for `interrogateapi()` and generation/extras queue use. Interrogation decodes and RGB-converts before the lock, then branches between CLIP and deepdanbooru under the lock with public 404 behavior for unknown models.
+- No dead API helper wrappers were removed. `interruptapi()`, `unloadapi()`, `reloadapi()`, `skip()`, refresh endpoints, model/listing endpoints, memory/extensions helpers, and server-control endpoints are public route handlers or gated public route handlers.
+- Model/listing response builders were left explicit. Their dictionaries map distinct public field names and source attributes, so a generic serializer would add indirection without removing meaningful duplicate logic and could risk field compatibility.
+- Options/config handling was left unchanged. `get_config()` preserves fallback to option metadata defaults, and `set_config()` preserves checkpoint alias validation before applying/saving API-supplied options.
+
+### Static/dynamic audit map notes
+- Queue-sensitive public endpoints remain conservative: generation/extras/interrogate/refresh/precision-map code still acquires `self.queue_lock` around shared model or mutable registry operations; invalid img2img masks/init image decoding still happens before task queue registration.
+- Public response surfaces preserved: progress fields (`progress`, `eta_relative`, `state`, `current_image`, `textinfo`, `current_task`), model/listing item keys, embeddings `loaded`/`skipped`, memory `ram`/`cuda`, and extension fields are unchanged.
+- Task cleanup lifecycle remains: `add_task_to_queue()` before queue-lock processing -> `shared.state.begin()` -> `start_task()` -> selected script or `process_images()` -> `_finish_generation_task()` in the inner `finally` -> pending task removal only if that finishing block did not complete.
+- Compatibility surfaces to continue treating conservatively: `/sdapi/v1/progress` versus `/internal/progress`, route handler return shapes that intentionally return `{}`/`None`/`Response`, `opts.data_labels` defaults, `sd_models.checkpoint_aliases`, model/listing dictionary keys, and `api_server_stop`-gated server endpoints.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass48.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass48-api.XXXXXX) python3 -m pytest -q test/test_api_script_defaults.py test/test_infotext_paste_bindings.py tests/test_api_training_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py` and `modules/api/models.py` reported no duplicate nontrivial function bodies.
+- `git diff --check` - passed.
+- Server-backed endpoint suites such as `test/test_txt2img.py`, `test/test_img2img.py`, `test/test_extras.py`, and live progress/listing endpoint checks were not run because they require a running WebUI/API server fixture.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into training/create/memory/extensions/server-control API helpers and then out toward lower-level model/registry refresh implementations (`shared.refresh_checkpoints()`, VAE/model loader listing refresh, extension listing metadata), looking for dead wrappers or duplicate registry serialization while preserving public API response contracts.

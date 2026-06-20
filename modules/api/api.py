@@ -683,6 +683,21 @@ class Api:
         from modules import openclaw_generation_diagnostics
         return openclaw_generation_diagnostics.last_generation_diagnostics() or {}
 
+    def _call_with_queue_lock(self, func, *args, **kwargs):
+        with self.queue_lock:
+            return func(*args, **kwargs)
+
+    @staticmethod
+    def _clear_pending_task_unless_finished(task_id, task_finished):
+        if not task_finished:
+            pending_tasks.pop(task_id, None)
+
+    @staticmethod
+    def _finish_generation_task(task_id):
+        finish_task(task_id)
+        shared.state.end()
+        shared.total_tqdm.clear()
+
     def auth(self, credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         if credentials.username in self.credentials:
             if compare_digest(credentials.password, self.credentials[credentials.username]):
@@ -911,13 +926,10 @@ class Api:
                             p.script_args = tuple(script_args) # Need to pass args as tuple here
                             processed = process_images(p)
                     finally:
-                        finish_task(task_id)
+                        self._finish_generation_task(task_id)
                         task_finished = True
-                        shared.state.end()
-                        shared.total_tqdm.clear()
         finally:
-            if not task_finished:
-                pending_tasks.pop(task_id, None)
+            self._clear_pending_task_unless_finished(task_id, task_finished)
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
@@ -972,13 +984,10 @@ class Api:
                             p.script_args = tuple(script_args) # Need to pass args as tuple here
                             processed = process_images(p)
                     finally:
-                        finish_task(task_id)
+                        self._finish_generation_task(task_id)
                         task_finished = True
-                        shared.state.end()
-                        shared.total_tqdm.clear()
         finally:
-            if not task_finished:
-                pending_tasks.pop(task_id, None)
+            self._clear_pending_task_unless_finished(task_id, task_finished)
 
         api_after_process = time.perf_counter()
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
@@ -999,8 +1008,7 @@ class Api:
         return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
 
     def _run_extras(self, *, extras_mode, image, image_folder, reqDict):
-        with self.queue_lock:
-            return postprocessing.run_extras(extras_mode=extras_mode, image=image, image_folder=image_folder, input_dir="", output_dir="", save_output=False, **reqDict)
+        return self._call_with_queue_lock(postprocessing.run_extras, extras_mode=extras_mode, image=image, image_folder=image_folder, input_dir="", output_dir="", save_output=False, **reqDict)
 
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)
@@ -1201,16 +1209,13 @@ class Api:
         }
 
     def refresh_embeddings(self):
-        with self.queue_lock:
-            sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)
+        self._call_with_queue_lock(sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings, force_reload=True)
 
     def refresh_checkpoints(self):
-        with self.queue_lock:
-            shared.refresh_checkpoints()
+        self._call_with_queue_lock(shared.refresh_checkpoints)
 
     def refresh_vae(self):
-        with self.queue_lock:
-            shared_items.refresh_vae_list()
+        self._call_with_queue_lock(shared_items.refresh_vae_list)
 
     def create_embedding(self, args: dict):
         try:
