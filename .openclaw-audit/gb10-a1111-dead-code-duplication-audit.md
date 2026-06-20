@@ -2757,3 +2757,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API extras/postprocessing request and response bridges around `modules/api/api.py`, `modules/api/models.py`, `modules/postprocessing.py`, and focused API tests, especially the `_call_with_queue_lock` AST-test harness gap surfaced during this pass, while preserving public API request fields, queue-lock behavior, and legacy extras response semantics.
+
+## Pass 73 - API extras/postprocessing request and response bridges (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: `setUpscalers()`, `decode_extras_batch_images()`, `Api._call_with_queue_lock()`, `Api._run_extras()`, `Api.extras_single_image_api()`, `Api.extras_batch_images_api()`, adjacent route registration, and queue-lock helper call sites.
+- `modules/api/models.py`: extras base request fields, legacy single/batch request models, shared `ExtraBaseResponse`, single-image null response field, and batch image response schema.
+- `modules/postprocessing.py`: `run_postprocessing()`, `run_postprocessing_webui()`, and `run_extras()` as the API-facing legacy adapter into the postprocessing runner.
+- Focused contracts: `test/test_postprocessing_api_defaults.py`, `test/test_postprocessing_script_args.py`, and `tests/test_api_progress_contract.py` around extras request normalization, batch decode tolerance, no-output extras response semantics, postprocessing argument defaults, and queue-lock-related API helpers.
+
+### Findings and fixes
+- Fixed the focused AST-loaded extras endpoint harness in `test/test_postprocessing_api_defaults.py` by including `_call_with_queue_lock` when constructing the fake `Api` class. This removes the stale test-only gap surfaced in pass 72 and keeps the test exercising the current production `_run_extras()` queue-lock bridge.
+- No production source-code remediation was made. The inspected API extras bridge is intentionally thin and public-contract-sensitive: request models expose legacy `upscaler_1`/`upscaler_2` fields, `setUpscalers()` maps them to postprocessing script names and forces API image return semantics, `_run_extras()` preserves queue-lock behavior and `save_output=False`, and endpoint response wrappers preserve `html_info`, batch image lists, and single-image `None` output for skipped/interrupted runs.
+- Preserved `ExtraBaseResponse` and separate single/batch response classes. They share `html_info`, but their image payload shapes differ and are route schema contracts.
+- Preserved `decode_extras_batch_images()` tolerance of corrupt batch items. It intentionally skips per-image decode errors while keeping valid items, matching the focused contract.
+- Preserved `run_extras()` despite its legacy signature. It remains the compatibility adapter from API extras request fields into `scripts.scripts_postproc.create_args_for_run()` and `run_postprocessing()` order semantics.
+
+### Static/dynamic audit map notes
+- API extras request chain remains: FastAPI route -> request model -> `setUpscalers()` legacy field normalization -> single image decode or tolerant batch decode -> `_run_extras()` queue lock -> `postprocessing.run_extras(..., save_output=False)` -> base64 response images plus `html_info`.
+- Single-image response semantics remain: if postprocessing produces no output because the run is skipped or interrupted, the API returns `image=None` rather than attempting to encode a missing image.
+- Batch response semantics remain: successful decoded inputs are postprocessed and encoded from `result[0]`; corrupt batch entries are skipped before postprocessing.
+- Compatibility surfaces to keep conservative: route paths, request field names, Pydantic model names and field defaults, `show_extras_results` API override, queue-lock wrapping, `html_info`, response image/null shapes, and no-disk-save behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/api/api.py modules/api/models.py modules/postprocessing.py test/test_postprocessing_api_defaults.py` - passed.
+- `python3 -m pytest test/test_postprocessing_api_defaults.py test/test_postprocessing_script_args.py tests/test_api_progress_contract.py -q` - passed: 14 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `rg -n "def setUpscalers|def decode_extras_batch_images|def _run_extras|def extras_single_image_api|def extras_batch_images_api|class ExtrasBaseRequest|class ExtraBaseResponse|class ExtrasSingleImage|class ExtrasBatchImages|def run_extras|def run_postprocessing" modules/api/api.py modules/api/models.py modules/postprocessing.py test/test_postprocessing_api_defaults.py` - confirmed the bridge symbols remain single, explicit contract points with no duplicate replacement candidate in this scope.
+- `git diff --check` - passed.
+- Live API extras requests, live WebUI extras tab behavior, and model-backed upscaling/restoration were not exercised because they require a running WebUI/model runtime and provisioned ML assets.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API PNG info, interrogate, metadata, model-refresh, and administrative compatibility endpoints around `modules/api/api.py`, `modules/api/models.py`, `modules/extras.py`, `modules/interrogate.py`, `modules/deepbooru.py`, and focused API contract tests, looking for dead response shims or duplicate queue-lock/admin wrappers while preserving public route schemas and extension-facing behavior.

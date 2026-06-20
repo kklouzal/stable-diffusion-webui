@@ -236,7 +236,7 @@ def load_api_extras_method(method_name):
     source = Path("modules/api/api.py").read_text()
     tree = ast.parse(source)
     api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
-    method_names = {"_run_extras", method_name}
+    method_names = {"_call_with_queue_lock", "_run_extras", method_name}
     methods = [node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name in method_names]
     fake_class = ast.ClassDef(name="FakeApi", bases=[], keywords=[], body=methods, decorator_list=[])
     module = ast.Module(body=[fake_class], type_ignores=[])
