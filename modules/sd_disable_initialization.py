@@ -49,16 +49,6 @@ class DisableInitialization(ReplaceHelper):
         super().__init__()
         self.disable_clip = disable_clip
 
-    def replace(self, obj, field, func):
-        original = getattr(obj, field, None)
-        if original is None:
-            return None
-
-        self.replaced.append((obj, field, original))
-        setattr(obj, field, func)
-
-        return original
-
     def __enter__(self):
         def do_nothing(*args, **kwargs):
             pass
