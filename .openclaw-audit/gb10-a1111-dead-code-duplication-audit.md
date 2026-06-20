@@ -2250,3 +2250,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into core image save implementation and filename/path helpers in `modules/images.py`, especially `FilenameGenerator`, filename sanitization, save path/subdirectory selection, existing-info metadata propagation, and text sidecar/callback branches, looking for duplicate output path handling while preserving public save callback contracts and filename-pattern behavior.
+
+## Pass 59 - Core image save implementation and filename/path helpers (2026-06-20)
+
+### Checked scope
+- `modules/images.py`: `sanitize_filename_part()`, scheduler/sampler filename helper strings, `FilenameGenerator` replacement map and methods (`get_vae_filename()`, `hasprompt()`, `prompt_no_style()`, `prompt_words()`, `datetime()`, `image_hash()`, `string_hash()`, and `apply()`), `get_next_sequence_number()`, `save_image_with_geninfo()`, `geninfo_to_exif_bytes()`, `save_image()`, `read_info_from_image()`, `image_data()`, and adjacent image read/fix helpers.
+- Save-path branches in `save_image()`: `save_to_dirs` and directory pattern expansion, forced filenames, numbered filenames, replacement suffix behavior, callback-rewritten filenames/directories, max filename component truncation, atomic temp-file writes, 4chan downscale export path updates, `already_saved_as`, `.txt` infotext sidecars, and save callbacks.
+- Adjacent contracts/tests: `test/test_images_save.py`, `tests/test_save_serialization_contract.py`, and callers of image metadata helpers in `modules/extras.py`, `modules/img2img.py`, `modules/ui_toprow.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/api/api.py`, and `modules/postprocessing.py`.
+
+### Findings and fixes
+- Removed duplicated EXIF metadata gating in `save_image_with_geninfo()`. JPEG/WebP and AVIF save branches now share `enabled_geninfo_exif_bytes()`, preserving the existing behavior that EXIF bytes are generated only when PNG-info metadata is enabled and generation info is present.
+- Preserved JPEG/WebP `piexif.insert()` timing after image save and AVIF `exif=` argument semantics. The helper only centralizes the common condition and conversion.
+- Preserved `FilenameGenerator` pattern behavior and public replacement names. Even helper-looking methods such as `hasprompt()`, `prompt_no_style()`, `datetime()`, and hash helpers are dynamically reached through filename patterns and must remain conservative.
+- Preserved filename sanitization and sequence/path logic. `sanitize_filename_part()` is the shared policy for filename pattern expansions; `get_next_sequence_number()` intentionally scans existing names for legacy numbering behavior; `save_to_dirs` uses the directory filename pattern while sample filenames use sample filename patterns.
+- Preserved `save_image()` callback contracts. `before_image_saved_callback()` may rewrite `params.image`, `params.filename`, and `params.pnginfo`; the post-callback directory creation, filename truncation, final `params.filename`, and `image_saved_callback()` behavior are covered by focused tests and were not rearranged.
+- Preserved `.txt` sidecar behavior. Generation infotext sidecars are intentionally written after the final image path is known, including duplicate suffixes, callback filename rewrites, max-name truncation, and optional 4chan JPG export path changes.
+- Preserved image metadata helpers. `save_image_with_geninfo()`, `read_info_from_image()`, `image_data()`, and `geninfo_to_exif_bytes()` remain directly used by PNG Info, Extras/Postprocessing, img2img image-info import, extra-network previews, API encoding, and top-row upload metadata paths.
+
+### Static/dynamic audit map notes
+- Filename pattern chain remains: caller supplies `p`/seed/prompt/image -> `FilenameGenerator.apply()` resolves bracket patterns dynamically -> each replacement sanitizes only the fragment it owns -> `save_image()` applies directory/sample patterns and numbering.
+- Save chain remains: path/name selection -> `ImageSaveParams` before-save callback -> post-callback directory creation and filesystem max-name truncation -> atomic temp image write -> optional downscaled JPG export -> `already_saved_as` and optional `.txt` sidecar -> saved callback.
+- Metadata chain remains: `existing_info` is merged with current `info` before callbacks; callbacks receive/may mutate `params.pnginfo`; image writers embed PNG text chunks, JPEG/WebP EXIF, AVIF EXIF, or GIF comments according to extension behavior.
+- Compatibility surfaces to keep conservative: `FilenameGenerator.replacements` keys and argument parsing, `save_image()` signature/return tuple, callback-visible `ImageSaveParams`, filename numbering and replacement suffix policy, `.txt` sidecar paths, PNG section names, `read_info_from_image()` NovelAI conversion, and `image_data()` upload return shape.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass59.XXXXXX) python3 -m py_compile modules/images.py test/test_images_save.py tests/test_save_serialization_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass59.XXXXXX) python3 -m pytest -q test/test_images_save.py tests/test_save_serialization_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/images.py` reported no duplicate nontrivial function body groups.
+- Targeted literal duplicate scan found the prior repeated `opts.enable_pnginfo and geninfo is not None` branch reduced to the single shared helper.
+- `git diff --check` - passed.
+- Live WebUI image generation/save callbacks, browser upload metadata, and real model/API runtime paths were not exercised because they require a running WebUI/API session and runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into lower/adjacent image utility code and metadata consumers not deeply covered here, especially PNG Info/extras upload paths (`modules/extras.py`, `modules/img2img.py`, `modules/ui_toprow.py`, `modules/ui_extra_networks*.py`, `modules/api/api.py` image encode/decode metadata branches), looking for duplicated metadata extraction/encoding and dead image-info compatibility helpers while preserving UI/API response contracts.

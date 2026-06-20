@@ -598,16 +598,11 @@ def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_p
 
         image.save(filename, format=image_format, quality=opts.jpeg_quality, lossless=opts.webp_lossless)
 
-        if opts.enable_pnginfo and geninfo is not None:
-            exif_bytes = geninfo_to_exif_bytes(geninfo)
-
+        exif_bytes = enabled_geninfo_exif_bytes(geninfo)
+        if exif_bytes is not None:
             piexif.insert(exif_bytes, filename)
     elif extension.lower() == '.avif':
-        if opts.enable_pnginfo and geninfo is not None:
-            exif_bytes = geninfo_to_exif_bytes(geninfo)
-        else:
-            exif_bytes = None
-
+        exif_bytes = enabled_geninfo_exif_bytes(geninfo)
         image.save(filename,format=image_format, quality=opts.jpeg_quality, exif=exif_bytes)
     elif extension.lower() == ".gif":
         image.save(filename, format=image_format, comment=geninfo)
@@ -621,6 +616,13 @@ def geninfo_to_exif_bytes(geninfo):
             piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(geninfo or "", encoding="unicode")
         },
     })
+
+
+def enabled_geninfo_exif_bytes(geninfo):
+    if opts.enable_pnginfo and geninfo is not None:
+        return geninfo_to_exif_bytes(geninfo)
+
+    return None
 
 
 def save_image(image, path, basename, seed=None, prompt=None, extension='png', info=None, short_filename=False, no_prompt=False, grid=False, pnginfo_section_name='parameters', p=None, existing_info=None, forced_filename=None, suffix="", save_to_dirs=None):
