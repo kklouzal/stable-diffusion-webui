@@ -413,3 +413,20 @@ Validation:
 
 Next unchecked scope:
 - Continue deeper through the remainder of `modules/api/api.py` methods after txt2img/img2img setup, API models, remaining script/hook surfaces (`modules/scripts.py`, `modules/script_callbacks.py`, `modules/script_loading.py`), and remaining source/test/config files not yet explicitly listed in ledger passes.
+
+### 2026-06-20 pass 16 - API response models and remaining API methods
+Checked:
+- Remainder of `modules/api/api.py`: txt2img/img2img completion and task cleanup, extras single/batch image endpoints, PNG info parsing, progress response construction, interrogate, interrupt/skip/unload/reload, options get/set, metadata listing endpoints, embedding/hypernetwork create/train wrappers, memory reporting, extension listing, and server control endpoints. Found a response-model mismatch for `current_task`.
+- `modules/api/models.py`: dynamic processing models, extras/PNG/progress/interrogate/train/create/listing response models, options/flags dynamic models, and extension/script metadata schemas. Found the progress schema omitted the task id returned by the API implementation.
+
+Findings/fixes:
+- Added `current_task: Optional[str]` to `ProgressResponse` so `/sdapi/v1/progress` exposes the active task id that `progressapi()` already returns, instead of having it dropped by the response model.
+- Added `tests/test_api_progress_contract.py` to lock the API/model contract.
+
+Validation:
+- `python3 -m py_compile modules/api/models.py modules/api/api.py tests/test_api_progress_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_api_progress_contract.py` -> passed, 1 test; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue through script/hook surfaces (`modules/scripts.py`, `modules/script_callbacks.py`, `modules/script_loading.py`), extension management internals, image save/delete/history paths, and remaining source/test/config files not yet explicitly listed in ledger passes.
