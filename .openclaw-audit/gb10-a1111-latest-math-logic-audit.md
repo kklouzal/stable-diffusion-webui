@@ -540,3 +540,19 @@ Validation:
 
 Next unchecked scope:
 - Function-by-function review still remains for `modules/ui.py`, `modules/ui_components.py`, `modules/ui_component_patches.py`, `modules/ui_loadsave.py`, `modules/ui_postprocessing.py`, `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_tempdir.py`, `modules/ui_toprow.py`, `modules/headless_ui.py`, `modules/shared_ui_themes.py`, the specialized extra-network page/editor modules, and extension source trees under `extensions/` and `extensions-builtin/` (especially `extensions-builtin/Lora`, `extensions-builtin/LDSR`, `extensions/sd-webui-incantations`, `extensions/sd-webui-model-converter`, upscalers, Hypertile, soft-inpainting, and postprocessing-for-training). The broad source audit is still not complete.
+
+### 2026-06-20 pass 23 - focused image save/delete/history recheck
+Checked:
+- `modules/images.py`: sequence numbering, forced filenames, extension fallback for oversized JPEG/WebP, callback-mutated filename handling, atomic temp-file save/replace behavior, 4chan downscale export, sidecar text writes, `already_saved_as` propagation, metadata readback, flatten/read/fix helpers, and PNG/JPEG/WebP/AVIF/GIF metadata paths. No new defect found in inspected paths.
+- `modules/ui_common.py`: generation-info selection, save-selected versus save-all index handling, grid/sample infotext alignment, `log.csv` migration/padding, save-folder status escaping, zip packaging, output-panel open-folder routing, and download-file list construction. No new defect found.
+- `modules/postprocessing.py`, `modules/extras.py`, `modules/ui_postprocessing.py`: extras source selection, batch/directory iteration, existing PNG info preservation, postprocessing save path, caption sidecar merge behavior, model-merger output naming/config-copy behavior, PNG-info display escaping path, and extras UI wiring. No new defect found beyond the caption-order fix already committed in pass 12.
+- `modules/processing.py`, `modules/api/api.py`, `modules/ui_tempdir.py`, `modules/ui_prompt_styles.py`: generation save call sites, auxiliary before/after/mask image save paths, API `image_paths` response metadata, Gradio temp-file reuse for already-saved images, temp cleanup, and style delete/save handlers as related save/delete/history surfaces. No new defect found.
+- Confirmed `modules/images_history.py` is not present in this checkout, and grep found no general image-history delete handler to audit in this slice.
+
+Validation:
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile modules/images.py modules/ui_common.py modules/postprocessing.py modules/extras.py modules/ui_postprocessing.py modules/ui_tempdir.py modules/processing.py modules/api/api.py tests/test_save_serialization_contract.py tests/test_postprocessing_caption_contract.py tests/test_textual_inversion_preview_save_contract.py` -> passed.
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m pytest -q tests/test_save_serialization_contract.py tests/test_postprocessing_caption_contract.py tests/test_textual_inversion_preview_save_contract.py` -> passed, 6 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue function-by-function review of remaining UI construction modules and extension trees not yet deeply audited: `modules/ui.py`, `modules/ui_components.py`, `modules/ui_component_patches.py`, `modules/ui_toprow.py`, `modules/headless_ui.py`, `modules/shared_ui_themes.py`, specialized extra-network page/editor modules, and extension source trees under `extensions/` and `extensions-builtin/` especially `extensions-builtin/Lora`, `extensions-builtin/LDSR`, Hypertile, soft-inpainting, upscalers, postprocessing-for-training, `extensions/sd-webui-incantations`, and `extensions/sd-webui-model-converter`. Another slice is needed for the broad audit.
