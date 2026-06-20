@@ -1,3 +1,4 @@
+import html
 import json
 import os
 
@@ -185,8 +186,13 @@ class UiLoadsave:
         text = ["<table><thead><tr><th>Path</th><th>Old value</th><th>New value</th></thead><tbody>"]
 
         for path, old_value, new_value in self.iter_changes(self.read_from_file(), values):
+            path = html.escape(str(path))
+            new_value = html.escape(str(new_value))
+
             if old_value is None:
                 old_value = "<span class='ui-defaults-none'>None</span>"
+            else:
+                old_value = html.escape(str(old_value))
 
             text.append(f"<tr><td>{path}</td><td>{old_value}</td><td>{new_value}</td></tr>")
 

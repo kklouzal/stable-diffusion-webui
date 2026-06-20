@@ -132,10 +132,11 @@ def check_updates(id_task, disable_list):
 def make_commit_link(commit_hash, remote, text=None):
     if text is None:
         text = commit_hash[:8]
+    text = html.escape(str(text))
     if remote.startswith("https://github.com/"):
         if remote.endswith(".git"):
             remote = remote[:-4]
-        href = remote + "/commit/" + commit_hash
+        href = html.escape(remote + "/commit/" + commit_hash, quote=True)
         return f'<a href="{href}" target="_blank">{text}</a>'
     else:
         return text
@@ -169,13 +170,13 @@ def extension_table():
         if ext.can_update:
             ext_status = f"""<label><input class="gr-check-radio gr-checkbox" name="update_{html.escape(ext.name)}" checked="checked" type="checkbox">{html.escape(ext.status)}</label>"""
         else:
-            ext_status = ext.status
+            ext_status = html.escape(ext.status)
 
         style = ""
         if shared.cmd_opts.disable_extra_extensions and not ext.is_builtin or shared.opts.disable_all_extensions == "extra" and not ext.is_builtin or shared.cmd_opts.disable_all_extensions or shared.opts.disable_all_extensions == "all":
             style = STYLE_PRIMARY
 
-        version_link = ext.version
+        version_link = html.escape(ext.version)
         if ext.commit_hash and ext.remote:
             version_link = make_commit_link(ext.commit_hash, ext.remote, ext.version)
 
@@ -183,7 +184,7 @@ def extension_table():
             <tr>
                 <td><label{style}><input class="gr-check-radio gr-checkbox extension_toggle" name="enable_{html.escape(ext.name)}" type="checkbox" {'checked="checked"' if ext.enabled else ''} onchange="toggle_extension(event)" />{html.escape(ext.name)}</label></td>
                 <td>{remote}</td>
-                <td>{ext.branch}</td>
+                <td>{html.escape(str(ext.branch or ''))}</td>
                 <td>{version_link}</td>
                 <td>{datetime.fromtimestamp(ext.commit_date) if ext.commit_date else ""}</td>
                 <td{' class="extension_status"' if ext.remote is not None else ''}>{ext_status}</td>
@@ -204,9 +205,9 @@ def update_config_states_table(state_name):
     else:
         config_state = config_states.all_config_states[state_name]
 
-    config_name = config_state.get("name", "Config")
+    config_name = html.escape(str(config_state.get("name", "Config")))
     created_date = datetime.fromtimestamp(config_state["created_at"]).strftime('%Y-%m-%d %H:%M:%S')
-    filepath = config_state.get("filepath", "<unknown>")
+    filepath = html.escape(str(config_state.get("filepath", "<unknown>")))
 
     try:
         webui_remote = config_state["webui"]["remote"] or ""
@@ -254,7 +255,7 @@ def update_config_states_table(state_name):
                 <label{style_remote}>{remote}</label>
             </td>
             <td>
-                <label{style_branch}>{webui_branch}</label>
+                <label{style_branch}>{html.escape(str(webui_branch or ''))}</label>
             </td>
             <td>
                 <label{style_commit}>{commit_link}</label>
@@ -315,7 +316,7 @@ def update_config_states_table(state_name):
             code += f"""        <tr>
             <td><label{style_enabled}><input class="gr-check-radio gr-checkbox" type="checkbox" disabled="true" {'checked="checked"' if ext_enabled else ''}>{html.escape(ext_name)}</label></td>
             <td><label{style_remote}>{remote}</label></td>
-            <td><label{style_branch}>{ext_branch}</label></td>
+            <td><label{style_branch}>{html.escape(str(ext_branch))}</label></td>
             <td><label{style_commit}>{commit_link}</label></td>
             <td><label{style_commit}>{date_link}</label></td>
         </tr>
