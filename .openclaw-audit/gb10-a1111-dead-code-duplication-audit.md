@@ -1383,3 +1383,43 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: PNG-info/API infotext import/export and paste-parameter surfaces outside raw saving, especially `modules/api/api.py` png-info/encode/decode helpers, `modules/generation_parameters_copypaste.py`, img2img infotext import, and any duplicated image/base64/infotext parsing contracts between API and UI paths.
+
+## Pass 33 - PNG-info API and paste-parameter import surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: `api_infotext_value_for_field()`, `verify_url()`, `decode_base64_to_image()`, `decode_extras_batch_images()`, `encode_pil_to_base64()`, `Api.apply_infotext()`, `Api.txt2imgapi()`/`img2imgapi()` infotext application, extras image decode reuse, `/sdapi/v1/png-info` `pnginfoapi()`, and `interrogateapi()` image decode.
+- `modules/infotext_utils.py` as the active implementation and compatibility alias for old `modules.generation_parameters_copypaste`: `ParamBinding`, `PasteField`, paste-field registration/reset, `image_from_url_text()`, `create_buttons()`, compatibility `bind_buttons()`, `register_paste_params_button()`, `connect_paste_params_buttons()`, `send_image_and_dimensions()`, indexed inpaint infotext helpers, `parse_generation_parameters()`, `create_override_settings_dict()`, `get_override_settings()`, and `connect_paste()`.
+- UI PNG-info and paste callers: `modules/ui.py` PNG Info tab send-to buttons, txt2img/img2img paste registration, `modules/ui_common.py` gallery save/paste registration and `update_generation_info()`, `modules/extras.py` `run_pnginfo()`, `modules/txt2img.py` first-pass image infotext path, and `modules/img2img.py` batch `use_png_info` import path.
+- Compatibility and reachability checks for `modules.generation_parameters_copypaste`, `image_from_url_text()`, `decode_base64_to_image()`, `encode_pil_to_base64()`, `create_buttons()`, `bind_buttons()`, `register_paste_params_button()`, `connect_paste()`, and all parse-generation-parameters call sites.
+- Focused duplicate-body scan across `modules`, `test`, and `tests`, filtered for duplicates touching the API/infotext/UI PNG-info scope.
+
+### Findings and fixes
+- No safe source-code remediation was found in this slice; this is a ledger-only checkpoint.
+- The apparent duplicate `image_from_url_text(x)` call in `send_image_and_dimensions()` was a display artifact from an earlier combined `sed` output. A numbered source read and blame confirmed the working file contains only one decode call.
+- `decode_base64_to_image()` and `image_from_url_text()` overlap conceptually but are not safe consolidation targets. The API helper accepts HTTP/HTTPS URLs behind API request policy, generic `data:image/*` payloads, and raw base64, and reports `HTTPException` details used by extras batch tolerant skipping. The UI helper accepts Gradio file/list payloads, validates temporary-file paths through `ui_tempdir.check_tmp_file()`, handles gallery payload shape, and returns PIL images directly for UI callbacks.
+- `encode_pil_to_base64()` and `images.save_image_with_geninfo()`/`geninfo_to_exif_bytes()` share metadata-writing concepts, but API response encoding is an in-memory response contract keyed by `opts.samples_format`, while save paths own filenames, callbacks, atomic writes, sidecars, and `already_saved_as`. Only the shared EXIF byte construction is already centralized in `images.geninfo_to_exif_bytes()`.
+- API `apply_infotext()` and UI `connect_paste()` intentionally share `infotext_utils.parse_generation_parameters()` and paste-field metadata but differ in output contracts: API mutates unset pydantic request fields, carries override settings, and maps script controls by `script_runner.inputs`; UI returns Gradio updates, supports prompt-history fallback, and triggers recalculate JavaScript.
+- `/sdapi/v1/png-info` and UI `run_pnginfo()` intentionally differ. Both read metadata through `images.read_info_from_image()`, but the API returns structured `info`, `items`, and parsed `parameters` with `infotext_pasted_callback()`, while the UI returns HTML display plus hidden generation text for Send-to buttons.
+
+### Preserved compatibility/dead-code decisions
+- Preserved `sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]` because old extensions may still import the historical module name even though the file no longer exists.
+- Preserved `bind_buttons()` despite no first-party call sites because it is explicitly documented as the old compatibility wrapper around `register_paste_params_button()`.
+- Preserved `create_buttons()` and `register_paste_params_button()` because current PNG Info, txt2img/img2img, output-panel, and extras UI surfaces use them to assemble Send-to/paste actions.
+- Preserved `paste_fields` compatibility writes to `modules.ui.txt2img_paste_fields` and `modules.ui.img2img_paste_fields` for extension/public surface compatibility.
+- Preserved indexed inpaint infotext helpers because img2img paste fields use them to map textual infotext labels into UI/API enum/boolean values.
+- Preserved `create_override_settings_dict()` and `get_override_settings()` as distinct helpers: the former converts UI multiselect strings back into processing override dictionaries, while the latter derives non-default override candidates from parsed infotext for UI/API paste behavior.
+
+### Static/dynamic audit map notes
+- API infotext chain: request `infotext` -> `Api.apply_infotext()` -> `infotext_utils.parse_generation_parameters()` -> paste fields registered during UI setup -> unset API request fields and override settings -> optional script arg extraction by component identity.
+- UI paste chain: `add_paste_fields()` registers tab fields -> `register_paste_params_button()` records source/destination bindings -> `connect_paste_params_buttons()` wires image transfer, text parsing, tab switching, and output-panel field copy -> `connect_paste()` returns Gradio updates and override-setting dropdown choices.
+- PNG-info chain: uploaded/API image -> `images.read_info_from_image()` -> UI `extras.run_pnginfo()` for HTML/hidden infotext or API `pnginfoapi()` for structured JSON and parsed parameters.
+- Img2img batch PNG-info import chain: source image or parallel `png_info_dir` image -> `images.read_info_from_image()` -> `parse_generation_parameters()` -> whitelisted `png_info_props` -> prompt/negative prompt/seed/CFG/sampler/steps/checkpoint override mutation.
+- Compatibility surfaces to continue treating conservatively: `modules.generation_parameters_copypaste` alias, paste-field tuple/PasteField shape, tab names (`txt2img`, `img2img`, `inpaint`, `extras`), API `/sdapi/v1/png-info` response fields, `decode_base64_to_image()` error details, Gradio gallery/file payload handling, and `infotext_pasted_callback()` invocation points.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass33.XXXXXX) python3 -m py_compile modules/api/api.py modules/infotext_utils.py modules/extras.py modules/img2img.py modules/txt2img.py modules/ui.py modules/ui_common.py modules/ui_postprocessing.py modules/ui_extra_networks.py modules/ui_extra_networks_user_metadata.py modules/api/models.py` - passed.
+- Exact AST duplicate-body scan across `modules`, `test`, and `tests`, filtered for duplicates touching `modules/api/api.py`, `modules/infotext_utils.py`, `modules/img2img.py`, `modules/ui.py`, `modules/ui_common.py`, and `modules/extras.py`, printed no duplicate nontrivial function body groups.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: infotext parsing/backcompat internals and option-setting override maps, especially deeper `modules/infotext_utils.py` parsing branches after the paste/API entrypoints, `modules/infotext_versions.py`, prompt/style extraction interactions, and focused parser/backcompat tests or fixtures.
