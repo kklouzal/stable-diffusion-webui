@@ -3254,3 +3254,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue past the static/listing API metadata family into the create/train and memory endpoint models/handlers in `modules/api/api.py`/`modules/api/models.py`, especially `CreateResponse`, `TrainResponse`, `_run_create_task()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `_prepare_hypernetwork_training()`, `_restore_hypernetwork_training_devices()`, and `get_memory()`, looking for stale response helpers, duplicate task wrappers, or unreachable training/memory branches while preserving task state, refresh side effects, and public response strings.
+
+## Pass 88 - API create/train task helpers and memory response surface (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: `_create_response()`, `_train_response()`, `_run_create_task()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `_prepare_hypernetwork_training()`, `_restore_hypernetwork_training_devices()`, `train_embedding()`, `train_hypernetwork()`, and `get_memory()`.
+- `modules/api/models.py`: `CreateResponse`, `TrainResponse`, and `MemoryResponse` public schemas.
+- Focused adjacent tests: `tests/test_api_training_contract.py` and `tests/test_api_server_control_contract.py` memory/task-response coverage.
+
+### Findings / fixes
+- No safe production-code deletion or consolidation was found in this slice. The create/train helpers already represent the useful deduplication boundary: one lifecycle wrapper for create endpoints, one lifecycle wrapper for training endpoints, and separate response constructors to preserve public schema-family intent.
+- Preserved `_create_response()` and `_train_response()` despite identical implementation shape. `CreateResponse` and `TrainResponse` are distinct public FastAPI response models with different endpoint families and generated schema names; collapsing them into a generic helper would be cosmetic and would weaken contract readability.
+- Preserved `_run_create_task()` and `_run_training_task()` as separate wrappers. Create tasks have post-create refresh side effects and assertion-error handling; training tasks have optimization undo/apply, train-function exception capture, optional before/after hooks, and one shared state end path. A merged wrapper would add branching around live task semantics without removing dead code.
+- Preserved hypernetwork training hooks. `_prepare_hypernetwork_training()` intentionally clears loaded hypernetworks before training, and `_restore_hypernetwork_training_devices()` restores model submodules to `devices.device` after training regardless of training success inside the helper.
+- Preserved `get_memory()` and `MemoryResponse` loose dictionary fields. The endpoint intentionally tolerates RAM/CUDA probe failures with `error` dictionaries and exposes runtime-dependent nested CUDA stats; stricter models or branch removal would risk public API compatibility.
+
+### Static/dynamic audit map notes
+- Create embedding chain remains: `/sdapi/v1/create/embedding` -> `Api.create_embedding()` -> `_run_create_task("create_embedding", textual_inversion.create_embedding, ..., after_create=embedding_db.load_textual_inversion_embeddings)` -> `CreateResponse(info="create embedding filename: ..." | "create embedding error: ...")` -> `shared.state.end()`.
+- Create hypernetwork chain remains: `/sdapi/v1/create/hypernetwork` -> `Api.create_hypernetwork()` -> `_run_create_task("create_hypernetwork", hypernetwork.create_hypernetwork, ...)` -> `CreateResponse(info="create hypernetwork filename: ..." | "create hypernetwork error: ...")`.
+- Training chains remain: `/sdapi/v1/train/embedding` and `/sdapi/v1/train/hypernetwork` -> `_run_training_task(...)` -> optional optimization undo/apply and optional hypernetwork prepare/restore hooks -> `TrainResponse(info="train ... complete: filename: ... error: ..." | "train ... error: ...")` -> `shared.state.end()`.
+- Memory chain remains: `/sdapi/v1/memory` -> process RSS/percent RAM calculation plus optional `torch.cuda.mem_get_info()` and `torch.cuda.memory_stats(shared.device)` -> `MemoryResponse(ram=..., cuda=...)`, with error dictionaries for failed probes.
+- Compatibility surfaces to keep conservative: route paths/methods, `CreateResponse.info`, `TrainResponse.info`, `MemoryResponse.ram`/`cuda`, exact public response strings, embedding refresh after create, training optimization restore, hypernetwork device restore, and memory fallback error shapes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass88.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_training_contract.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass88-training.XXXXXX) python3 -m pytest -q tests/test_api_training_contract.py tests/test_api_server_control_contract.py -k "training or memory"` - passed: 4 passed, 6 deselected, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate class/function scan across `modules/api/api.py`, `modules/api/models.py`, `tests/test_api_training_contract.py`, and `tests/test_api_server_control_contract.py` reports only intentional empty wrapper/marker classes from earlier passes: `ScriptArgsList`, `TextToImageResponse`, `ImageToImageResponse`, and `ExtrasSingleImageRequest`.
+- `git diff --check` - passed.
+- Live create/train/memory API requests were not exercised because this bounded slice did not start a WebUI/model runtime or perform training operations.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue after memory into extension/script-control and remaining API utility response surfaces, especially `get_extensions_list()`, script-info/list coverage boundaries not already covered by pass 81/87, launch-info/help-style responses if present, and any trailing `modules/api/models.py` response classes after `MemoryResponse`, looking for stale public fields or duplicated serializers while preserving OpenAPI schema identities and registry refresh side effects.
