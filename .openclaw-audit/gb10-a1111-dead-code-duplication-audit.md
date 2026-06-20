@@ -2321,3 +2321,42 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into infotext/paste/send-to plumbing around `modules/infotext_utils.py`, `modules/ui.py`, `modules/ui_common.py`, `modules/generation_parameters_copypaste.py`, and txt2img/img2img paste-field registration, looking for duplicated paste-field mapping, stale compatibility wrappers, and dead image-info helpers while preserving extension-visible paste/send-to behavior and UI/API infotext contracts.
+
+
+
+## Pass 61 - Infotext paste/send-to UI plumbing (2026-06-20)
+
+### Checked scope
+- `modules/infotext_utils.py`: compatibility alias for `modules.generation_parameters_copypaste`, `ParamBinding`, `PasteField`, `reset()`, `image_from_url_text()`, `add_paste_fields()`, `create_buttons()`, legacy `bind_buttons()`, `register_paste_params_button()`, `connect_paste_params_buttons()`, `send_image_and_dimensions()`, infotext parse/backcompat defaults, inpaint infotext conversion helpers, override-setting mapping helpers, and `connect_paste()`.
+- `modules/ui_common.py`: `update_generation_info()`, `save_files()` image decode/import use, `OutputPanel`, `create_output_panel()`, send-to button construction, gallery selected-infotext update, save/save-zip wiring, paste field name propagation, and output-panel paste-button registration.
+- `modules/ui.py`: `create_output_panel()` wrapper, `image_from_url_text()` import/use, txt2img/img2img `PasteField` registration, PNG Info send-to registration, and final `connect_paste_params_buttons()` call.
+- Adjacent API/tests/contracts: `modules/api/api.py` `api_infotext_value_for_field()` and script arg infotext handling; `test/test_infotext_paste_bindings.py`, `test/test_infotext_api_mappings.py`, and `tests/test_save_serialization_contract.py`.
+- Compatibility-module check: there is no physical `modules/generation_parameters_copypaste.py`; the old import path is intentionally served by `sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]` in `modules/infotext_utils.py`.
+
+### Findings and fixes
+- No safe source-code removals or consolidations were made in this slice.
+- Preserved the `modules.generation_parameters_copypaste` alias. It is a stale-looking name but remains an extension compatibility surface; removing or replacing it with a real wrapper file would change import behavior for extensions that import the old module after `infotext_utils` is loaded.
+- Preserved `bind_buttons()` and `create_buttons()` as compatibility/UI helper surfaces. `bind_buttons()` is explicitly marked old compatibility and still translates legacy callers into `ParamBinding`; `create_buttons()` is still used by the PNG Info tab to build its send-to buttons.
+- Preserved `modules.ui.create_output_panel()` as a wrapper around `ui_common.create_output_panel()`. It is thin, but it keeps the historical `modules.ui` API surface while the implementation lives in `ui_common`.
+- Preserved duplicated-looking txt2img/img2img `PasteField` lists. They share prompt/style/size fields, but the component instances, high-res-only txt2img fields, img2img/inpaint mask fields, script infotext fields, API names, and extension-visible `modules.ui.txt2img_paste_fields`/`img2img_paste_fields` assignments make a shared constructor riskier than the duplication it would remove.
+- Preserved send-to button registration in `ui_common.create_output_panel()` and PNG Info registration in `ui.py`. They look similar but differ in source components, source tab copying, generated-info source text, image transfer behavior, and output-panel tab semantics.
+- Preserved `image_from_url_text()` and `send_image_and_dimensions()`. They are still used by UI save/download, gallery send-to, PNG Info image send-to, and tests; their list/file/base64 handling is distinct from API base64 decode helpers.
+- Preserved `api_infotext_value_for_field()` as API-specific conversion logic. It mirrors some UI paste coercion concerns, but it consumes `PasteField` metadata for pydantic/script defaults and must unwrap Gradio update dictionaries without depending on live Gradio components.
+
+### Static/dynamic audit map notes
+- UI paste chain remains: tab UI registers `PasteField` lists with `add_paste_fields()` -> top-row/PNG Info/output-panel buttons register `ParamBinding`s -> `connect_paste_params_buttons()` wires image transfer, infotext parse, same-name source-tab copy, and final tab switch callbacks in that order.
+- Gallery send-to chain remains: output-panel gallery -> `extract_image_from_gallery` JS -> `image_from_url_text()` or `send_image_and_dimensions()` -> destination init image plus optional width/height updates when `shared.opts.send_size` permits.
+- Source-tab send-to chain remains: txt2img output panel can copy a filtered allowlist of fields to img2img/inpaint/extras using matching infotext names; script-provided `paste_field_names` extend the built-in prompt/steps/seed allowlist.
+- PNG Info chain remains: image upload -> `extras.run_pnginfo()` fills hidden generation-info textbox -> PNG Info send-to buttons use that textbox as source text and the image component as source image.
+- Compatibility surfaces to keep conservative: old module alias, legacy `bind_buttons()` behavior, `PasteField` tuple shape plus `.api/.component/.label/.function`, global `paste_fields` and `registered_param_bindings`, extension-visible `modules.ui.txt2img_paste_fields`/`img2img_paste_fields`, callback ordering, generated JS function names, Gradio input/output tuple shapes, `infotext_pasted_callback()` side effects, and `shared.opts.send_seed/send_size` behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass61.XXXXXX) python3 -m py_compile modules/infotext_utils.py modules/ui.py modules/ui_common.py modules/api/api.py test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py tests/test_save_serialization_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass61.XXXXXX) python3 -m pytest -q test/test_infotext_paste_bindings.py test/test_infotext_api_mappings.py tests/test_save_serialization_contract.py` - passed: 12 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/infotext_utils.py`, `modules/ui.py`, `modules/ui_common.py`, `modules/api/api.py`, `test/test_infotext_paste_bindings.py`, and `test/test_infotext_api_mappings.py` reported no duplicate nontrivial function body groups.
+- Targeted reference scans confirmed paste/send-to registration is concentrated in `modules/infotext_utils.py`, `modules/ui_common.py`, `modules/ui.py`, and focused infotext tests; no separate `modules/generation_parameters_copypaste.py` file exists.
+- `git diff --check` - passed.
+- Live browser send-to/paste interactions were not exercised because they require a running WebUI session and browser/UI runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into script and extension infotext/paste integration surfaces, especially `modules/scripts.py` script `infotext_fields`/`paste_field_names`, sampler/seed script UI controls that feed paste fields, and any extension-facing script callback contracts, looking for duplicate script paste metadata while preserving script API and extension hook behavior.
