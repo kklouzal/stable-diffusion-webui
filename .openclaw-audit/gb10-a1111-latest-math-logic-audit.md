@@ -354,3 +354,26 @@ References:
 
 Next unchecked scope:
 - Continue with remaining file/cache/model metadata and extra-network surfaces: `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/ui_extra_networks_checkpoints*.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`, `modules/hashes.py`, `modules/cache.py`, `modules/modelloader.py`, `modules/safe.py`, `modules/paths.py`, and shell/launch/config files not yet covered.
+
+### 2026-06-20 pass 13 - prompt styles, settings, cache, paths, safe load, and extra-network metadata
+Checked:
+- `modules/ui_prompt_styles.py`: style selection, save/delete, dropdown refresh, materialize/apply wiring, and prompt-copy behavior; no defect found in inspected paths.
+- `modules/ui_settings.py`: bulk and quick settings save, refresh components, checkpoint hash worker fanout, sysinfo validation, script-body reload, restart wiring, and settings reload values; no defect found in inspected paths.
+- `modules/hashes.py`, `modules/cache.py`: sha256/addnet/partial hash cache invalidation by mtime and size, old cache migration, diskcache initialization, and cached-file helper behavior; no new defect found in inspected paths.
+- `modules/modelloader.py`: model directory walk/download fallback, friendly names, upscaler registry de-duplication, spandrel extra arch initialization, dtype/half handling, and descriptor evaluation mode; no defect found.
+- `modules/safe.py`: restricted pickle globals, zip filename filtering, legacy and zip checkpoint precheck paths, PyTorch 2.6 `weights_only` compatibility default, and global extra handler context; no defect found.
+- `modules/paths.py`: SD/SDXL/BLIP/k-diffusion path discovery and import-path insertion behavior; no defect found.
+- `modules/ui_extra_networks.py`, `modules/ui_extra_networks_user_metadata.py`, `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_checkpoints_user_metadata.py`, `modules/ui_extra_networks_textual_inversion.py`, `modules/ui_extra_networks_hypernets.py`: extra-network route registration, preview fetch guards, cover-image metadata fetch, item/card/tree/dir HTML construction, hidden-model detection, metadata editor save/preview behavior, and checkpoint/TI/hypernetwork item creation. Found unsafe string-prefix path classification and brittle cover-image metadata defaults/indexing.
+
+Findings/fixes:
+- Extra-network search terms and hidden-model local path detection now use `path_is_parent`/`os.path.commonpath` instead of raw string prefixes, preventing sibling paths with matching prefixes from being treated as inside an allowed preview root.
+- Cover-image metadata fetch now defaults missing `ssmd_cover_images` to an empty list, rejects non-list decoded values, and rejects negative indexes instead of accidentally selecting from the end.
+- Added `tests/test_extra_networks_metadata_contract.py` to lock the cover-image and path-parent contracts.
+
+Validation:
+- `python3 -m py_compile modules/ui_extra_networks.py tests/test_extra_networks_metadata_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_extra_networks_metadata_contract.py` -> passed, 2 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue with shell/launch/config/runtime helper files and remaining non-Python/less-traveled source surfaces not yet covered: launch scripts, `webui*.sh`, `modules/paths_internal.py`, API/options/history/save/delete paths, scripts/hooks, tests, and repository JS/config/shell files outside the already audited frontend set.

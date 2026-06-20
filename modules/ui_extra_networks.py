@@ -122,8 +122,11 @@ def fetch_cover_images(page: str = "", item: str = "", index: int = 0):
     if metadata is None:
         raise HTTPException(status_code=404, detail="File not found")
 
-    cover_images = json.loads(metadata.get('ssmd_cover_images', {}))
-    image = cover_images[index] if index < len(cover_images) else None
+    cover_images = json.loads(metadata.get('ssmd_cover_images', '[]'))
+    if not isinstance(cover_images, list):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    image = cover_images[index] if 0 <= index < len(cover_images) else None
     if not image:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -223,9 +226,8 @@ class ExtraNetworksPage:
     def search_terms_from_path(self, filename, possible_directories=None):
         abspath = os.path.abspath(filename)
         for parentdir in (possible_directories if possible_directories is not None else self.allowed_directories_for_previews()):
-            parentdir = os.path.dirname(os.path.abspath(parentdir))
-            if abspath.startswith(parentdir):
-                return os.path.relpath(abspath, parentdir)
+            if path_is_parent(parentdir, abspath):
+                return os.path.relpath(abspath, os.path.abspath(parentdir))
 
         return ""
 
@@ -286,10 +288,9 @@ class ExtraNetworksPage:
 
         local_path = ""
         filename = item.get("filename", "")
-        for reldir in self.allowed_directories_for_previews():
-            absdir = os.path.abspath(reldir)
-
-            if filename.startswith(absdir):
+        for preview_dir in self.allowed_directories_for_previews():
+            absdir = os.path.abspath(preview_dir)
+            if path_is_parent(absdir, filename):
                 local_path = filename[len(absdir):]
 
         # if this is true, the item must not be shown in the default view, and must instead only be
