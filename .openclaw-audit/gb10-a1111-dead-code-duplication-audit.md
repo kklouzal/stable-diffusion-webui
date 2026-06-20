@@ -2006,3 +2006,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue through prompt-style/UI state refresh and settings reload plumbing, especially style reload/save/materialize callbacks, config-state refresh in extensions UI, quicksettings/settings component refresh contracts, and any remaining duplicated Gradio update helpers while preserving public UI and extension callback behavior.
+
+## Pass 52 - Prompt-style/UI state refresh and settings reload plumbing (2026-06-20)
+
+### Checked scope
+- `modules/ui_prompt_styles.py`: `select_style()`, `save_style()`, `delete_style()`, `materialize_styles()`, `refresh_styles()`, and `UiPromptStyles` edit/materialize/copy callback wiring.
+- `modules/ui_settings.py`: `get_value_for_setting()`, new `get_setting_component_args()` / `refreshed_setting_component_args()`, `create_setting_component()`, quicksettings construction, `run_settings_single()`, settings reload actions, and `demo.load()` settings value refresh.
+- `modules/ui_common.py`: `create_refresh_button()` Gradio update helper contract and multi-output update shape.
+- `modules/ui_extensions.py`: config-state save/refresh/dropdown plumbing in the Backup/Restore UI, `save_config_state()`, new `config_state_choices()`, and adjacent config-state restore/update callbacks.
+- `modules/config_states.py`: `list_config_states()`, `get_config()`, webui/extension restore helpers, and `all_config_states` refresh side effects.
+- `modules/styles.py`: style database reload/save/materialize-adjacent methods (`reload()`, `save_styles()`, style apply/extract helpers) as called by the UI style editor.
+- Adjacent focused tests: `tests/test_ui_loadsave_contract.py` and `tests/test_ui_extensions_contract.py`.
+
+### Findings and fixes
+- Extracted repeated settings `OptionInfo.component_args` resolution into `ui_settings.get_setting_component_args()`. `get_value_for_setting()`, `create_setting_component()`, and refresh-button callbacks now share the same callable/dict/default handling and the same exclusion of Gradio `precision` from update payloads.
+- Added `ui_settings.refreshed_setting_component_args()` as the refresh-button-facing wrapper, keeping `OptionInfo.refresh`/`component_args` behavior explicit for settings and quicksettings while preserving the existing `create_refresh_button()` contract.
+- Extracted config-state dropdown choice construction into `ui_extensions.config_state_choices()`. Config-state save still selects the newly saved config, and the refresh button still calls `config_states.list_config_states()` before returning updated choices.
+- No dead style editor callbacks were removed. `select_style()`, `save_style()`, `delete_style()`, `materialize_styles()`, and `refresh_styles()` are all directly wired to visible style editor controls and preserve their Gradio update shapes.
+- No change was made to `ui_common.create_refresh_button()`. It remains the shared extension-visible refresh helper that mutates component attributes and returns either a single `gr.update(...)` or a list of updates depending on output count.
+- No config-state restore/save wrappers were removed. They are UI callbacks with side effects across config files, extension disabled state, git restore, and restart request behavior.
+
+### Static/dynamic audit map notes
+- Settings refresh chain remains: `OptionInfo.refresh` -> `ui_settings.create_setting_component()` -> `ui_common.create_refresh_button()` -> `refreshed_setting_component_args()` -> component attribute mutation plus Gradio update.
+- Settings load/save refresh remains: `run_settings_single()` updates `opts`, saves `config.json`, then returns `get_value_for_setting()` plus the hidden JSON settings payload; `demo.load()` refreshes every settings component through the same value/update helper.
+- Style edit chain remains: style selection updates prompt fields and Save/Delete visibility; Save/Delete persist through `shared.prompt_styles.save_styles()` and then refresh both the main style dropdown and editor selection choices; Materialize applies selected styles and clears the dropdown.
+- Config-state refresh chain remains: save/list refresh `config_states.all_config_states`, dropdown choices are rebuilt with `Current` first, and restore keeps selected config names tied to the refreshed global map.
+- Compatibility surfaces to continue treating conservatively: `OptionInfo.component_args`, `OptionInfo.refresh`, `ui_common.create_refresh_button()`, style dropdown Gradio update shapes, config-state dropdown value/choice behavior, extension Backup/Restore UI callbacks, and public settings/quicksettings component dictionaries.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass52.XXXXXX) python3 -m py_compile modules/ui_settings.py modules/ui_prompt_styles.py modules/ui_common.py modules/ui_extensions.py modules/config_states.py modules/styles.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass52.XXXXXX) python3 -m pytest -q tests/test_ui_loadsave_contract.py tests/test_ui_extensions_contract.py` - passed: 3 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/ui_settings.py`, `modules/ui_prompt_styles.py`, `modules/ui_common.py`, `modules/ui_extensions.py`, `modules/config_states.py`, and `modules/styles.py` reported no duplicate nontrivial function bodies after the helper extractions.
+- `git diff --check` - passed.
+- Live Gradio/WebUI style editor, quicksettings, settings reload, and extension Backup/Restore buttons were not exercised because they require a running WebUI session and some actions can restart or alter extension/git state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into UI component construction and paste/load/save plumbing around `modules/ui_loadsave.py`, `modules/ui_components.py`, `modules/ui_toprow.py`, and infotext/paste binding helpers, looking for duplicated Gradio update shapes or dead callback wrappers while preserving API-visible paste/settings contracts.

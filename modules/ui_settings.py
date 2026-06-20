@@ -9,14 +9,22 @@ from modules.ui_html_extensions import reload_javascript
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def get_value_for_setting(key):
-    value = getattr(opts, key)
-
+def get_setting_component_args(key):
     info = opts.data_labels[key]
     args = info.component_args() if callable(info.component_args) else info.component_args or {}
-    args = {k: v for k, v in args.items() if k not in {'precision'}}
+
+    return {k: v for k, v in args.items() if k not in {'precision'}}
+
+
+def get_value_for_setting(key):
+    value = getattr(opts, key)
+    args = get_setting_component_args(key)
 
     return gr.update(value=value, **args)
+
+
+def refreshed_setting_component_args(key):
+    return get_setting_component_args(key)
 
 
 def create_setting_component(key, is_quicksettings=False):
@@ -26,7 +34,7 @@ def create_setting_component(key, is_quicksettings=False):
     info = opts.data_labels[key]
     t = type(info.default)
 
-    args = info.component_args() if callable(info.component_args) else info.component_args
+    args = get_setting_component_args(key)
 
     if info.component is not None:
         comp = info.component
@@ -43,14 +51,14 @@ def create_setting_component(key, is_quicksettings=False):
 
     if info.refresh is not None:
         if is_quicksettings:
-            res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
-            ui_common.create_refresh_button(res, info.refresh, info.component_args, f"refresh_{key}")
+            res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
+            ui_common.create_refresh_button(res, info.refresh, lambda: refreshed_setting_component_args(key), f"refresh_{key}")
         else:
             with FormRow():
-                res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
-                ui_common.create_refresh_button(res, info.refresh, info.component_args, f"refresh_{key}")
+                res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
+                ui_common.create_refresh_button(res, info.refresh, lambda: refreshed_setting_component_args(key), f"refresh_{key}")
     else:
-        res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
+        res = comp(label=info.label, value=fun(), elem_id=elem_id, **args)
 
     return res
 
