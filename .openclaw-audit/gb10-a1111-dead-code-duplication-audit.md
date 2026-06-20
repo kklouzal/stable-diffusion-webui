@@ -2219,3 +2219,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into generation/save plumbing adjacent to postprocessing, especially `modules/processing.py`, `modules/ui_common.py` save/download paths, scripts that call `images.save_image()` (`scripts/loopback.py`, `scripts/outpainting_mk_2.py`, `scripts/sd_upscale.py`, `scripts/xyz_grid.py`), and API processed-image response helpers, looking for duplicated save/infotext/list assembly while preserving callback contracts and user-visible output ordering.
+
+## Pass 58 - Generation/save plumbing adjacent to postprocessing (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `process_images_inner()` generation output loop, pre-face-restoration and pre-color-correction save branches, final sample save, output image/infotext list assembly, returned mask/mask-composite handling, grid return/save handling, highres-fix intermediate save, and img2img init-image save.
+- `modules/ui_common.py`: `update_generation_info()`, `update_logfile()`, `save_files()`, output-panel save/download button wiring, selected-image save behavior, CSV log handling, zip creation, and gallery/open-folder paths.
+- Script save callers: `scripts/loopback.py`, `scripts/outpainting_mk_2.py`, `scripts/sd_upscale.py`, and `scripts/xyz_grid.py` grid/sample save calls, processed image/infotext list assembly, and returned grid ordering.
+- API processed-image response helpers: `modules/api/api.py` `processed_js_with_image_paths()`, txt2img/img2img response assembly, `encode_pil_to_base64()`, extras batch response encoding, and PNG info response helper; adjacent response models in `modules/api/models.py` were checked for field contracts.
+
+### Findings and fixes
+- Removed a small duplicated per-image infotext recomputation in `process_images_inner()`. The final sample save, returned image metadata/list entry, saved mask, and saved mask-composite now reuse the same `text = infotext(i)` value for that output image.
+- Preserved pre-face-restoration and pre-color-correction save calls with their inline `infotext(i)` calls because those saves intentionally happen before later image transformations and callbacks; moving or sharing their infotext across the later output block could change callback-visible timing.
+- Preserved `ui_common.save_files()` as a UI/download-specific path. It decodes gallery image data, reconstructs a lightweight processing object for filename pattern expansion, updates optional CSV logs, handles selected-image save semantics, and builds zip downloads; it is similar to generation save plumbing but not a dead wrapper around `images.save_image()`.
+- Preserved script-level save calls in loopback, outpainting, SD upscale, and XYZ grid. Each script has different output ordering, seed/infotext alignment, grid/subgrid behavior, and `Processed` assembly semantics; no safe shared helper was found without risking user-visible ordering or extension/script contracts.
+- Preserved API response helpers and duplicated-looking txt2img/img2img response mapping. `processed_js_with_image_paths()` enriches the `Processed.js()` JSON with saved paths and OpenClaw diagnostics, while each endpoint must keep its response model fields, `send_images` behavior, and img2img timing metadata.
+
+### Static/dynamic audit map notes
+- Generation output chain remains: decoded samples -> script postprocess callbacks -> optional overlay/color correction -> final `text = infotext(i)` -> optional `images.save_image()` -> output image/infotext append -> optional returned/saved mask and mask-composite images.
+- Grid chain remains: returned grid inserts its infotext/image at index 0 and shifts `index_of_first_image`; saved grid still uses main prompt/seed and main-grid infotext through the existing `images.save_image()` call.
+- UI save/download chain remains: gallery save button -> `save_files()` -> `image_from_url_text()` -> `images.save_image()` under `outdir_save` -> optional CSV row and zip archive -> Gradio file update plus saved filename HTML.
+- API response chain remains: endpoint processing -> optional base64 encoding of `processed.images` -> `processed_js_with_image_paths()` JSON in `info` with image path/diagnostic fields -> pydantic response model.
+- Compatibility surfaces to keep conservative: `Processed.images` ordering, `Processed.infotexts` alignment, `index_of_first_image`, `already_saved_as` path propagation, `save_files()` Gradio output shape, CSV column order, script save side effects, API `images`/`parameters`/`info` fields, and image metadata preserved by `encode_pil_to_base64()`.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass58.XXXXXX) python3 -m py_compile modules/processing.py modules/ui_common.py modules/api/api.py scripts/loopback.py scripts/outpainting_mk_2.py scripts/sd_upscale.py scripts/xyz_grid.py` - passed.
+- Exact AST duplicate-body scan across `modules/processing.py`, `modules/ui_common.py`, `modules/api/api.py`, `scripts/loopback.py`, `scripts/outpainting_mk_2.py`, `scripts/sd_upscale.py`, and `scripts/xyz_grid.py` reported no duplicate nontrivial function body groups.
+- `git diff --check` - passed.
+- Focused runtime generation/UI/API save-path tests were not run because they require a running WebUI/API session and model/runtime state; this slice used static inspection plus bytecode compilation.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into core image save implementation and filename/path helpers in `modules/images.py`, especially `FilenameGenerator`, filename sanitization, save path/subdirectory selection, existing-info metadata propagation, and text sidecar/callback branches, looking for duplicate output path handling while preserving public save callback contracts and filename-pattern behavior.

@@ -1258,10 +1258,10 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     p.scripts.postprocess_image_after_composite(p, pp)
                     image = pp.image
 
-                if save_samples:
-                    images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
-
                 text = infotext(i)
+
+                if save_samples:
+                    images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=text, p=p)
 
                 def append_output_image(output_image):
                     infotexts.append(text)
@@ -1275,14 +1275,14 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     if opts.return_mask or opts.save_mask:
                         image_mask = mask_for_overlay.convert('RGB')
                         if save_samples and opts.save_mask:
-                            images.save_image(image_mask, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask")
+                            images.save_image(image_mask, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=text, p=p, suffix="-mask")
                         if opts.return_mask:
                             append_output_image(image_mask)
 
                     if opts.return_mask_composite or opts.save_mask_composite:
                         image_mask_composite = Image.composite(original_denoised_image.convert('RGBA').convert('RGBa'), Image.new('RGBa', image.size), images.resize_image(2, mask_for_overlay, image.width, image.height).convert('L')).convert('RGBA')
                         if save_samples and opts.save_mask_composite:
-                            images.save_image(image_mask_composite, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask-composite")
+                            images.save_image(image_mask_composite, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=text, p=p, suffix="-mask-composite")
                         if opts.return_mask_composite:
                             append_output_image(image_mask_composite)
 
