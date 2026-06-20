@@ -1177,3 +1177,43 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - Continue with API/data-listing and metadata helper surfaces not yet fully audited in this API pass: `/sdapi/v1/options`, `/cmd-flags`, samplers/schedulers/upscalers/latent-upscale-modes, model/VAE/hypernetwork/face-restorer/realesrgan/prompt-style/embedding list helpers, refresh/create/train endpoints, memory reporting, and adjacent `modules/api/models.py` response contracts.
+
+
+## Pass 28 - API data-listing and metadata helper surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py` public API data/metadata routes and helpers: `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, sampler/scheduler/upscaler/latent-upscale/model/VAE/hypernetwork/face-restorer/RealESRGAN/prompt-style/embedding list helpers, refresh endpoints, create/train embedding and hypernetwork endpoints, and `/sdapi/v1/memory`.
+- `modules/api/models.py` response contracts for the same route set: `OptionsModel`, `FlagsModel`, `SamplerItem`, `SchedulerItem`, `UpscalerItem`, `LatentUpscalerModeItem`, `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `FaceRestorerItem`, `RealesrganItem`, `PromptStyleItem`, `EmbeddingItem`, `EmbeddingsResponse`, `CreateResponse`, `TrainResponse`, and `MemoryResponse`.
+- Adjacent source fanout for runtime value shapes and live hooks: `modules/sd_schedulers.py`, `modules/upscaler.py`, `modules/sd_models.py`, `modules/sd_vae.py`, `modules/shared_items.py`, `modules/realesrgan_model.py`, `modules/face_restoration.py`, `modules/hypernetworks/hypernetwork.py`, `modules/textual_inversion/textual_inversion.py`, `modules/shared_state.py`, and existing focused API/listing tests.
+- Focused duplicate checks: route registration grep, response model fanout grep, training/create string/body inspection, and exact AST duplicate-body scan over `modules/api/api.py` and `modules/api/models.py`.
+
+### Findings and fixes
+- Fixed stale create endpoint response classes: `create_embedding()` and `create_hypernetwork()` now return `models.CreateResponse` on assertion-error paths, matching their registered `response_model=models.CreateResponse`. The serialized field shape remains the same (`info`) for API compatibility.
+- Fixed copied hypernetwork training response text in `train_hypernetwork()`. It now reports `train hypernetwork complete` / `train hypernetwork error` instead of embedding messages.
+- Removed a duplicated `shared.state.end()` call in `train_hypernetwork()`. The method now mirrors `train_embedding()` by restoring model/optimization state in the inner `finally` and ending the shared job once in the outer `finally`; this avoids double-ending the same shared state job.
+- Added `tests/test_api_training_contract.py` to lock the create response-class contract and the hypernetwork train response/state-end behavior.
+- No safe deletion or generic serializer collapse was found in the list helpers. Their compact comprehensions are public `/sdapi/v1/*` compatibility serializers with route-specific field names and response models.
+
+### Preserved compatibility/dead-code decisions
+- `get_config()` and `OptionsModel` remain dynamic over `shared.opts.data` / `opts.data_labels`; even sparse option keys are part of the public settings API.
+- `get_cmd_flags()` and `FlagsModel` remain parser-derived compatibility surfaces; command-line flag defaults/types are intentionally exposed as runtime metadata.
+- Sampler, scheduler, upscaler, latent upscale, checkpoint, VAE, hypernetwork, face-restorer, RealESRGAN, prompt-style, and embedding serializers remain explicit instead of being collapsed into generic dict serialization because their field names are public API contracts and their backing registries have different shapes.
+- API refresh endpoints remain thin queue-locked wrappers around embedding, checkpoint, and VAE refresh hooks. They are intentionally separate from UI option refresh callbacks.
+- `/sdapi/v1/memory` keeps RAM and CUDA logic in one route-local helper because it reports two different best-effort runtime sources and the public response is a permissive `dict` contract.
+- `CreateResponse` and `TrainResponse` remain separate model classes despite identical fields because they document different route families in the generated API schema.
+
+### Static/dynamic audit map notes
+- Listing route chain: `Api.__init__()` registers each `/sdapi/v1/...` listing route with a response model in `modules/api/models.py`; each method serializes a distinct runtime registry into stable public field names.
+- Create/train chain: API routes begin a shared state job, call textual inversion or hypernetwork create/train implementation, restore optimization/model placement where needed, and return a single `info` string through the create/train response schema.
+- Refresh chain: API refresh routes run under `self.queue_lock` and dispatch to embedding DB reload, checkpoint refresh, or VAE refresh, preserving the same queue boundary as other runtime-mutating API calls.
+- Memory chain: `/sdapi/v1/memory` gathers process RSS through `psutil` when available and CUDA allocator stats through `torch.cuda` when available, returning `error` dictionaries on unavailable platforms instead of failing the whole route.
+- Compatibility surfaces to continue treating conservatively: all `/sdapi/v1/*` listing field names, dynamic options/flags schemas, create/train `info` response strings, queue locks on refresh endpoints, and permissive memory error dictionaries.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass28 python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_training_contract.py` - passed.
+- `python3 -m pytest -q tests/test_api_training_contract.py tests/test_api_extension_item_contract.py tests/test_api_progress_contract.py` - passed: 4 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan over `modules/api/api.py` and `modules/api/models.py` reported `0 duplicate nontrivial function body groups` for both files.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: remaining API script/extension metadata and OpenClaw-specific runtime endpoints, especially `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, `/sdapi/v1/extensions`, `/sdapi/v1/openclaw/sdpa-backend`, `/sdapi/v1/openclaw/cuda-graphs`, `/sdapi/v1/openclaw/generation-diagnostics`, `/sdapi/v1/openclaw/precision-map` and `/sdapi/v1/precision-map`, plus adjacent script metadata models and OpenClaw diagnostic helper modules.

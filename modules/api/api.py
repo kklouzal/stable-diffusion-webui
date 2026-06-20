@@ -1226,7 +1226,7 @@ class Api:
             sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings() # reload embeddings so new one can be immediately used
             return models.CreateResponse(info=f"create embedding filename: {filename}")
         except AssertionError as e:
-            return models.TrainResponse(info=f"create embedding error: {e}")
+            return models.CreateResponse(info=f"create embedding error: {e}")
         finally:
             shared.state.end()
 
@@ -1234,10 +1234,10 @@ class Api:
     def create_hypernetwork(self, args: dict):
         try:
             shared.state.begin(job="create_hypernetwork")
-            filename = create_hypernetwork(**args) # create empty embedding
+            filename = create_hypernetwork(**args) # create empty hypernetwork
             return models.CreateResponse(info=f"create hypernetwork filename: {filename}")
         except AssertionError as e:
-            return models.TrainResponse(info=f"create hypernetwork error: {e}")
+            return models.CreateResponse(info=f"create hypernetwork error: {e}")
         finally:
             shared.state.end()
 
@@ -1280,10 +1280,9 @@ class Api:
                 shared.sd_model.first_stage_model.to(devices.device)
                 if not apply_optimizations:
                     sd_hijack.apply_optimizations()
-                shared.state.end()
-            return models.TrainResponse(info=f"train embedding complete: filename: {filename} error: {error}")
+            return models.TrainResponse(info=f"train hypernetwork complete: filename: {filename} error: {error}")
         except Exception as exc:
-            return models.TrainResponse(info=f"train embedding error: {exc}")
+            return models.TrainResponse(info=f"train hypernetwork error: {exc}")
         finally:
             shared.state.end()
 
