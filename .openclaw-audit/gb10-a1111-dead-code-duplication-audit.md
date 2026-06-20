@@ -1935,3 +1935,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue below the API route layer into lower-level registry refresh and listing implementations, especially `shared.refresh_checkpoints()`, VAE/model loader refresh/listing paths, extension metadata refresh internals, and any duplicate registry serialization behind the API wrappers while preserving public API contracts.
+
+
+## Pass 50 - Lower-level registry refresh/listing helpers (2026-06-20)
+
+### Checked scope
+- `modules/shared.py`: compatibility aliases for `list_checkpoint_tiles`, `refresh_checkpoints`, `list_samplers`, and `reload_hypernetworks`.
+- `modules/shared_items.py`: `sd_vae_items()`, `refresh_vae_list()`, `list_checkpoint_tiles()`, `refresh_checkpoints()`, adjacent sampler/unet/hypernetwork list helpers.
+- `modules/sd_models.py`: checkpoint registry globals, `CheckpointInfo.register()`, `CheckpointInfo.calculate_shorthash()`, `checkpoint_tiles()`, `list_models()`, `get_closet_checkpoint_match()`, and `select_checkpoint()`.
+- `modules/sd_vae.py`: VAE registry globals, `get_filename()`, new `vae_search_paths()`, `refresh_vae_list()`, and registry consumers that resolve/load VAE names.
+- `modules/modelloader.py`: `load_models()`, `friendly_name()`, `load_upscalers()`, and spandrel loader initialization adjacent to registry/listing behavior.
+- `modules/extensions.py`: extension registry globals, `ExtensionMetadata`, `Extension.read_info_from_repo()`, `Extension.do_read_info_from_repo()`, `list_extensions()`, and `find_extension()`.
+- Adjacent contracts/callers: API refresh/listing endpoints, shared options refresh hooks, UI checkpoint/VAE refresh buttons, model converter extension calls, `tests/test_extensions_metadata_contract.py`, and `tests/test_sd_models_checkpoint_info_contract.py`.
+
+### Findings and fixes
+- Extracted VAE search-path construction from `sd_vae.refresh_vae_list()` into `sd_vae.vae_search_paths()`. This separates path discovery from registry mutation while preserving the exact path order, extension filters, optional `--ckpt-dir`/`--vae-dir` gating, duplicate-name overwrite behavior, and final natural-sort registry order.
+- No safe removal was made for `shared.refresh_checkpoints()` / `shared.list_checkpoint_tiles()` or the corresponding `shared_items` wrappers. They are compatibility aliases and option-refresh/UI/API surfaces; external extensions may import them even when tracked in-tree callers mostly use lower-level modules directly.
+- No consolidation was made between checkpoint and VAE listing serializers. Checkpoints expose `title`/`short_title` from `CheckpointInfo` objects, while VAE listings intentionally expose names from `vae_dict` plus `Automatic`/`None` UI sentinels in selected callers.
+- No safe change was made to `sd_models.list_models()`. Its registry refresh includes default checkpoint download fallback, explicit `--ckpt` handling, alias registration, metadata/hash side effects, and sd_model_checkpoint option mutation that should stay local to checkpoint loading.
+- No safe change was made to `modelloader.load_models()`. It is a broad compatibility helper used by checkpoints, upscalers, GFPGAN/CodeFormer, interrogate/deepbooru, and extensions; its silent exception tolerance and URL fallback are public behavior.
+- No safe extension registry extraction/removal was made. `extensions.list_extensions()` owns registry clearing, metadata canonical-name de-duplication, disabled/builtin filtering, and requirement checks; `read_info_from_repo()` separately owns cached Git metadata refresh and remains used by API/config/UI surfaces.
+- `modules/extensions_metadata.py` is not present in this checkout; extension metadata behavior lives in `modules/extensions.py` with coverage in `tests/test_extensions_metadata_contract.py`.
+
+### Static/dynamic audit map notes
+- Registry refresh boundaries remain conservative: checkpoint/VAE/model-loader/extension refresh paths mutate module-level registries that are consumed by UI, API, options refresh hooks, and extensions.
+- Public compatibility surfaces preserved: `shared.refresh_checkpoints`, `shared.list_checkpoint_tiles`, `shared_items.refresh_checkpoints`, `shared_items.refresh_vae_list`, `sd_models.list_models`, `sd_models.checkpoint_tiles`, `sd_vae.refresh_vae_list`, `modelloader.load_models`, and `extensions.list_extensions`.
+- Exact AST duplicate-body scan across `modules/shared.py`, `modules/shared_items.py`, `modules/sd_models.py`, `modules/sd_vae.py`, `modules/modelloader.py`, and `modules/extensions.py` reported no duplicate nontrivial function bodies after the VAE extraction.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass50.XXXXXX) python3 -m py_compile modules/shared.py modules/shared_items.py modules/sd_models.py modules/sd_vae.py modules/modelloader.py modules/extensions.py tests/test_extensions_metadata_contract.py tests/test_sd_models_checkpoint_info_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass50.XXXXXX) python3 -m pytest -q tests/test_extensions_metadata_contract.py tests/test_sd_models_checkpoint_info_contract.py` - passed: 5 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across the checked registry modules reported no duplicate nontrivial function bodies.
+- `git diff --check` - passed.
+- Live WebUI/API registry refresh endpoints and UI refresh buttons were not exercised because they require a running WebUI/API server fixture.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from lower-level registries into UI refresh button plumbing and option refresh contracts, especially `modules/ui_common.py`/refresh-button helpers, checkpoint/VAE dropdown update lambdas, and extra-networks checkpoint refresh surfaces, while preserving extension-visible callback and Gradio update contracts.

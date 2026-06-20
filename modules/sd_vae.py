@@ -69,9 +69,7 @@ def get_filename(filepath):
     return os.path.basename(filepath)
 
 
-def refresh_vae_list():
-    vae_dict.clear()
-
+def vae_search_paths():
     paths = [
         os.path.join(sd_models.model_path, '**/*.vae.ckpt'),
         os.path.join(sd_models.model_path, '**/*.vae.pt'),
@@ -95,8 +93,14 @@ def refresh_vae_list():
             os.path.join(shared.cmd_opts.vae_dir, '**/*.safetensors'),
         ]
 
+    return paths
+
+
+def refresh_vae_list():
+    vae_dict.clear()
+
     candidates = []
-    for path in paths:
+    for path in vae_search_paths():
         candidates += glob.iglob(path, recursive=True)
 
     for filepath in candidates:
