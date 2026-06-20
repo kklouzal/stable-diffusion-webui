@@ -87,6 +87,13 @@ def test_xyz_grid_drops_stale_lone_image_infotexts():
 def test_processing_branch_shape_helpers_keep_sensitive_semantics_local():
     source = Path("modules/processing.py").read_text()
 
+    image_helper_at = source.index("def _image_to_chw_float32_array")
+    image_helper_body = source[image_helper_at:source.index("def _full_masked_image_conditioning", image_helper_at)]
+    assert "np.array(image).astype(np.float32) / 255.0" in image_helper_body
+    assert "image = image * 2.0 - 1.0" in image_helper_body
+    assert "return np.moveaxis(image, 2, 0)" in image_helper_body
+    assert source.count("_image_to_chw_float32_array(") == 4
+
     helper_at = source.index("def _full_masked_image_conditioning")
     helper_body = source[helper_at:source.index("def txt2img_image_conditioning", helper_at)]
     assert "torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5" in helper_body

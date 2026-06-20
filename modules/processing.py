@@ -166,6 +166,14 @@ def _record_cache_stats_miss(stats, started_at):
 _IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to")
 
 
+def _image_to_chw_float32_array(image, scale_to_signed=False):
+    image = np.array(image).astype(np.float32) / 255.0
+    if scale_to_signed:
+        image = image * 2.0 - 1.0
+
+    return np.moveaxis(image, 2, 0)
+
+
 def _full_masked_image_conditioning(sd_model, x, width, height):
     # The "masked-image" in this case will just be all 0.5 since the entire image is masked.
     image_conditioning = torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5
@@ -1480,13 +1488,6 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             if self.hr_upscaler is not None:
                 self.extra_generation_params["Hires upscaler"] = self.hr_upscaler
 
-    def _firstpass_image_to_chw_array(self, scale_to_signed=False):
-        image = np.array(self.firstpass_image).astype(np.float32) / 255.0
-        if scale_to_signed:
-            image = image * 2.0 - 1.0
-
-        return np.moveaxis(image, 2, 0)
-
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
 
@@ -1494,13 +1495,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             # here we don't need to generate image, we just take self.firstpass_image and prepare it for hires fix
 
             if self.latent_scale_mode is None:
-                image = self._firstpass_image_to_chw_array(scale_to_signed=True)
+                image = _image_to_chw_float32_array(self.firstpass_image, scale_to_signed=True)
 
                 samples = None
                 decoded_samples = torch.asarray(np.expand_dims(image, 0))
 
             else:
-                image = self._firstpass_image_to_chw_array()
+                image = _image_to_chw_float32_array(self.firstpass_image)
                 image = torch.from_numpy(np.expand_dims(image, axis=0))
                 image = image.to(shared.device, dtype=devices.dtype_vae)
 
@@ -2009,10 +2010,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             if add_color_corrections:
                 self.color_corrections.append(setup_color_correction(image))
 
-            image = np.array(image).astype(np.float32) / 255.0
-            image = np.moveaxis(image, 2, 0)
-
-            imgs.append(image)
+            imgs.append(_image_to_chw_float32_array(image))
 
         if len(imgs) == 1:
             batch_images = np.expand_dims(imgs[0], axis=0)

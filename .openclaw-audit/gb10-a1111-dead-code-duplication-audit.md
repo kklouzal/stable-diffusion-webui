@@ -1773,3 +1773,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue with `StableDiffusionProcessingImg2Img` subclass methods after the txt2img hires class, especially init-image preparation, mask/latent/cache interactions, resize-mode handling, img2img sampler setup/sample state, and duplicated image-to-latent or mask-conditioning transitions adjacent to the already-audited cache helpers.
+
+## Pass 45 - img2img subclass init/mask/sample state assembly (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `StableDiffusionProcessingImg2Img.__post_init__()`, `mask_blur` property/setter, img2img init-cache public/status helpers, cache bypass/key/restore/store boundaries adjacent to pass 42, `init()` init-image preparation, resize-mode/crop-region handling, mask blur/invert/full-res/overlay setup, latent-mask resize/fill transitions, `image_conditioning` construction, `close()`, `sample()`, mask latent blending, and `get_token_merging_ratio()`.
+- Adjacent callers/contracts: `modules/img2img.py` UI/API construction of `StableDiffusionProcessingImg2Img`, `modules/api/api.py` img2img API path and `openclaw_img2img_init_cache_stats` propagation, sampler `sample_img2img()` call shape in `modules/sd_samplers_kdiffusion.py` and `modules/sd_samplers_timesteps.py`, mask blend callback surface in `modules/scripts.py`, `tests/test_processing_auxiliary_infotext_alignment.py`, `test/test_openclaw_cache_invalidation.py`, and `tests/test_image_mask_fix_contract.py`.
+
+### Findings and fixes
+- Consolidated duplicated PIL-image-to-CHW float32 conversion into `_image_to_chw_float32_array()`. The txt2img firstpass decoded-sample path still applies signed `[-1, 1]` scaling, the txt2img firstpass VAE encode path still uses unsigned `[0, 1]` scaling, and img2img init-image preparation still appends unsigned CHW arrays after flatten/resize/mask-fill/color-correction setup.
+- Removed the now-redundant `StableDiffusionProcessingTxt2Img._firstpass_image_to_chw_array()` private method and routed both firstpass branches through the shared helper.
+- Added a focused source-contract assertion for the conversion helper and expected call count in `tests/test_processing_auxiliary_infotext_alignment.py`.
+- No safe extraction was made for img2img mask preparation. The similar-looking blur/invert/full-res/non-full-res branches are coupled to `mask_for_overlay`, `overlay_images`, `paste_to`, generation params, blank-mask fallback, mask return/save behavior, and inpaint crop/resize ordering.
+- No safe extraction was made for latent mask/cache handling. `image_mask`, `latent_mask`, `repeat_init_latent`, seeded latent noise fill, cache bypass/key payloads, and inpainting conditioning all remain behavior-sensitive and extension/API visible.
+- No dead resize-mode variables or sampler setup branches were proven. `resize_mode == 3`, crop-region handling, sampler creation before cache-key construction, `process_before_every_sampling()`, and mask blending are all still active runtime contracts.
+
+### Static/dynamic audit map notes
+- Img2img init image lifecycle remains: save optional init image -> flatten transparency with `opts.img2img_background_color` -> resize unless crop/full-res or latent-resize mode says otherwise -> compose overlays before crop -> crop/full-res resize if needed -> optional mask fill -> optional color correction -> shared CHW float32 conversion -> batch/repeat handling -> VAE encode -> optional latent resize -> optional mask latent blending/fill -> image conditioning.
+- Mask lifecycle remains conservative: UI/API `mask` is moved to `image_mask` in `__post_init__`; `self.mask` later becomes latent keep-mask, while `self.nmask` becomes latent masked-region mask used by sampler denoiser and final blend callbacks.
+- Cache lifecycle remains unchanged from pass 42: masked requests and latent noise fill bypass persistent img2img init cache; unmasked cache keys still include image fingerprints, resize/mask/inpaint settings, sampler conditioning key, VAE/model identity, dtype/device, background color, and effective inpainting mask weight.
+- Sample lifecycle remains: RNG noise -> optional initial noise multiplier metadata -> script `process_before_every_sampling()` with init latent/noise/conds -> sampler `sample_img2img()` with cached/precomputed `image_conditioning` -> optional latent blend and `on_mask_blend()` callback -> GC.
+- Compatibility surfaces to continue treating conservatively: `image_mask` versus latent `mask`, `mask_for_overlay`, `overlay_images`, `paste_to`, `extra_generation_params` strings, img2img init cache tuple ordering, `openclaw_img2img_init_cache_stats`, `scripts.MaskBlendArgs`, and sampler `image_conditioning` argument semantics.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass45.XXXXXX) python3 -m py_compile modules/processing.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass45-source.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass45-cache.XXXXXX) python3 -m pytest -q test/test_openclaw_cache_invalidation.py tests/test_image_mask_fix_contract.py` - blocked during collection because this shell's `/usr/bin/python3` lacks `numpy` (`ModuleNotFoundError: No module named 'numpy'`).
+- Exact AST duplicate-body scan across `modules/processing.py` and `tests/test_processing_auxiliary_infotext_alignment.py` reported `duplicate nontrivial function body groups: 0` for both files.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue past the processing subclasses into adjacent img2img entry/API assembly, especially `modules/img2img.py` mode-specific init image/mask selection, batch img2img setup, duplicate mask construction between UI modes, API img2img request population, and boundaries where scripts/API compatibility should stay conservative.
