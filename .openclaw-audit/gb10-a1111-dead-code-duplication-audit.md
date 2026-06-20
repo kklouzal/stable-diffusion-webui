@@ -1520,3 +1520,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: callback and paste-field consumers adjacent to script lifecycle/runtime behavior, especially `modules/scripts.py` script field registration/exposure, processing script infotext-field producers after paste consumers, and extension callback ordering/priority surfaces outside `infotext_pasted`.
+
+## Pass 37 - script lifecycle callback ordering and paste-field producers (2026-06-20)
+
+### Checked scope
+- `modules/scripts.py`: `Script` public field/callback registration surfaces, selectable-script UI visibility paste fields, script runner aggregation of `infotext_fields`/`paste_field_names`, script-specific ordered callback construction/cache, before/after component elem-id callback collection, runtime script hook dispatch, and reload/body-only compatibility alias.
+- `modules/script_callbacks.py`: global callback naming, extension metadata ordering, user priority sorting, ordered callback cache, callback enumeration for settings UI, public `on_*` registration helpers, removal helpers, reversed unload/UI callbacks, and all callback dispatch functions outside `infotext_pasted`.
+- `modules/shared_items.py`: callback priority option enumeration for global callbacks and script callbacks, including unsorted callback list creation for settings UI.
+- Built-in script field producers: `modules/processing_scripts/seed.py`, `modules/processing_scripts/sampler.py`, `modules/processing_scripts/refiner.py`, `scripts/xyz_grid.py`, `scripts/img2imgalt.py`, `scripts/sd_upscale.py`, `scripts/loopback.py`, `scripts/prompt_matrix.py`, and `scripts/prompts_from_file.py`.
+- Adjacent tests: callback/metadata and infotext-result alignment tests in `tests/test_extensions_metadata_contract.py`, `tests/test_processing_auxiliary_infotext_alignment.py`, `tests/test_save_serialization_contract.py`, plus existing infotext paste/API mapping tests from earlier passes.
+
+### Findings and fixes
+- Consolidated duplicated component elem-id callback registration in `modules/scripts.py`. `Script.on_before_component()` and `Script.on_after_component()` now share `_add_component_callback()` while preserving the public attributes, tuple shape, and registration order.
+- Consolidated duplicated before/after elem-id callback collection in `ScriptRunner.apply_on_before_component_callbacks()` with one local `register_callbacks()` helper using the same `elem_id -> [(callback, script)]` structure and same per-script order.
+- No safe script field registration/exposure removal was found. `infotext_fields` and `paste_field_names` remain public script/extension contracts consumed by UI paste fields, output-panel Send-to buttons, API script-arg paste, and the settings skip-pasting list.
+- No safe processing-script infotext producer deletion was found. Seed/sampler/refiner producers map parsed infotext into live UI/API fields, XYZ grid writes grid-specific script parameters, and the auxiliary scripts maintain live per-result infotext alignment covered by tests.
+- No safe callback compatibility alias removal was found. `reload_scripts = load_scripts`, `topological_sort = util.topological_sort`, public `on_*` registration helpers, and callback maps are extension-facing compatibility surfaces.
+- No safe consolidation of global and script callback ordering helpers was made. Both use `script_callbacks.sort_callbacks()`, but global callbacks cache by category while script callbacks must build per-runner categories from current script objects and expose unsorted lists for settings UI without mutating the runtime cache.
+
+### Static/dynamic audit map notes
+- Script field chain: script `ui()` assigns `infotext_fields`/`paste_field_names` -> `ScriptRunner.create_script_ui_inner()` aggregates them -> `modules/ui.py` and `modules/ui_common.py` expose them to paste/send-to paths -> `infotext_utils` applies parsed fields or copies source fields.
+- Selectable script chain: `ScriptRunner.setup_ui()` creates the script dropdown -> adds `Script` paste field and selectable group visibility fields -> parsed `Script` infotext reopens the selected script group during paste.
+- Script callback ordering chain: script method overrides -> `ScriptRunner.create_ordered_callbacks_list()` wraps them as `ScriptCallback` entries with `script_<method>` categories -> `script_callbacks.sort_callbacks()` applies extension metadata and user priority -> runtime `ordered_scripts()` dispatches methods with script args and timing.
+- Global callback ordering chain: public `script_callbacks.on_*()` registration -> `callback_map` -> `ordered_callbacks()` cache/sort -> dispatch functions; settings UI reads unsorted ordered lists with `enable_user_sort=False` for priority option choices.
+- Compatibility surfaces to continue treating conservatively: `Script.infotext_fields`, `Script.paste_field_names`, `Script.on_before_component_elem_id`, `Script.on_after_component_elem_id`, `reload_scripts`, `topological_sort`, callback category names, `callbacks_*` map keys, callback priority option names, and reversed unload/before-UI dispatch order.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass37.XXXXXX) python3 -m py_compile modules/scripts.py modules/script_callbacks.py modules/shared_items.py modules/processing_scripts/seed.py modules/processing_scripts/sampler.py modules/processing_scripts/refiner.py scripts/xyz_grid.py scripts/img2imgalt.py scripts/sd_upscale.py scripts/loopback.py scripts/prompt_matrix.py scripts/prompts_from_file.py tests/test_extensions_metadata_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass37.XXXXXX) python3 -m pytest -q tests/test_extensions_metadata_contract.py tests/test_processing_auxiliary_infotext_alignment.py tests/test_save_serialization_contract.py test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py` - passed: 22 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/scripts.py`, `modules/script_callbacks.py`, `modules/shared_items.py`, `modules/processing_scripts/seed.py`, `modules/processing_scripts/sampler.py`, `modules/processing_scripts/refiner.py`, `scripts/xyz_grid.py`, `scripts/img2imgalt.py`, `scripts/sd_upscale.py`, `scripts/loopback.py`, `scripts/prompt_matrix.py`, and `scripts/prompts_from_file.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: script runtime helpers and API script-arg consumers beyond callback ordering, especially `modules/api/api.py` script argument initialization/defaulting, `modules/scripts.py` `set_named_arg()` and `init_default_script_args()` interactions, always-on script API persistence, and tests around script arg override/infotext paste behavior.

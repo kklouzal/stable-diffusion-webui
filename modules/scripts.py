@@ -314,19 +314,21 @@ class Script:
         This function is an alternative to before_component in that it also cllows to run before a component is created, but
         it doesn't require to be called for every created component - just for the one you need.
         """
-        if self.on_before_component_elem_id is None:
-            self.on_before_component_elem_id = []
-
-        self.on_before_component_elem_id.append((elem_id, callback))
+        self._add_component_callback("on_before_component_elem_id", elem_id, callback)
 
     def on_after_component(self, callback, *, elem_id):
         """
         Calls callback after a component is created. The callback function is called with a single argument of type OnComponent.
         """
-        if self.on_after_component_elem_id is None:
-            self.on_after_component_elem_id = []
+        self._add_component_callback("on_after_component_elem_id", elem_id, callback)
 
-        self.on_after_component_elem_id.append((elem_id, callback))
+    def _add_component_callback(self, field_name, elem_id, callback):
+        callbacks = getattr(self, field_name)
+        if callbacks is None:
+            callbacks = []
+            setattr(self, field_name, callbacks)
+
+        callbacks.append((elem_id, callback))
 
     def describe(self):
         """unused"""
@@ -613,21 +615,16 @@ class ScriptRunner:
         self.apply_on_before_component_callbacks()
 
     def apply_on_before_component_callbacks(self):
+        def register_callbacks(target, entries, script):
+            for elem_id, callback in entries:
+                target.setdefault(elem_id, []).append((callback, script))
+
         for script in self.scripts:
             on_before = script.on_before_component_elem_id or []
             on_after = script.on_after_component_elem_id or []
 
-            for elem_id, callback in on_before:
-                if elem_id not in self.on_before_component_elem_id:
-                    self.on_before_component_elem_id[elem_id] = []
-
-                self.on_before_component_elem_id[elem_id].append((callback, script))
-
-            for elem_id, callback in on_after:
-                if elem_id not in self.on_after_component_elem_id:
-                    self.on_after_component_elem_id[elem_id] = []
-
-                self.on_after_component_elem_id[elem_id].append((callback, script))
+            register_callbacks(self.on_before_component_elem_id, on_before, script)
+            register_callbacks(self.on_after_component_elem_id, on_after, script)
 
             on_before.clear()
             on_after.clear()
