@@ -3387,3 +3387,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from startup/runtime glue into UI startup/app reload orchestration around `webui.py`, `modules/ui.py` reload/restart hooks, and `modules/shared_state.py` command consumption, looking for stale restart compatibility shims or duplicated UI reload loop helpers while preserving launcher behavior, Gradio unload/reload hooks, server command semantics, and extension/config restore side effects.
+## Pass 92 - UI startup/app reload orchestration and command shims (2026-06-20)
+
+### Scope checked
+- webui.py: module startup import path, create_api(), api_only(), browser-UI guard webui(), and __main__ dispatch.
+- modules/ui.py: top-level headless UI/runtime imports, create_ui() startup side effects, Gradio block construction return surface, demo.ui_loadsave, and setup_ui_api() internal route mounting.
+- modules/shared_state.py: server_command property/signal, wait_for_server_command(), compatibility need_restart, and request_restart().
+- Adjacent reload/callback surfaces: modules/script_callbacks.py app_reload_callback(), on_before_reload(), script_unloaded_callback(), on_before_ui(), and app_started_callback(); modules/initialize.py initialize_rest(reload_script_modules=...); modules/launch_utils.py startup dispatch; modules/headless_ui.py fallback Blocks methods; UI extension/config restore callers in modules/ui_extensions.py and UI settings reload caller in modules/ui_settings.py.
+
+### Findings / fixes
+- No safe production-code deletion or consolidation was found in this slice. This fork has already removed the browser UI runtime loop from webui.py: non---nowebui startup now raises a clear SystemExit, while --nowebui --api uses api_only() without constructing a Gradio app.
+- Preserved modules/ui.py create_ui() and setup_ui_api() despite the disabled browser-UI entry point. The module remains imported during initialization, exports helper symbols consumed by txt2img/img2img/extension modules, and still carries public/internal UI construction APIs that extension code can import dynamically.
+- Preserved script_callbacks.app_reload_callback() and on_before_reload(). No tracked in-repo caller remains after browser UI removal, but these are public extension callback registration/dispatch surfaces; deleting them would risk extension compatibility without reducing active runtime complexity.
+- Preserved shared_state.server_command, wait_for_server_command(), and need_restart. The current tracked runtime no longer consumes commands in a webui reload loop, but API stop still writes server_command = "stop", UI settings/config restore still call request_restart(), and need_restart is an explicit compatibility shim. Removing or narrowing these would change public runtime state semantics.
+- Preserved extension/config restore side effects: ui_extensions.restore_config_state() sets restore config state and requests an in-process restart; startup initialize_rest() still consumes restore_config_state_file() during initialization.
+- No duplicated UI reload loop helper remains to consolidate. The active code has one API-only launch path and no Gradio unload/reload loop; remaining duplicate AST bodies are intentionally inert headless UI fallback methods or compatibility no-op methods.
+
+### Static/dynamic audit map notes
+- API-only startup chain remains: modules.launch_utils.start() -> webui.api_only() when --nowebui is present -> initialize.initialize() -> FastAPI app/middleware/API setup -> script_callbacks.before_ui_callback() -> script_callbacks.app_started_callback(None, app) -> Api.launch().
+- Browser UI chain remains intentionally disabled: modules.launch_utils.start() without --nowebui -> webui.webui() -> SystemExit("The browser UI has been removed from this GB10 fork...").
+- UI helper import chain remains: initialize.imports() imports modules.ui; other modules import modules.ui symbols such as plaintext_to_html, paste symbols, wrap_ui_call, wrap_ui_call_no_job, and create_refresh_button.
+- Reload/config chain remains compatibility-only/currently non-looped: UI settings Reload UI and extension config restore call shared.state.request_restart(); request_restart() interrupts generation and sets server_command = "restart"; no tracked loop consumes it in the current headless-only runtime.
+- Callback chain remains: extensions may register on_before_reload(), but no tracked active runtime caller invokes app_reload_callback() after browser UI removal; before_ui_callback() and app_started_callback(None, app) are still invoked by api_only().
+- Compatibility surfaces to keep conservative: disabled browser-UI error text, --nowebui API launch behavior, before_ui/app_started callback timing, public callback registration names, server_command/need_restart properties, extension config restore request side effects, modules.ui public helper imports, and headless UI fallback no-op methods.
+
+### Validation log
+- PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass92.XXXXXX) python3 -m py_compile webui.py modules/ui.py modules/shared_state.py modules/script_callbacks.py modules/initialize.py modules/launch_utils.py modules/headless_ui.py tests/test_api_server_control_contract.py tests/test_ui_extensions_contract.py - passed.
+- PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass92.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py tests/test_ui_extensions_contract.py - passed: 9 passed, with the existing pytest config warning Unknown config option: base_url.
+- Exact no-ignore reference scans confirmed no tracked active caller for wait_for_server_command() or app_reload_callback(), while server_command writes, request_restart() callers, before_ui/app_started callbacks, and modules.ui public helper imports remain live.
+- Exact AST duplicate function scan across webui.py, modules/ui.py, modules/shared_state.py, modules/script_callbacks.py, modules/initialize.py, modules/launch_utils.py, and modules/headless_ui.py reported only intentional headless UI fallback/no-op duplicates: _FallbackComponent fluent methods plus Blocks.queue, inert load/from_hub, and inert setup_progressbar/Blocks.close/dump shapes.
+- git diff --check - passed after replacing the ledger entry.
+- Live UI reload/restart, extension config restore, and browser-UI startup were not exercised because this bounded slice did not start, stop, or mutate a WebUI runtime; the browser UI entry point is intentionally disabled in this fork.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: move from UI startup/reload orchestration into the headless UI compatibility layer and UI helper exports, especially modules/headless_ui.py, top-level modules/ui.py compatibility no-ops/aliases, and callers that import UI symbols without constructing the browser UI, looking for safely removable fallback methods or duplicate compatibility helpers while preserving extension import compatibility and API/headless startup behavior.
