@@ -1120,14 +1120,15 @@ class Api:
         img = decode_base64_to_image(image_b64)
         img = img.convert('RGB')
 
-        # Override object param
-        with self.queue_lock:
+        def interrogate_image():
             if interrogatereq.model == "clip":
-                processed = shared.interrogator.interrogate(img)
+                return shared.interrogator.interrogate(img)
             elif interrogatereq.model == "deepdanbooru":
-                processed = deepbooru.model.tag(img)
-            else:
-                raise HTTPException(status_code=404, detail="Model not found")
+                return deepbooru.model.tag(img)
+
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        processed = self._call_with_queue_lock(interrogate_image)
 
         return models.InterrogateResponse(caption=processed)
 
