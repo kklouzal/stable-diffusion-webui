@@ -6,6 +6,22 @@ from modules import shared, images, devices, scripts, scripts_postprocessing, ui
 from modules.shared import opts
 
 
+def combine_caption(existing_caption, new_caption, action):
+    existing_caption = (existing_caption or '').strip()
+    new_caption = (new_caption or '').strip()
+
+    if action == 'Prepend' and existing_caption:
+        caption = f"{new_caption} {existing_caption}"
+    elif action == 'Append' and existing_caption:
+        caption = f"{existing_caption} {new_caption}"
+    elif action == 'Keep' and existing_caption:
+        caption = existing_caption
+    else:
+        caption = new_caption
+
+    return caption.strip()
+
+
 def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True, scripts_order=None):
     devices.torch_gc()
 
@@ -113,16 +129,7 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
                         pass
 
                     action = shared.opts.postprocessing_existing_caption_action
-                    if action == 'Prepend' and existing_caption:
-                        caption = f"{existing_caption} {pp.caption}"
-                    elif action == 'Append' and existing_caption:
-                        caption = f"{pp.caption} {existing_caption}"
-                    elif action == 'Keep' and existing_caption:
-                        caption = existing_caption
-                    else:
-                        caption = pp.caption
-
-                    caption = caption.strip()
+                    caption = combine_caption(existing_caption, pp.caption, action)
                     if caption:
                         with open(caption_filename, "w", encoding="utf8") as file:
                             file.write(caption)
