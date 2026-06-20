@@ -4150,3 +4150,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from checkpoint load/cache internals into checkpoint config/model-instantiation internals, especially `load_model()`, `instantiate_from_config()`, `sd_models_config.find_checkpoint_config()`, `repair_config()`, `set_model_type()`, `set_model_fields()`, and adjacent model-type/config tests, looking for duplicate config inference or stale compatibility branches while preserving checkpoint reload side effects, model-type metadata, config repair behavior, and extension callbacks.
+
+
+## Pass 114 - Checkpoint config/model-instantiation internals (2026-06-20)
+
+### Scope checked
+- `modules/sd_models.py`: `load_model()`, `instantiate_from_config()`, `repair_config()`, `set_model_type()`, `set_model_fields()`, `load_model_weights()` model-type/config adjacency, fresh-load callback/embedding/hijack side effects, and `reload_model_weights()` checkpoint-config reuse/reload branches around fresh TorchAO reloads and already-loaded model reuse.
+- `modules/sd_models_config.py`: `find_checkpoint_config()`, `find_checkpoint_config_near_filename()`, `guess_model_config_from_state_dict()`, SD1/SD2/SDXL/SSD/SD3/inpainting/instruct-pix2pix/depth/UnCLIP/Alt-Diffusion config inference branches, and SD2 v-parameterization probing.
+- Adjacent model-type/config consumers by reference: `modules/sd_vae_approx.py`, `modules/sd_vae_taesd.py`, `modules/sd_samplers.py`, `modules/sd_schedulers.py`, `modules/processing.py`, `modules/lowvram.py`, `extensions-builtin/Lora/*`, `extensions-builtin/hypertile/*`, `modules/api/api.py`, `modules/extras.py`, and `modules/sd_hijack_ip2p.py`.
+- Adjacent tests/references: `tests/test_sd_models_checkpoint_info_contract.py`, `tests/test_api_listing_contract.py`, `test/test_openclaw_device_dtypes.py`, scheduler/cache tests by model-type attribute reference, and exact reference scans for config/model-type helpers.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `find_checkpoint_config()` and `find_checkpoint_config_near_filename()` separation. The near-file helper is a public/adjacent compatibility surface used by API model listing, extras, IP2P hijack config detection, and tests; full config selection must still prefer checkpoint-adjacent YAML before state-dict inference.
+- Preserved `guess_model_config_from_state_dict()` branches, including SD3, SDXL inpaint/v-pred/base/refiner, SD2 inpaint/v/base, SD1 inpaint, instruct-pix2pix, depth, UnCLIP/OpenCLIP, and Alt-Diffusion variants. These branches map checkpoint formats to distinct YAML targets, and removing rare-format handling would be a compatibility regression rather than dead-code cleanup.
+- Preserved the `v_pred` deletion in SDXL-v inference and the SD2 v-parameterization probe. Both are mutation/compatibility behaviors inside config inference, not duplicate config repair paths.
+- Preserved `repair_config()` as the post-YAML normalization boundary. Its EMA default, fp16 UNet flag adjustment, VAE `vanilla-xformers` repair, Karlo path rewrite, and checkpoint disabling target different config subtrees and should remain explicit.
+- Preserved `set_model_type()` and `set_model_fields()` as load-time metadata initialization. The boolean flags and `model_type` enum feed samplers, schedulers, VAE approximations, LoRA filtering, HyperTile, processing inpaint behavior, and extension-facing checks; `latent_channels` default remains a compatibility field for models/configs that omit it.
+- Preserved the quick-then-slow `instantiate_from_config()` call pattern in `load_model()`. The first attempt is wrapped in `DisableInitialization(disable_clip=...)` plus meta initialization, while the fallback intentionally retries without `DisableInitialization` after reporting the fast-path exception.
+- Preserved repeated checkpoint-config inference in `reload_model_weights()` branches. The fresh TorchAO path re-reads uncached disk state before delegating to `load_model()`, and the reusable-model path must compare the new checkpoint config against `sd_model.used_config` before deciding between in-place weight load and full model reconstruction.
+
+### Static/dynamic audit map notes
+- Initial load chain remains: selected checkpoint -> state dict -> optional near-file YAML -> inferred config -> `OmegaConf.load()` -> `repair_config()` -> fast model construction attempt -> slow construction fallback -> `load_model_weights()` -> model-to-device -> hijack -> embedding reload -> model-loaded callbacks -> empty prompt cache.
+- Model metadata chain remains: `load_model_weights()` -> `set_model_type()` / `set_model_fields()` -> SDXL extension and SSD conversion -> CLIP key remap -> weight load -> `is_sdxl_inpaint` structural detection.
+- Config inference chain remains: adjacent YAML wins; otherwise state-dict markers choose SD3/SDXL/refiner/depth/UnCLIP/SD2/SD1/instruct-pix2pix/Alt-Diffusion/default configs, with SD2 v-parameterization requiring a temporary UNet probe.
+- Compatibility surfaces kept conservative: checkpoint-adjacent YAML discovery, API `config` field behavior, IP2P/extras config basename callers, rare checkpoint format branches, model boolean flags, `ModelType` enum values, model `used_config`, `latent_channels` default, extension callbacks, model hijack ordering, textual inversion reload after model load, and TorchAO precision/quant reload boundaries.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass114.XXXXXX) python3 -m py_compile modules/sd_models.py modules/sd_models_config.py modules/sd_models_types.py tests/test_sd_models_checkpoint_info_contract.py tests/test_api_listing_contract.py test/test_openclaw_device_dtypes.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass114.XXXXXX) python3 -m pytest -q tests/test_sd_models_checkpoint_info_contract.py tests/test_api_listing_contract.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed scoped config/type helpers and model-type fields are referenced by expected API, extras, IP2P, sampler/scheduler, processing, VAE approximation, LoRA, HyperTile, lowvram, and focused test surfaces.
+- Exact AST duplicate-body scan across `modules/sd_models.py` and `modules/sd_models_config.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, actual checkpoint/model instantiation, rare checkpoint-format config inference with real files, CUDA/offload behavior, and extension callback execution under a loaded model were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from model instantiation into post-load model mutation and conditioning helpers, especially `remap_sdxl_clip_text_model_state_dict_if_needed()`, `apply_alpha_schedule_override()`, `rescale_zero_terminal_snr_abar()`, `get_empty_cond()`, `sd_models_xl.extend_sdxl()`, `sd_models_xl.get_learned_conditioning()`, and adjacent prompt-conditioning/model-patch tests, looking for duplicate conditioning or stale SDXL compatibility branches while preserving prompt output shape, sampler behavior, extension patches, and inpaint/refiner compatibility.
