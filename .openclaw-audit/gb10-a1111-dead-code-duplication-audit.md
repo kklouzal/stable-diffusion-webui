@@ -1340,3 +1340,46 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: image saving/metadata sidecar and infotext duplication surfaces adjacent to postprocessing outputs, especially `modules/images.py` save/info helpers, caption/sidecar call sites, PNG info propagation in generation vs extras, and focused image-save tests/contracts.
+
+
+## Pass 32 - image save metadata sidecars and extras infotext propagation (2026-06-20)
+
+### Checked scope
+- `modules/images.py` image save/info surface: `save_image_with_geninfo()`, `geninfo_to_exif_bytes()`, `save_image()`, nested `_atomically_save_image()`, `read_info_from_image()`, `image_data()`, and adjacent filename/save sequencing behavior relevant to metadata sidecars.
+- `modules/postprocessing.py` output surface: `combine_caption()`, `run_postprocessing()` image loading, inherited PNG info extraction, extras infotext assembly, returned-image info propagation, `images.save_image()` call, caption sidecar read/merge/write, and `run_extras()` save-output bridge.
+- Infotext-adjacent helpers/callers: `modules/infotext_utils.py` parse/paste helpers at a reachability level, `modules/extras.py` PNG info display, `modules/ui_common.py` gallery save-to-files path, `modules/ui_extra_networks.py` and `modules/ui_extra_networks_user_metadata.py` preview metadata preservation.
+- Focused tests/contracts: `test/test_images_save.py`, `tests/test_postprocessing_caption_contract.py`, `tests/test_save_serialization_contract.py`, `test/test_extras.py`, and postprocessing API default stubs that pin extras caption/pnginfo interactions.
+- Focused grep/AST checks for `save_image_with_geninfo`, `geninfo_to_exif_bytes`, `save_image`, `read_info_from_image`, `image_data`, `.txt` sidecar writes, caption sidecars, `existing_pnginfo`, `pnginfo_section_name`, and exact duplicate nontrivial function bodies across the save/metadata caller set.
+
+### Findings and fixes
+- No safe source-code remediation was found in this slice; this is a ledger-only checkpoint.
+- `save_image_with_geninfo()` remains active as the shared low-level embedder for normal saves plus extra-network preview replacement. Its format branches are not dead: PNG preserves text chunks, JPEG/WebP use EXIF insertion after save, AVIF passes EXIF bytes at save time, GIF uses `comment`, and the fallback covers other registered Pillow extensions.
+- `geninfo_to_exif_bytes()` remains active via image saving and API encode paths. Pass 24 already consolidated the EXIF byte construction; this slice intentionally did not rework it.
+- `save_image()` remains the correct high-level owner of filename generation, callback mutation, atomic temp-save/replace policy, 4chan downscale export, `already_saved_as`, and optional `.txt` infotext sidecar output. The `.txt` sidecar write is not duplicated with extras caption output because it records generation/extras infotext when `opts.save_txt` is enabled, while postprocessing captions are extension-generated captions merged under `postprocessing_existing_caption_action`.
+- `read_info_from_image()` and `image_data()` are reachable through PNG info display, img2img infotext import, API png-info, extra-network metadata/preview paths, and text/image upload parsing. No safe deletion was identified.
+- Postprocessing PNG-info propagation looks repetitive but has separate effects: `existing_pnginfo["parameters"] = parameters` preserves source generation parameters after `read_info_from_image()` pops them; `pp.image.info["postprocessing"] = infotext` feeds returned gallery image metadata; `images.save_image(... pnginfo_section_name="extras", existing_info=existing_pnginfo)` embeds the extras infotext into saved files. Collapsing these without a broader contract change would risk API/UI metadata behavior.
+- Caption sidecar merge logic is currently localized to postprocessing output and covered by `combine_caption()` contract tests; extracting a one-call wrapper would be cosmetic churn rather than a dead-code/duplication fix.
+
+### Preserved compatibility/dead-code decisions
+- Preserved `existing_info` mutation behavior in `save_image()` and `save_image_with_geninfo()` because callback/plugin callers receive and may mutate the same PNG info dictionary before save.
+- Preserved `pnginfo_section_name` flexibility because generation uses `parameters`, extras uses `extras`, and low-level preview callers rely on the default section.
+- Preserved `save_txt` sidecar semantics and returned `txt_fullfn` because UI save-to-files appends the `.txt` artifact to downloads and focused image-save tests assert the path follows callback-rewritten/truncated/exported filenames.
+- Preserved postprocessing's `postprocessing` image-info key separately from saved `extras` PNG section. The first is for returned PIL/gallery metadata; the second is the saved-file infotext section.
+- Preserved preview save paths in extra networks even though there are two similar preview-save closures; one is explicitly marked backwards-compatible UI glue and both perform path/permission/UI refresh work around the shared `save_image_with_geninfo()` helper.
+- Preserved `image_data()`'s fallback text decode path because upload/paste surfaces can pass either an image byte stream with embedded metadata or a short plain-text infotext payload.
+
+### Static/dynamic audit map notes
+- Generation save chain: processing/UI save caller -> `images.save_image()` -> before-save callback can rewrite image/filename/pnginfo -> `_atomically_save_image()` -> `save_image_with_geninfo()` -> optional `.txt` sidecar -> image-saved callback.
+- Extras save chain: `run_postprocessing()` reads inherited source metadata -> scripts mutate `PostprocessedImage.info` and optional `caption` -> returned PIL image gets `postprocessing` metadata when PNG info is enabled -> `save_image()` embeds inherited source metadata plus `extras` infotext -> optional generation/extras `.txt` sidecar -> optional caption sidecar merge overwrites/keeps/prepends/appends according to user option.
+- PNG-info read chain: image upload/API/preview callers -> `read_info_from_image()` extracts canonical generation parameters from PNG `parameters`, EXIF user comment, GIF comment, or NovelAI fields and returns remaining non-ignored metadata for display or preservation.
+- Compatibility surfaces to continue treating conservatively: `ImageSaveParams` callback mutation of filename/pnginfo, `already_saved_as`, returned `txt_fullfn`, `parameters`/`extras`/`postprocessing` metadata keys, `postprocessing_existing_caption_action` values, extra-network preview save callbacks, and API `/sdapi/v1/png-info` output shape.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass32.XXXXXX) python3 -m py_compile modules/images.py modules/postprocessing.py modules/infotext_utils.py modules/extras.py modules/ui_common.py modules/ui_extra_networks.py modules/ui_extra_networks_user_metadata.py test/test_images_save.py tests/test_postprocessing_caption_contract.py tests/test_save_serialization_contract.py test/test_postprocessing_api_defaults.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass32.XXXXXX) python3 -m pytest -q test/test_images_save.py tests/test_postprocessing_caption_contract.py tests/test_save_serialization_contract.py test/test_postprocessing_api_defaults.py` - blocked by the GB10 bare system Python dependency set after 16 passes: `test_postprocessing_runner_order_override_preserves_script_defaults` imports the full `modules.scripts_postprocessing` stack and failed on `ModuleNotFoundError: No module named fastapi`; extension preload also reported the existing `torch` absence.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass32-focused.XXXXXX) python3 -m pytest -q test/test_images_save.py tests/test_postprocessing_caption_contract.py tests/test_save_serialization_contract.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/images.py`, `modules/postprocessing.py`, `modules/infotext_utils.py`, `modules/ui_common.py`, `modules/extras.py`, `modules/ui_extra_networks.py`, and `modules/ui_extra_networks_user_metadata.py` reported `0 duplicate nontrivial function body groups` in every file.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: PNG-info/API infotext import/export and paste-parameter surfaces outside raw saving, especially `modules/api/api.py` png-info/encode/decode helpers, `modules/generation_parameters_copypaste.py`, img2img infotext import, and any duplicated image/base64/infotext parsing contracts between API and UI paths.
