@@ -430,3 +430,17 @@ Validation:
 
 Next unchecked scope:
 - Continue through script/hook surfaces (`modules/scripts.py`, `modules/script_callbacks.py`, `modules/script_loading.py`), extension management internals, image save/delete/history paths, and remaining source/test/config files not yet explicitly listed in ledger passes.
+
+### 2026-06-20 pass 17 - script loading, callback ordering, and extension metadata
+Checked:
+- `modules/scripts.py`: base `Script` hook contracts, script discovery from built-in/extensions/processing scripts, extension metadata dependency expansion, topological ordering, module load/reload, UI arg collection/API metadata, script dropdown visibility, selectable script execution, always-on hook dispatch/timing, element-specific before/after component callbacks, source reload, setup/before-hr hooks, and named arg mutation; no defect found in inspected paths.
+- `modules/script_callbacks.py`: callback registration naming/de-duplication, metadata/user ordering, ordered callback cache invalidation, all callback dispatchers, unload/reload behavior, and callback removal helpers; no defect found.
+- `modules/script_loading.py`: module import-by-path and extension preload handling; no defect found.
+- `modules/extensions.py`: extension metadata parsing, canonical-name de-duplication, requirements/callback-order parsing, Git info caching, update checks, hard reset helper, active-extension filters, file listing, and path-to-extension lookup; no defect found in inspected paths.
+
+Validation:
+- `python3 -m py_compile modules/scripts.py modules/script_callbacks.py modules/script_loading.py modules/extensions.py` -> passed.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue through image save/delete/history paths (`modules/images.py`, `modules/ui_common.py`, `modules/infotext_utils.py` where not already covered), model load/config/vae surfaces, remaining `modules/sd_*` files, tests, and repo config/JS files not yet explicitly listed in ledger passes.
