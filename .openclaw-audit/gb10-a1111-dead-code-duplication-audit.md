@@ -4017,3 +4017,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from create/train lifecycle endpoints into API memory/checkpoint/server-control lifecycle endpoints and remaining low-frequency control routes, especially `get_memory()`, `_memory_counter_pair()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, `stop_webui()`, their route registrations, and adjacent server-control/memory contract tests, looking for stale response branches or duplicate lifecycle/status wrappers while preserving public empty responses, process command side effects, queue/runtime semantics, and memory counter compatibility.
+
+## Pass 110 - API memory/checkpoint/server-control lifecycle endpoints (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registrations for `/sdapi/v1/memory`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, and gated `/sdapi/v1/server-kill`, `/sdapi/v1/server-restart`, `/sdapi/v1/server-stop`; `Api.get_memory()`, `_memory_counter_pair()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, and `stop_webui()`.
+- `modules/api/models.py`: `MemoryResponse` public response contract.
+- Adjacent lifecycle/control modules: `modules/restart.py`, `modules/shared_state.py`, and UI checkpoint lifecycle buttons in `modules/ui_settings.py` for comparison.
+- Adjacent contract tests: `tests/test_api_server_control_contract.py`, especially memory shape, checkpoint empty-response, server-control side-effect, and route-gating coverage.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `unloadapi()` and `reloadapi()` as separate endpoint handlers. They intentionally target different checkpoint lifecycle operations (`sd_models.unload_model_weights()` versus `sd_models.send_model_to_device(shared.sd_model)`) while preserving the public empty-object API responses.
+- Preserved `kill_webui()`, `restart_webui()`, and `stop_webui()` as distinct server-control endpoints. `kill_webui()` immediately delegates to `restart.stop_program()` and returns no body; `restart_webui()` conditionally triggers `restart.restart_program()` but still returns the historical 501 response; `stop_webui()` sets `shared.state.server_command = "stop"` and returns `Response("Stopping.")` for the caller-visible graceful stop path.
+- Preserved the `shared.cmd_opts.api_server_stop` route gate. The focused test confirms the server-control routes are absent unless explicitly enabled.
+- Preserved `_memory_counter_pair()` and the explicit CUDA counter extraction in `get_memory()`. The helper centralizes the `current`/`peak` compatibility shape for four PyTorch memory-stat counter families, and the endpoint keeps separate RAM, CUDA-unavailable, and CUDA-error branches that are public response behavior.
+
+### Static/dynamic audit map notes
+- Memory chain remains: `/sdapi/v1/memory` -> `psutil.Process(os.getpid())` RSS/percent-derived RAM totals -> optional `torch.cuda.mem_get_info()` system VRAM stats -> `torch.cuda.memory_stats(shared.device)` counter families -> `models.MemoryResponse(ram=..., cuda=...)`.
+- Checkpoint lifecycle chain remains: `/sdapi/v1/unload-checkpoint` -> `sd_models.unload_model_weights()` -> `{}`; `/sdapi/v1/reload-checkpoint` -> `sd_models.send_model_to_device(shared.sd_model)` -> `{}`.
+- Server-control chain remains: gated route registration by `--api-server-stop`; `/server-kill` -> `restart.stop_program()`; `/server-restart` -> `restart.is_restartable()` guard, optional `restart.restart_program()`, then 501 response; `/server-stop` -> `shared.state.server_command = "stop"` and a text response.
+- Compatibility surfaces kept conservative: public route paths/methods, route gating, empty response bodies, text/status response quirks, process-exit side effects, restart marker side effects, shared-state server command signaling, memory response field names, CUDA event key names, and PyTorch memory counter `current`/`peak` shape.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass110.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/restart.py modules/shared_state.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass110.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan across `modules/api/api.py`, `modules/restart.py`, `modules/shared_state.py`, `tests/test_api_server_control_contract.py`, and `modules/ui_settings.py` confirmed the scoped memory counters, checkpoint lifecycle functions, server-control side effects, and response quirks are limited to expected API/UI/test surfaces.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `tests/test_api_server_control_contract.py`, `modules/restart.py`, and `modules/shared_state.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real HTTP calls to `/sdapi/v1/memory`, `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, or server-control endpoints, actual process kill/restart/stop behavior, and live CUDA memory readings under a running model were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from memory/checkpoint/server-control lifecycle endpoints into API embedding refresh and remaining low-frequency model-list refresh/lifecycle helpers, especially `refresh_embeddings()`, `refresh_checkpoints()`, `refresh_vae()`, `get_embeddings()`, embedding response helpers, their route registrations, and adjacent embedding/refresh contract tests, looking for stale queue-lock wrappers or duplicate mapping helpers while preserving refresh side effects, queue/runtime semantics, and public embedding response shape.
