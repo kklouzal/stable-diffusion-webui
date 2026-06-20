@@ -501,3 +501,25 @@ Validation:
 
 Next unchecked scope:
 - Broad source audit still is not complete: remaining not-explicitly-listed surfaces include deeper training/hypernetwork/textual-inversion internals, checkpoint merger/model conversion paths, face restoration/GFPGAN/CodeFormer helpers, lowvram/devices/mac-specific paths, interrogate/deepbooru, UI construction modules not named in earlier passes, and extension source trees beyond the already-audited extension slices.
+
+### 2026-06-20 pass 21 - training, textual inversion, hypernetwork, and checkpoint merger internals
+Checked:
+- `modules/textual_inversion/autocrop.py`: focal-point weighting, entropy/corner/face point collection, YuNet model path selection, model download/cache path, and crop coordinate clamping. Found an OpenCV array truthiness defect in Haar face detection.
+- `modules/textual_inversion/dataset.py`: dataset image/text loading, latent sampling modes, alpha-channel loss weighting normalization, tag shuffle/dropout, varsize grouping, grouped batch sampling, and collate wrappers; no additional defect found.
+- `modules/textual_inversion/image_embedding.py`: embedding JSON/base64 encode/decode, PNG side-band embedding insert/extract, deterministic xor/style blocks, black-border cropping, and preview caption overlay; no defect found in inspected paths.
+- `modules/textual_inversion/learn_schedule.py`, `modules/textual_inversion/saving_settings.py`, and `modules/textual_inversion/ui.py`: learning-rate schedule parsing/application, training settings serialization, embedding creation UI, and optimization restore around embedding training; no defect found.
+- `modules/textual_inversion/textual_inversion.py`: template discovery, embedding database reload/cache/hash/shape handling, embedding creation/loading, train-input validation, textual-inversion training loop, preview image/embed save path, loss/tensorboard writes, and checkpoint metadata on save; no additional defect found.
+- `modules/hypernetworks/hypernetwork.py` and `modules/hypernetworks/ui.py`: hypernetwork module construction/load/save, dropout parsing, optimizer resume metadata, attention patch application, hypernetwork list/load/multiplier behavior, creation UI contract, and training loop/preview save path. Found a create helper return-value defect.
+- `modules/extras.py` and `modules/ui_checkpoint_merger.py`: PNG info display, checkpoint config copy selection, metadata normalization/read/merge recipe construction, weighted/add-difference/no-interpolation merge flows, VAE baking, discard regex, safetensors metadata save, and checkpoint merger UI wiring; no defect found in inspected paths.
+
+Findings/fixes:
+- `image_face_points()` used `if faces:` on OpenCV `detectMultiScale()` results. For NumPy arrays with multiple detections this raises ambiguous-truth errors instead of returning face focal points. Switched to `len(faces) > 0` and added `tests/test_textual_inversion_autocrop_contract.py`.
+- `create_hypernetwork()` saved and reloaded hypernetworks but returned `None`, while `modules/hypernetworks/ui.py` reports the returned filename like textual-inversion embedding creation does. Returned `fn` and added `tests/test_hypernetwork_creation_contract.py`.
+
+Validation:
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile modules/textual_inversion/autocrop.py modules/hypernetworks/hypernetwork.py tests/test_textual_inversion_autocrop_contract.py tests/test_hypernetwork_creation_contract.py` -> passed.
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m pytest -q tests/test_textual_inversion_autocrop_contract.py tests/test_hypernetwork_creation_contract.py tests/test_textual_inversion_preview_save_contract.py` -> passed, 3 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue through face restoration/GFPGAN/CodeFormer helpers, lowvram/devices/mac-specific paths, interrogate/deepbooru, remaining UI construction modules not named in earlier passes, and extension source trees beyond already-audited extension slices. The broad source audit is still not complete.

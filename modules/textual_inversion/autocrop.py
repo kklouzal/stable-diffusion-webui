@@ -190,7 +190,7 @@ def image_face_points(im, settings):
             except Exception:
                 continue
 
-            if faces:
+            if len(faces) > 0:
                 rects = [[f[0], f[1], f[0] + f[2], f[1] + f[3]] for f in faces]
                 return [PointOfInterest((r[0] + r[2]) // 2, (r[1] + r[3]) // 2, size=abs(r[0] - r[2]),
                                         weight=1 / len(rects)) for r in rects]
