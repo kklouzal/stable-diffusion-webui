@@ -22,20 +22,18 @@ samplers_data_timesteps = [
 ]
 
 
-class CompVisTimestepsDenoiser(torch.nn.Module):
+class CompVisTimestepsDenoiserBase(torch.nn.Module):
     def __init__(self, model, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.inner_model = model
 
+
+class CompVisTimestepsDenoiser(CompVisTimestepsDenoiserBase):
     def forward(self, input, timesteps, **kwargs):
         return self.inner_model.apply_model(input, timesteps, **kwargs)
 
 
-class CompVisTimestepsVDenoiser(torch.nn.Module):
-    def __init__(self, model, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.inner_model = model
-
+class CompVisTimestepsVDenoiser(CompVisTimestepsDenoiserBase):
     def predict_eps_from_z_and_v(self, x_t, t, v):
         return torch.sqrt(self.inner_model.alphas_cumprod)[t.to(torch.int), None, None, None] * v + torch.sqrt(1 - self.inner_model.alphas_cumprod)[t.to(torch.int), None, None, None] * x_t
 

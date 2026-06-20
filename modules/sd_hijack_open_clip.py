@@ -7,7 +7,7 @@ from modules.shared import opts
 tokenizer = open_clip.tokenizer._tokenizer
 
 
-class FrozenOpenCLIPEmbedderWithCustomWords(sd_hijack_clip.FrozenCLIPEmbedderWithCustomWordsBase):
+class FrozenOpenCLIPEmbedderWithCustomWordsBase(sd_hijack_clip.FrozenCLIPEmbedderWithCustomWordsBase):
     def __init__(self, wrapped, hijack):
         super().__init__(wrapped, hijack)
 
@@ -22,6 +22,9 @@ class FrozenOpenCLIPEmbedderWithCustomWords(sd_hijack_clip.FrozenCLIPEmbedderWit
         tokenized = [tokenizer.encode(text) for text in texts]
 
         return tokenized
+
+
+class FrozenOpenCLIPEmbedderWithCustomWords(FrozenOpenCLIPEmbedderWithCustomWordsBase):
 
     def encode_with_transformers(self, tokens):
         # set self.wrapped.layer_idx here according to opts.CLIP_stop_at_last_layers
@@ -37,21 +40,7 @@ class FrozenOpenCLIPEmbedderWithCustomWords(sd_hijack_clip.FrozenCLIPEmbedderWit
         return embedded
 
 
-class FrozenOpenCLIPEmbedder2WithCustomWords(sd_hijack_clip.FrozenCLIPEmbedderWithCustomWordsBase):
-    def __init__(self, wrapped, hijack):
-        super().__init__(wrapped, hijack)
-
-        self.comma_token = [v for k, v in tokenizer.encoder.items() if k == ',</w>'][0]
-        self.id_start = tokenizer.encoder["<start_of_text>"]
-        self.id_end = tokenizer.encoder["<end_of_text>"]
-        self.id_pad = 0
-
-    def tokenize(self, texts):
-        assert not opts.use_old_emphasis_implementation, 'Old emphasis implementation not supported for Open Clip'
-
-        tokenized = [tokenizer.encode(text) for text in texts]
-
-        return tokenized
+class FrozenOpenCLIPEmbedder2WithCustomWords(FrozenOpenCLIPEmbedderWithCustomWordsBase):
 
     def encode_with_transformers(self, tokens):
         d = self.wrapped.encode_with_transformer(tokens)
