@@ -465,3 +465,20 @@ Validation:
 
 Next unchecked scope:
 - Continue through the remaining `modules/sd_*` sampler/hijack/emphasis/CLIP files not listed in pass 18, then tests, repository config files, and JS files not yet explicitly listed in ledger passes.
+
+### 2026-06-20 pass 19 - remaining SD hijack, CLIP, sampler, and scheduler surfaces
+Checked:
+- `modules/sd_emphasis.py`: emphasis option selection and normalization variants; no defect found.
+- `modules/sd_hijack.py`: optimizer selection/undo, checkpoint patching, weighted loss/forward hooks, model hijack/undo for SD1/SD2/SDXL/AltDiffusion/OpenCLIP/XLMR, textual inversion embedding injection, prompt-length reporting, circular convolution patch, and buffer registration device handling; no defect found in inspected paths.
+- `modules/sd_hijack_clip.py`, `modules/sd_hijack_clip_old.py`, `modules/sd_hijack_open_clip.py`, `modules/sd_hijack_xlmr.py`, `modules/sd_hijack_ip2p.py`: prompt chunking, comma backtracking, textual inversion placement, emphasis multiplier flow, pooled-output handling, old emphasis compatibility, OpenCLIP/XLMR tokenization/embedding-init paths, and InstructPix2Pix config heuristic; no defect found.
+- `modules/sd_hijack_optimizations.py`: attention optimizer registration/selection, split attention memory slicing, InvokeAI/sub-quadratic/SDPA attention paths, SDPA backend normalization/status setters, and VAE attention block replacements; no defect found in inspected paths.
+- `modules/sd_samplers.py`: sampler registry/visibility, infotext sampler/scheduler normalization, hires sampler/scheduler extraction, and invalid sampler autocorrection; no defect found.
+- `modules/sd_samplers_common.py`: img2img step math, latent/image encode/decode approximation paths, live preview storage, eta-noise-delta decision, refiner switch timing, Torch RNG hijack, sampler setup/extra params/noise sampler creation, and callback state handling; no defect found in inspected paths.
+- `modules/sd_samplers_cfg_denoiser.py`: condition concatenation/subscript/padding, CFG denoiser inner-model dispatch, refiner refresh, mask blending hook, edit-model guidance, skip-uncond decisions, cond/uncond batching, callback dispatch, preview latent selection, and after-CFG callback; no defect found in inspected paths.
+- `modules/sd_samplers_kdiffusion.py`, `modules/sd_samplers_lcm.py`, `modules/sd_samplers_timesteps.py`, `modules/sd_samplers_timesteps_impl.py`, `modules/sd_samplers_extra.py`, `modules/sd_schedulers.py`: K-diffusion sigma scheduling/extra args/noise samplers, LCM denoiser/sample loop, CompVis timestep scheduling/img2img start math, DDIM/DDIM CFG++/PLMS/UniPC implementations, Restart sampler step list, and scheduler functions for uniform/SGM/Karras-like/simple/normal/DDIM/beta/AYS/KL optimal schedules; no defect found in inspected paths.
+
+Validation:
+- `python3 -m py_compile modules/sd_disable_initialization.py modules/sd_emphasis.py modules/sd_hijack.py modules/sd_hijack_checkpoint.py modules/sd_hijack_clip.py modules/sd_hijack_clip_old.py modules/sd_hijack_ip2p.py modules/sd_hijack_open_clip.py modules/sd_hijack_optimizations.py modules/sd_hijack_unet.py modules/sd_hijack_utils.py modules/sd_hijack_xlmr.py modules/sd_models.py modules/sd_models_config.py modules/sd_models_types.py modules/sd_models_xl.py modules/sd_samplers.py modules/sd_samplers_cfg_denoiser.py modules/sd_samplers_common.py modules/sd_samplers_compvis.py modules/sd_samplers_extra.py modules/sd_samplers_kdiffusion.py modules/sd_samplers_lcm.py modules/sd_samplers_timesteps.py modules/sd_samplers_timesteps_impl.py modules/sd_schedulers.py modules/sd_unet.py modules/sd_vae.py modules/sd_vae_approx.py modules/sd_vae_taesd.py` -> passed.
+
+Next unchecked scope:
+- Continue through tests, repository config files, and JS files not yet explicitly listed in ledger passes.
