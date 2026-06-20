@@ -977,3 +977,45 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: shared generation/cache invalidation surfaces outside precision-specific caches, especially `modules/processing.py`, `modules/cache.py`, `modules/openclaw_generation_diagnostics.py`, img2img/txt2img cache-stat plumbing, infotext cache fields, and adjacent tests around cond-cache and init-image cache behavior. Keep precision runtime consolidation deferred until a torch/TorchAO-capable validation environment is available.
+
+## Pass 23 - shared generation/cache invalidation surfaces outside precision-specific caches (2026-06-20)
+
+### Checked scope
+- Generation cache/stat plumbing in `modules/processing.py`, including `_image_cache_fingerprint()`, `_array_cache_fingerprint()`, `_clone_cache_value()`, conditional-conditioning cache keys/stat updates, `StableDiffusionProcessing.cached_c` / `cached_uc`, txt2img HR cond caches, img2img init-cache key/restore/store/status helpers, and `create_infotext()` cache/conditioning-related fields.
+- File metadata cache helpers in `modules/cache.py`, including legacy JSON conversion, subsection cache creation, and `cached_data_for_file()` mtime/size invalidation behavior.
+- Generation diagnostics in `modules/openclaw_generation_diagnostics.py`, including CUDA graph status summarization, request summaries, extra-generation-param filtering, per-sample diagnostics capture, and last-diagnostics storage.
+- UI/API entry-point plumbing in `modules/txt2img.py` and `modules/img2img.py`, especially whether cache/stat fields are duplicated or dead across Processed JSON, infotext, and gallery-generation responses.
+- Clear-cond-cache extension and tests: `extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py` and `test/test_openclaw_cache_invalidation.py`, covering granular cache clears, token estimation, endpoint queue locking, img2img init-cache key invalidation, file-cache invalidation, and hash-cache size checks.
+- Focused duplicate/reachability checks: grep fanout for cache/stat/infotext/diagnostic/init-image symbols; targeted reads of cond-cache, img2img init-cache, diagnostics, and clear-cond-cache call chains; AST duplicate-body scan across the pass-23 target set.
+
+### Findings and fixes
+- Deduplicated shared generation-cache counter mechanics in `modules/processing.py` by adding `_cache_stats()`, `_reset_cache_stats()`, `_record_cache_stats_hit()`, and `_record_cache_stats_miss()`.
+- Reused those helpers for conditional-conditioning cache stats and img2img init-cache stats while preserving the existing public/stat keys (`hits`, `misses`, `compute_seconds`, `last_hit`, `cached`, and `bypass_reason`) and the per-request `openclaw_*_cache_stats` snapshots.
+- No safe dead cache-stat field deletion was found. `openclaw_cond_cache_stats`, `openclaw_img2img_init_cache_stats`, and generation diagnostics fields are copied into `Processed.js()`/API-style outputs and are useful runtime diagnostics, even when not all are embedded into image infotext.
+- No safe stale infotext cache field was found. `Cache FP16 weight for LoRA`, precision weight fields, and `Conditional mask weight` remain generation-replay or diagnostics-facing fields tied to active runtime options and conditioning behavior.
+- No additional duplicate init-image/conditioning reset flow was removed. The clear-cond-cache extension intentionally resets class-level caches by target, while img2img init-cache helpers maintain status and payload cloning around generation lifecycle.
+
+### Preserved compatibility/dead-code decisions
+- `dump_cache()` in `modules/cache.py` remains a no-op compatibility shim for callers from the old JSON cache era; deleting it would be low value and may break extensions that still call it after writing cache entries.
+- `cached_img2img_init_stats` remains class-level state because the persistent init cache is class-level; per-processing instances snapshot it into `openclaw_img2img_init_cache_stats` for result JSON and diagnostics.
+- `cached_c`, `cached_uc`, `cached_hr_c`, and `cached_hr_uc` stay as two-slot mutable list caches for legacy cond-cache behavior and the openclaw clear-cond-cache endpoint. Their sparse direct fanout is expected because callers mutate slot zero/one in place.
+- Img2img init-cache bypass for masked requests was preserved. Although the key includes image-mask and latent-mask fingerprints, `_img2img_init_cache_bypass_reason()` bypasses masked requests before key creation to avoid reusing stateful inpaint/mask setup across requests.
+- `openclaw_generation_diagnostics.py` remains separate from cache-stat construction. It summarizes sample/runtime diagnostics and only carries selected extra params, while cache stats live on processing/result objects.
+- Public JSON field names in `Processed.js()` and cache-clear API response keys were not renamed.
+
+### Static/dynamic audit map notes
+- Cond-cache chain: `setup_conds()` calls `get_conds_with_caching()` for negative and positive prompts; the cache key includes prompts, schedules, checkpoint info, active LoRA cond signature, crop/size, FP8 settings, and emphasis mode, and records hit/miss/compute seconds on the processing instance.
+- Txt2img HR cache chain: `StableDiffusionProcessingTxt2Img` maintains separate class-level HR cond caches, calls the same cond-cache helper during HR conditioning, and the clear-cond-cache extension can reset those HR slots independently.
+- Img2img init-cache chain: `StableDiffusionProcessingImg2Img.init()` computes a key from init images, model/VAE identity, sampler/model conditioning mode, request geometry, inpaint settings, VAE/background/dtype/device options, restores cached latents/conditioning when available, or stores cloned payload state after computing init latents.
+- File-cache chain: `cached_data_for_file()` invalidates cached metadata when either mtime or size differs, including legacy entries without size. Existing tests cover backward mtime movement and legacy size-missing entries.
+- Diagnostics chain: `process_images_inner()` captures CUDA graph status before/after each sample through `openclaw_generation_diagnostics`, stores per-processing history, and `Processed.js()` exposes the latest diagnostics/history plus cache stats.
+- Compatibility surfaces to continue treating conservatively: `dump_cache()`, cache subsection names, class-level cond-cache slot shapes, clear-cond-cache target names/API routes, `Processed.js()` openclaw field names, infotext precision/cache field labels, and img2img init-cache status keys.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass23 python3 -m py_compile modules/processing.py modules/cache.py modules/openclaw_generation_diagnostics.py modules/txt2img.py modules/img2img.py extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py test/test_openclaw_cache_invalidation.py` - passed.
+- Exact AST duplicate-body scan across the pass-23 target set at the 500-character threshold reported no duplicate nontrivial function bodies after remediation.
+- `python3 -m pytest -q test/test_openclaw_cache_invalidation.py` - failed during collection because GB10 system Python has no `numpy` module available (`ModuleNotFoundError: No module named 'numpy'`), with the existing pytest config warning `Unknown config option: base_url`.
+- `git diff --check` - passed after trimming the ledger EOF blank line.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: remaining generation/result serialization and API/reporting surfaces adjacent to processing caches, especially `modules/api/api.py` txt2img/img2img response models and infotext overrides, `modules/images.py` metadata save/read helpers, `modules/infotext_utils.py` parse/paste mappings, `modules/generation_parameters_copypaste.py`, `modules/ui_common.py` save/download paths, and adjacent serialization/infotext tests.

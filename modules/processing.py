@@ -145,6 +145,24 @@ def _clone_cache_value(value):
     return value
 
 
+def _cache_stats(**extra):
+    return {"hits": 0, "misses": 0, "compute_seconds": 0.0, **extra}
+
+
+def _reset_cache_stats(stats, **extra):
+    stats.clear()
+    stats.update(_cache_stats(**extra))
+
+
+def _record_cache_stats_hit(stats):
+    stats["hits"] += 1
+
+
+def _record_cache_stats_miss(stats, started_at):
+    stats["misses"] += 1
+    stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
+
+
 def txt2img_image_conditioning(sd_model, x, width, height):
     if sd_model.model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
 
@@ -236,14 +254,11 @@ class StableDiffusionProcessing:
     cached_uc = [None, None]
     cached_c = [None, None]
     cached_img2img_init = [None, None]
-    cached_img2img_init_stats = {
-        "hits": 0,
-        "misses": 0,
-        "compute_seconds": 0.0,
-        "last_hit": False,
-        "cached": False,
-        "bypass_reason": None,
-    }
+    cached_img2img_init_stats = _cache_stats(
+        last_hit=False,
+        cached=False,
+        bypass_reason=None,
+    )
 
     comments: dict = None
     sampler: sd_samplers_common.Sampler | None = field(default=None, init=False)
@@ -567,11 +582,11 @@ class StableDiffusionProcessing:
 
         stats = getattr(self, "openclaw_cond_cache_stats", None)
         if stats is None:
-            stats = self.openclaw_cond_cache_stats = {"hits": 0, "misses": 0, "compute_seconds": 0.0}
+            stats = self.openclaw_cond_cache_stats = _cache_stats()
 
         for cache in caches:
             if cache[0] is not None and cached_params == cache[0]:
-                stats["hits"] += 1
+                _record_cache_stats_hit(stats)
                 return cache[1]
 
         cache = caches[0]
@@ -579,8 +594,7 @@ class StableDiffusionProcessing:
         started = time.perf_counter()
         with devices.autocast():
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
-        stats["misses"] += 1
-        stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started), 3)
+        _record_cache_stats_miss(stats, started)
 
         cache[0] = cached_params
         return cache[1]
@@ -1760,14 +1774,12 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     @classmethod
     def clear_img2img_init_cache(cls):
         StableDiffusionProcessing.cached_img2img_init = [None, None]
-        StableDiffusionProcessing.cached_img2img_init_stats.update({
-            "hits": 0,
-            "misses": 0,
-            "compute_seconds": 0.0,
-            "last_hit": False,
-            "cached": False,
-            "bypass_reason": None,
-        })
+        _reset_cache_stats(
+            StableDiffusionProcessing.cached_img2img_init_stats,
+            last_hit=False,
+            cached=False,
+            bypass_reason=None,
+        )
 
     @classmethod
     def img2img_init_cache_status(cls):
@@ -1784,7 +1796,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def _record_img2img_init_cache_hit(self):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
-        stats["hits"] += 1
+        _record_cache_stats_hit(stats)
         stats["last_hit"] = True
         stats["cached"] = True
         stats["bypass_reason"] = None
@@ -1792,8 +1804,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def _record_img2img_init_cache_miss(self, started_at):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
-        stats["misses"] += 1
-        stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
+        _record_cache_stats_miss(stats, started_at)
         stats["last_hit"] = False
         stats["cached"] = True
         stats["bypass_reason"] = None
