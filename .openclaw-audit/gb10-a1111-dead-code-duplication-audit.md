@@ -1584,3 +1584,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: adjacent runtime script dispatch wrappers and postprocess helper duplication, especially `modules/scripts.py` postprocess hook wrappers (`postprocess_image`, `postprocess_maskoverlay`, image-after-composite, batch/list/sample/mask hooks), their argument object types, and extension compatibility constraints around hook method names.
+
+## Pass 39 - runtime script postprocess hook wrappers (2026-06-20)
+
+### Checked scope
+- `modules/scripts.py`: callback payload classes (`MaskBlendArgs`, `PostSampleArgs`, `PostprocessImageArgs`, `PostProcessMaskOverlayArgs`, `PostprocessBatchListArgs`), `Script` base postprocess hook stubs, `ScriptRunner` timed dispatch helpers, `postprocess_batch()`, `postprocess_batch_list()`, `post_sample()`, `on_mask_blend()`, `postprocess_image()`, `postprocess_maskoverlay()`, and `postprocess_image_after_composite()`.
+- `modules/processing.py`: generation call sites for post-sample, batch tensor/list hooks, per-image postprocess hook, mask-overlay hook, after-composite hook, and inpainting mask-blend payload construction.
+- `modules/sd_samplers_cfg_denoiser.py`: per-step/final mask-blend payload construction.
+- `modules/scripts_auto_postprocessing.py`: main-UI postprocessing bridge override of `postprocess_image()`.
+- Installed extension samples overriding adjacent hooks, especially `extensions/sd-webui-incantations/scripts/*` `postprocess_batch()` wrappers.
+
+### Findings and fixes
+- Consolidated the duplicated runtime dispatch bodies for `ScriptRunner.postprocess_image()`, `postprocess_maskoverlay()`, and `postprocess_image_after_composite()` into private `_run_postprocess_arg_hook()`. The public method names/signatures remain intact, and the helper still dispatches through `_run_timed_script_hook()` so script args, timing, and hook-specific error labels are preserved.
+- No safe removal was found for callback payload object types. They are live mutable compatibility payloads constructed by `processing.py` and `sd_samplers_cfg_denoiser.py` and then passed to extension hooks that may mutate images, masks, overlays, samples, or batch lists.
+- No safe removal was found for `Script` base hook stubs. They are the extension ABI used by `ScriptRunner.create_ordered_callbacks_list()` to detect overrides; removing or aliasing them would risk dynamic extension compatibility.
+- No safe consolidation was made for `postprocess_batch()`, `postprocess_batch_list()`, `post_sample()`, or `on_mask_blend()`. They have different call shapes (`images=` keyword, positional payloads, extra `**kwargs`) and preserving exact hook argument behavior is more important than introducing a broader generic wrapper.
+- No safe consolidation was made with `ScriptPostprocessingForMainUI.postprocess_image()`. That method adapts extras/postprocessing scripts into generation-tab always-on hooks and mutates `PostprocessImageArgs.image` plus generation info, so it remains a distinct bridge.
+
+### Static/dynamic audit map notes
+- Per-image postprocess chain: `processing.py` creates `PostprocessImageArgs(image)` -> `ScriptRunner.postprocess_image()` -> extension hook may replace `pp.image` -> processing continues with the possibly replaced image.
+- Mask overlay chain: `processing.py` creates `PostProcessMaskOverlayArgs(index, mask_for_overlay, overlay_image)` -> `ScriptRunner.postprocess_maskoverlay()` -> extension hook may replace `mask_for_overlay`/`overlay_image` before color correction and overlay composition.
+- After-composite chain: after `apply_overlay()`, `processing.py` creates a new `PostprocessImageArgs(image)` -> `postprocess_image_after_composite()` -> extension hook operates on the final full image.
+- Batch/list/sample/mask chains: `postprocess_batch()` receives the 4D tensor as `images=` plus batch kwargs; `postprocess_batch_list()` receives mutable `PostprocessBatchListArgs.images`; `post_sample()` receives latent/sample payload before VAE decode; `on_mask_blend()` receives denoiser/sigma-aware per-step and final blend payloads.
+- Compatibility surfaces to continue treating conservatively: script hook method names/signatures, payload class names/fields/mutability, hook-specific timing keys/error labels, `ScriptRunner.callback_names`, `ScriptPostprocessingForMainUI.postprocess_image()`, and extension override detection by comparing subclass methods with `Script` base methods.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass39.XXXXXX) python3 -m py_compile modules/scripts.py modules/processing.py modules/scripts_auto_postprocessing.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass39.XXXXXX) python3 -m pytest -q test/test_api_script_defaults.py test/test_infotext_api_mappings.py` - passed: 12 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/scripts.py`, `modules/processing.py`, and `modules/scripts_auto_postprocessing.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+- Ad hoc runtime smoke under system `python3` was attempted but not used as a gate because direct app import failed on missing non-test runtime dependencies (`torch`, then `fastapi`); no repo `venv/bin/python` was present for rerun in this shell context.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: adjacent processing per-image output/mask save flow after script hooks, especially duplicated mask/overlay save-return branches in `modules/processing.py`, image/info mutation around `postprocess_image_after_composite()`, and safe helper boundaries for mask return/save behavior without changing output ordering or infotext metadata.

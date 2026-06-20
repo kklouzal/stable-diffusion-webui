@@ -900,17 +900,18 @@ class ScriptRunner:
         for script in self.ordered_scripts('on_mask_blend'):
             self._run_timed_script_hook(p, script, 'on_mask_blend', mba)
 
+    def _run_postprocess_arg_hook(self, p, hook_name, hook_arg):
+        for script in self.ordered_scripts(hook_name):
+            self._run_timed_script_hook(p, script, hook_name, hook_arg)
+
     def postprocess_image(self, p, pp: PostprocessImageArgs):
-        for script in self.ordered_scripts('postprocess_image'):
-            self._run_timed_script_hook(p, script, 'postprocess_image', pp)
+        self._run_postprocess_arg_hook(p, 'postprocess_image', pp)
 
     def postprocess_maskoverlay(self, p, ppmo: PostProcessMaskOverlayArgs):
-        for script in self.ordered_scripts('postprocess_maskoverlay'):
-            self._run_timed_script_hook(p, script, 'postprocess_maskoverlay', ppmo)
+        self._run_postprocess_arg_hook(p, 'postprocess_maskoverlay', ppmo)
 
     def postprocess_image_after_composite(self, p, pp: PostprocessImageArgs):
-        for script in self.ordered_scripts('postprocess_image_after_composite'):
-            self._run_timed_script_hook(p, script, 'postprocess_image_after_composite', pp)
+        self._run_postprocess_arg_hook(p, 'postprocess_image_after_composite', pp)
 
     def before_component(self, component, **kwargs):
         for callback, script in self.on_before_component_elem_id.get(kwargs.get("elem_id"), []):
