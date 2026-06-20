@@ -261,6 +261,16 @@ def inpaint_full_res_from_infotext(params):
     return value == 1
 
 
+def add_missing_default(params, key, default):
+    if key not in params:
+        params[key] = default
+
+
+def add_missing_defaults(params, defaults):
+    for key, default in defaults.items():
+        add_missing_default(params, key, default)
+
+
 def parse_generation_parameters(x: str, skip_fields: list[str] | None = None):
     """parses generation parameters string, the one you see in text field under the picture in UI:
 ```
@@ -342,32 +352,17 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
         res["Hires resize-1"] = 0
         res["Hires resize-2"] = 0
 
-    if "Hires sampler" not in res:
-        res["Hires sampler"] = "Use same sampler"
-
-    if "Hires schedule type" not in res:
-        res["Hires schedule type"] = "Use same scheduler"
-
-    if "Hires checkpoint" not in res:
-        res["Hires checkpoint"] = "Use same checkpoint"
-
-    if "Hires prompt" not in res:
-        res["Hires prompt"] = ""
-
-    if "Hires negative prompt" not in res:
-        res["Hires negative prompt"] = ""
-
-    if "Mask mode" not in res:
-        res["Mask mode"] = "Inpaint masked"
-
-    if "Masked content" not in res:
-        res["Masked content"] = 'original'
-
-    if "Inpaint area" not in res:
-        res["Inpaint area"] = "Whole picture"
-
-    if "Masked area padding" not in res:
-        res["Masked area padding"] = 32
+    add_missing_defaults(res, {
+        "Hires sampler": "Use same sampler",
+        "Hires schedule type": "Use same scheduler",
+        "Hires checkpoint": "Use same checkpoint",
+        "Hires prompt": "",
+        "Hires negative prompt": "",
+        "Mask mode": "Inpaint masked",
+        "Masked content": 'original',
+        "Inpaint area": "Whole picture",
+        "Masked area padding": 32,
+    })
 
     restore_old_hires_fix_params(res)
 
@@ -375,29 +370,16 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
     if "RNG" not in res:
         res["RNG"] = "GPU"
 
-    if "Schedule type" not in res:
-        res["Schedule type"] = "Automatic"
-
-    if "Schedule max sigma" not in res:
-        res["Schedule max sigma"] = 0
-
-    if "Schedule min sigma" not in res:
-        res["Schedule min sigma"] = 0
-
-    if "Schedule rho" not in res:
-        res["Schedule rho"] = 0
-
-    if "VAE Encoder" not in res:
-        res["VAE Encoder"] = "Full"
-
-    if "VAE Decoder" not in res:
-        res["VAE Decoder"] = "Full"
-
-    if "FP8 weight" not in res:
-        res["FP8 weight"] = "Disable"
-
-    if "MXFP8 weight" not in res:
-        res["MXFP8 weight"] = "Disable"
+    add_missing_defaults(res, {
+        "Schedule type": "Automatic",
+        "Schedule max sigma": 0,
+        "Schedule min sigma": 0,
+        "Schedule rho": 0,
+        "VAE Encoder": "Full",
+        "VAE Decoder": "Full",
+        "FP8 weight": "Disable",
+        "MXFP8 weight": "Disable",
+    })
 
     if "MXFP8 Linear coverage" not in res and res["MXFP8 weight"] != "Disable":
         res["MXFP8 Linear coverage"] = "unet_other"
@@ -411,8 +393,7 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
     if "Emphasis" not in res and prompt_uses_emphasis:
         res["Emphasis"] = "Original"
 
-    if "Refiner switch by sampling steps" not in res:
-        res["Refiner switch by sampling steps"] = False
+    add_missing_default(res, "Refiner switch by sampling steps", False)
 
     infotext_versions.backcompat(res)
 

@@ -3606,3 +3606,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from processing override application into generation parameter parsing and infotext serialization internals, especially `modules/processing.py` `create_infotext()`/`Processed.js()` metadata emission, `modules/infotext_utils.py` parsing/default normalization, save-path infotext consumers, and API pnginfo handling, looking for duplicate metadata/default handling while preserving old infotext labels, extension callbacks, and image metadata compatibility.
+
+
+## Pass 98 - Generation parameter parsing and infotext serialization internals (2026-06-20)
+
+### Scope checked
+- `modules/processing.py`: `Processed.__init__()`, `Processed.js()`, `Processed.infotext()`, `create_infotext()`, extra-generation-param callable/list serialization, comments/negative prompt serialization, processing-time infotext creation, grid/sample infotext alignment, and override metadata interactions from pass 97.
+- `modules/infotext_utils.py`: `quote()`, `unquote()`, `parse_generation_parameters()`, old hires-fix restoration, inpaint label-to-index helpers, parser default normalization, legacy `modules.generation_parameters_copypaste` alias, paste bindings, `infotext_setting_name_mapping()`, `create_override_settings_dict()`, and `get_override_settings()`.
+- Save/API consumers: `modules/images.py` `save_image_with_geninfo()`/`save_image()` PNG/JPEG/WebP/AVIF/GIF metadata handling, `modules/api/api.py` `api_infotext_value_for_field()`, `apply_infotext()`, and `pnginfoapi()`, plus `modules/api/models.py` pnginfo request/response fields.
+- Adjacent tests: `test/test_infotext_api_mappings.py`, `tests/test_save_serialization_contract.py`, `tests/test_processing_auxiliary_infotext_alignment.py`, and `test/test_images_save.py`.
+
+### Findings / fixes
+- Consolidated duplicate parser default insertion in `modules/infotext_utils.py` with `add_missing_default()` and `add_missing_defaults()`. This removes repeated `if key not in res: res[key] = default` branches for hires, inpaint, scheduler, VAE, quantization, and refiner defaults while preserving the exact default values and insertion order.
+- Left conditional/default branches explicit where behavior depends on parsed values or compatibility semantics: missing `Clip skip`, paired `Hires resize-1`/`Hires resize-2`, missing `RNG`, `MXFP8 Linear coverage` only when MXFP8 is enabled, `Cache FP16 weight for LoRA` only when FP8 is enabled, prompt-emphasis detection, old hires-fix restoration, and `infotext_versions.backcompat()` ordering.
+- Preserved old infotext labels, inpaint label mappings, the mutable empty legacy `infotext_to_setting_name_mapping` compatibility list, the `modules.generation_parameters_copypaste` alias, extension paste callbacks, API/UI paste behavior, PNGInfo request/response shape, and image metadata section handling.
+- No safe deletion was found in `Processed.js()`, `create_infotext()`, save-path metadata consumers, or API pnginfo handling. These surfaces are live serialization/API contracts and remain intentionally conservative.
+
+### Static/dynamic audit map notes
+- Serialization chain remains: processing fills `p.extra_generation_params` -> `create_infotext()` merges core fields, extra params, callable/list params, version/user fields, and quoted values -> save paths store the selected infotext under the requested PNG text key or EXIF/comment metadata -> `Processed.js()` returns `infotexts` and related generation metadata to UI/API consumers.
+- Parse chain remains: `parse_generation_parameters()` splits prompt/negative prompt/last parameter line -> unquotes values -> splits `WxH` values into `-1`/`-2` fields -> extracts styles -> applies default/compatibility normalization -> applies infotext version backcompat -> removes skipped fields.
+- API paste/pnginfo chain remains: `apply_infotext()` fills unset request fields, casts script/API values including generic Gradio updates and bool strings, and merges override settings without overwriting caller-provided overrides; `pnginfoapi()` reads image metadata, parses parameters, invokes `infotext_pasted_callback()`, and returns `info`, `items`, and `parameters`.
+- Compatibility surfaces kept conservative: infotext label text, order-sensitive generated parameter emission, quote/unquote JSON behavior, image metadata key names, legacy paste module alias, mutable legacy option mapping list, extension callbacks, and UI/API field population rules.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/processing.py modules/infotext_utils.py modules/images.py modules/api/api.py modules/api/models.py` - passed.
+- `pytest -q test/test_infotext_api_mappings.py tests/test_save_serialization_contract.py tests/test_processing_auxiliary_infotext_alignment.py test/test_images_save.py` - passed: 26 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact parser-default reference scan now reports only the intentionally explicit branches for `Clip skip`, paired `Hires resize-1`/`Hires resize-2`, and `RNG` in `modules/infotext_utils.py`.
+- Exact AST duplicate scan across `modules/processing.py`, `modules/infotext_utils.py`, `modules/images.py`, `modules/api/api.py`, and `modules/api/models.py` reported only trivial no-op/schema duplicates: `modules/processing.py:344:sd_model`, `modules/processing.py:480:init`, `modules/api/api.py:308:ScriptArgsList`, `modules/api/models.py:146:TextToImageResponse`, `modules/api/models.py:149:ImageToImageResponse`, and `modules/api/models.py:174:ExtrasSingleImageRequest`.
+- `git diff --check` - passed.
+- Live WebUI/API server startup, real image generation, third-party extension paste callbacks outside the checked tree, and real PNG/JPEG/WebP/AVIF metadata round-trips were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from infotext serialization into save/download/gallery metadata consumers and UI save-file paths, especially `modules/ui_common.py`, `modules/images.py` filename/logging helpers, `modules/generation_parameters_copypaste` compatibility callers, `modules/txt2img.py`/`modules/img2img.py` gallery-index handling, and API processed-image path injection, looking for stale save metadata wrappers or duplicate gallery/infotext index handling while preserving image metadata compatibility and UI/API save behavior.
