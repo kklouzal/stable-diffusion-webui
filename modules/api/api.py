@@ -758,16 +758,21 @@ class Api:
         script = script_runner.selectable_scripts[script_idx]
         return script, script_idx
 
+    @staticmethod
+    def _script_lists():
+        return scripts.scripts_txt2img.scripts, scripts.scripts_img2img.scripts
+
     def get_scripts_list(self):
-        t2ilist = [script.name for script in scripts.scripts_txt2img.scripts if script.name is not None]
-        i2ilist = [script.name for script in scripts.scripts_img2img.scripts if script.name is not None]
+        txt2img_scripts, img2img_scripts = self._script_lists()
+        t2ilist = [script.name for script in txt2img_scripts if script.name is not None]
+        i2ilist = [script.name for script in img2img_scripts if script.name is not None]
 
         return models.ScriptsList(txt2img=t2ilist, img2img=i2ilist)
 
     def get_script_info(self):
         res = []
 
-        for script_list in [scripts.scripts_txt2img.scripts, scripts.scripts_img2img.scripts]:
+        for script_list in self._script_lists():
             res += [script.api_info for script in script_list if script.api_info is not None]
 
         return res

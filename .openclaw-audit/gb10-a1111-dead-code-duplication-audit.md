@@ -2827,3 +2827,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API model-list and extension/script listing surfaces, especially `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_embeddings()`, `get_scripts_list()`, `get_script_info()`, `get_extensions_list()`, their `modules/api/models.py` item schemas, and focused API list-contract tests, looking for stale item fields or duplicate list-shaping helpers while preserving public route schemas and extension-facing behavior.
+
+
+## Pass 75 - API model-list and extension/script listing surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_embeddings()`, `get_scripts_list()`, `get_script_info()`, and `get_extensions_list()` plus route registration for the corresponding `/sdapi/v1/*` listing endpoints.
+- `modules/api/models.py`: `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `FaceRestorerItem`, `RealesrganItem`, `PromptStyleItem`, `EmbeddingItem`, `EmbeddingsResponse`, `ScriptsList`, `ScriptArg`, `ScriptInfo`, and `ExtensionItem` response schemas.
+- Adjacent list data producers and compatibility surfaces: `modules/sd_models.py`, `modules/sd_vae.py`, `modules/styles.py`, `modules/textual_inversion/textual_inversion.py`, `modules/scripts.py`, `modules/extensions.py`, and `modules/ui_extensions.py` extension metadata preload behavior.
+- Focused contracts: new `tests/test_api_listing_contract.py`, existing `tests/test_api_extension_item_contract.py`, `tests/test_extensions_metadata_contract.py`, and live smoke list references in `test/test_utils.py`.
+
+### Findings and fixes
+- Consolidated the duplicate txt2img/img2img script collection access used by `Api.get_scripts_list()` and `Api.get_script_info()` into a private `Api._script_lists()` helper. The public `/sdapi/v1/scripts` shape still filters `None` script names and returns `models.ScriptsList(txt2img=..., img2img=...)`; `/sdapi/v1/script-info` still returns non-`None` `script.api_info` objects in txt2img-then-img2img order.
+- Added `tests/test_api_listing_contract.py` to pin the shared script-list source behavior without importing the full WebUI runtime.
+- Preserved model-list response fields in `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `FaceRestorerItem`, `RealesrganItem`, `PromptStyleItem`, and `EmbeddingsResponse`. These fields map directly to public route schemas and live runtime metadata such as checkpoint config sidecars, VAE filenames, embedding training metadata, face restorer command directories, and RealESRGAN scales.
+- Preserved `get_prompt_styles()` tuple indexing. It is tied to the existing prompt style storage shape and public API field names; replacing it with a guessed named abstraction would be compatibility churn.
+- Preserved `get_extensions_list()` filtering to extensions with a non-`None` remote. `ExtensionItem.remote` and `commit_hash` remain required schema fields, while `branch` and `commit_date` are optional for missing git metadata; broadening the endpoint to non-git/builtin extensions would change the route contract rather than remove dead code.
+- Preserved `ScriptArg`/`ScriptInfo` schemas and `script.api_info` generation in `modules/scripts.py`. These are extension-facing API metadata contracts, including empty hook methods in `Script` that are intentionally overridden by scripts/extensions.
+
+### Static/dynamic audit map notes
+- Script listing chain remains: route -> `Api._script_lists()` -> `scripts.scripts_txt2img.scripts` / `scripts.scripts_img2img.scripts` -> `/scripts` names or `/script-info` `api_info` payloads.
+- Model listing chain remains: route -> current shared/global registry (`sd_models.checkpoints_list`, `sd_vae.vae_dict`, `shared.hypernetworks`, `shared.face_restorers`, RealESRGAN model loader, `shared.prompt_styles.styles`, embedding DB dictionaries) -> public item schemas.
+- Extension listing chain remains: route -> `extensions.list_extensions()` -> per-extension `read_info_from_repo()` -> include only repo-backed extensions with a remote -> `ExtensionItem` git metadata response.
+- Compatibility surfaces to keep conservative: route paths, item field names, `hash` short-hash field, optional `sha256`/config/branch/commit-date fields, script order and filtering semantics, `api_info` object shape, extension remote filtering, and embedding dictionary keys by embedding name.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass75.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/extensions.py modules/scripts.py modules/sd_models.py modules/sd_vae.py modules/styles.py modules/textual_inversion/textual_inversion.py tests/test_api_listing_contract.py tests/test_api_extension_item_contract.py tests/test_extensions_metadata_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass75.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_extension_item_contract.py tests/test_extensions_metadata_contract.py` - passed: 5 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/extensions.py`, `modules/scripts.py`, `modules/sd_models.py`, `modules/sd_vae.py`, `modules/styles.py`, `modules/textual_inversion/textual_inversion.py`, and focused list/extension tests reported one pre-existing duplicate empty hook pair in `modules/scripts.py` (`postprocess_image()` / `postprocess_maskoverlay()`), preserved as extension-visible script hooks outside this slice's remediation target.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/sd-models`, `/sdapi/v1/sd-vae`, `/sdapi/v1/hypernetworks`, `/sdapi/v1/face-restorers`, `/sdapi/v1/realesrgan-models`, `/sdapi/v1/prompt-styles`, `/sdapi/v1/embeddings`, `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions` requests were not exercised because they require a running WebUI/model runtime and provisioned extension/model state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API memory/progress/queue/status and task-control surfaces, especially `get_memory()`, `progressapi()`, `skip()`, `interrupt()`, task-id/state handling, queue-lock/precision-map interactions, `MemoryResponse`/`ProgressResponse`, and focused API progress/task tests, looking for dead response fields or duplicate status-shaping helpers while preserving public API schemas and live task semantics.
