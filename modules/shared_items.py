@@ -30,6 +30,12 @@ def sd_vae_items():
     return ["Automatic", "None"] + list(modules.sd_vae.vae_dict)
 
 
+def sd_vae_dropdown_args(*prefix_items):
+    import modules.sd_vae
+
+    return {"choices": [*prefix_items, *modules.sd_vae.vae_dict]}
+
+
 def refresh_vae_list():
     import modules.sd_vae
 
@@ -57,6 +63,10 @@ def refresh_unet_list():
 def list_checkpoint_tiles(use_short=False):
     import modules.sd_models
     return modules.sd_models.checkpoint_tiles(use_short)
+
+
+def checkpoint_dropdown_args(*prefix_items, use_short=False):
+    return {"choices": [*prefix_items, *list_checkpoint_tiles(use_short)]}
 
 
 def refresh_checkpoints():

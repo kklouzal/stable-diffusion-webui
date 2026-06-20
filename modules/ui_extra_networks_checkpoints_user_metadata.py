@@ -1,6 +1,6 @@
 from modules import headless_ui as gr
 
-from modules import ui_extra_networks_user_metadata, sd_vae, shared
+from modules import ui_extra_networks_user_metadata, sd_vae, shared, shared_items
 from modules.ui_common import create_refresh_button
 
 
@@ -36,7 +36,7 @@ class CheckpointUserMetadataEditor(ui_extra_networks_user_metadata.UserMetadataE
 
         with gr.Row():
             self.select_vae = gr.Dropdown(choices=["Automatic", "None"] + list(sd_vae.vae_dict), value="None", label="Preferred VAE", elem_id="checpoint_edit_user_metadata_preferred_vae")
-            create_refresh_button(self.select_vae, sd_vae.refresh_vae_list, lambda: {"choices": ["Automatic", "None"] + list(sd_vae.vae_dict)}, "checpoint_edit_user_metadata_refresh_preferred_vae")
+            create_refresh_button(self.select_vae, sd_vae.refresh_vae_list, lambda: shared_items.sd_vae_dropdown_args("Automatic", "None"), "checpoint_edit_user_metadata_refresh_preferred_vae")
 
         self.edit_notes = gr.TextArea(label='Notes', lines=4)
 

@@ -1971,3 +1971,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from lower-level registries into UI refresh button plumbing and option refresh contracts, especially `modules/ui_common.py`/refresh-button helpers, checkpoint/VAE dropdown update lambdas, and extra-networks checkpoint refresh surfaces, while preserving extension-visible callback and Gradio update contracts.
+
+
+## Pass 51 - UI refresh button plumbing and option refresh contracts (2026-06-20)
+
+### Checked scope
+- `modules/ui_common.py`: `create_refresh_button()` label selection, callback wrapper, component attribute mutation, and Gradio update return shape for single and multiple outputs.
+- `modules/ui.py`: hires checkpoint refresh button, training embedding/hypernetwork/template refresh callbacks, and adjacent settings/model-merger wiring.
+- `modules/shared_items.py`: option/listing wrappers for VAE, checkpoint, UNet, sampler, and hypernetwork refresh providers.
+- `modules/ui_settings.py`: `create_setting_component()` refresh wiring for normal settings and quicksettings, including `OptionInfo.refresh` and `component_args` contracts.
+- Extra-network checkpoint surfaces: `modules/ui_extra_networks.py` internal refresh tab callback, `modules/ui_extra_networks_checkpoints.py`, and `modules/ui_extra_networks_checkpoints_user_metadata.py` preferred-VAE refresh/save behavior.
+- Adjacent first-party refresh button callers: `modules/ui_checkpoint_merger.py`, `modules/processing_scripts/refiner.py`, `modules/ui_prompt_styles.py`, `modules/ui_extensions.py`, plus the bundled model-converter extension refresh surfaces.
+
+### Findings and fixes
+- Extracted repeated checkpoint dropdown update callback construction into `shared_items.checkpoint_dropdown_args(*prefix_items, use_short=False)` and routed first-party checkpoint refresh buttons through it where the callback shape was identical: hires checkpoint, checkpoint merger A/B/C, and refiner checkpoint.
+- Extracted repeated VAE dropdown update callback construction into `shared_items.sd_vae_dropdown_args(*prefix_items)` and routed first-party VAE refresh buttons through it for checkpoint merger bake-in VAE and checkpoint metadata preferred VAE.
+- Preserved sentinel differences explicitly: hires checkpoint still prefixes `Use same checkpoint` and uses short checkpoint tiles, generic checkpoint merger/refiner choices have no prefix, preferred VAE still prefixes `Automatic`/`None`, and bake-in VAE still prefixes only `None`.
+- Left `create_refresh_button()` behavior unchanged. Its extension-visible callback wrapper still refreshes the backing registry first, updates component attributes, returns one `gr.update(...)` for a single output, and returns a list of updates for multi-output refresh buttons.
+- Left `modules/shared_items.refresh_vae_list()` and `refresh_checkpoints()` wrappers intact. They remain public option-refresh and compatibility surfaces for settings, API/UI wiring, and extensions.
+- Left extra-network internal refresh plumbing unchanged. It intentionally refreshes all stored extra-network pages, rebuilds cached page HTML, returns `ui.pages_contents`, then reapplies filters/resizers in JS for each hidden refresh button.
+- Left bundled extension model-converter callbacks unchanged as extension-owned surface, even though they have similar choice lambdas.
+
+### Static/dynamic audit map notes
+- Settings refresh chain remains: `OptionInfo.refresh` -> `ui_settings.create_setting_component()` -> `ui_common.create_refresh_button()` -> option `component_args` dict -> component attribute mutation plus Gradio update.
+- Checkpoint refresh chain remains: refresh button -> `sd_models.list_models()` -> `shared_items.checkpoint_dropdown_args()`/checkpoint tiles -> dropdown choices update.
+- VAE refresh chain remains: refresh button -> `sd_vae.refresh_vae_list()` -> `shared_items.sd_vae_dropdown_args()`/`vae_dict` keys -> dropdown choices update.
+- Compatibility surfaces to continue treating conservatively: `create_refresh_button()`, `OptionInfo.refresh`, `OptionInfo.component_args`, `shared_items` refresh wrappers, extra-network hidden refresh buttons and JS callbacks, and bundled/third-party extension refresh lambdas.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass51.XXXXXX) python3 -m py_compile modules/ui_common.py modules/ui.py modules/shared_items.py modules/ui_settings.py modules/ui_checkpoint_merger.py modules/processing_scripts/refiner.py modules/ui_extra_networks.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_checkpoints_user_metadata.py` - passed.
+- Focused AST duplicate-lambda scan across the checked UI refresh modules and the bundled model-converter extension reported no duplicate in-scope first-party `choices` lambdas after extraction; the remaining similar model-converter callbacks were left as extension surface.
+- `git diff --check` - passed.
+- Live WebUI UI refresh buttons were not exercised because they require a running Gradio/WebUI session.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue through prompt-style/UI state refresh and settings reload plumbing, especially style reload/save/materialize callbacks, config-state refresh in extensions UI, quicksettings/settings component refresh contracts, and any remaining duplicated Gradio update helpers while preserving public UI and extension callback behavior.

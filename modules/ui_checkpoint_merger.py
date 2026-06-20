@@ -1,7 +1,7 @@
 
 from modules import headless_ui as gr
 
-from modules import sd_models, sd_vae, errors, extras, call_queue
+from modules import sd_models, sd_vae, errors, extras, call_queue, shared_items
 from modules.ui_components import FormRow
 from modules.ui_common import create_refresh_button
 
@@ -35,13 +35,13 @@ class UiCheckpointMerger:
 
                     with FormRow(elem_id="modelmerger_models"):
                         self.primary_model_name = gr.Dropdown(sd_models.checkpoint_tiles(), elem_id="modelmerger_primary_model_name", label="Primary model (A)")
-                        create_refresh_button(self.primary_model_name, sd_models.list_models, lambda: {"choices": sd_models.checkpoint_tiles()}, "refresh_checkpoint_A")
+                        create_refresh_button(self.primary_model_name, sd_models.list_models, shared_items.checkpoint_dropdown_args, "refresh_checkpoint_A")
 
                         self.secondary_model_name = gr.Dropdown(sd_models.checkpoint_tiles(), elem_id="modelmerger_secondary_model_name", label="Secondary model (B)")
-                        create_refresh_button(self.secondary_model_name, sd_models.list_models, lambda: {"choices": sd_models.checkpoint_tiles()}, "refresh_checkpoint_B")
+                        create_refresh_button(self.secondary_model_name, sd_models.list_models, shared_items.checkpoint_dropdown_args, "refresh_checkpoint_B")
 
                         self.tertiary_model_name = gr.Dropdown(sd_models.checkpoint_tiles(), elem_id="modelmerger_tertiary_model_name", label="Tertiary model (C)")
-                        create_refresh_button(self.tertiary_model_name, sd_models.list_models, lambda: {"choices": sd_models.checkpoint_tiles()}, "refresh_checkpoint_C")
+                        create_refresh_button(self.tertiary_model_name, sd_models.list_models, shared_items.checkpoint_dropdown_args, "refresh_checkpoint_C")
 
                     self.custom_name = gr.Textbox(label="Custom Name (Optional)", elem_id="modelmerger_custom_name")
                     self.interp_amount = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, label='Multiplier (M) - set to 0 to get model A', value=0.3, elem_id="modelmerger_interp_amount")
@@ -59,7 +59,7 @@ class UiCheckpointMerger:
                         with gr.Column():
                             with FormRow():
                                 self.bake_in_vae = gr.Dropdown(choices=["None"] + list(sd_vae.vae_dict), value="None", label="Bake in VAE", elem_id="modelmerger_bake_in_vae")
-                                create_refresh_button(self.bake_in_vae, sd_vae.refresh_vae_list, lambda: {"choices": ["None"] + list(sd_vae.vae_dict)}, "modelmerger_refresh_bake_in_vae")
+                                create_refresh_button(self.bake_in_vae, sd_vae.refresh_vae_list, lambda: shared_items.sd_vae_dropdown_args("None"), "modelmerger_refresh_bake_in_vae")
 
                     with FormRow():
                         self.discard_weights = gr.Textbox(value="", label="Discard weights with matching name", elem_id="modelmerger_discard_weights")
