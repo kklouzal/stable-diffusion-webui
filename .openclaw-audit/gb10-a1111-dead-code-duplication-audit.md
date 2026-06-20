@@ -2115,3 +2115,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into script/extension callback aggregation and script UI surfaces, especially `modules/scripts.py`, `modules/script_callbacks.py`, extension callback registration metadata, and bundled extension script classes, looking for duplicated lifecycle hook wrappers or stale compatibility shims while preserving third-party extension APIs.
+
+## Pass 55 - Script/extension callback aggregation and script UI surfaces (2026-06-20)
+
+### Checked scope
+- `modules/script_callbacks.py`: callback parameter classes, `ScriptCallback`, callback naming/registration, extension callback ordering metadata, ordered callback cache, callback enumeration/removal helpers, lifecycle dispatch wrappers, and public `on_*` registration API wrappers.
+- `modules/scripts.py`: `Script` base lifecycle hooks, component-specific callback shims, `ScriptBuiltinUI`, script discovery/dependency ordering, script loading, `ScriptRunner` initialization, script UI construction, selectable/always-on UI setup, callback aggregation, timed lifecycle hook wrappers, component hook dispatch, script source reload, and named script argument setter.
+- Bundled extension script/UI surfaces: `extensions/sd-webui-incantations/scripts/ui_wrapper.py`, incantations callback registration/use sites, bundled script classes under `extensions-builtin/*/scripts`, OpenClaw bundled extension script classes, and `extensions/sd-webui-model-converter/scripts/ui.py` callback registrations.
+- Adjacent contracts/callers: `modules/ui_component_patches.py` component hook patch points, `modules/shared_items.py` callback order settings, `modules/ui_settings.py` callback order UI, `modules/ui.py` UI tab/train/settings callback dispatch, model/image/sampler callback call sites, and extension tests with script callback stubs.
+
+### Findings and fixes
+- Extracted the repeated public callback registration payload into `script_callbacks.add_callback_for_category()`. Public `on_*` functions keep their existing names, signatures, docstrings, categories, callback-map keys, generated callback names, and `name=` behavior while sharing one internal helper for the repeated `callback_map[...]`/`category=` wiring.
+- Verified the `on_after_component()` public compatibility wrapper is still live and left its single docstring/API surface intact.
+- Preserved the lifecycle dispatch wrappers in `script_callbacks.py`. Although many have similar try/report loops, each wrapper has API-visible ordering direction, argument shape, return aggregation behavior, and error label semantics.
+- Preserved `Script` base no-op hooks and `ScriptRunner` lifecycle wrappers. These are third-party extension subclass surfaces and timed dispatch points, not dead code.
+- Preserved component-specific `Script.on_before_component()`/`on_after_component()` and `ScriptRunner.apply_on_before_component_callbacks()` behavior. The seed processing script still relies on elem-id-specific post-component hooks, and global component callbacks remain separate through `script_callbacks.on_before_component()`/`on_after_component()`.
+- Preserved bundled extension `UIWrapper` hooks and extension script classes. They are subclass/UI lifecycle surfaces or registered extension callbacks, even when their default implementations are no-ops.
+
+### Static/dynamic audit map notes
+- Callback registration chain remains: public `script_callbacks.on_*()` wrapper -> `add_callback_for_category()` -> `add_callback()` -> extension/file/category/name-derived `ScriptCallback` entry in `callback_map`.
+- Callback ordering chain remains: `ordered_callbacks()` -> `sort_callbacks()` -> extension metadata `list_callback_order_instructions()` dependency graph -> optional `shared.opts.prioritized_callbacks_<category>` user ordering -> cached category list.
+- Script UI chain remains: `ScriptRunner.initialize_scripts()` instantiates visible scripts -> `setup_ui()`/`setup_ui_for_section()` creates groups/dropdown -> `create_script_ui()` records controls, API arg metadata, infotext fields, and paste field names -> processing lifecycle methods slice `p.script_args` through recorded ranges.
+- Script lifecycle chain remains: processing call sites invoke `ScriptRunner` hook methods -> ordered script callback list -> `_run_timed_script_hook()` -> script method with script UI args and timing capture.
+- Compatibility surfaces to keep conservative: all public `script_callbacks.on_*` wrappers, `callback_map` key names, callback generated name format, `ScriptCallback`, `Script` base hooks, `ScriptRunner` hook method names, `reload_scripts` alias, `Script.elem_id()`, component hook callback object shape, and bundled extension `UIWrapper` method names.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass55.XXXXXX) python3 -m py_compile modules/script_callbacks.py modules/scripts.py extensions/sd-webui-incantations/scripts/ui_wrapper.py extensions/sd-webui-model-converter/scripts/ui.py` - passed.
+- Stubbed import contract for `modules/script_callbacks.py` confirmed `on_ui_tabs(callback, name="contract")` still appends one callback to `callback_map["callbacks_ui_tabs"]`, preserves callback identity, produces a generated name ending in `/ui_tabs/contract`, and exposes the category through `enumerate_callbacks()`.
+- Direct system-Python import of `modules.script_callbacks` without stubs is blocked in this shell by missing runtime dependencies (`fastapi`, then `torch` through preload/shared imports). No dependencies were installed for this audit slice.
+- Exact AST duplicate-body scan across `modules/script_callbacks.py`, `modules/scripts.py`, `extensions/sd-webui-incantations/scripts/ui_wrapper.py`, and `extensions/sd-webui-model-converter/scripts/ui.py` reported only the intentionally empty public base hook stubs `Script.postprocess_image()` and `Script.postprocess_maskoverlay()`; they were preserved as subclass API contracts.
+- `git diff --check` - passed.
+- Live Gradio/WebUI script dropdown, extension callback ordering UI, component hook dispatch, and bundled extension script interactions were not exercised because they require a running WebUI session and extension/runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into postprocessing script runner and bundled postprocessing extension classes, especially `modules/scripts_postprocessing.py`, `modules/scripts_auto_postprocessing.py`, `modules/processing_scripts/*`, and `extensions-builtin/postprocessing-for-training/scripts/*`, looking for duplicated postprocessing UI/run wrappers or stale compatibility shims while preserving extension-visible postprocessing APIs.

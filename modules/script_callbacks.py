@@ -147,6 +147,10 @@ def add_callback(callbacks, fun, *, name=None, category='unknown', filename=None
     callbacks.append(ScriptCallback(filename, fun, unique_callback_name))
 
 
+def add_callback_for_category(category, callback, *, name=None):
+    add_callback(callback_map[f'callbacks_{category}'], callback, name=name, category=category)
+
+
 def sort_callbacks(category, unordered_callbacks, *, enable_user_sort=True):
     callbacks = unordered_callbacks.copy()
     callback_lookup = {x.name: x for x in callbacks}
@@ -456,18 +460,18 @@ def remove_callbacks_for_function(callback_func):
 def on_app_started(callback, *, name=None):
     """register a function to be called when the webui started, the UI `Block` component and
     fastapi `FastAPI` object are passed as the arguments"""
-    add_callback(callback_map['callbacks_app_started'], callback, name=name, category='app_started')
+    add_callback_for_category('app_started', callback, name=name)
 
 
 def on_before_reload(callback, *, name=None):
     """register a function to be called just before the server reloads."""
-    add_callback(callback_map['callbacks_on_reload'], callback, name=name, category='on_reload')
+    add_callback_for_category('on_reload', callback, name=name)
 
 
 def on_model_loaded(callback, *, name=None):
     """register a function to be called when the stable diffusion model is created; the model is
     passed as an argument; this function is also called when the script is reloaded. """
-    add_callback(callback_map['callbacks_model_loaded'], callback, name=name, category='model_loaded')
+    add_callback_for_category('model_loaded', callback, name=name)
 
 
 def on_ui_tabs(callback, *, name=None):
@@ -480,20 +484,20 @@ def on_ui_tabs(callback, *, name=None):
     title is tab text displayed to user in the UI
     elem_id is HTML id for the tab
     """
-    add_callback(callback_map['callbacks_ui_tabs'], callback, name=name, category='ui_tabs')
+    add_callback_for_category('ui_tabs', callback, name=name)
 
 
 def on_ui_train_tabs(callback, *, name=None):
     """register a function to be called when the UI is creating new tabs for the train tab.
     Create your new tabs with gr.Tab.
     """
-    add_callback(callback_map['callbacks_ui_train_tabs'], callback, name=name, category='ui_train_tabs')
+    add_callback_for_category('ui_train_tabs', callback, name=name)
 
 
 def on_ui_settings(callback, *, name=None):
     """register a function to be called before UI settings are populated; add your settings
     by using shared.opts.add_option(shared.OptionInfo(...)) """
-    add_callback(callback_map['callbacks_ui_settings'], callback, name=name, category='ui_settings')
+    add_callback_for_category('ui_settings', callback, name=name)
 
 
 def on_before_image_saved(callback, *, name=None):
@@ -501,7 +505,7 @@ def on_before_image_saved(callback, *, name=None):
     The callback is called with one argument:
         - params: ImageSaveParams - parameters the image is to be saved with. You can change fields in this object.
     """
-    add_callback(callback_map['callbacks_before_image_saved'], callback, name=name, category='before_image_saved')
+    add_callback_for_category('before_image_saved', callback, name=name)
 
 
 def on_image_saved(callback, *, name=None):
@@ -509,7 +513,7 @@ def on_image_saved(callback, *, name=None):
     The callback is called with one argument:
         - params: ImageSaveParams - parameters the image was saved with. Changing fields in this object does nothing.
     """
-    add_callback(callback_map['callbacks_image_saved'], callback, name=name, category='image_saved')
+    add_callback_for_category('image_saved', callback, name=name)
 
 
 def on_extra_noise(callback, *, name=None):
@@ -517,7 +521,7 @@ def on_extra_noise(callback, *, name=None):
     The callback is called with one argument:
         - params: ExtraNoiseParams - contains noise determined by seed and latent representation of image
     """
-    add_callback(callback_map['callbacks_extra_noise'], callback, name=name, category='extra_noise')
+    add_callback_for_category('extra_noise', callback, name=name)
 
 
 def on_cfg_denoiser(callback, *, name=None):
@@ -525,7 +529,7 @@ def on_cfg_denoiser(callback, *, name=None):
     The callback is called with one argument:
         - params: CFGDenoiserParams - parameters to be passed to the inner model and sampling state details.
     """
-    add_callback(callback_map['callbacks_cfg_denoiser'], callback, name=name, category='cfg_denoiser')
+    add_callback_for_category('cfg_denoiser', callback, name=name)
 
 
 def on_cfg_denoised(callback, *, name=None):
@@ -533,7 +537,7 @@ def on_cfg_denoised(callback, *, name=None):
     The callback is called with one argument:
         - params: CFGDenoisedParams - parameters to be passed to the inner model and sampling state details.
     """
-    add_callback(callback_map['callbacks_cfg_denoised'], callback, name=name, category='cfg_denoised')
+    add_callback_for_category('cfg_denoised', callback, name=name)
 
 
 def on_cfg_after_cfg(callback, *, name=None):
@@ -541,7 +545,7 @@ def on_cfg_after_cfg(callback, *, name=None):
     The callback is called with one argument:
         - params: AfterCFGCallbackParams - parameters to be passed to the script for post-processing after cfg calculation.
     """
-    add_callback(callback_map['callbacks_cfg_after_cfg'], callback, name=name, category='cfg_after_cfg')
+    add_callback_for_category('cfg_after_cfg', callback, name=name)
 
 
 def on_before_component(callback, *, name=None):
@@ -553,12 +557,12 @@ def on_before_component(callback, *, name=None):
     Use elem_id/label fields of kwargs to figure out which component it is.
     This can be useful to inject your own components somewhere in the middle of vanilla UI.
     """
-    add_callback(callback_map['callbacks_before_component'], callback, name=name, category='before_component')
+    add_callback_for_category('before_component', callback, name=name)
 
 
 def on_after_component(callback, *, name=None):
     """register a function to be called after a component is created. See on_before_component for more."""
-    add_callback(callback_map['callbacks_after_component'], callback, name=name, category='after_component')
+    add_callback_for_category('after_component', callback, name=name)
 
 
 def on_image_grid(callback, *, name=None):
@@ -566,7 +570,7 @@ def on_image_grid(callback, *, name=None):
     The callback is called with one argument:
        - params: ImageGridLoopParams - parameters to be used for grid creation. Can be modified.
     """
-    add_callback(callback_map['callbacks_image_grid'], callback, name=name, category='image_grid')
+    add_callback_for_category('image_grid', callback, name=name)
 
 
 def on_infotext_pasted(callback, *, name=None):
@@ -575,20 +579,20 @@ def on_infotext_pasted(callback, *, name=None):
        - infotext: str - raw infotext.
        - result: dict[str, any] - parsed infotext parameters.
     """
-    add_callback(callback_map['callbacks_infotext_pasted'], callback, name=name, category='infotext_pasted')
+    add_callback_for_category('infotext_pasted', callback, name=name)
 
 
 def on_script_unloaded(callback, *, name=None):
     """register a function to be called before the script is unloaded. Any hooks/hijacks/monkeying about that
     the script did should be reverted here"""
 
-    add_callback(callback_map['callbacks_script_unloaded'], callback, name=name, category='script_unloaded')
+    add_callback_for_category('script_unloaded', callback, name=name)
 
 
 def on_before_ui(callback, *, name=None):
     """register a function to be called before the UI is created."""
 
-    add_callback(callback_map['callbacks_before_ui'], callback, name=name, category='before_ui')
+    add_callback_for_category('before_ui', callback, name=name)
 
 
 def on_list_optimizers(callback, *, name=None):
@@ -596,18 +600,18 @@ def on_list_optimizers(callback, *, name=None):
     The function will be called with one argument, a list, and shall add objects of type modules.sd_hijack_optimizations.SdOptimization
     to it."""
 
-    add_callback(callback_map['callbacks_list_optimizers'], callback, name=name, category='list_optimizers')
+    add_callback_for_category('list_optimizers', callback, name=name)
 
 
 def on_list_unets(callback, *, name=None):
     """register a function to be called when UI is making a list of alternative options for unet.
     The function will be called with one argument, a list, and shall add objects of type modules.sd_unet.SdUnetOption to it."""
 
-    add_callback(callback_map['callbacks_list_unets'], callback, name=name, category='list_unets')
+    add_callback_for_category('list_unets', callback, name=name)
 
 
 def on_before_token_counter(callback, *, name=None):
     """register a function to be called when UI is counting tokens for a prompt.
     The function will be called with one argument of type BeforeTokenCounterParams, and should modify its fields if necessary."""
 
-    add_callback(callback_map['callbacks_before_token_counter'], callback, name=name, category='before_token_counter')
+    add_callback_for_category('before_token_counter', callback, name=name)
