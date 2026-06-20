@@ -33,6 +33,10 @@ class SoftInpaintingSettings:
 
 # ------------------- Methods -------------------
 
+def vec(x):
+    return np.array(x)
+
+
 def processing_uses_inpainting(p):
     # TODO: Figure out a better way to determine if inpainting is being used by p
     if getattr(p, "image_mask", None) is not None:
@@ -271,10 +275,6 @@ def weighted_histogram_filter(img, kernel, kernel_center, percentile_min=0.0, pe
         (nparray): A filtered copy of the input image "img", a 2-D array of floats.
     """
 
-    # Converts an index tuple into a vector.
-    def vec(x):
-        return np.array(x)
-
     kernel_min = -kernel_center
     kernel_max = vec(kernel.shape) - kernel_center
 
@@ -405,10 +405,6 @@ def get_gaussian_kernel(stddev_radius=1.0, max_radius=2):
     # Evaluates a 0-1 normalized gaussian function for a given square distance from the mean.
     def gaussian(sqr_mag):
         return math.exp(-sqr_mag / (stddev_radius * stddev_radius))
-
-    # Helper function for converting a tuple to an array.
-    def vec(x):
-        return np.array(x)
 
     """
     Since a gaussian is unbounded, we need to limit ourselves
