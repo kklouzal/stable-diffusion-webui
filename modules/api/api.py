@@ -1211,7 +1211,7 @@ class Api:
             {
                 "name": upscale_mode,
             }
-            for upscale_mode in [*(shared.latent_upscale_modes or {})]
+            for upscale_mode in (shared.latent_upscale_modes or {})
         ]
 
     def get_sd_models(self):

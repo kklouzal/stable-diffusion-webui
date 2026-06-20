@@ -2962,3 +2962,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API latent upscale modes and remaining static metadata/list endpoints adjacent to the current surface, especially `get_latent_upscale_modes()`, `/sdapi/v1/latent-upscale-modes`, any remaining response item schemas not covered by passes 75 and 78, and focused endpoint smoke/list tests, looking for stale fields or duplicate list-shaping helpers while preserving public route schemas and runtime compatibility.
+
+## Pass 79 - API latent upscale modes and adjacent static list endpoints (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, `/sdapi/v1/latent-upscale-modes`, and adjacent static metadata/list handlers; focused inspection of `get_samplers()`, `get_schedulers()`, `get_upscalers()`, `get_latent_upscale_modes()`, `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, and `get_embeddings()` boundaries from the nearby list surface.
+- `modules/api/models.py`: `SamplerItem`, `SchedulerItem`, `UpscalerItem`, `LatentUpscalerModeItem`, and adjacent static list response item schemas previously mapped in passes 75 and 78.
+- `modules/shared.py`: `latent_upscale_modes`, `latent_upscale_default_mode`, `sd_upscalers`, and UI/processing consumers for latent hires upscale mode names.
+- Focused tests and smoke references: `tests/test_api_listing_contract.py` and `test/test_utils.py` static API list smoke parameterization.
+
+### Findings and fixes
+- Removed one small duplicate list-materialization step in `Api.get_latent_upscale_modes()`: iterating `(shared.latent_upscale_modes or {})` preserves dict key order and the existing empty fallback while avoiding the stale-looking `[*(...)]` copy used only for iteration.
+- Added a focused AST-isolated contract test for `get_latent_upscale_modes()` to pin that the endpoint returns only public `{"name": ...}` items in the same order as `shared.latent_upscale_modes` keys. This protects the public route schema while keeping internal interpolation details private.
+- Added `/sdapi/v1/schedulers` and `/sdapi/v1/latent-upscale-modes` to the existing live API smoke URL list beside samplers and upscalers. These are adjacent public static list endpoints and were missing from the smoke surface.
+- Preserved `LatentUpscalerModeItem` as a separate response model even though it has one field. The route is a public API schema, and merging it with unrelated one-field item schemas would be cosmetic rather than a safe dead-code removal.
+- Preserved `shared.latent_upscale_modes` values and UI/processing consumers. The API intentionally exposes only mode names; the values are live runtime interpolation settings consumed by hires-fix processing.
+- Preserved separate sampler, scheduler, upscaler, latent-mode, model, VAE, hypernetwork, face-restorer, RealESRGAN, prompt-style, and embedding list helpers. They read from distinct registries and expose distinct public item shapes, so generic static-list wrapping would add abstraction without eliminating real duplicate behavior.
+
+### Static/dynamic audit map notes
+- Latent upscale API chain remains: `/sdapi/v1/latent-upscale-modes` -> `Api.get_latent_upscale_modes()` -> keys from `shared.latent_upscale_modes` -> `models.LatentUpscalerModeItem(name=...)` response validation.
+- Latent upscale runtime chain remains: UI hires-fix dropdown choices from `[*shared.latent_upscale_modes, *[x.name for x in shared.sd_upscalers]]` -> `StableDiffusionProcessing` lookup in `shared.latent_upscale_modes` -> `torch.nn.functional.interpolate(..., mode=..., antialias=...)` for latent hires upscale modes.
+- Adjacent list smoke chain now includes command flags, samplers, schedulers, upscalers, latent upscale modes, models, hypernetworks, face restorers, RealESRGAN models, prompt styles, and embeddings.
+- Compatibility surfaces to keep conservative: `/sdapi/v1/latent-upscale-modes` path, response item field name `name`, mode-name ordering, empty fallback if `shared.latent_upscale_modes` is absent/falsey, hidden internal interpolation config values, and all adjacent static list response field names.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass79b.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/shared.py test/test_utils.py tests/test_api_listing_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass79b.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py` - passed: 2 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/shared.py`, `test/test_utils.py`, and `tests/test_api_listing_contract.py` found no duplicate function bodies.
+- `git diff --check` - passed after removing one trailing blank line in the new listing contract test.
+- Live `/sdapi/v1/schedulers` and `/sdapi/v1/latent-upscale-modes` smoke requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API refresh/checkpoint reload and server-control endpoints, especially `refresh_embeddings()`, `refresh_checkpoints()`, `refresh_vae()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, `stop_webui()`, route gating by `api_server_stop`, and adjacent response/side-effect tests, looking for stale wrappers or duplicate command-control logic while preserving public route behavior and runtime side effects.

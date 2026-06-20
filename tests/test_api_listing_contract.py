@@ -49,3 +49,32 @@ def test_script_listing_endpoints_share_txt2img_img2img_sources(monkeypatch):
     assert scripts_list.img2img == ["Img Script"]
     assert scripts_list_calls == [{"txt2img": ["Selectable"], "img2img": ["Img Script"]}]
     assert api.get_script_info() == [txt_info, img_info]
+
+def load_latent_upscale_api_class():
+    source = Path("modules/api/api.py").read_text(encoding="utf8")
+    module = ast.parse(source)
+    api_class = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    method = next(node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == "get_latent_upscale_modes")
+    subset = ast.Module(body=[ast.ClassDef(name="Api", bases=[], keywords=[], body=[method], decorator_list=[])], type_ignores=[])
+    ast.fix_missing_locations(subset)
+
+    namespace = {}
+    exec(compile(subset, "<api-latent-upscale-modes>", "exec"), namespace)
+    return namespace["Api"]
+
+
+def test_latent_upscale_modes_lists_shared_mode_names_in_order(monkeypatch):
+    api_class = load_latent_upscale_api_class()
+    shared_stub = SimpleNamespace(
+        latent_upscale_modes={
+            "Latent": {"mode": "bilinear", "antialias": False},
+            "Latent (nearest)": {"mode": "nearest", "antialias": False},
+        }
+    )
+
+    monkeypatch.setitem(api_class.get_latent_upscale_modes.__globals__, "shared", shared_stub)
+
+    assert api_class().get_latent_upscale_modes() == [
+        {"name": "Latent"},
+        {"name": "Latent (nearest)"},
+    ]
