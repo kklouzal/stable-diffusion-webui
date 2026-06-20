@@ -163,6 +163,9 @@ def _record_cache_stats_miss(stats, started_at):
     stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
 
 
+_IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to")
+
+
 def _full_masked_image_conditioning(sd_model, x, width, height):
     # The "masked-image" in this case will just be all 0.5 since the entire image is masked.
     image_conditioning = torch.ones(x.shape[0], 3, height, width, device=x.device) * 0.5
@@ -1785,28 +1788,25 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
         return stats
 
-    def _record_img2img_init_cache_bypass(self, reason):
+    def _snapshot_img2img_init_cache_stats(self, *, last_hit, cached=None, bypass_reason=None):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
-        stats["last_hit"] = False
-        stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
-        stats["bypass_reason"] = reason
+        stats["last_hit"] = last_hit
+        stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None if cached is None else cached
+        stats["bypass_reason"] = bypass_reason
         self.openclaw_img2img_init_cache_stats = dict(stats)
+
+    def _record_img2img_init_cache_bypass(self, reason):
+        self._snapshot_img2img_init_cache_stats(last_hit=False, bypass_reason=reason)
 
     def _record_img2img_init_cache_hit(self):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
         _record_cache_stats_hit(stats)
-        stats["last_hit"] = True
-        stats["cached"] = True
-        stats["bypass_reason"] = None
-        self.openclaw_img2img_init_cache_stats = dict(stats)
+        self._snapshot_img2img_init_cache_stats(last_hit=True, cached=True)
 
     def _record_img2img_init_cache_miss(self, started_at):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
         _record_cache_stats_miss(stats, started_at)
-        stats["last_hit"] = False
-        stats["cached"] = True
-        stats["bypass_reason"] = None
-        self.openclaw_img2img_init_cache_stats = dict(stats)
+        self._snapshot_img2img_init_cache_stats(last_hit=False, cached=True)
 
     def _img2img_init_cache_bypass_reason(self):
         if not getattr(opts, "persistent_img2img_init_cache", True):
@@ -1878,7 +1878,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             return False
 
         payload = cache[1] or {}
-        for attr in ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to"):
+        for attr in _IMG2IMG_INIT_CACHE_ATTRS:
             setattr(self, attr, _clone_cache_value(payload.get(attr)))
 
         self.is_using_inpainting_conditioning = bool(payload.get("is_using_inpainting_conditioning", False))
@@ -1891,14 +1891,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             return
 
         StableDiffusionProcessing.cached_img2img_init = [cache_key, {
-            "init_latent": _clone_cache_value(self.init_latent),
-            "image_conditioning": _clone_cache_value(self.image_conditioning),
-            "mask": _clone_cache_value(self.mask),
-            "nmask": _clone_cache_value(self.nmask),
-            "mask_for_overlay": _clone_cache_value(getattr(self, "mask_for_overlay", None)),
-            "overlay_images": _clone_cache_value(getattr(self, "overlay_images", None)),
-            "color_corrections": _clone_cache_value(getattr(self, "color_corrections", None)),
-            "paste_to": _clone_cache_value(getattr(self, "paste_to", None)),
+            attr: _clone_cache_value(getattr(self, attr, None)) for attr in _IMG2IMG_INIT_CACHE_ATTRS
+        } | {
             "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
             "extra_generation_params": _clone_cache_value(extra_generation_params),
         }]

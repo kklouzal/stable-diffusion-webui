@@ -1678,3 +1678,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` generation-state/cache helpers outside the branch-shape groups, especially cache key/clone/restore/store helper duplication, `Processed` metadata assembly, and remaining conditioning/cache lifecycle boundaries where public extension hooks should stay conservative.
+
+## Pass 42 - processing generation-state cache helpers and Processed metadata assembly (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: generic cache helpers (`_clone_cache_value`, `_cache_stats`, `_reset_cache_stats`, hit/miss recorders), conditioning cache lifecycle in `get_conds_with_caching()`/`setup_conds()`, img2img init-cache status, bypass/hit/miss stat propagation, cache bypass reasons, cache key construction, restore/store payload cloning, init-cache lifecycle in `StableDiffusionProcessingImg2Img.init()`/`close()`, `Processed.__init__()`, `Processed.js()`, and `create_infotext()` generation parameter assembly around cache-visible metadata.
+- Adjacent consumers/contracts: API `processed_js_with_image_paths()` OpenClaw stat propagation, txt2img/img2img `processed.js()` callers, `test/test_openclaw_cache_invalidation.py`, and `tests/test_processing_auxiliary_infotext_alignment.py` source contracts.
+
+### Findings and fixes
+- Consolidated duplicated img2img init-cache payload attribute bookkeeping into `_IMG2IMG_INIT_CACHE_ATTRS`. Cache restore and store now share the same authoritative attribute tuple while preserving clone-on-read/write semantics for tensors, PIL images, numpy arrays, lists, tuples, and dicts.
+- Consolidated duplicated img2img init-cache stat snapshot updates into `_snapshot_img2img_init_cache_stats()`. Bypass, hit, and miss paths still update the same `last_hit`, `cached`, `bypass_reason`, hit/miss counters, compute seconds, and per-processing-object snapshot fields as before.
+- Added a focused source-contract test covering the shared payload and stat-helper boundaries so later audit slices preserve this behavior-sensitive cache state.
+- No safe removal was found in `_clone_cache_value()`. Its recursive tensor/PIL/numpy/container handling is needed by cache restore/store and generation-param cloning boundaries to avoid mutable cached payload aliasing.
+- No safe removal or broad extraction was made for img2img init-cache key construction. The tuple is intentionally explicit and behavior-sensitive, covering image/mask fingerprints, model/VAE/sampler identity, resize/mask/inpaint options, dtype/device, background color, and effective inpainting mask weight.
+- No safe consolidation was made between conditioning cache and img2img init cache lifecycles. They share small stats primitives, but their invalidation keys, payloads, bypass rules, and public clear/status behavior are different.
+- No safe Processed metadata field removal was found. `Processed.__init__()`, `Processed.js()`, API `processed_js_with_image_paths()`, txt2img/img2img UI consumers, and OpenClaw diagnostics/stat fields intentionally expose overlapping but not identical metadata surfaces; `openclaw_cond_cache_stats` is added by the API wrapper while `openclaw_img2img_init_cache_stats` also remains in `Processed.js()` for UI/API compatibility.
+
+### Static/dynamic audit map notes
+- Img2img init-cache lifecycle remains: `init()` builds request metadata and `cache_extra_generation_params` -> `_img2img_init_cache_key()` may bypass and snapshot stats -> `_restore_img2img_init_cache()` clones cached payload back to the processing object and records hit -> cold path computes init latent/conditioning -> `_store_img2img_init_cache()` clones payload into the class cache and records miss -> `close()` clears when persistent caching is disabled.
+- Cache payload attributes now have one shared list: `init_latent`, `image_conditioning`, `mask`, `nmask`, `mask_for_overlay`, `overlay_images`, `color_corrections`, and `paste_to`; non-attribute cache metadata remains `is_using_inpainting_conditioning` and cloned `extra_generation_params`.
+- Conditioning cache lifecycle remains separate: `cached_params()` keys prompt schedules/model/options/LoRA signatures, `get_conds_with_caching()` checks one or more cond caches, records simple per-processing stats, and recomputes under autocast on miss.
+- Processed metadata assembly remains conservative: constructor copies processing state into serializable/public fields; `Processed.js()` emits the historic UI JSON surface; API response wrapping adds image paths and OpenClaw timing/cache fields.
+- Compatibility surfaces to continue treating conservatively: `StableDiffusionProcessing.cached_*` class cache shapes, `clear_img2img_init_cache()`, `img2img_init_cache_status()`, `openclaw_*_cache_stats` field names, `Processed.js()` JSON keys, `processed_js_with_image_paths()` extras, generation param names, and explicit cache key tuple ordering.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass42.XXXXXX) python3 -m py_compile modules/processing.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass42-source.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass42-cache.XXXXXX) python3 -m pytest -q test/test_openclaw_cache_invalidation.py` - blocked during collection because this shell's `/usr/bin/python3` lacks `numpy` (`ModuleNotFoundError: No module named 'numpy'`); no repo `venv`/`.venv` was present for rerun in this shell context.
+- Exact AST duplicate-body scan across `modules/processing.py` and `tests/test_processing_auxiliary_infotext_alignment.py` reported `duplicate nontrivial function body groups: 0` for both files.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` process loop state assembly after cache helpers, especially prompt/seed/batch list setup, comments/infotext construction around `Processed(...)`, grid and `index_of_first_image` behavior, and callback-visible generation diagnostics/history propagation.

@@ -98,3 +98,28 @@ def test_processing_branch_shape_helpers_keep_sensitive_semantics_local():
     assert "opts.sd_vae_encode_method != 'Full'" in vae_helper_body
     assert "self.extra_generation_params['VAE Encoder']" in vae_helper_body
     assert source.count("self.add_vae_encoder_generation_param()") == 3
+
+
+def test_img2img_init_cache_helpers_share_payload_and_stats_boundaries():
+    source = Path("modules/processing.py").read_text()
+
+    attrs_at = source.index("_IMG2IMG_INIT_CACHE_ATTRS =")
+    attrs_line = source[attrs_at:source.index("\n", attrs_at)]
+    for attr in ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to"):
+        assert attr in attrs_line
+
+    restore_at = source.index("def _restore_img2img_init_cache")
+    restore_body = source[restore_at:source.index("def _store_img2img_init_cache", restore_at)]
+    assert "for attr in _IMG2IMG_INIT_CACHE_ATTRS" in restore_body
+    assert "setattr(self, attr, _clone_cache_value(payload.get(attr)))" in restore_body
+
+    store_at = source.index("def _store_img2img_init_cache")
+    store_body = source[store_at:source.index("def init(self, all_prompts", store_at)]
+    assert "for attr in _IMG2IMG_INIT_CACHE_ATTRS" in store_body
+    assert '"is_using_inpainting_conditioning": self.is_using_inpainting_conditioning' in store_body
+    assert '"extra_generation_params": _clone_cache_value(extra_generation_params)' in store_body
+
+    stats_at = source.index("def _snapshot_img2img_init_cache_stats")
+    stats_body = source[stats_at:source.index("def _img2img_init_cache_bypass_reason", stats_at)]
+    assert stats_body.count("_snapshot_img2img_init_cache_stats(") == 4
+    assert 'self.openclaw_img2img_init_cache_stats = dict(stats)' in stats_body
