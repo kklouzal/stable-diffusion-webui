@@ -4049,3 +4049,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from memory/checkpoint/server-control lifecycle endpoints into API embedding refresh and remaining low-frequency model-list refresh/lifecycle helpers, especially `refresh_embeddings()`, `refresh_checkpoints()`, `refresh_vae()`, `get_embeddings()`, embedding response helpers, their route registrations, and adjacent embedding/refresh contract tests, looking for stale queue-lock wrappers or duplicate mapping helpers while preserving refresh side effects, queue/runtime semantics, and public embedding response shape.
+
+## Pass 111 - API embedding refresh and low-frequency model-list refresh helpers (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registrations for `/sdapi/v1/embeddings`, `/sdapi/v1/refresh-embeddings`, `/sdapi/v1/refresh-checkpoints`, and `/sdapi/v1/refresh-vae`; `Api.get_embeddings()`, `_embedding_item()`, `_embedding_items()`, `_call_with_queue_lock()`, `refresh_embeddings()`, `refresh_checkpoints()`, and `refresh_vae()`.
+- `modules/api/models.py`: `EmbeddingItem` and `EmbeddingsResponse` public response models.
+- Adjacent refresh/listing providers and side-effect targets: `sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)`, `shared.refresh_checkpoints`, `shared_items.refresh_checkpoints`, `shared_items.refresh_vae_list`, `sd_vae.refresh_vae_list`, and embedding reload calls from UI/model-load paths.
+- Adjacent contract tests: `tests/test_api_listing_contract.py` embedding response map coverage and `tests/test_api_server_control_contract.py` refresh endpoint queue-lock/side-effect coverage.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `refresh_embeddings()`, `refresh_checkpoints()`, and `refresh_vae()` as explicit queue-locked endpoint methods. They are public API route handlers with distinct refresh targets and side effects, and prior helper consolidation already routes them through `_call_with_queue_lock()` without changing lock boundaries.
+- Preserved `_embedding_item()` and `_embedding_items()` as the dedicated embedding response shaping helpers. They are used by both loaded and skipped embedding maps and keep the public `step`, `sd_checkpoint`, `sd_checkpoint_name`, `shape`, and `vectors` fields centralized.
+- Preserved `get_embeddings()` returning separate `loaded` and `skipped` maps from `word_embeddings` and `skipped_embeddings`. Collapsing the maps or replacing the helper with a generic mapping serializer would alter the public response shape or obscure the current explicit contract tests.
+- Preserved `shared.refresh_checkpoints` and `shared_items.refresh_vae_list` indirection at the API layer. The wrappers remain compatibility/list-refresh surfaces used by shared options, UI paths, and extension-facing imports.
+
+### Static/dynamic audit map notes
+- Embedding response chain remains: `/sdapi/v1/embeddings` -> `sd_hijack.model_hijack.embedding_db` -> `word_embeddings` and `skipped_embeddings` -> `_embedding_items()` -> public `EmbeddingsResponse` maps.
+- Embedding refresh chain remains: `/sdapi/v1/refresh-embeddings` -> queue lock -> `embedding_db.load_textual_inversion_embeddings(force_reload=True)`.
+- Checkpoint refresh chain remains: `/sdapi/v1/refresh-checkpoints` -> queue lock -> `shared.refresh_checkpoints()` -> `shared_items.refresh_checkpoints()` -> `sd_models.list_models()`.
+- VAE refresh chain remains: `/sdapi/v1/refresh-vae` -> queue lock -> `shared_items.refresh_vae_list()` -> `sd_vae.refresh_vae_list()`.
+- Compatibility surfaces kept conservative: route paths/methods, queue-lock semantics, refresh side effects, wrapper imports through `shared`/`shared_items`, embedding map names, embedding item field names, and loaded-vs-skipped separation.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass111.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/shared.py modules/shared_items.py modules/sd_vae.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass111.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py::test_refresh_endpoints_keep_queue_lock_and_side_effect_targets` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed the refresh route registrations, endpoint wrappers, queue-lock helper use, embedding response helpers, embedding reload force-refresh calls, and lower-level checkpoint/VAE refresh wrappers are limited to expected API/UI/model-load/shared/test surfaces.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/shared.py`, `modules/shared_items.py`, `modules/sd_vae.py`, `tests/test_api_listing_contract.py`, and `tests/test_api_server_control_contract.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real HTTP calls to `/sdapi/v1/embeddings` or refresh endpoints, actual checkpoint/VAE filesystem refresh under installed model directories, and live textual-inversion reload behavior under a loaded model were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue below these API wrappers into lower-level embedding/checkpoint/VAE registry refresh internals, especially `EmbeddingDatabase.load_textual_inversion_embeddings()`, `EmbeddingDatabase.load_from_dir()`, `shared_items.refresh_checkpoints()`, `sd_models.list_models()`, `sd_models.checkpoint_tiles()`, `shared_items.refresh_vae_list()`, `sd_vae.refresh_vae_list()`, and adjacent registry/cache tests, looking for stale refresh branches or duplicate registry serialization while preserving public API/UI/extension compatibility and model reload side effects.
