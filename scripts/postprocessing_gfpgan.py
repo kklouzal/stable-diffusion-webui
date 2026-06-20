@@ -25,12 +25,5 @@ class ScriptPostprocessingGfpGan(scripts_postprocessing.ScriptPostprocessing):
         restored_img = gfpgan_model.gfpgan_fix_faces(np.array(pp.image.convert("RGB"), dtype=np.uint8))
         res = Image.fromarray(restored_img)
 
-        if gfpgan_visibility < 1.0:
-            if pp.image.size != res.size:
-                res = res.resize(pp.image.size)
-            if pp.image.mode != res.mode:
-                res = res.convert(pp.image.mode)
-            res = Image.blend(pp.image, res, gfpgan_visibility)
-
-        pp.image = res
+        pp.image = scripts_postprocessing.blend_with_original(pp.image, res, gfpgan_visibility)
         pp.info["GFPGAN visibility"] = round(gfpgan_visibility, 3)

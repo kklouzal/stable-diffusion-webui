@@ -2723,3 +2723,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into postprocessing script framework and main-UI postprocessing bridges, especially `modules/scripts_postprocessing.py`, `modules/scripts_auto_postprocessing.py`, `scripts/postprocessing_upscale.py`, `scripts/postprocessing_gfpgan.py`, `scripts/postprocessing_codeformer.py`, and main UI always-on postprocessing integration, looking for stale compatibility wrappers or duplicate upscaler/face-restoration argument mapping while preserving extension-visible postprocessing contracts.
+
+## Pass 72 - Postprocessing script framework and main-UI postprocessing bridges (2026-06-20)
+
+### Checked scope
+- `modules/scripts_postprocessing.py`: framework classes, extension-visible element-id helpers, runner initialization/UI/control bounds, preferred-order filtering, first-pass/process execution, API argument default synthesis, image-change fanout, and late import cycle guard.
+- `modules/scripts_auto_postprocessing.py`: `ScriptPostprocessingForMainUI` always-on script adapter, main UI tab-name suffixing, postprocess image argument mapping, generation-params bridge, and `create_auto_preprocessing_script_data()` option/name filtering.
+- Bundled postprocessing scripts: `scripts/postprocessing_upscale.py`, `scripts/postprocessing_gfpgan.py`, and `scripts/postprocessing_codeformer.py`, including upscaler argument normalization, first-pass target-size production, cache invalidation, face-restoration visibility blending, and info metadata.
+- Main extras/UI bridges and contracts: `modules/ui_postprocessing.py`, relevant `modules/ui.py` extras/main UI integration points, `modules/shared_items.py` postprocessing option list filters, `modules/shared_options.py` postprocessing settings, `modules/postprocessing.py` legacy API extras mapping, `test/test_postprocessing_script_args.py`, and `test/test_postprocessing_api_defaults.py`.
+
+### Findings and fixes
+- Consolidated the duplicate restored-image blend/resize/mode-conversion block from `scripts/postprocessing_gfpgan.py` and `scripts/postprocessing_codeformer.py` into `scripts_postprocessing.blend_with_original()`.
+- Updated both bundled face-restoration scripts to call the shared helper while preserving output image semantics and metadata keys: `GFPGAN visibility`, `CodeFormer visibility`, and `CodeFormer weight`.
+- Added `test_blend_with_original_resizes_and_converts_processed_image()` to pin the helper's resize, mode conversion, alpha preservation, and blend behavior.
+- Removed two inert self-assignments in `ScriptPostprocessingUpscale.process()` (`upscaler_1_name = upscaler_1_name` and `upscaler_2_name = upscaler_2_name`). The existing `"None"` normalization, upscaler lookup/assertion behavior, two-upscaler blend, and info metadata remain unchanged.
+- Preserved `ScriptPostprocessingForMainUI` despite its thin adapter shape. It is the bridge that gives postprocessing scripts unique txt2img/img2img element IDs, maps always-on script values by script UI control order, copies updated images back into the processing script object, and exposes postprocessing info through `p.extra_generation_params`.
+- Preserved `create_auto_preprocessing_script_data()` and postprocessing option filters. They are option-driven extension-visible wiring, not dead wrappers; `extra_only` and `main_ui_only` must keep their current filtering semantics for extras/main UI lists.
+- Preserved `run_postprocessing_webui(id_task, ...)` and `run_extras()` legacy mapping as UI/API compatibility bridges already audited in pass 71.
+
+### Static/dynamic audit map notes
+- Main-UI bridge chain remains: options `postprocessing_enable_in_main_ui` -> `create_auto_preprocessing_script_data()` -> always-on `ScriptPostprocessingForMainUI` -> script `ui()` control order -> `postprocess_image()` -> `PostprocessedImage` wrapper -> image and generation-param transfer back into txt2img/img2img processing.
+- Extras/API bridge chain remains: extras UI or legacy API -> `run_postprocessing()`/`run_extras()` -> `scripts.scripts_postproc.create_args_for_run()` -> runner control slices -> script first-pass/process -> postprocessing metadata and saved/output images.
+- Bundled script contracts to keep conservative: script class names and `name` strings, `ui()` return keys, process signatures/defaults, `elem_id`/`elem_id_suffix` behavior, upscaler `"None"` normalization, `limit_size_by_one_dimention()` spelling, cache clearing on image change, and face-restoration metadata keys.
+- Exact duplicate scan after remediation found no remaining duplicated GFPGAN/CodeFormer visibility blend block and no remaining `upscaler_[12]_name = upscaler_[12]_name` no-op assignments in the checked files.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/scripts_postprocessing.py modules/scripts_auto_postprocessing.py scripts/postprocessing_upscale.py scripts/postprocessing_gfpgan.py scripts/postprocessing_codeformer.py modules/ui_postprocessing.py` - passed.
+- `python3 -m pytest test/test_postprocessing_script_args.py -q` - passed: 5 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `python3 -m pytest test/test_postprocessing_script_args.py test/test_postprocessing_api_defaults.py -q` - partially blocked by an unrelated pre-existing focused-test harness failure in `test_extras_single_response_allows_no_output_from_skipped_or_interrupted_run`: the AST-loaded fake `Api` class lacks `_call_with_queue_lock`; 12 tests passed before the failure.
+- `rg -n "if .*visibility < 1\\.0|Image\\.blend\\(pp\\.image, res|upscaler_[12]_name = upscaler_[12]_name|blend_with_original" modules/scripts_postprocessing.py scripts/postprocessing_gfpgan.py scripts/postprocessing_codeformer.py scripts/postprocessing_upscale.py` - confirmed only the shared helper and its two call sites remain.
+- `git diff --check` - passed.
+- Live WebUI txt2img/img2img always-on postprocessing, extras tab clicks, API extras requests, and model-backed upscaling/restoration were not exercised because they require a running WebUI/model runtime and provisioned ML assets.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API extras/postprocessing request and response bridges around `modules/api/api.py`, `modules/api/models.py`, `modules/postprocessing.py`, and focused API tests, especially the `_call_with_queue_lock` AST-test harness gap surfaced during this pass, while preserving public API request fields, queue-lock behavior, and legacy extras response semantics.

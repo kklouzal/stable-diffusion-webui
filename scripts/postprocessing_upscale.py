@@ -132,7 +132,6 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         if not upscale_enabled:
             return
 
-        upscaler_1_name = upscaler_1_name
         if upscaler_1_name == "None":
             upscaler_1_name = None
 
@@ -142,7 +141,6 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         if not upscaler1:
             return
 
-        upscaler_2_name = upscaler_2_name
         if upscaler_2_name == "None":
             upscaler_2_name = None
 

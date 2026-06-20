@@ -61,6 +61,20 @@ def make_runner(monkeypatch, script_classes, *, disabled=()):
     return runner
 
 
+
+def test_blend_with_original_resizes_and_converts_processed_image():
+    from PIL import Image
+
+    original = Image.new("RGBA", (2, 2), (10, 20, 30, 255))
+    processed = Image.new("RGB", (1, 1), (110, 120, 130))
+
+    blended = scripts_postprocessing.blend_with_original(original, processed, 0.5)
+
+    assert blended.size == original.size
+    assert blended.mode == original.mode
+    assert blended.getpixel((0, 0)) == (60, 70, 80, 255)
+
+
 def test_create_args_for_run_preserves_ui_defaults_for_omitted_keys(monkeypatch):
     runner = make_runner(monkeypatch, [DummyPostprocessingScript])
 

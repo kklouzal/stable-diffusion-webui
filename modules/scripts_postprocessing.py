@@ -1,6 +1,7 @@
 import re
 import dataclasses
 import os
+from PIL import Image
 from modules import headless_ui as gr
 
 
@@ -134,6 +135,18 @@ def wrap_call(func, filename, funcname, *args, default=None, **kwargs):
         errors.display(e, f"calling {filename}/{funcname}")
 
     return default
+
+
+def blend_with_original(original_image, processed_image, visibility):
+    if visibility >= 1.0:
+        return processed_image
+
+    if original_image.size != processed_image.size:
+        processed_image = processed_image.resize(original_image.size)
+    if original_image.mode != processed_image.mode:
+        processed_image = processed_image.convert(original_image.mode)
+
+    return Image.blend(original_image, processed_image, visibility)
 
 
 class ScriptPostprocessingRunner:

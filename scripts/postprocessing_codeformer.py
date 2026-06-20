@@ -28,13 +28,6 @@ class ScriptPostprocessingCodeFormer(scripts_postprocessing.ScriptPostprocessing
         restored_img = codeformer_model.codeformer.restore(np.array(pp.image.convert("RGB"), dtype=np.uint8), w=codeformer_weight)
         res = Image.fromarray(restored_img)
 
-        if codeformer_visibility < 1.0:
-            if pp.image.size != res.size:
-                res = res.resize(pp.image.size)
-            if pp.image.mode != res.mode:
-                res = res.convert(pp.image.mode)
-            res = Image.blend(pp.image, res, codeformer_visibility)
-
-        pp.image = res
+        pp.image = scripts_postprocessing.blend_with_original(pp.image, res, codeformer_visibility)
         pp.info["CodeFormer visibility"] = round(codeformer_visibility, 3)
         pp.info["CodeFormer weight"] = round(codeformer_weight, 3)
