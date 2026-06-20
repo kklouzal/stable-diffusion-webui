@@ -6,7 +6,7 @@ from modules import headless_ui as gr
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from modules import script_callbacks, sd_models, sd_vae
+from modules import script_callbacks, sd_models, sd_vae, shared_items
 from modules.ui import create_refresh_button
 from scripts import convert
 
@@ -57,7 +57,7 @@ def add_tab():
                     create_refresh_button(
                         model_name,
                         sd_models.list_models,
-                        lambda: {"choices": sd_models.checkpoint_tiles()},
+                        shared_items.checkpoint_dropdown_args,
                         "refresh_checkpoint_Z",
                     )
                 lora_name = gr.Dropdown(
@@ -107,7 +107,7 @@ def add_tab():
                     create_refresh_button(
                         bake_in_vae,
                         sd_vae.refresh_vae_list,
-                        lambda: {"choices": ["None", *list(sd_vae.vae_dict)]},
+                        lambda: shared_items.sd_vae_dropdown_args("None"),
                         "model_converter_refresh_bake_in_vae",
                     )
 

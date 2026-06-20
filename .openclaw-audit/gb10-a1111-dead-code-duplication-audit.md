@@ -2077,3 +2077,41 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue through remaining UI dialog/output-adjacent and extension surfaces not covered by this pass, especially `modules/ui_postprocessing.py`, `modules/ui_checkpoint_merger.py`, `modules/ui_extra_networks*.py`, `modules/ui_html_extensions.py`, and bundled extension UI helpers, looking for duplicated callback/update payloads while preserving extension-visible Gradio contracts.
+
+## Pass 54 - UI dialog/output-adjacent and extension surfaces (2026-06-20)
+
+### Checked scope
+- `modules/ui_postprocessing.py`: Extras tab construction, single/batch/batch-directory tab index callbacks, postprocessing submit wiring, paste registration, and postprocessing image-change callback.
+- `modules/ui_checkpoint_merger.py`: interpolation description helper, model-merger exception/update path, checkpoint/VAE refresh button callbacks, metadata accordion visibility, metadata read callback, merge-result clearing, and wrapped merge callback output shape.
+- `modules/ui_extra_networks.py`: preview extension helpers, page registration/API routes, thumbnail/cover-image/metadata/single-card endpoints, JS/HTML escaping helpers, `ExtraNetworksPage` card/tree/dir HTML builders, preview/description/metadata lookup helpers, page ordering, tab/refresh/load callback wiring, path parent check, and save-preview callback.
+- `modules/ui_extra_networks_checkpoints.py`, `modules/ui_extra_networks_hypernets.py`, and `modules/ui_extra_networks_textual_inversion.py`: page refresh/list/create-item/allowed-preview-directory methods and prompt/search/sort/preview payloads.
+- `modules/ui_extra_networks_user_metadata.py` and `modules/ui_extra_networks_checkpoints_user_metadata.py`: metadata editor component construction, file metadata/card preview rendering, metadata save/write, popup/save callback chaining, preview replacement, checkpoint preferred-VAE refresh/save/reload behavior.
+- `modules/ui_html_extensions.py`: JS/CSS head injection helpers, cache-busting web paths, user CSS inclusion, theme/background style injection, and `TemplateResponse` wrapper preservation.
+- Bundled extension UI helpers: `extensions/sd-webui-incantations/scripts/ui_wrapper.py` abstract/no-op extension hook surface and `extensions/sd-webui-model-converter/scripts/ui.py` tab/API UI helpers.
+- Adjacent tests/contracts: `tests/test_extra_networks_path_contract.py`, `tests/test_extra_networks_metadata_contract.py`, pass-51 refresh-helper ledger notes, and direct callers in `modules/ui.py`, `modules/profiling.py`, `modules/initialize.py`, and bundled extension scripts.
+
+### Findings and fixes
+- Routed the bundled model-converter extension checkpoint refresh callback through `shared_items.checkpoint_dropdown_args()` instead of its local duplicate `{"choices": sd_models.checkpoint_tiles()}` payload.
+- Routed the bundled model-converter VAE refresh callback through `shared_items.sd_vae_dropdown_args("None")` instead of its local duplicate `{"choices": ["None", *list(sd_vae.vae_dict)]}` payload.
+- Preserved the model-converter initial dropdown choices, component IDs, tab tuple, FastAPI routes, request model defaults, and conversion callback payload shape.
+- No first-party extra-network card/tree/page helpers were removed. The small wrappers are directly tied to API routes, JavaScript callbacks, HTML templates, Gradio hidden buttons, extension registration, preview-file safety checks, or user metadata side effects.
+- No checkpoint-merger or postprocessing callback wrappers were removed. Their lambdas and update lists preserve Gradio event contracts, JavaScript submit/merge hooks, output ordering, and error-recovery dropdown refresh behavior.
+- No `UIWrapper` hooks were removed from the incantations extension. The pass found they are subclass/extension lifecycle hooks used by bundled scripts and callback aggregation, not dead no-ops.
+
+### Static/dynamic audit map notes
+- Extra-network route chain remains: `add_pages_to_demo()` registers thumbnail, cover-image, metadata, and single-card endpoints; those endpoints consume `extra_pages`, `allowed_dirs`, page metadata, card HTML templates, and preview extension policy.
+- Extra-network UI refresh chain remains: hidden per-page Refresh button -> refresh every stored page -> rebuild cached page HTML -> return one HTML update per page -> reapply JS filter and resize handles.
+- Extra-network card/editor chain remains: card edit button and JS set hidden name -> editor `button_edit` populates metadata/preview fields -> save/replace-preview writes sidecar/preview files -> JS refreshes just the affected card.
+- Checkpoint preferred-VAE metadata chain remains: editor save writes JSON metadata and reloads VAE weights only when the edited checkpoint is currently active.
+- HTML extension injection chain remains: `reload_javascript()` wraps Gradio `TemplateResponse`, injects JS before `</head>`, injects CSS before `</body>`, and keeps the original template response cached in `shared.UITemplateResponseOriginal`.
+- Compatibility surfaces to keep conservative: `register_page()`, `ExtraNetworksPage` subclass methods, extra-network API route query shapes, hidden extra-network refresh/save-preview buttons, metadata editor button IDs, `UIWrapper` lifecycle hooks, model-converter API routes, and Gradio update return shapes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass54.XXXXXX) python3 -m py_compile modules/ui_postprocessing.py modules/ui_checkpoint_merger.py modules/ui_extra_networks.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_checkpoints_user_metadata.py modules/ui_extra_networks_hypernets.py modules/ui_extra_networks_textual_inversion.py modules/ui_extra_networks_user_metadata.py modules/ui_html_extensions.py extensions/sd-webui-incantations/scripts/ui_wrapper.py extensions/sd-webui-model-converter/scripts/ui.py tests/test_extra_networks_path_contract.py tests/test_extra_networks_metadata_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass54.XXXXXX) python3 -m pytest -q tests/test_extra_networks_path_contract.py tests/test_extra_networks_metadata_contract.py` - passed: 5 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across the checked UI/extra-network/extension files reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+- Live Gradio/WebUI extra-network card refresh, metadata editor, Extras postprocessing, model merger, model-converter tab/API, and HTML injection behavior were not exercised because they require a running WebUI session and user-visible UI/server state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into script/extension callback aggregation and script UI surfaces, especially `modules/scripts.py`, `modules/script_callbacks.py`, extension callback registration metadata, and bundled extension script classes, looking for duplicated lifecycle hook wrappers or stale compatibility shims while preserving third-party extension APIs.
