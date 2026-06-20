@@ -216,7 +216,6 @@ class CreateResponse(BaseModel):
 
 fields = {}
 for key, metadata in opts.data_labels.items():
-    value = opts.data.get(key)
     optType = opts.typemap.get(type(metadata.default), type(metadata.default)) if metadata.default else Any
 
     if metadata is not None:

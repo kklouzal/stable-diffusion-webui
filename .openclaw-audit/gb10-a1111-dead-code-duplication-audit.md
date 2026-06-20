@@ -2929,3 +2929,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API options/configuration and command-control surfaces, especially `get_config()`, `set_config()`, command-line flag exposure, `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, related response schemas/list helpers, and focused option/list tests, looking for stale fields or duplicate list-shaping helpers while preserving public route schemas and runtime side effects.
+
+## Pass 78 - API options/configuration and command/list surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, and `/sdapi/v1/upscalers`; `get_config()`, `set_config()`, `get_cmd_flags()`, `get_samplers()`, `get_schedulers()`, and `get_upscalers()`.
+- `modules/api/models.py`: dynamic `OptionsModel`, dynamic `FlagsModel`, `SamplerItem`, `SchedulerItem`, and `UpscalerItem` response schemas.
+- Adjacent option/list producers and compatibility surfaces: `modules/options.py`, `modules/shared.py`, `modules/shared_options.py`, `modules/sd_samplers.py`, `modules/sd_schedulers.py`, and `modules/modelloader.py` upscaler loading/list state.
+- Focused tests and smoke references: `test/test_utils.py`, `tests/test_api_listing_contract.py`, and `tests/test_api_progress_contract.py` where they exercise API list/progress contract helpers without requiring a live WebUI server.
+
+### Findings and fixes
+- Removed one dead local assignment in `modules/api/models.py`: `value = opts.data.get(key)` inside the `OptionsModel` dynamic field loop was never read and had no side effects. The dynamic options schema still uses `opts.data_labels`, each option's default, label text, and `opts.typemap` exactly as before.
+- Preserved `get_config()`'s explicit current-value/default fallback behavior. Although it parallels the dynamic `OptionsModel` field generation, the route returns runtime values while the schema describes available option fields, so folding them together would risk changing settings compatibility.
+- Preserved `set_config()`'s direct `sd_model_checkpoint` alias guard followed by `shared.opts.set(..., is_api=True)` and `shared.opts.save(...)`. This is live validation/persistence behavior rather than duplicate generic option-setting code.
+- Preserved `get_cmd_flags()` returning `vars(shared.cmd_opts)`. It intentionally reports parsed runtime command options; the `FlagsModel` builder reads the parser's option actions for documentation/default schema and is not a replacement for live command flag values.
+- Preserved the separate sampler, scheduler, and upscaler list comprehensions. They read from different runtime registries (`sd_samplers.all_samplers`, `sd_schedulers.schedulers`, and `shared.sd_upscalers`) and expose distinct public item fields; a generic list-shaping helper would add abstraction without removing real duplication.
+- Preserved public response schema field names and route paths for options, cmd-flags, samplers, schedulers, and upscalers, including sampler aliases/options, scheduler `default_rho`/`need_inner_model`, and upscaler `model_url=None` compatibility.
+
+### Static/dynamic audit map notes
+- Options GET chain remains: `/sdapi/v1/options` -> `Api.get_config()` -> `shared.opts.data` with defaults from `shared.opts.data_labels` -> dynamic `OptionsModel` response schema.
+- Options POST chain remains: `/sdapi/v1/options` -> `Api.set_config()` -> checkpoint alias validation through `sd_models.checkpoint_aliases` -> `shared.opts.set(..., is_api=True)` for every submitted key -> `shared.opts.save(shared.config_filename)`.
+- Command flag chain remains: `/sdapi/v1/cmd-flags` -> `Api.get_cmd_flags()` -> `vars(shared.cmd_opts)` with `FlagsModel` generated from `shared.parser` option actions.
+- List chains remain: `/sdapi/v1/samplers` -> `sd_samplers.all_samplers`; `/sdapi/v1/schedulers` -> `sd_schedulers.schedulers`; `/sdapi/v1/upscalers` -> `shared.sd_upscalers` entries populated by `modelloader.load_upscalers()` and startup fallback.
+- Compatibility surfaces to keep conservative: option keys/labels/defaults/aliases, `is_api=True` option-set behavior, config save side effects, command-flag response values, sampler tuple indexing, scheduler labels/aliases/default rho/inner-model flag, upscaler model metadata, and existing live-smoke endpoint list in `test/test_utils.py`.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass78.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/options.py modules/shared.py modules/shared_options.py modules/sd_samplers.py modules/sd_schedulers.py modules/modelloader.py test/test_utils.py tests/test_api_listing_contract.py tests/test_api_progress_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass78.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_progress_contract.py` - passed: 2 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/options.py`, `modules/shared.py`, `modules/shared_options.py`, `modules/sd_samplers.py`, `modules/sd_schedulers.py`, `modules/modelloader.py`, `test/test_utils.py`, `tests/test_api_listing_contract.py`, and `tests/test_api_progress_contract.py` found no duplicate function bodies.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, and `/sdapi/v1/upscalers` requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API latent upscale modes and remaining static metadata/list endpoints adjacent to the current surface, especially `get_latent_upscale_modes()`, `/sdapi/v1/latent-upscale-modes`, any remaining response item schemas not covered by passes 75 and 78, and focused endpoint smoke/list tests, looking for stale fields or duplicate list-shaping helpers while preserving public route schemas and runtime compatibility.
