@@ -3674,3 +3674,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from save/download/gallery consumers into temp-file/gallery serving and UI media exposure paths, especially `modules/ui_tempdir.py`, `modules/ui_common.py` open-folder/temp path handling, Gradio gallery serialization, API/base64 image encode/decode helpers, and any tests around temporary file registration/path disclosure, looking for stale wrappers or duplicate path normalization while preserving file exposure and extension compatibility.
+
+## Pass 100 - Temp-file/gallery serving and UI media exposure paths (2026-06-20)
+
+### Scope checked
+- `modules/ui_tempdir.py`: `Savedfile`, `register_tmp_file()`, `check_tmp_file()`, `save_pil_to_file()`, `install_ui_tempdir_override()`, `on_tmpdir_changed()`, `cleanup_tmpdr()`, and `is_ui_temp_path()`.
+- `modules/ui_common.py`: output-panel `open_folder()` selected-gallery path handling, temp-path filtering via `ui_tempdir.is_ui_temp_path()`, save/download gallery inputs, and paste button gallery source registration.
+- `modules/ui_component_patches.py`: Gradio component patch installation and `ui_tempdir.install_ui_tempdir_override()` call site.
+- `modules/infotext_utils.py`: `image_from_url_text()` file-dict handling, temp-file allow-list check, gallery paste decode path, and PNG data-URI fallback path.
+- `modules/api/api.py` and `modules/api/models.py`: `decode_base64_to_image()`, `decode_extras_batch_images()`, `encode_pil_to_base64()`, `processed_js_with_image_paths()`, txt2img/img2img/extras/pnginfo/progress/interrogate base64 callers, and public base64 image request/response models.
+- Adjacent consumers/tests: `modules/progress.py`, `modules/txt2img.py`, `modules/ui_extra_networks.py`, `tests/test_save_serialization_contract.py`, `test/test_api_info_interrogate_admin_contract.py`, and `tests/test_api_progress_contract.py`.
+
+### Findings / fixes
+- No code changes were made. The inspected wrappers and branches are live compatibility or security surfaces, and no safe dead-code removal or helper consolidation was found in this bounded slice.
+- Preserved both `temp_file_sets` and `temp_dirs` branches in `register_tmp_file()`/`check_tmp_file()`. They cover different Gradio compatibility shapes and feed the security check in `image_from_url_text()`.
+- Preserved registration of both the raw `already_saved_as` path and the `?mtime` suffixed path in `save_pil_to_file()`. Gradio gallery/file dictionaries can carry the suffixed name back into `image_from_url_text()`, so collapsing to only one registration would risk rejecting valid in-memory gallery images.
+- Preserved `is_ui_temp_path()` behavior for `shared.opts.temp_dir`, `GRADIO_TEMP_DIR`, and the default system `gradio` temp directory. `ui_common.open_folder()` relies on this distinction to avoid switching the open-folder target to UI temp paths unless configured.
+- Preserved separate API and infotext/gallery base64 decode helpers. API decoding accepts remote URLs, generic `data:image/*` payloads, and raises HTTP errors; infotext/gallery paste decoding accepts Gradio file dictionaries and PNG data URIs guarded by the UI temp allow-list. They are not safe duplicates.
+- Preserved API encode behavior in `encode_pil_to_base64()`: it reflects `opts.samples_format`, image metadata, JPEG/WebP conversion, and public response payload contracts.
+
+### Static/dynamic audit map notes
+- UI temp-file chain remains: `ui_component_patches` installs `save_pil_to_file()` as Gradio's PIL temp writer -> existing saved images are registered with and without the mtime query suffix -> `infotext_utils.image_from_url_text()` accepts only file dictionaries found in Gradio temp allow-lists before reading from disk.
+- Output-folder chain remains: selected gallery image name is stripped of any query suffix for directory selection -> `is_ui_temp_path()` prevents UI temp directories from replacing the configured output directory unless the open-dir option explicitly allows temp paths.
+- API media chain remains: request image strings flow through `decode_base64_to_image()` for txt2img/img2img masks/init images, extras, pnginfo, and interrogate; response PIL images flow through `encode_pil_to_base64()` for generation, extras, and progress current-image payloads; `processed_js_with_image_paths()` separately reports saved file paths in API `info` JSON.
+- Compatibility surfaces kept conservative: legacy Gradio temp allow-list attributes, mtime-suffixed gallery names, `GRADIO_TEMP_DIR`, `already_saved_as`, selected-gallery JS/index handoff, API HTTP/local-request guards, response byte/base64 shape, and extension-facing paste/gallery behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass100.XXXXXX) python3 -m py_compile modules/ui_tempdir.py modules/ui_common.py modules/ui_component_patches.py modules/infotext_utils.py modules/api/api.py modules/api/models.py modules/progress.py modules/txt2img.py modules/ui_extra_networks.py tests/test_save_serialization_contract.py test/test_api_info_interrogate_admin_contract.py tests/test_api_progress_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass100.XXXXXX) python3 -m pytest -q tests/test_save_serialization_contract.py test/test_api_info_interrogate_admin_contract.py tests/test_api_progress_contract.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate function scan across `modules/ui_tempdir.py`, `modules/ui_common.py`, `modules/api/api.py`, `modules/infotext_utils.py`, `modules/ui_component_patches.py`, `tests/test_save_serialization_contract.py`, `test/test_api_info_interrogate_admin_contract.py`, and `tests/test_api_progress_contract.py` reported no duplicate function bodies.
+- Reference scan confirmed the temp/media helpers remain limited to the expected UI temp override, infotext/gallery paste, output-folder, API generation/extras/pnginfo/progress/interrogate, and focused test callers.
+- `git diff --check` - passed.
+- Live WebUI/API server startup, browser gallery open-folder clicks, actual Gradio media serving, remote URL API image fetches, and real temp-file cleanup were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from media exposure into remaining server/static-file and path-safety surfaces, especially `modules/server.py`, `modules/ui.py` static route setup, `modules/ui_html_extensions.py`, `modules/util.py` path/open helpers, `modules/safe.py`, and adjacent launch/API route wiring, looking for stale path-disclosure wrappers or duplicate local/remote resource guards while preserving extension compatibility and UI/API serving behavior.
