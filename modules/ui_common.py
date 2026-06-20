@@ -119,7 +119,7 @@ def save_files(js_data, images, do_make_zip, index):
 
             is_grid = image_index < p.index_of_first_image
 
-            p.batch_index = image_index-1
+            p.batch_index = image_index - p.index_of_first_image
 
             parameters = parameters_copypaste.parse_generation_parameters(data["infotexts"][image_index], [])
             parsed_infotexts.append(parameters)

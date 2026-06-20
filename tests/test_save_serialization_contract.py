@@ -127,6 +127,18 @@ def test_save_files_save_all_uses_index_of_first_image_for_grid_prefix_and_infot
     assert html == "Saved: grid.png"
 
 
+def test_save_files_save_all_without_grid_uses_sample_batch_indexes():
+    save_files, saved_calls = make_save_files()
+
+    file_update, html = save_files(generation_info(index_of_first_image=0), ["sample-1", "sample-2"], False, -1)
+
+    assert [call["grid"] for call in saved_calls] == [False, False]
+    assert [call["info"] for call in saved_calls] == ["10 grid", "11 first sample"]
+    assert [call["batch_index"] for call in saved_calls] == [0, 1]
+    assert file_update == {"value": ["/tmp/out/sample-1.png", "/tmp/out/sample-2.png"], "visible": True}
+    assert html == "Saved: sample-1.png"
+
+
 def test_save_files_save_selected_keeps_original_gallery_index_for_sample_metadata():
     save_files, saved_calls = make_save_files()
 

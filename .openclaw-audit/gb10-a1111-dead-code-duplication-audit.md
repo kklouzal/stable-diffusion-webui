@@ -3638,3 +3638,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from infotext serialization into save/download/gallery metadata consumers and UI save-file paths, especially `modules/ui_common.py`, `modules/images.py` filename/logging helpers, `modules/generation_parameters_copypaste` compatibility callers, `modules/txt2img.py`/`modules/img2img.py` gallery-index handling, and API processed-image path injection, looking for stale save metadata wrappers or duplicate gallery/infotext index handling while preserving image metadata compatibility and UI/API save behavior.
+
+## Pass 99 - Save/download/gallery metadata consumers and UI save-file paths (2026-06-20)
+
+### Scope checked
+- `modules/ui_common.py`: `update_generation_info()`, `save_files()`, `create_output_panel()` save/download/open-folder wiring, gallery selected-index JS handoff, CSV log maintenance, zip creation, paste button registration, and old `parameters_copypaste` import alias usage.
+- `modules/images.py`: `save_image_with_geninfo()`, `enabled_geninfo_exif_bytes()`, `save_image()`, filename generation, callback path rewrites, atomic save/duplicate suffix handling, 4chan JPG export path update, txt sidecar writing, and `already_saved_as` propagation.
+- `modules/infotext_utils.py`: legacy `modules.generation_parameters_copypaste` module alias and `parse_generation_parameters()` compatibility callers in this save path.
+- `modules/txt2img.py`: `txt2img_upscale()` gallery-index validation, selected gallery image reuse, infotext splice/update behavior, and placeholder `already_saved_as` preservation for non-upscaled images.
+- `modules/img2img.py`: main `img2img()` and batch result handling where gallery/result infotext alignment flows into UI save/download behavior.
+- `modules/api/api.py`: `processed_js_with_image_paths()` path injection and txt2img/img2img API response callers.
+- Adjacent tests: `tests/test_save_serialization_contract.py`, `test/test_images_save.py`, and `test/test_infotext_paste_bindings.py`.
+
+### Findings / fixes
+- Fixed `modules/ui_common.py` `save_files()` batch-index metadata for no-grid galleries. The old code used `image_index - 1`, which is only correct when `index_of_first_image == 1`; no-grid results use `index_of_first_image == 0`, so the first saved sample was exposed to filename generation as batch index `-1`. The save path now derives `p.batch_index` from `image_index - p.index_of_first_image`, preserving existing grid behavior while correcting no-grid sample indexes.
+- Added `tests/test_save_serialization_contract.py::test_save_files_save_all_without_grid_uses_sample_batch_indexes` to lock the no-grid save-all contract.
+- Left `parameters_copypaste` import aliases and the `modules.generation_parameters_copypaste` module alias intact. They remain compatibility surfaces for old extensions/tests and are not safe dead-code removals.
+- Left `processed_js_with_image_paths()` intact. Its `image_paths` list intentionally preserves one entry per returned image and carries `already_saved_as` for API consumers; focused tests already cover image/path alignment.
+- Left `txt2img_upscale()` gallery placeholder `already_saved_as` handling intact. It preserves non-upscaled gallery file paths during replacement and is live UI behavior.
+- No safe consolidation was found for `save_image()` filename/logging construction beyond the batch-index fix. Callback filename rewrites, atomic duplicate suffixing, metadata embedding, 4chan JPG replacement, txt sidecar paths, and image-saved callbacks are order-sensitive side-effect surfaces.
+
+### Static/dynamic audit map notes
+- UI save chain remains: browser selected gallery index -> `save_files()` chooses all images or selected non-grid image -> original gallery index selects matching infotext -> `parse_generation_parameters()` supplies seed/prompt -> `p.batch_index` is now relative to `index_of_first_image` -> `images.save_image()` writes image metadata, paths, txt sidecars, callbacks, and optional zip entries.
+- API path chain remains: image save paths are attached to PIL images as `already_saved_as` in `images.save_image()` or preserved by UI upscale placeholders -> `processed_js_with_image_paths()` injects a same-length `image_paths` list into txt2img/img2img API `info` JSON.
+- Gallery/infotext chain remains conservative: `update_generation_info()` uses the selected gallery index directly against `infotexts`; `txt2img_upscale()` validates gallery index, splices replacement infotexts, and updates displayed info; img2img batch limits images and infotexts together.
+- Compatibility surfaces kept conservative: UI selected-index JavaScript, Gradio `File.update()` return shape, save CSV field order, image metadata keys/sections, `already_saved_as`, API response `info` JSON shape, legacy infotext module alias, extension callbacks, and path exposure behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/ui_common.py modules/images.py modules/infotext_utils.py modules/txt2img.py modules/img2img.py modules/api/api.py tests/test_save_serialization_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m pytest -q tests/test_save_serialization_contract.py test/test_images_save.py test/test_infotext_paste_bindings.py` - passed: 9 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Reference scan confirmed tracked compatibility/path/index surfaces remain limited to the expected UI/API/save/upscale callers: `parameters_copypaste`, `modules.generation_parameters_copypaste`, `index_of_first_image`, `already_saved_as`, and `processed_js_with_image_paths`.
+- Exact AST duplicate function/class scan across `modules/ui_common.py`, `modules/images.py`, `modules/infotext_utils.py`, `modules/txt2img.py`, `modules/img2img.py`, and `modules/api/api.py` reported no exact duplicates.
+- `git diff --check` - passed after trimming the ledger EOF blank line.
+- Live WebUI/API server startup, browser save/download clicks, real image generation, real zip downloads, and real PNG/JPEG/WebP/AVIF metadata round-trips were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from save/download/gallery consumers into temp-file/gallery serving and UI media exposure paths, especially `modules/ui_tempdir.py`, `modules/ui_common.py` open-folder/temp path handling, Gradio gallery serialization, API/base64 image encode/decode helpers, and any tests around temporary file registration/path disclosure, looking for stale wrappers or duplicate path normalization while preserving file exposure and extension compatibility.
