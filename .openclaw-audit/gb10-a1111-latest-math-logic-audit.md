@@ -482,3 +482,22 @@ Validation:
 
 Next unchecked scope:
 - Continue through tests, repository config files, and JS files not yet explicitly listed in ledger passes.
+
+### 2026-06-20 pass 20 - tests, auxiliary JavaScript, and repo config manifests
+Checked:
+- `tests/*.py`: current lightweight audit contract tests, including API progress, errors, extension metadata, extra-network path/metadata, JavaScript UI contracts, launch shell guard, postprocessing captions, processing infotext alignment, save serialization, SD checkpoint path classification, textual-inversion preview save, UI extension escaping, and UI load/save escaping. Found a test isolation defect.
+- `script.js`, `.eslintrc.js`, `javascript/aspectRatioOverlay.js`, `contextMenus.js`, `edit-order.js`, `hints.js`, `hires_fix.js`, `imageMaskFix.js`, `inputAccordion.js`, `localization.js`, `notification.js`, `profilerVisualization.js`, `resizeHandle.js`, `textualInversion.js`, and `ui_settings_hints.js`: global Gradio helpers/callbacks, keyboard shortcuts, aspect-ratio overlay, context menus/repeat generation, prompt order editing, tooltips, hires resolution state, mask canvas resize, accordion state sync, localization dump/RTL handling, browser notifications, profiler table expansion, resize handle behavior, textual inversion progress startup, and settings comments/quicksettings hints. No defect found in inspected paths.
+- `package.json`, `pyproject.toml`, `_typos.toml`, `environment-wsl2.yaml`, and `configs/*.yaml`: lint/test manifest settings, dependency environment metadata, and model config targets/shape constants used by `sd_models_config`; no defect found.
+
+Findings/fixes:
+- `tests/test_extensions_metadata_contract.py` installed fake `modules.*` entries in `sys.modules` without restoring them, so running the whole lightweight suite could make later tests fail to import real `modules.ui_extensions`. Added an autouse fixture that snapshots/restores `modules` and `modules.*` entries around each test.
+
+Validation:
+- `python3 -m py_compile tests/test_extensions_metadata_contract.py` -> passed.
+- `python3 -m pytest -q tests` -> passed, 31 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `node --check script.js .eslintrc.js javascript/aspectRatioOverlay.js javascript/contextMenus.js javascript/edit-order.js javascript/hints.js javascript/hires_fix.js javascript/imageMaskFix.js javascript/inputAccordion.js javascript/localization.js javascript/notification.js javascript/profilerVisualization.js javascript/resizeHandle.js javascript/textualInversion.js javascript/ui_settings_hints.js` -> passed.
+- JSON/TOML/YAML parse check for `package.json`, `pyproject.toml`, `_typos.toml`, `environment-wsl2.yaml`, and `configs/*.yaml` -> passed.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Broad source audit still is not complete: remaining not-explicitly-listed surfaces include deeper training/hypernetwork/textual-inversion internals, checkpoint merger/model conversion paths, face restoration/GFPGAN/CodeFormer helpers, lowvram/devices/mac-specific paths, interrogate/deepbooru, UI construction modules not named in earlier passes, and extension source trees beyond the already-audited extension slices.

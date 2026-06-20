@@ -1,7 +1,22 @@
 import importlib.util
 import sys
 import types
+
+import pytest
 from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def restore_module_stubs():
+    saved = {name: module for name, module in sys.modules.items() if name == "modules" or name.startswith("modules.")}
+    yield
+
+    for name in [name for name in sys.modules if name == "modules" or name.startswith("modules.")]:
+        if name not in saved:
+            sys.modules.pop(name, None)
+
+    for name, module in saved.items():
+        sys.modules[name] = module
 
 
 def load_extensions_module(tmp_path):
