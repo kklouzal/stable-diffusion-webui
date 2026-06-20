@@ -4082,3 +4082,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue below these API wrappers into lower-level embedding/checkpoint/VAE registry refresh internals, especially `EmbeddingDatabase.load_textual_inversion_embeddings()`, `EmbeddingDatabase.load_from_dir()`, `shared_items.refresh_checkpoints()`, `sd_models.list_models()`, `sd_models.checkpoint_tiles()`, `shared_items.refresh_vae_list()`, `sd_vae.refresh_vae_list()`, and adjacent registry/cache tests, looking for stale refresh branches or duplicate registry serialization while preserving public API/UI/extension compatibility and model reload side effects.
+
+## Pass 112 - Lower-level embedding/checkpoint/VAE registry refresh internals (2026-06-20)
+
+### Scope checked
+- `modules/textual_inversion/textual_inversion.py`: `EmbeddingDatabase.load_from_dir()` and `EmbeddingDatabase.load_textual_inversion_embeddings()`, plus adjacent embedding directory change tracking, expected-shape filtering, load-time skipped embedding handling, and UI/model-load/API reload call sites.
+- `modules/shared_items.py`: `refresh_checkpoints()`, `list_checkpoint_tiles()`, `checkpoint_dropdown_args()`, `refresh_vae_list()`, `sd_vae_items()`, and `sd_vae_dropdown_args()` compatibility wrappers.
+- `modules/sd_models.py`: `list_models()`, `checkpoint_tiles()`, `CheckpointInfo.register()`, alias registration, command-line checkpoint handling, VAE checkpoint blacklist filtering, and checkpoint fallback selection adjacency.
+- `modules/sd_vae.py`: `vae_search_paths()`, `refresh_vae_list()`, VAE dict sorting, near-checkpoint resolution, user metadata/settings resolution, and cache adjacency.
+- Adjacent contract and registry tests/references: `tests/test_api_server_control_contract.py`, `tests/test_api_listing_contract.py`, UI checkpoint/VAE refresh buttons, extra-network refresh surfaces, checkpoint merger refresh paths, and model-load embedding refresh side effects.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `EmbeddingDatabase.load_textual_inversion_embeddings()` change-detection and force-reload branches. The non-force path avoids needless reloads by checking every embedding directory; force reload is used by API/UI/model-load paths and must still clear/register/sort loaded and skipped embeddings after recalculating expected shape for the currently loaded model.
+- Preserved `EmbeddingDatabase.load_from_dir()` as the directory walking boundary. Its `os.walk(..., followlinks=True)`, zero-byte skip, per-file exception isolation, and delegation to `load_from_file()` are embedding database behavior rather than duplicate generic file scanning.
+- Preserved `shared_items` checkpoint/VAE refresh and dropdown helpers as compatibility surfaces. They are imported through `modules.shared`, options refresh callbacks, UI refresh buttons, API refresh handlers, and extension-facing paths; collapsing them into lower-level module calls would risk public import/UI callback compatibility.
+- Preserved `sd_models.list_models()` registry rebuild semantics. It intentionally clears both `checkpoints_list` and `checkpoint_aliases`, excludes VAE sidecar files from checkpoint discovery, handles `--ckpt` specially, updates `shared.opts.data['sd_model_checkpoint']` for explicit checkpoint files, and registers all checkpoint aliases through `CheckpointInfo.register()`.
+- Preserved `sd_models.checkpoint_tiles()` as the title/short-title serialization helper used by multiple dropdown surfaces with different `use_short` requirements.
+- Preserved `sd_vae.refresh_vae_list()` and `vae_search_paths()` as VAE-specific discovery logic. Their search roots and extension patterns intentionally differ from checkpoint discovery, include checkpoint-adjacent sidecars and explicit VAE directories, and sort `vae_dict` by `shared.natural_sort_key` while retaining last-found path behavior for duplicate names.
+
+### Static/dynamic audit map notes
+- Embedding reload chain remains: UI/API/model-load refresh -> `EmbeddingDatabase.load_textual_inversion_embeddings(force_reload=...)` -> directory change checks unless forced -> clear loaded/skipped/id maps -> calculate expected shape -> `load_from_dir()` for every registered embedding dir -> per-dir `update()` -> stable name sort -> optional load summary print.
+- Checkpoint refresh chain remains: API/options/UI wrappers -> `shared_items.refresh_checkpoints()` / `shared.refresh_checkpoints` -> `sd_models.list_models()` -> `modelloader.load_models(..., ext_blacklist=[".vae.ckpt", ".vae.safetensors"])` -> `CheckpointInfo.register()` into title map and alias map.
+- Checkpoint dropdown chain remains: `shared_items.checkpoint_dropdown_args()` / `list_checkpoint_tiles()` -> `sd_models.checkpoint_tiles(use_short=...)` -> title or short-title list from ordered checkpoint registry values.
+- VAE refresh chain remains: API/options/UI wrappers -> `shared_items.refresh_vae_list()` or direct `sd_vae.refresh_vae_list()` -> `vae_search_paths()` -> glob candidates -> filename-keyed `vae_dict` sorted by natural name.
+- Compatibility surfaces kept conservative: public wrapper names in `shared` and `shared_items`, route/refresh callback targets, checkpoint and VAE dropdown choice shapes, checkpoint alias keys, explicit `--ckpt` option mutation, VAE sidecar discovery semantics, embedding symlink traversal, zero-byte skip behavior, skipped embedding map behavior, and model-load embedding reload side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass112.XXXXXX) python3 -m py_compile modules/textual_inversion/textual_inversion.py modules/shared_items.py modules/sd_models.py modules/sd_vae.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass112.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py::test_refresh_endpoints_keep_queue_lock_and_side_effect_targets` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed the scoped embedding/checkpoint/VAE refresh functions are referenced by expected API, shared-options, UI, extra-network, model-load, checkpoint-merger, and focused test surfaces.
+- Exact AST duplicate-body scan across `modules/textual_inversion/textual_inversion.py`, `modules/shared_items.py`, `modules/sd_models.py`, and `modules/sd_vae.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, actual checkpoint/VAE filesystem refresh under installed model directories, real embedding file reloads under a loaded model, and model/VAE reload side effects were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from registry refresh internals into checkpoint selection/load/cache internals, especially `sd_models.get_closet_checkpoint_match()`, `select_checkpoint()`, `get_checkpoint_state_dict()`, `load_model_weights()`, `reuse_model_from_already_loaded()`, `unload_model_weights()`, and adjacent cache/metadata tests, looking for stale cache invalidation branches or duplicate checkpoint lookup/loading paths while preserving model cache semantics, alias compatibility, and reload side effects.
