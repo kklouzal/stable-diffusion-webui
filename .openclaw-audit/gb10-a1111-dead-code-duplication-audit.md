@@ -2437,3 +2437,43 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into generation-parameter parsing/backcompat/versioning and override-settings ingestion, especially `modules/infotext_utils.py` `parse_generation_parameters()`, `modules/infotext_versions.py`, txt2img/img2img infotext override paths, and API `infotext` request handling, looking for duplicated stale compatibility parsing while preserving old infotext import and extension callback behavior.
+
+
+## Pass 64 - Generation-parameter parsing/backcompat/versioning and override ingestion (2026-06-20)
+
+### Checked scope
+- `modules/infotext_utils.py`: `quote()`, `unquote()`, `parse_generation_parameters()`, `restore_old_hires_fix_params()`, inpaint label conversion helpers, `infotext_to_setting_name_mapping`, `infotext_setting_name_mapping()`, `create_override_settings_dict()`, `get_override_settings()`, and `connect_paste()` override dropdown ingestion.
+- `modules/infotext_versions.py`: version constants, `parse_version()`, and `backcompat()` compatibility switches for old prompt editing, old pad conds, downcast alpha behavior, and old refiner switch semantics.
+- UI request paths: `modules/txt2img.py` `txt2img_create_processing()` and `txt2img_upscale()`, plus `modules/img2img.py` `process_batch()` PNG-info import and `img2img()` override-setting ingestion.
+- API request paths: `modules/api/api.py` `api_infotext_value_for_field()`, `Api.apply_infotext()`, `_prepare_generation_api_request()` callers, and `pnginfoapi()` parsing/callback behavior.
+- Adjacent option/test contracts: `modules/shared_options.py` `OptionInfo(..., infotext=...)` mappings and backcompat options, `test/test_infotext_api_mappings.py`, `test/test_infotext_paste_bindings.py`, `test/test_txt2img.py`, `test/test_img2img.py`, `tests/test_save_serialization_contract.py`, and `tests/test_processing_auxiliary_infotext_alignment.py`.
+
+### Findings and fixes
+- No safe source-code removals or consolidations were made in this slice.
+- Preserved `parse_generation_parameters()` as the central parser/backcompat path. It is still shared by UI paste, PNG Info API, txt2img upscale seed reuse, img2img batch PNG-info import, save/update helpers, and API request infotext ingestion; its default filling and `infotext_versions.backcompat()` call are compatibility behavior rather than dead code.
+- Preserved `infotext_versions.py` as a separate versioning helper. The version constants and backcompat switches are small but active through `parse_generation_parameters()` and map directly to `OptionInfo(..., infotext=...)` settings that reproduce old generation behavior.
+- Preserved both `create_override_settings_dict()` and `get_override_settings()`. The UI generation path consumes explicit dropdown text and should cast all selected overrides; paste/API paths derive candidate overrides from parsed infotext, skip already-handled paste fields, ignore unchanged current values, and respect `disable_weights_auto_swap` for checkpoint import.
+- Preserved API-specific infotext request handling in `Api.apply_infotext()`. It intentionally fills only unset request fields, preserves explicit `request.override_settings`, unwraps Gradio update dictionaries for script fields, records mentioned script args, and does not fire extension paste callbacks for generation requests. `pnginfoapi()` remains the callback-firing parse surface for PNG-info inspection.
+- Preserved img2img batch PNG-info import logic. It imports only user-selected properties, appends prompt text rather than replacing it, handles alternate metadata-image directories, and applies checkpoint override fallback separately from UI/API override-setting dropdown ingestion.
+- Preserved old/default parser fill-ins for CLIP skip, hires fields, inpaint labels, RNG, scheduler sigma fields, VAE encode/decode, FP8/MXFP8 fields, emphasis, and refiner switch mode. These keys feed paste fields, API mappings, option overrides, and old infotext reproduction; removing them would change imports of older or partial infotext.
+- Left `re_hypernet_hash` untouched despite no in-repo references. It is an internal-looking leftover, but `modules.infotext_utils` has explicit old-module compatibility exposure and extension import history, so removing a module-level regex was not strong enough to satisfy the safe-removal bar for this audit.
+
+### Static/dynamic audit map notes
+- Parser chain remains: raw infotext -> prompt/negative prompt split -> comma-separated `key: value` parse with quoted value support and size fanout -> style extraction -> default/backcompat fill-ins -> `infotext_versions.backcompat()` -> user skip-field removal.
+- UI paste chain remains: parsed params -> per-component paste fields -> callable conversion helpers for legacy labels -> optional override dropdown populated by `get_override_settings(params, skip_fields=already_handled_fields)`.
+- UI generation override chain remains: override dropdown text pairs -> `create_override_settings_dict()` -> processing `override_settings` for txt2img/img2img, independent of raw infotext parsing.
+- API generation infotext chain remains: request `infotext` -> parser -> unset pydantic request fields/script args only -> missing `override_settings` initialized -> derived option overrides added without replacing explicit request overrides.
+- PNG Info API chain remains: image metadata -> parser -> `infotext_pasted_callback()` -> response `info`, `items`, and parsed `parameters`.
+- Compatibility surfaces to keep conservative: old infotext field names and defaults, `Version` parsing of prerelease/build strings, `auto_backcompat`, `infotext_skip_pasting`, `infotext_styles`, `OptionInfo.infotext` mappings, legacy `infotext_to_setting_name_mapping`, extension `infotext_pasted_callback()` side effects, API request field precedence, and Gradio update dictionary unwrapping.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass64.XXXXXX) python3 -m py_compile modules/infotext_utils.py modules/infotext_versions.py modules/txt2img.py modules/img2img.py modules/api/api.py modules/shared_options.py test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py test/test_txt2img.py test/test_img2img.py tests/test_save_serialization_contract.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass64-focused.XXXXXX) python3 -m pytest -q test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py tests/test_save_serialization_contract.py tests/test_processing_auxiliary_infotext_alignment.py` - passed: 22 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass64.XXXXXX) python3 -m pytest -q test/test_infotext_api_mappings.py test/test_infotext_paste_bindings.py test/test_txt2img.py test/test_img2img.py tests/test_save_serialization_contract.py tests/test_processing_auxiliary_infotext_alignment.py` - partially ran but blocked on live API fixture setup: 22 passed, 19 setup errors because `base_url` fixture was not available for `test/test_txt2img.py` and `test/test_img2img.py`; existing warning `Unknown config option: base_url` was also emitted.
+- Exact AST duplicate-body scan across `modules/infotext_utils.py`, `modules/infotext_versions.py`, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py`, `test/test_infotext_api_mappings.py`, `test/test_infotext_paste_bindings.py`, `test/test_txt2img.py`, and `test/test_img2img.py` reported no duplicate nontrivial function body groups.
+- Targeted reference scans confirmed parser/version/override-setting use is concentrated in infotext utilities, txt2img/img2img UI generation paths, API infotext handling, PNG-info parsing, and focused infotext tests.
+- `git diff --check` - passed.
+- Live WebUI paste/API generation/PNG-info requests were not exercised because they require a running WebUI/API session and model runtime state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into infotext option inventory and option-name discovery surfaces, especially `modules/shared_items.py` `get_infotext_names()`, `modules/shared_options.py` infotext-bearing options, settings UI skip-pasting choices, and any duplicated option-to-infotext registries, looking for stale option mappings while preserving old import names and settings/API compatibility.
