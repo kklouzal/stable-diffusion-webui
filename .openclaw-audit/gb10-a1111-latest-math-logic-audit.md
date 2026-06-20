@@ -523,3 +523,20 @@ Validation:
 
 Next unchecked scope:
 - Continue through face restoration/GFPGAN/CodeFormer helpers, lowvram/devices/mac-specific paths, interrogate/deepbooru, remaining UI construction modules not named in earlier passes, and extension source trees beyond already-audited extension slices. The broad source audit is still not complete.
+
+### 2026-06-20 pass 22 - face restoration, device/interrogate helpers, UI construction triage, and extension inventory
+Checked:
+- `modules/codeformer_model.py`, `modules/gfpgan_model.py`, `modules/face_restoration.py`, and `modules/face_restoration_utils.py`: model discovery/load wrappers, device selection, face helper construction, BGR/RGB tensor conversion, per-face restore failure handling, paste-back resizing, unload behavior, and facexlib download-dir patching; no defect found in inspected paths.
+- `modules/devices.py`, `modules/lowvram.py`, and `modules/mac_specific.py`: device selection, autocast/manual-cast gates, TF32 enablement, NaN checks, low/medvram hook installation, module CPU/GPU shuttling, and MPS workaround registration; no defect found in inspected paths.
+- `modules/interrogate.py`, `modules/deepbooru.py`, and `modules/deepbooru_model.py`: CLIP category download/cache, BLIP/CLIP load/unload/ranking, interrogate state handling, DeepDanbooru model load/start/stop/tag filtering, and generated model forward graph syntax; no defect found in inspected paths.
+- UI construction triage covered function/class boundaries and targeted reads in `modules/ui_extra_networks.py` around allowed preview dirs, fetch endpoints, card/tree/dir HTML generation, page ordering, refresh/load behavior, path-parent checks, and preview-save authorization; no defect found in inspected paths.
+- Extension inventory enumerated remaining source files under `extensions/` and `extensions-builtin/` and syntax-validated Python/JavaScript files, but did not complete function-by-function review of every extension module in this pass.
+
+Validation:
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile modules/codeformer_model.py modules/gfpgan_model.py modules/face_restoration.py modules/face_restoration_utils.py modules/devices.py modules/lowvram.py modules/mac_specific.py modules/interrogate.py modules/deepbooru.py modules/deepbooru_model.py modules/ui.py modules/ui_components.py modules/ui_component_patches.py modules/ui_extra_networks.py modules/ui_extra_networks_checkpoints.py modules/ui_extra_networks_checkpoints_user_metadata.py modules/ui_extra_networks_hypernets.py modules/ui_extra_networks_textual_inversion.py modules/ui_extra_networks_user_metadata.py modules/ui_html_extensions.py modules/ui_loadsave.py modules/ui_postprocessing.py modules/ui_prompt_styles.py modules/ui_settings.py modules/ui_tempdir.py modules/ui_toprow.py modules/headless_ui.py modules/shared_ui_themes.py` -> passed.
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m py_compile $(find extensions extensions-builtin -type f -name "*.py" ! -path "*/__pycache__/*")` -> passed.
+- `node --check extensions/sd-webui-incantations/javascript/dynthres_active.js extensions-builtin/canvas-zoom-and-pan/javascript/zoom.js extensions-builtin/mobile/javascript/mobile.js extensions-builtin/prompt-bracket-checker/javascript/prompt-bracket-checker.js` -> passed.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Function-by-function review still remains for `modules/ui.py`, `modules/ui_components.py`, `modules/ui_component_patches.py`, `modules/ui_loadsave.py`, `modules/ui_postprocessing.py`, `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_tempdir.py`, `modules/ui_toprow.py`, `modules/headless_ui.py`, `modules/shared_ui_themes.py`, the specialized extra-network page/editor modules, and extension source trees under `extensions/` and `extensions-builtin/` (especially `extensions-builtin/Lora`, `extensions-builtin/LDSR`, `extensions/sd-webui-incantations`, `extensions/sd-webui-model-converter`, upscalers, Hypertile, soft-inpainting, and postprocessing-for-training). The broad source audit is still not complete.
