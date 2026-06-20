@@ -52,6 +52,24 @@ def record_results(id_task, res):
 def add_task_to_queue(id_job):
     pending_tasks[id_job] = time.time()
 
+
+def calculate_progress_and_eta(job_count, job_no, sampling_steps, sampling_step, time_start, *, base_progress=0):
+    progress = base_progress
+
+    if job_count > 0:
+        progress += job_no / job_count
+    if sampling_steps > 0 and job_count > 0:
+        progress += 1 / job_count * sampling_step / sampling_steps
+
+    progress = min(progress, 1)
+
+    elapsed_since_start = time.time() - time_start
+    predicted_duration = elapsed_since_start / progress if progress > 0 else None
+    eta = predicted_duration - elapsed_since_start if predicted_duration is not None else None
+
+    return progress, eta
+
+
 class PendingTasksResponse(BaseModel):
     size: int = Field(title="Pending task size")
     tasks: List[str] = Field(title="Pending task ids")
@@ -97,21 +115,13 @@ def progressapi(req: ProgressRequest):
             textinfo = "In queue: {}/{}".format(queue_index + 1, len(sorted_queued))
         return ProgressResponse(active=active, queued=queued, completed=completed, id_live_preview=-1, textinfo=textinfo)
 
-    progress = 0
-
-    job_count, job_no = shared.state.job_count, shared.state.job_no
-    sampling_steps, sampling_step = shared.state.sampling_steps, shared.state.sampling_step
-
-    if job_count > 0:
-        progress += job_no / job_count
-    if sampling_steps > 0 and job_count > 0:
-        progress += 1 / job_count * sampling_step / sampling_steps
-
-    progress = min(progress, 1)
-
-    elapsed_since_start = time.time() - shared.state.time_start
-    predicted_duration = elapsed_since_start / progress if progress > 0 else None
-    eta = predicted_duration - elapsed_since_start if predicted_duration is not None else None
+    progress, eta = calculate_progress_and_eta(
+        shared.state.job_count,
+        shared.state.job_no,
+        shared.state.sampling_steps,
+        shared.state.sampling_step,
+        shared.state.time_start,
+    )
 
     live_preview = None
     id_live_preview = req.id_live_preview

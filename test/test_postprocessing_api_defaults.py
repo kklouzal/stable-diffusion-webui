@@ -245,6 +245,54 @@ def load_api_extras_method(method_name):
     return namespace["FakeApi"]
 
 
+def load_api_progress_method():
+    source = Path("modules/api/api.py").read_text()
+    tree = ast.parse(source)
+    api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    method = next(node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == "progressapi")
+    fake_class = ast.ClassDef(name="FakeApi", bases=[], keywords=[], body=[method], decorator_list=[])
+    module = ast.Module(body=[fake_class], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"Depends": lambda: None, "models": SimpleNamespace(ProgressRequest=object)}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
+    return namespace["FakeApi"]
+
+
+def test_api_progress_reports_live_current_task_reference():
+    api_class = load_api_progress_method()
+    api = api_class()
+
+    class State:
+        job_count = 1
+        job_no = 0
+        sampling_steps = 10
+        sampling_step = 5
+        time_start = 1
+        current_image = None
+        textinfo = "running"
+
+        def dict(self):
+            return {"job_count": self.job_count}
+
+        def set_current_image(self):
+            pass
+
+    progress_module = SimpleNamespace(
+        current_task="task(txt2img-LIVE)",
+        calculate_progress_and_eta=lambda *args, **kwargs: (0.5, 12.0),
+    )
+    api.progressapi.__globals__.update(
+        progress_module=progress_module,
+        shared=SimpleNamespace(state=State()),
+        models=SimpleNamespace(ProgressResponse=lambda **kwargs: kwargs),
+    )
+
+    result = api.progressapi(SimpleNamespace(skip_current_image=True))
+
+    assert result["current_task"] == "task(txt2img-LIVE)"
+    assert result["progress"] == 0.5
+
+
 def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
     set_upscalers = load_set_upscalers()
     req = SimpleNamespace(

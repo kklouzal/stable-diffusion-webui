@@ -1062,3 +1062,44 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: remaining progress/reporting and API utility surfaces around task state, progress previews, extras/postprocessing serialization, interrogate/png-info/reporting routes, and adjacent tests, especially the rest of `modules/api/api.py`, `modules/api/models.py`, `modules/progress.py`, `modules/ui.py` progress helpers, `modules/postprocessing.py`, and API progress/extras tests.
+
+## Pass 25 - progress/reporting and API utility surfaces (2026-06-20)
+
+### Checked scope
+- Remaining progress/task reporting surfaces in `modules/api/api.py`, `modules/api/models.py`, and `modules/progress.py`, including `/sdapi/v1/progress`, `/internal/progress`, `/internal/pending-tasks`, task queue state helpers, current-task reporting, ETA/progress calculation, and live-preview serialization.
+- Extras/postprocessing API and UI wrappers in `modules/api/api.py`, `modules/api/models.py`, `modules/postprocessing.py`, and `modules/ui_postprocessing.py` fanout via grep, including `setUpscalers()`, `decode_extras_batch_images()`, `extras_single_image_api()`, `extras_batch_images_api()`, `run_postprocessing_webui()`, and `run_extras()`.
+- Interrogate and PNG-info/reporting routes in `modules/api/api.py`, `modules/ui.py`, and `modules/extras.py`, including API `pnginfoapi()`, API `interrogateapi()`, UI `process_interrogate()`, `interrogate()`, `interrogate_deepbooru()`, and `run_pnginfo()`.
+- Adjacent API/extras/progress tests and contracts in `test/test_postprocessing_api_defaults.py`, `test/test_extras.py`, and `tests/test_postprocessing_caption_contract.py`.
+- Focused duplicate/reachability checks: grep fanout for progress/task/extras/interrogate/png-info symbols, targeted reads of route/helper call chains, and AST duplicate-body scan across the pass-25 target files and adjacent tests.
+
+### Findings and fixes
+- Fixed stale API progress task reporting by changing `/sdapi/v1/progress` to read `modules.progress.current_task` through the module object. The previous `from modules.progress import current_task` captured the initial `None` and did not reflect later `start_task()` / `finish_task()` global reassignments.
+- Deduplicated the progress fraction and ETA calculation shared by `/internal/progress` and `/sdapi/v1/progress` into `progress.calculate_progress_and_eta()`. The public API keeps its existing `base_progress=0.01` behavior while the internal progress endpoint keeps its previous zero-progress/`None` ETA behavior.
+- Added a focused regression test confirming API progress reports the live task id from the progress module reference.
+- No safe dead-code deletion was found in extras, postprocessing, interrogate, or PNG-info route helpers. Sparse-looking wrappers are live UI/API compatibility surfaces with distinct response shapes and Gradio/API call contracts.
+
+### Preserved compatibility/dead-code decisions
+- `modules.progress.ProgressRequest` / `ProgressResponse` remain separate from `modules.api.models.ProgressRequest` / `ProgressResponse` because `/internal/progress` is a Gradio live-preview/task-state protocol while `/sdapi/v1/progress` is the public API schema with a state snapshot and optional current image.
+- `run_postprocessing_webui(id_task, *args, **kwargs)` remains a UI queue wrapper even though it ignores `id_task`; `ui_postprocessing.py` calls it through `call_queue.wrap_ui_gpu_call()` and the signature is part of the queued UI contract.
+- API extras endpoints continue using `run_extras()` rather than calling `run_postprocessing()` directly because `run_extras()` maps legacy API fields to postprocessing script args and preserves `upscale_first` ordering.
+- API and UI PNG-info helpers stay separate: API `pnginfoapi()` returns raw/parsed JSON and fires infotext callbacks; UI `modules.extras.run_pnginfo()` returns rendered HTML plus hidden generation text for paste buttons.
+- API and UI interrogate helpers stay separate because the API returns a JSON caption under queue lock, while UI helpers return Gradio update-compatible values and support batch directory modes.
+- Live preview serialization in `/internal/progress` is intentionally not shared with API image serialization because it returns `data:image/...` URIs, honors `opts.live_previews_image_format`, and uses preview-specific PNG compression shortcuts.
+
+### Static/dynamic audit map notes
+- API task chain: txt2img/img2img API calls create or accept a task id, add it to `pending_tasks`, call `start_task()` inside the queue lock, call `finish_task()` in `finally`, and now `/sdapi/v1/progress` reports the live `progress_module.current_task` rather than an imported snapshot.
+- Internal progress chain: JavaScript calls `/internal/progress` with a task id and last preview id; the endpoint reports active/queued/completed flags, queue position text, ETA/progress, and only sends a live preview when the preview id changes.
+- Extras API chain: API request models normalize `upscaler_1`/`upscaler_2` to postprocessing names, decode images, run under the API queue lock with `save_output=False`, and serialize either a single optional image or a batch list plus HTML info.
+- Postprocessing chain: UI extras call `run_postprocessing_webui()` through the queued GPU wrapper, then `run_postprocessing()` enumerates upload/directory/single-image inputs, runs postprocessing scripts, optionally saves output/captions, assigns current image for previews, and returns gallery images plus HTML info/log.
+- PNG-info/interrogate chain: UI routes feed Gradio components and paste fields; API routes decode base64 input and return stable JSON response models. These chains overlap conceptually but not enough to safely collapse without changing public/UI behavior.
+- Compatibility surfaces to continue treating conservatively: `/internal/progress` response shape, `/sdapi/v1/progress` response shape, task id strings, `force_task_id`, live-preview data URI format, extras API field names, `run_postprocessing_webui()` signature, API/HTML PNG-info outputs, and interrogate model names (`clip`, `deepdanbooru`).
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass25 python3 -m py_compile modules/api/api.py modules/api/models.py modules/progress.py modules/ui.py modules/postprocessing.py modules/extras.py test/test_postprocessing_api_defaults.py test/test_extras.py tests/test_postprocessing_caption_contract.py` - passed.
+- `python3 -m pytest -q test/test_postprocessing_api_defaults.py::test_api_progress_reports_live_current_task_reference test/test_postprocessing_api_defaults.py::test_api_extras_always_returns_images_despite_directory_gallery_toggle test/test_postprocessing_api_defaults.py::test_extras_batch_decode_skips_corrupt_images_but_keeps_valid_items test/test_postprocessing_api_defaults.py::test_extras_single_response_allows_no_output_from_skipped_or_interrupted_run tests/test_postprocessing_caption_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Broader `python3 -m pytest -q test/test_postprocessing_api_defaults.py tests/test_postprocessing_caption_contract.py` was attempted and failed in GB10 system Python before/while collecting existing tests because optional/runtime dependencies are unavailable there (`ModuleNotFoundError: No module named fastapi` and extension preload errors from missing `torch`).
+- Exact AST duplicate-body scan across the pass-25 target set reported only two tiny duplicate test fixture `__init__` methods in `test/test_postprocessing_api_defaults.py`; no duplicate nontrivial production function bodies were reported at the 500-character threshold.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: low-level model/listing and refresh API surfaces plus remaining utility/reporting endpoints, especially `modules/api/api.py` getters after progress (`get_config`, `set_config`, sampler/scheduler/upscaler/model/embedding/extension/memory/train/create endpoints), `modules/api/models.py` item/response schemas, `modules/sd_models.py` listing helpers, `modules/sd_vae.py`, `modules/shared_items.py`, and adjacent API model/listing tests.

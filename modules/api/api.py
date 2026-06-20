@@ -30,7 +30,8 @@ from modules.realesrgan_model import get_realesrgan_models
 from modules import devices
 from typing import Any
 from contextlib import closing
-from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, current_task, pending_tasks
+from modules import progress as progress_module
+from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, pending_tasks
 
 
 _precision_map_cache_key = None
@@ -1051,19 +1052,14 @@ class Api:
         if shared.state.job_count == 0:
             return models.ProgressResponse(progress=0, eta_relative=0, state=shared.state.dict(), textinfo=shared.state.textinfo)
 
-        # avoid dividing zero
-        progress = 0.01
-
-        if shared.state.job_count > 0:
-            progress += shared.state.job_no / shared.state.job_count
-        if shared.state.sampling_steps > 0:
-            progress += 1 / shared.state.job_count * shared.state.sampling_step / shared.state.sampling_steps
-
-        time_since_start = time.time() - shared.state.time_start
-        eta = (time_since_start/progress)
-        eta_relative = eta-time_since_start
-
-        progress = min(progress, 1)
+        progress, eta_relative = progress_module.calculate_progress_and_eta(
+            shared.state.job_count,
+            shared.state.job_no,
+            shared.state.sampling_steps,
+            shared.state.sampling_step,
+            shared.state.time_start,
+            base_progress=0.01,
+        )
 
         shared.state.set_current_image()
 
@@ -1071,7 +1067,7 @@ class Api:
         if shared.state.current_image and not req.skip_current_image:
             current_image = encode_pil_to_base64(shared.state.current_image)
 
-        return models.ProgressResponse(progress=progress, eta_relative=eta_relative, state=shared.state.dict(), current_image=current_image, textinfo=shared.state.textinfo, current_task=current_task)
+        return models.ProgressResponse(progress=progress, eta_relative=eta_relative, state=shared.state.dict(), current_image=current_image, textinfo=shared.state.textinfo, current_task=progress_module.current_task)
 
     def interrogateapi(self, interrogatereq: models.InterrogateRequest):
         image_b64 = interrogatereq.image
