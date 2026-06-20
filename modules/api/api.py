@@ -698,6 +698,51 @@ class Api:
         shared.state.end()
         shared.total_tqdm.clear()
 
+    @staticmethod
+    def _create_response(info):
+        return models.CreateResponse(info=info)
+
+    @staticmethod
+    def _train_response(info):
+        return models.TrainResponse(info=info)
+
+    def _run_create_task(self, job, create_fn, args, success_prefix, error_prefix, after_create=None):
+        try:
+            shared.state.begin(job=job)
+            filename = create_fn(**args)
+            if after_create is not None:
+                after_create()
+            return self._create_response(f"{success_prefix}{filename}")
+        except AssertionError as e:
+            return self._create_response(f"{error_prefix}{e}")
+        finally:
+            shared.state.end()
+
+    def _run_training_task(self, job, train_fn, args, success_prefix, error_prefix, before_train=None, after_train=None):
+        try:
+            shared.state.begin(job=job)
+            if before_train is not None:
+                before_train()
+            apply_optimizations = shared.opts.training_xattention_optimizations
+            error = None
+            filename = ''
+            if not apply_optimizations:
+                sd_hijack.undo_optimizations()
+            try:
+                _, filename = train_fn(**args)
+            except Exception as e:
+                error = e
+            finally:
+                if after_train is not None:
+                    after_train()
+                if not apply_optimizations:
+                    sd_hijack.apply_optimizations()
+            return self._train_response(f"{success_prefix}{filename} error: {error}")
+        except Exception as exc:
+            return self._train_response(f"{error_prefix}{exc}")
+        finally:
+            shared.state.end()
+
     def auth(self, credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         if credentials.username in self.credentials:
             if compare_digest(credentials.password, self.credentials[credentials.username]):
@@ -1218,71 +1263,52 @@ class Api:
         self._call_with_queue_lock(shared_items.refresh_vae_list)
 
     def create_embedding(self, args: dict):
-        try:
-            shared.state.begin(job="create_embedding")
-            filename = create_embedding(**args) # create empty embedding
-            sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings() # reload embeddings so new one can be immediately used
-            return models.CreateResponse(info=f"create embedding filename: {filename}")
-        except AssertionError as e:
-            return models.CreateResponse(info=f"create embedding error: {e}")
-        finally:
-            shared.state.end()
-
+        return self._run_create_task(
+            "create_embedding",
+            create_embedding,
+            args,
+            "create embedding filename: ",
+            "create embedding error: ",
+            after_create=sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings,
+        )
 
     def create_hypernetwork(self, args: dict):
-        try:
-            shared.state.begin(job="create_hypernetwork")
-            filename = create_hypernetwork(**args) # create empty hypernetwork
-            return models.CreateResponse(info=f"create hypernetwork filename: {filename}")
-        except AssertionError as e:
-            return models.CreateResponse(info=f"create hypernetwork error: {e}")
-        finally:
-            shared.state.end()
+        return self._run_create_task(
+            "create_hypernetwork",
+            create_hypernetwork,
+            args,
+            "create hypernetwork filename: ",
+            "create hypernetwork error: ",
+        )
+
+    @staticmethod
+    def _prepare_hypernetwork_training():
+        shared.loaded_hypernetworks = []
+
+    @staticmethod
+    def _restore_hypernetwork_training_devices():
+        shared.sd_model.cond_stage_model.to(devices.device)
+        shared.sd_model.first_stage_model.to(devices.device)
 
     def train_embedding(self, args: dict):
-        try:
-            shared.state.begin(job="train_embedding")
-            apply_optimizations = shared.opts.training_xattention_optimizations
-            error = None
-            filename = ''
-            if not apply_optimizations:
-                sd_hijack.undo_optimizations()
-            try:
-                embedding, filename = train_embedding(**args) # can take a long time to complete
-            except Exception as e:
-                error = e
-            finally:
-                if not apply_optimizations:
-                    sd_hijack.apply_optimizations()
-            return models.TrainResponse(info=f"train embedding complete: filename: {filename} error: {error}")
-        except Exception as msg:
-            return models.TrainResponse(info=f"train embedding error: {msg}")
-        finally:
-            shared.state.end()
+        return self._run_training_task(
+            "train_embedding",
+            train_embedding,
+            args,
+            "train embedding complete: filename: ",
+            "train embedding error: ",
+        )
 
     def train_hypernetwork(self, args: dict):
-        try:
-            shared.state.begin(job="train_hypernetwork")
-            shared.loaded_hypernetworks = []
-            apply_optimizations = shared.opts.training_xattention_optimizations
-            error = None
-            filename = ''
-            if not apply_optimizations:
-                sd_hijack.undo_optimizations()
-            try:
-                hypernetwork, filename = train_hypernetwork(**args)
-            except Exception as e:
-                error = e
-            finally:
-                shared.sd_model.cond_stage_model.to(devices.device)
-                shared.sd_model.first_stage_model.to(devices.device)
-                if not apply_optimizations:
-                    sd_hijack.apply_optimizations()
-            return models.TrainResponse(info=f"train hypernetwork complete: filename: {filename} error: {error}")
-        except Exception as exc:
-            return models.TrainResponse(info=f"train hypernetwork error: {exc}")
-        finally:
-            shared.state.end()
+        return self._run_training_task(
+            "train_hypernetwork",
+            train_hypernetwork,
+            args,
+            "train hypernetwork complete: filename: ",
+            "train hypernetwork error: ",
+            before_train=self._prepare_hypernetwork_training,
+            after_train=self._restore_hypernetwork_training_devices,
+        )
 
     def get_memory(self):
         try:

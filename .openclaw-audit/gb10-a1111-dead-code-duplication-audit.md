@@ -1902,3 +1902,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into training/create/memory/extensions/server-control API helpers and then out toward lower-level model/registry refresh implementations (`shared.refresh_checkpoints()`, VAE/model loader listing refresh, extension listing metadata), looking for dead wrappers or duplicate registry serialization while preserving public API response contracts.
+
+
+## Pass 49 - API training/create/memory/extensions/server-control helpers (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: create endpoints (`create_embedding()`, `create_hypernetwork()`), training endpoints (`train_embedding()`, `train_hypernetwork()`), new private response/task helpers, memory endpoint (`get_memory()`), extension listing (`get_extensions_list()`), server-control endpoints (`kill_webui()`, `restart_webui()`, `stop_webui()`), and adjacent interrupt/skip/unload/reload wrappers.
+- `modules/api/models.py`: `TrainResponse`, `CreateResponse`, `MemoryResponse`, `ExtensionItem`, and adjacent embedding/listing response models.
+- Adjacent contracts/tests: `tests/test_api_training_contract.py`; live server-control and memory/extension endpoints were inspected as public API surfaces but not exercised without a running WebUI/API server fixture.
+
+### Findings and fixes
+- Extracted duplicated create endpoint state/response handling into `Api._run_create_task()` plus `_create_response()`. `create_embedding()` still reloads textual inversion embeddings immediately after successful creation, and both create endpoints preserve the exact `CreateResponse.info` strings for success and `AssertionError` handling.
+- Extracted duplicated train endpoint optimization/response handling into `Api._run_training_task()` plus `_train_response()`. `train_embedding()` and `train_hypernetwork()` still preserve their exact success/error text prefixes, single `shared.state.end()` lifecycle, and optimization undo/apply behavior.
+- Kept hypernetwork-specific training behavior explicit through `_prepare_hypernetwork_training()` and `_restore_hypernetwork_training_devices()`, preserving `shared.loaded_hypernetworks = []` before training and device restoration of `cond_stage_model`/`first_stage_model` in the training cleanup path.
+- Updated `tests/test_api_training_contract.py` so the source-level contract follows the new helper structure: create endpoints must route through `_run_create_task()`, train endpoints through `_run_training_task()`, response helper types remain separated, and the shared training helper still owns exactly one `shared.state.end()` call.
+- No dead memory helper code was found. `get_memory()` is a public `/sdapi/v1/memory` route, and its RAM/torch CUDA probes intentionally tolerate platform/device errors by returning `error` dictionaries under the existing `MemoryResponse` contract.
+- No safe extension metadata serializer extraction was made. `get_extensions_list()` maps the public `ExtensionItem` fields directly after `extensions.list_extensions()`/`ext.read_info_from_repo()`, skips extensions without remotes as existing behavior, and has no repeated serialization body elsewhere in the checked scope.
+- No server-control wrapper removal or consolidation was made. `interruptapi()`, `skip()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, and `stop_webui()` are public route handlers or gated public route handlers with intentionally distinct return shapes (`{}`, `None`, and `Response`) that should remain compatibility-preserved.
+
+### Static/dynamic audit map notes
+- Create endpoint flow now remains: public route -> `_run_create_task()` -> `shared.state.begin()` -> concrete create function -> optional post-create reload -> `CreateResponse(info=...)` -> `shared.state.end()`.
+- Training endpoint flow now remains: public route -> `_run_training_task()` -> `shared.state.begin()` -> optional hypernetwork pre-hook -> optional optimization undo -> concrete train function -> optional hypernetwork device restore -> optional optimization apply -> `TrainResponse(info=...)` -> `shared.state.end()`.
+- Public response schemas checked in this slice remain unchanged: `TrainResponse.info`, `CreateResponse.info`, `MemoryResponse.ram`/`cuda`, and `ExtensionItem` fields.
+- Compatibility surfaces to continue treating conservatively: `/sdapi/v1/memory` platform fallbacks, extension list remote filtering and repo metadata reads, `api_server_stop`-gated routes, and public server-control return shapes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_training_contract.py` - passed.
+- `pytest -q tests/test_api_training_contract.py` - passed: 3 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, and `tests/test_api_training_contract.py` reported no duplicate nontrivial function bodies.
+- `git diff --check` - passed.
+- Live memory/extensions/server-control endpoint tests were not run because they require a running WebUI/API server fixture and server-control calls can stop/restart the process.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue below the API route layer into lower-level registry refresh and listing implementations, especially `shared.refresh_checkpoints()`, VAE/model loader refresh/listing paths, extension metadata refresh internals, and any duplicate registry serialization behind the API wrappers while preserving public API contracts.
