@@ -4,15 +4,20 @@ from pathlib import Path
 def test_returned_mask_images_keep_infotexts_aligned():
     source = Path("modules/processing.py").read_text()
 
+    helper_at = source.index("def append_output_image(output_image):")
+    helper_body = source[helper_at:source.index("append_output_image(image)", helper_at)]
+    assert "infotexts.append(text)" in helper_body
+    assert "output_images.append(output_image)" in helper_body
+
     for append_call in (
-        "output_images.append(image_mask)",
-        "output_images.append(image_mask_composite)",
+        "append_output_image(image_mask)",
+        "append_output_image(image_mask_composite)",
     ):
         append_at = source.index(append_call)
         branch_at = source.rfind("if opts.return_", 0, append_at)
-        branch_body = source[branch_at:append_at]
+        branch_body = source[branch_at:append_at + len(append_call)]
 
-        assert "infotexts.append(text)" in branch_body
+        assert append_call in branch_body
 
 
 def test_outpainting_mk2_marks_prepended_grid_as_non_sample():

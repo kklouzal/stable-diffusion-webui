@@ -1617,3 +1617,33 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: adjacent processing per-image output/mask save flow after script hooks, especially duplicated mask/overlay save-return branches in `modules/processing.py`, image/info mutation around `postprocess_image_after_composite()`, and safe helper boundaries for mask return/save behavior without changing output ordering or infotext metadata.
+
+## Pass 40 - processing per-image output and mask return/save flow (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `process_images_inner()` per-image output loop after `postprocess_image()`, `postprocess_maskoverlay()`, color correction, `apply_overlay()`, and `postprocess_image_after_composite()`; final sample save, PNG infotext mutation, output image/infotext list append order, returned/saved mask branch, returned/saved mask-composite branch, grid prepend behavior, and `Processed` construction.
+- `modules/processing.py`: adjacent img2img inpainting setup around `image_mask`, `mask_for_overlay`, `overlay_images`, full-res crop fallback, latent mask setup, and `MaskBlendArgs` payload construction in `StableDiffusionProcessingImg2Img.sample()`.
+- Adjacent contracts: `tests/test_processing_auxiliary_infotext_alignment.py` and `tests/test_image_mask_fix_contract.py`.
+
+### Findings and fixes
+- Consolidated duplicated result-list append behavior in the per-image output loop with a local `append_output_image()` helper scoped after `text = infotext(i)`. The main image, returned mask, and returned mask composite now share the same `infotexts.append(text)` plus `output_images.append(...)` path without recomputing infotext or changing return ordering.
+- Updated the auxiliary infotext alignment source-contract test so it asserts the helper owns aligned append behavior and both returned auxiliary branches call it.
+- No safe consolidation was made for the mask and mask-composite save branches themselves. They intentionally differ in image construction, option flags (`return_mask`/`save_mask` versus `return_mask_composite`/`save_mask_composite`), and suffixes (`-mask` versus `-mask-composite`).
+- No safe changes were made to `postprocess_image_after_composite()` placement, `image.info["parameters"]` mutation, save timing, or grid prepend logic. These are behavior-sensitive output/API/UI contracts.
+- No safe removal was found in the adjacent inpainting mask setup. `image_mask`, `latent_mask`, `mask_for_overlay`, `overlay_images`, and `paste_to` feed different downstream conditioning, overlay, cache, and return/save behavior.
+
+### Static/dynamic audit map notes
+- Per-image output order remains: save final sample if enabled -> compute one `text = infotext(i)` -> append final image/infotext -> write PNG `parameters` metadata on the final image when enabled -> optionally save/return mask -> optionally save/return mask composite.
+- Returned mask and mask composite still reuse the already-computed sample `text`, keeping `Processed.images` and `Processed.infotexts` lengths aligned for auxiliary images.
+- Mask composite construction still uses `original_denoised_image` from `apply_overlay()` and a resized `mask_for_overlay`; plain mask construction still uses `mask_for_overlay.convert(RGB)`.
+- Inpainting setup remains deliberately separate from return/save behavior: setup prepares conditioning/cache/overlay state, while the per-image loop decides returned/saved auxiliary images after script hooks can mutate mask/overlay payloads.
+- Compatibility surfaces to continue treating conservatively: `opts.return_mask`, `opts.save_mask`, `opts.return_mask_composite`, `opts.save_mask_composite`, saved suffixes, `image.info["parameters"]`, `Processed.index_of_first_image`, `mask_for_overlay`, `overlay_images`, `paste_to`, and script hook timing around compositing.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass40.XXXXXX) python3 -m py_compile modules/processing.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass40.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py tests/test_image_mask_fix_contract.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/processing.py`, `tests/test_processing_auxiliary_infotext_alignment.py`, and `tests/test_image_mask_fix_contract.py` still reports four pre-existing nontrivial branch-shape duplicate groups in `modules/processing.py` at lines `(167, 184)`, `(1601, 1693)`, `(2031, 1585, 1494)`, and `(1395, 1407)`; none are in the remediated per-image mask return/save append path.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: nearby `modules/processing.py` branch-shape duplication outside the just-checked output loop, especially txt2img/img2img image conditioning branches, hires resize target calculations, VAE encoder metadata branches, and hires/img2img init mask/latent setup where behavior-sensitive duplication may or may not be safely extractable.

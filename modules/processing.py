@@ -1246,10 +1246,14 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
 
                 text = infotext(i)
-                infotexts.append(text)
+
+                def append_output_image(output_image):
+                    infotexts.append(text)
+                    output_images.append(output_image)
+
+                append_output_image(image)
                 if opts.enable_pnginfo:
                     image.info["parameters"] = text
-                output_images.append(image)
 
                 if mask_for_overlay is not None:
                     if opts.return_mask or opts.save_mask:
@@ -1257,16 +1261,14 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                         if save_samples and opts.save_mask:
                             images.save_image(image_mask, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask")
                         if opts.return_mask:
-                            infotexts.append(text)
-                            output_images.append(image_mask)
+                            append_output_image(image_mask)
 
                     if opts.return_mask_composite or opts.save_mask_composite:
                         image_mask_composite = Image.composite(original_denoised_image.convert('RGBA').convert('RGBa'), Image.new('RGBa', image.size), images.resize_image(2, mask_for_overlay, image.width, image.height).convert('L')).convert('RGBA')
                         if save_samples and opts.save_mask_composite:
                             images.save_image(image_mask_composite, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-mask-composite")
                         if opts.return_mask_composite:
-                            infotexts.append(text)
-                            output_images.append(image_mask_composite)
+                            append_output_image(image_mask_composite)
 
             del x_samples_ddim
 
