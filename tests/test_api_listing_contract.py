@@ -1,4 +1,6 @@
 import ast
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +52,7 @@ def test_script_listing_endpoints_share_txt2img_img2img_sources(monkeypatch):
     assert scripts_list_calls == [{"txt2img": ["Selectable"], "img2img": ["Img Script"]}]
     assert api.get_script_info() == [txt_info, img_info]
 
+
 def load_latent_upscale_api_class():
     source = Path("modules/api/api.py").read_text(encoding="utf8")
     module = ast.parse(source)
@@ -78,3 +81,67 @@ def test_latent_upscale_modes_lists_shared_mode_names_in_order(monkeypatch):
         {"name": "Latent"},
         {"name": "Latent (nearest)"},
     ]
+
+
+def load_extension_listing_api_class():
+    source = Path("modules/api/api.py").read_text(encoding="utf8")
+    module = ast.parse(source)
+    api_class = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    method = next(node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == "get_extensions_list")
+    subset = ast.Module(body=[ast.ClassDef(name="Api", bases=[], keywords=[], body=[method], decorator_list=[])], type_ignores=[])
+    ast.fix_missing_locations(subset)
+
+    namespace = {}
+    exec(compile(subset, "<api-extension-listing>", "exec"), namespace)
+    return namespace["Api"]
+
+
+def test_extensions_list_preserves_public_git_metadata_shape(monkeypatch):
+    api_class = load_extension_listing_api_class()
+    events = []
+
+    class Extension:
+        pass
+
+    class ExtensionRecord:
+        def __init__(self, name, remote, enabled=True, path="/extensions/private-path"):
+            self.name = name
+            self.path = path
+            self.remote = remote
+            self.branch = None
+            self.commit_hash = "abc123"
+            self.commit_date = None
+            self.version = "abc123"
+            self.enabled = enabled
+
+        def read_info_from_repo(self):
+            events.append(("read", self.name))
+
+    remote_extension = ExtensionRecord("remote-ext", "https://example.invalid/repo.git", enabled=False)
+    local_extension = ExtensionRecord("local-ext", None)
+
+    def list_extensions():
+        events.append(("list", None))
+
+    extensions_stub = types.ModuleType("modules.extensions")
+    extensions_stub.Extension = Extension
+    extensions_stub.extensions = [remote_extension, local_extension]
+    extensions_stub.list_extensions = list_extensions
+
+    modules_stub = types.ModuleType("modules")
+    modules_stub.extensions = extensions_stub
+    monkeypatch.setitem(sys.modules, "modules", modules_stub)
+    monkeypatch.setitem(sys.modules, "modules.extensions", extensions_stub)
+
+    assert api_class().get_extensions_list() == [
+        {
+            "name": "remote-ext",
+            "remote": "https://example.invalid/repo.git",
+            "branch": None,
+            "commit_hash": "abc123",
+            "commit_date": None,
+            "version": "abc123",
+            "enabled": False,
+        }
+    ]
+    assert events == [("list", None), ("read", "remote-ext"), ("read", "local-ext")]

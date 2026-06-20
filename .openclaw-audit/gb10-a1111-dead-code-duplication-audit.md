@@ -3027,3 +3027,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into API scripts/extensions metadata surfaces, especially `get_scripts_list()`, `get_script_info()`, `get_extensions_list()`, extension enabled/path metadata, and adjacent script API info helpers, looking for stale wrappers or duplicate list shaping while preserving public route schemas and extension/script compatibility.
+
+## Pass 81 - API scripts/extensions metadata surfaces (2026-06-20)
+
+### Checked scope
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions`; focused inspection of `_script_lists()`, `get_scripts_list()`, `get_script_info()`, and `get_extensions_list()`.
+- `modules/api/models.py`: `ScriptsList`, `ScriptArg`, `ScriptInfo`, and `ExtensionItem` response schemas.
+- `modules/scripts.py`: script `api_info` construction in `ScriptRunner.create_script_ui_inner()`, script name filtering, always-on/img2img flags, control argument metadata, and adjacent script callback wrappers surfaced by the duplicate scan.
+- `modules/extensions.py`: extension discovery, enabled state, path metadata, repo metadata cache fields, `read_info_from_repo()`, remote filtering, and `Extension.path`/`extension_paths` behavior.
+- Focused tests: `tests/test_api_listing_contract.py`, `tests/test_api_extension_item_contract.py`, and `tests/test_extensions_metadata_contract.py`.
+
+### Findings and fixes
+- Added focused contract coverage for `get_extensions_list()` in `tests/test_api_listing_contract.py`. The new AST-isolated test pins the existing public API shape: refreshes the extension registry, calls `read_info_from_repo()` for each discovered extension, includes only remote-backed extensions, preserves `enabled=False`, permits nullable `branch`/`commit_date`, and does not expose internal extension `path` metadata.
+- Preserved `_script_lists()` as the shared script registry seam for `get_scripts_list()` and `get_script_info()`. Pass 75 already consolidated the duplicated txt2img/img2img source lookup, and the current functions now differ only in public response shape: selectable script names versus prebuilt `ScriptInfo` records.
+- Preserved `ScriptRunner.create_script_ui_inner()` script info assembly. It is the live owner of script UI/control metadata and captures labels, defaults, ranges, choices, always-on state, and img2img state while controls are built; rebuilding this in the API endpoint would duplicate dynamic UI behavior and risk extension/script compatibility.
+- Preserved `get_extensions_list()` direct field mapping instead of extracting a serializer. No repeated extension API serializer body was found in this slice, and the route remote-only filter plus public fields are compatibility behavior rather than dead code.
+- Preserved absence of `path` from `ExtensionItem`. `Extension.path` and `extensions.extension_paths` are live internal/runtime metadata for extension discovery and `find_extension()` lookup, but exposing filesystem paths through `/sdapi/v1/extensions` would be public schema expansion, not dead-code remediation.
+- Preserved `Extension.cached_fields` without `enabled` or `path`. The cache is intentionally repo metadata only; `enabled` comes from current options during `list_extensions()`, and `path` is runtime discovery state.
+
+### Static/dynamic audit map notes
+- Script list chains remain: `/sdapi/v1/scripts` -> `Api.get_scripts_list()` -> `_script_lists()` -> `scripts.scripts_txt2img.scripts`/`scripts.scripts_img2img.scripts` -> non-`None` script names; `/sdapi/v1/script-info` -> same sources -> non-`None` `script.api_info` records built during UI/script setup.
+- Script info build chain remains: `ScriptRunner.create_script_ui_inner()` -> `script.ui(...)` controls -> `ScriptArg` label/value/minimum/maximum/step/choices -> `ScriptInfo(name, is_img2img, is_alwayson, args)`.
+- Extension listing chain remains: `/sdapi/v1/extensions` -> `extensions.list_extensions()` -> per-extension `read_info_from_repo()` -> include only entries with `remote is not None` -> public `ExtensionItem` fields `name`, `remote`, `branch`, `commit_hash`, `commit_date`, `version`, and `enabled`.
+- Compatibility surfaces to keep conservative: route paths, response field names, script ordering, filtering of `None` script names/api_info, script control choice normalization, extension remote-only filtering, nullable git branch/date metadata, extension enabled state, and non-exposure of internal extension filesystem paths.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass81.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py modules/extensions.py modules/scripts.py tests/test_api_listing_contract.py tests/test_api_extension_item_contract.py tests/test_extensions_metadata_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass81.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_extension_item_contract.py tests/test_extensions_metadata_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/api/models.py`, `modules/extensions.py`, `modules/scripts.py`, `tests/test_api_listing_contract.py`, `tests/test_api_extension_item_contract.py`, and `tests/test_extensions_metadata_contract.py` found no actionable API metadata duplicates. The only duplicate-body hit was the pre-existing adjacent `modules/scripts.py` callback pair `postprocess_image()`/`postprocess_maskoverlay()`, outside this API metadata surface.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions` requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into API memory and diagnostics/runtime metadata endpoints adjacent to this region, especially `get_memory()`, CUDA/RAM response shaping, generation diagnostics/CUDA graph status toggles, and any nearby low-level API status helpers, looking for stale response fields or duplicate stats shaping while preserving public route schemas and runtime side effects.
