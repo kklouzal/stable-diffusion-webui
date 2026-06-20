@@ -847,174 +847,73 @@ class ScriptRunner:
         script_stats["calls"] = int(script_stats.get("calls") or 0) + 1
         script_stats["hooks"][hook_name] = round(float(script_stats["hooks"].get(hook_name) or 0.0) + elapsed, 6)
 
+    def _run_timed_script_hook(self, p, script, hook_name, *hook_args, **kwargs):
+        try:
+            script_args = self._script_args_for(p, script)
+            started = time.perf_counter()
+            try:
+                getattr(script, hook_name)(p, *hook_args, *script_args, **kwargs)
+            finally:
+                self._record_script_timing(p, hook_name, script, time.perf_counter() - started)
+        except Exception:
+            errors.report(f"Error running {hook_name}: {script.filename}", exc_info=True)
+
 
     def before_process(self, p):
         for script in self.ordered_scripts('before_process'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.before_process(p, *script_args)
-                finally:
-                    self._record_script_timing(p, 'before_process', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running before_process: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'before_process')
 
     def process(self, p):
         for script in self.ordered_scripts('process'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.process(p, *script_args)
-                finally:
-                    self._record_script_timing(p, 'process', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running process: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'process')
 
     def process_before_every_sampling(self, p, **kwargs):
         for script in self.ordered_scripts('process_before_every_sampling'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.process_before_every_sampling(p, *script_args, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'process_before_every_sampling', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running process_before_every_sampling: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'process_before_every_sampling', **kwargs)
 
     def before_process_batch(self, p, **kwargs):
         for script in self.ordered_scripts('before_process_batch'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.before_process_batch(p, *script_args, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'before_process_batch', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running before_process_batch: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'before_process_batch', **kwargs)
 
     def after_extra_networks_activate(self, p, **kwargs):
         for script in self.ordered_scripts('after_extra_networks_activate'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.after_extra_networks_activate(p, *script_args, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'after_extra_networks_activate', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running after_extra_networks_activate: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'after_extra_networks_activate', **kwargs)
 
     def process_batch(self, p, **kwargs):
         for script in self.ordered_scripts('process_batch'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.process_batch(p, *script_args, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'process_batch', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running process_batch: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'process_batch', **kwargs)
 
     def postprocess(self, p, processed):
         for script in self.ordered_scripts('postprocess'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess(p, processed, *script_args)
-                finally:
-                    self._record_script_timing(p, 'postprocess', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess', processed)
 
     def postprocess_batch(self, p, images, **kwargs):
         for script in self.ordered_scripts('postprocess_batch'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess_batch(p, *script_args, images=images, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'postprocess_batch', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess_batch: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess_batch', images=images, **kwargs)
 
     def postprocess_batch_list(self, p, pp: PostprocessBatchListArgs, **kwargs):
         for script in self.ordered_scripts('postprocess_batch_list'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess_batch_list(p, pp, *script_args, **kwargs)
-                finally:
-                    self._record_script_timing(p, 'postprocess_batch_list', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess_batch_list: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess_batch_list', pp, **kwargs)
 
     def post_sample(self, p, ps: PostSampleArgs):
         for script in self.ordered_scripts('post_sample'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.post_sample(p, ps, *script_args)
-                finally:
-                    self._record_script_timing(p, 'post_sample', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running post_sample: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'post_sample', ps)
 
     def on_mask_blend(self, p, mba: MaskBlendArgs):
         for script in self.ordered_scripts('on_mask_blend'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.on_mask_blend(p, mba, *script_args)
-                finally:
-                    self._record_script_timing(p, 'on_mask_blend', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running post_sample: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'on_mask_blend', mba)
 
     def postprocess_image(self, p, pp: PostprocessImageArgs):
         for script in self.ordered_scripts('postprocess_image'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess_image(p, pp, *script_args)
-                finally:
-                    self._record_script_timing(p, 'postprocess_image', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess_image: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess_image', pp)
 
     def postprocess_maskoverlay(self, p, ppmo: PostProcessMaskOverlayArgs):
         for script in self.ordered_scripts('postprocess_maskoverlay'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess_maskoverlay(p, ppmo, *script_args)
-                finally:
-                    self._record_script_timing(p, 'postprocess_maskoverlay', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess_image: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess_maskoverlay', ppmo)
 
     def postprocess_image_after_composite(self, p, pp: PostprocessImageArgs):
         for script in self.ordered_scripts('postprocess_image_after_composite'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.postprocess_image_after_composite(p, pp, *script_args)
-                finally:
-                    self._record_script_timing(p, 'postprocess_image_after_composite', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running postprocess_image_after_composite: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'postprocess_image_after_composite', pp)
 
     def before_component(self, component, **kwargs):
         for callback, script in self.on_before_component_elem_id.get(kwargs.get("elem_id"), []):
@@ -1065,30 +964,14 @@ class ScriptRunner:
 
     def before_hr(self, p):
         for script in self.ordered_scripts('before_hr'):
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.before_hr(p, *script_args)
-                finally:
-                    self._record_script_timing(p, 'before_hr', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running before_hr: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'before_hr')
 
     def setup_scrips(self, p, *, is_ui=True):
         for script in self.ordered_scripts('setup'):
             if not is_ui and script.setup_for_ui_only:
                 continue
 
-            try:
-                script_args = self._script_args_for(p, script)
-                started = time.perf_counter()
-                try:
-                    script.setup(p, *script_args)
-                finally:
-                    self._record_script_timing(p, 'setup', script, time.perf_counter() - started)
-            except Exception:
-                errors.report(f"Error running setup: {script.filename}", exc_info=True)
+            self._run_timed_script_hook(p, script, 'setup')
 
     def set_named_arg(self, args, script_name, arg_elem_id, value, fuzzy=False):
         """Locate an arg of a specific script in script_args and set its value

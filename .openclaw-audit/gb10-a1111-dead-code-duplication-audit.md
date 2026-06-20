@@ -1259,3 +1259,43 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: remaining script runner and OpenClaw script-argument runtime surfaces outside the API route layer, especially `modules/scripts.py` callback/timing helpers, `ScriptArgsList`/`openclaw_script_args_to_overrides` fanout, OpenClaw denoise-ramp extension integration, and adjacent script lifecycle tests.
+
+## Pass 30 - script runner and OpenClaw script-argument runtime surfaces (2026-06-20)
+
+### Checked scope
+- `modules/scripts.py` script lifecycle/runtime helpers: `wrap_call()`, `ScriptRunner.create_script_ui()` / `create_script_ui_inner()`, `setup_ui_for_section()`, `prepare_ui()`, `setup_ui()`, `run()`, callback ordering helpers, `_script_timing_name()`, `_script_args_for()`, `_record_script_timing()`, all timed lifecycle dispatchers (`before_process`, `process`, `process_before_every_sampling`, `before_process_batch`, `after_extra_networks_activate`, `process_batch`, `postprocess`, `postprocess_batch`, `postprocess_batch_list`, `post_sample`, `on_mask_blend`, `postprocess_image`, `postprocess_maskoverlay`, `postprocess_image_after_composite`, `before_hr`, `setup_scrips`), component callbacks, `script()`, `reload_sources()`, `set_named_arg()`, and compatibility alias `reload_scripts`.
+- OpenClaw API script-argument fanout in `modules/api/api.py`: `ScriptArgsList`, `script_default_ui_values()`, `init_default_script_args()`, `persist_openclaw_denoise_ramp_args()`, `init_script_args()`, infotext script-arg handoff, and txt2img/img2img propagation of `openclaw_script_args_to_overrides` into processing objects.
+- OpenClaw denoise-ramp integration: `extensions/openclaw-denoise-ramp/scripts/openclaw_denoise_ramp.py`, `extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py`, and cross-extension reuse in `extensions/openclaw-multi-sampler/scripts/openclaw_multi_sampler.py` / `tests/test_openclaw_multi_sampler.py`.
+- Adjacent script lifecycle fanout: `modules/processing.py` `setup_scripts()` call into the existing `setup_scrips()` compatibility spelling, UI script lookup uses in `modules/ui.py`, direct txt2img/img2img script arg assignment, and extension always-on hook implementations.
+- Focused duplicate/reachability checks: grep fanout for script timing and argument override fields, denoise-ramp helper loading, lifecycle hook definitions, `setup_scrips` callers, and exact AST duplicate-body scan over the pass-30 target files.
+
+### Findings and fixes
+- Consolidated duplicated timed lifecycle wrapper logic in `modules/scripts.py`. The repeated per-hook pattern for script-arg lookup, `time.perf_counter()` timing, `_record_script_timing()`, and error reporting is now centralized in private `ScriptRunner._run_timed_script_hook()`.
+- Kept all public `ScriptRunner` lifecycle method names and signatures intact. Each hook still calls the same script method, with the same positional object arguments, script UI args, keyword args, callback ordering, timing accumulation, and exception swallowing/reporting behavior.
+- Corrected two stale copy/paste error-report labels as part of the consolidation: `on_mask_blend` and `postprocess_maskoverlay` now report their actual hook names via the shared helper instead of stale `post_sample` / `postprocess_image` labels.
+- No safe deletion was found for `ScriptArgsList` or `openclaw_script_args_to_overrides`. `ScriptArgsList` is the API-side list subclass that carries the override metadata while still behaving as a plain script-args list/tuple source for A1111 processing, and `_script_args_for()` is the runtime consumer that prevents truncating always-on extension payloads whose controls exceed the default-args bootstrap range.
+- No safe deletion or dedupe was found in the denoise-ramp plumbing. API persistence keeps the hidden always-on ramp delta sticky across requests, while multi-sampler's `_load_denoise_ramp_func()` intentionally reuses the ramp helper only if the denoise-ramp extension was already loaded, avoiding fallback imports with sampler monkeypatch side effects.
+
+### Preserved compatibility/dead-code decisions
+- `setup_scrips()` remains misspelled because `modules.processing.StableDiffusionProcessing.setup_scripts()` calls that existing method; renaming would require an alias and would be compatibility churn for this audit slice.
+- `reload_scripts = load_scripts` remains a compatibility alias for external/plugin callers even though local references are indirect and sparse.
+- `Script.describe()` remains as the upstream/public script API stub marked unused; deleting it could break third-party script subclasses or callers that reflect over the base script interface.
+- Component-specific callbacks (`on_before_component`, `on_after_component`, `before_component`, `after_component`) remain separate from timed generation hooks because they run during UI construction and use `OnComponent` callback lists plus all-script dispatch instead of always-on generation script args.
+- `set_named_arg()` remains a public helper for tuple/list script-arg mutation by script name and elem id; its fuzzy matching behavior is not duplicated by the API `init_script_args()` path.
+- Denoise-ramp API persistence remains title-based for the hidden always-on script because it deliberately targets the extension's public script title and avoids importing or depending on the extension module from API bootstrap.
+
+### Static/dynamic audit map notes
+- UI script chain: `load_scripts()` discovers script classes, `ScriptRunner.initialize_scripts()` instantiates and categorizes visible/always-on scripts, `setup_ui()` builds controls and API metadata, and component callbacks remain UI-construction hooks.
+- Generation script chain: `StableDiffusionProcessing.script_args` setter triggers `setup_scripts()` once scripts and args are present; processing then calls the appropriate `ScriptRunner` lifecycle methods, which dispatch ordered always-on callbacks through `_run_timed_script_hook()` and record OpenClaw script timing metadata on the processing object.
+- API script-arg chain: API defaults are copied into `ScriptArgsList`, selectable script args and always-on args are overlaid, over-length always-on payloads set `openclaw_script_args_to_overrides`, txt2img/img2img attach those overrides to `p`, and `_script_args_for()` expands the slice end only for that target script id.
+- Denoise-ramp chain: API always-on args can persist the hidden delta default, the denoise-ramp script sets `p.openclaw_denoise_step_delta`, patched k-diffusion img2img sampling marks ramp context and calls `ramp_sigmas_for_img2img()`, and multi-sampler reuses that helper only when the extension module is already loaded.
+- Compatibility surfaces to continue treating conservatively: all `Script` base hook names, `ScriptRunner` public hook names, `setup_scrips` spelling, script arg vector positions, `openclaw_script_args_to_overrides`, `openclaw_script_timings` JSON shape, denoise-ramp hidden always-on title/arg position, and script loader extension boundaries.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass30.XXXXXX) python3 -m py_compile modules/scripts.py modules/api/api.py extensions/openclaw-denoise-ramp/scripts/openclaw_denoise_ramp.py extensions/openclaw-multi-sampler/scripts/openclaw_multi_sampler.py extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py` - passed.
+- `python3 -m pytest -q extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py` - blocked during collection in the GB10 bare system Python because `torch` is not installed (`ModuleNotFoundError: No module named 'torch'`), matching the prior pass-29 environment limitation.
+- Exact AST duplicate-body scan across `modules/scripts.py`, `modules/api/api.py`, `extensions/openclaw-denoise-ramp/scripts/openclaw_denoise_ramp.py`, and `extensions/openclaw-multi-sampler/scripts/openclaw_multi_sampler.py` reported `0 duplicate nontrivial function body groups` in every file.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: postprocessing script runner and script-argument surfaces outside the main generation runner, especially `modules/scripts_postprocessing.py`, postprocessing script arg dict/list conversion, extras API/UI postprocessing fanout, postprocessing tests, and any duplicated timing/error-wrapper patterns between postprocessing and generation script runners.
