@@ -1743,3 +1743,33 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue through adjacent `modules/processing.py` subclasses after the main loop, especially `StableDiffusionProcessingTxt2Img` hires setup/sample/sample_hr_pass state assembly, duplicated HR prompt/negative prompt/conditioning transitions, firstpass image handling, and script-visible hires metadata boundaries.
+
+## Pass 44 - txt2img hires setup/sample state assembly (2026-06-20)
+
+### Checked scope
+- `modules/processing.py`: `StableDiffusionProcessingTxt2Img.__post_init__()`, `calculate_target_resolution()`, `init()`, `sample()`, `sample_hr_pass()`, `close()`, `setup_prompts()`, `calculate_hr_conds()`, `setup_conds()`, `get_conds()`, and `parse_extra_network_prompts()`.
+- Adjacent firstpass/hires callers and contracts: `modules/txt2img.py` firstpass-image/upscale entry, `modules/infotext_utils.py` hires prompt/resize restore behavior, `modules/processing_scripts/comments.py` hires prompt mutation, `modules/scripts.py` `before_hr()` hook surface, `modules/sd_samplers_common.py` hires refiner branch, `modules/shared_options.py` hires options, and `extensions/openclaw-clear-cond-cache` HR cond-cache clear/status handling.
+
+### Findings and fixes
+- Consolidated duplicated firstpass image conversion in `StableDiffusionProcessingTxt2Img.sample()` into private `_firstpass_image_to_chw_array()`. The signed decoded-sample path still applies `/ 255.0 * 2.0 - 1.0`, and the latent VAE-encode path still uses unsigned `/ 255.0` before tensor/device conversion and `VAE Encoder` metadata emission.
+- No safe consolidation was made for hires prompt and negative-prompt metadata callbacks. The nested `get_hr_prompt()` and `get_hr_negative_prompt()` functions are script/infotext-visible callables with different source fields and comparison arguments, and keeping them local preserves the current metadata boundary.
+- No safe consolidation was made for `setup_prompts()` HR prompt/negative-prompt expansion. The two branches are mechanically similar, but they populate distinct public fields that built-in scripts can mutate before per-batch parsing.
+- No safe consolidation was made for HR conditioning activation in `setup_conds()` and `sample_hr_pass()`. The branches intentionally differ on firstpass-cond reuse, lowvram early calculation, checkpoint switching, extra-network restoration, and script/refiner-visible `is_hr_pass` state.
+- No safe removal was found for HR fields (`hr_c`, `hr_uc`, `all_hr_prompts`, `hr_extra_network_data`, `hr_checkpoint_info`, `latent_scale_mode`, truncate fields). They are used across generation, metadata, cache clear/status, scripts, and sampler/refiner transitions.
+- The AST duplicate scan for `StableDiffusionProcessingTxt2Img` after the fix reported only repeated `devices.torch_gc()` calls in `sample_hr_pass()`, which are intentional lifecycle barriers around memory-heavy hires stages and were not collapsed.
+
+### Static/dynamic audit map notes
+- Firstpass-image hires path remains: `modules/txt2img.py` may set `p.firstpass_image` -> txt2img `sample()` skips first-pass sampling only when `enable_hr` is true -> decoded or latent samples are prepared according to `latent_scale_mode` -> optional HR checkpoint reload -> `sample_hr_pass()`.
+- Hires prompt lifecycle remains: `setup_prompts()` expands/stylizes full HR prompt lists -> `parse_extra_network_prompts()` slices current HR batch and parses extra networks -> `calculate_hr_conds()` builds HR conditioning at final resolution with HR sampler total-step scheduling -> `get_conds()` exposes HR conds only during `is_hr_pass`.
+- Script-visible HR metadata remains local to `init()`: `Hires prompt` and `Hires negative prompt` are callable generation-param entries that compare final HR prompt text with the first-pass prompt text at infotext creation time.
+- Firstpass image handling remains conservative: signed decoded samples are only used when there is no latent upscaler, while latent-upscale mode still encodes the unsigned image tensor through the selected VAE encode approximation before `sample_hr_pass()`.
+- Compatibility surfaces to continue treating conservatively: `firstpass_image`, `is_hr_pass`, `before_hr()`, HR prompt fields/lists, HR cond-cache class variables, HR checkpoint/sampler/scheduler generation params, `save_images_before_highres_fix`, output ordering, and exact hires infotext keys.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass44 python3 -m py_compile modules/processing.py modules/txt2img.py modules/infotext_utils.py modules/processing_scripts/comments.py extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass44-source.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Focused AST duplicate statement scan inside `StableDiffusionProcessingTxt2Img` reported only duplicated `devices.torch_gc()` calls at `sample_hr_pass()` lines 1610 and 1636 after the fix; no remaining safe duplicate firstpass-image conversion was found.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue with `StableDiffusionProcessingImg2Img` subclass methods after the txt2img hires class, especially init-image preparation, mask/latent/cache interactions, resize-mode handling, img2img sampler setup/sample state, and duplicated image-to-latent or mask-conditioning transitions adjacent to the already-audited cache helpers.

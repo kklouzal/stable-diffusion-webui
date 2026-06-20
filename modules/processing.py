@@ -1480,6 +1480,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             if self.hr_upscaler is not None:
                 self.extra_generation_params["Hires upscaler"] = self.hr_upscaler
 
+    def _firstpass_image_to_chw_array(self, scale_to_signed=False):
+        image = np.array(self.firstpass_image).astype(np.float32) / 255.0
+        if scale_to_signed:
+            image = image * 2.0 - 1.0
+
+        return np.moveaxis(image, 2, 0)
+
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
 
@@ -1487,15 +1494,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             # here we don't need to generate image, we just take self.firstpass_image and prepare it for hires fix
 
             if self.latent_scale_mode is None:
-                image = np.array(self.firstpass_image).astype(np.float32) / 255.0 * 2.0 - 1.0
-                image = np.moveaxis(image, 2, 0)
+                image = self._firstpass_image_to_chw_array(scale_to_signed=True)
 
                 samples = None
                 decoded_samples = torch.asarray(np.expand_dims(image, 0))
 
             else:
-                image = np.array(self.firstpass_image).astype(np.float32) / 255.0
-                image = np.moveaxis(image, 2, 0)
+                image = self._firstpass_image_to_chw_array()
                 image = torch.from_numpy(np.expand_dims(image, axis=0))
                 image = image.to(shared.device, dtype=devices.dtype_vae)
 
