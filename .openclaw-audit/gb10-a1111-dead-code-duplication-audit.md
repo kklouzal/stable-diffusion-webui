@@ -3223,3 +3223,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue immediately after embeddings into refresh endpoints and the next API metadata families in `modules/api/api.py`/`modules/api/models.py`, especially face restorers, RealESRGAN models, prompt styles, script list/script info, extension item listing, and their existing listing contract tests, looking for stale fields, duplicate serializers, or safe helper consolidation while preserving public OpenAPI schemas and refresh/list side effects.
+
+## Pass 87 - API refresh and adjacent metadata listing families (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/face-restorers`, `/sdapi/v1/realesrgan-models`, `/sdapi/v1/prompt-styles`, `/sdapi/v1/embeddings`, `/sdapi/v1/refresh-embeddings`, `/sdapi/v1/refresh-checkpoints`, `/sdapi/v1/refresh-vae`, `/sdapi/v1/scripts`, `/sdapi/v1/script-info`, and `/sdapi/v1/extensions`; focused inspection of `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_embeddings()`, refresh handlers, `_script_lists()`, `get_scripts_list()`, `get_script_info()`, and `get_extensions_list()`.
+- `modules/api/models.py`: response models for `FaceRestorerItem`, `RealesrganItem`, `PromptStyleItem`, `EmbeddingItem`, `EmbeddingsResponse`, `ScriptsList`, `ScriptArg`, `ScriptInfo`, and `ExtensionItem`.
+- Adjacent contract tests: `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py`, `tests/test_api_extension_item_contract.py`, and `tests/test_extensions_metadata_contract.py`.
+
+### Findings / fixes
+- Added focused contract coverage for face-restorer, RealESRGAN, and prompt-style listing shapes in `tests/test_api_listing_contract.py`. The new AST-isolated test pins nullable `cmd_dir`, nullable RealESRGAN `path`, scale preservation, prompt-style ordering from the style registry, and nullable `negative_prompt`.
+- Preserved the current face-restorer, RealESRGAN, prompt-style, embedding, script-list, script-info, and extension-list serializers. Each endpoint projects a different live registry and public item shape, so a generic serializer/helper would add abstraction without removing actionable duplication.
+- Preserved `get_realesrgan_models(None)` even though the argument is unused by the list factory for current static model data; the imported helper's signature accepts an upscaler instance for runtime construction, and changing the API call shape would not remove dead code.
+- Preserved refresh handlers as small queue-locked side-effect wrappers. They intentionally dispatch to separate registries: textual inversion embeddings, checkpoint discovery, and VAE discovery.
+- Preserved script and extension listing behavior already covered in pass 81: shared script source lookup through `_script_lists()`, filtering of `None` names/api-info records, extension registry refresh, per-extension git metadata refresh, remote-only filtering, and non-exposure of extension filesystem paths.
+
+### Static/dynamic audit map notes
+- Face-restorer chain remains: `/sdapi/v1/face-restorers` -> `shared.face_restorers` -> per-restorer `name()` plus optional `cmd_dir`.
+- RealESRGAN chain remains: `/sdapi/v1/realesrgan-models` -> `modules.realesrgan_model.get_realesrgan_models(None)` -> public `name`, `path` from `data_path`, and `scale`.
+- Prompt-style chain remains: `/sdapi/v1/prompt-styles` -> `shared.prompt_styles.styles` insertion order -> tuple fields `name`, `prompt`, and `negative_prompt`.
+- Refresh chain remains: `/sdapi/v1/refresh-embeddings` -> queued `embedding_db.load_textual_inversion_embeddings(force_reload=True)`; `/sdapi/v1/refresh-checkpoints` -> queued `shared.refresh_checkpoints`; `/sdapi/v1/refresh-vae` -> queued `shared_items.refresh_vae_list`.
+- Compatibility surfaces to keep conservative: route paths/methods, response field names, nullable metadata fields, registry/list ordering, script and extension filtering semantics, OpenAPI component names, and refresh endpoint side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass87.XXXXXX) python3 -m py_compile modules/api/models.py modules/api/api.py tests/test_api_listing_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass87.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate class/function scan across `modules/api/models.py`, `modules/api/api.py`, and `tests/test_api_listing_contract.py` reports only intentional empty wrapper/marker classes: `TextToImageResponse`, `ImageToImageResponse`, `ExtrasSingleImageRequest`, `ScriptArgsList`, and the test-local `Extension` marker used by the extension listing contract.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/face-restorers`, `/sdapi/v1/realesrgan-models`, `/sdapi/v1/prompt-styles`, refresh, scripts, script-info, and extensions requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue past the static/listing API metadata family into the create/train and memory endpoint models/handlers in `modules/api/api.py`/`modules/api/models.py`, especially `CreateResponse`, `TrainResponse`, `_run_create_task()`, `_run_training_task()`, `create_embedding()`, `create_hypernetwork()`, `train_embedding()`, `train_hypernetwork()`, `_prepare_hypernetwork_training()`, `_restore_hypernetwork_training_devices()`, and `get_memory()`, looking for stale response helpers, duplicate task wrappers, or unreachable training/memory branches while preserving task state, refresh side effects, and public response strings.

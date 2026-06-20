@@ -79,6 +79,9 @@ def load_metadata_listing_api_class():
         "get_sd_models",
         "get_sd_vaes",
         "get_hypernetworks",
+        "get_face_restorers",
+        "get_realesrgan_models",
+        "get_prompt_styles",
         "get_embeddings",
     }
     methods = [node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
@@ -245,6 +248,43 @@ def test_embeddings_response_preserves_loaded_and_skipped_maps(monkeypatch):
             }
         },
     }
+
+
+def test_adjacent_metadata_listing_shapes_match_response_models(monkeypatch):
+    api_class = load_metadata_listing_api_class()
+    api_globals = api_class.get_face_restorers.__globals__
+
+    api_globals["shared"] = SimpleNamespace(
+        face_restorers=[
+            SimpleNamespace(name=lambda: "GFPGAN", cmd_dir="/models/gfpgan"),
+            SimpleNamespace(name=lambda: "CodeFormer"),
+        ],
+        prompt_styles=SimpleNamespace(
+            styles={
+                "cinematic": ("Cinematic", "sharp lighting", "blur"),
+                "empty-negative": ("Empty Negative", "plain", None),
+            }
+        ),
+    )
+    api_globals["get_realesrgan_models"] = lambda scaler: [
+        SimpleNamespace(name="R-ESRGAN 4x+", data_path="/models/realesrgan.pth", scale=4),
+        SimpleNamespace(name="R-ESRGAN 2x+", data_path=None, scale=2),
+    ]
+
+    api = api_class()
+
+    assert api.get_face_restorers() == [
+        {"name": "GFPGAN", "cmd_dir": "/models/gfpgan"},
+        {"name": "CodeFormer", "cmd_dir": None},
+    ]
+    assert api.get_realesrgan_models() == [
+        {"name": "R-ESRGAN 4x+", "path": "/models/realesrgan.pth", "scale": 4},
+        {"name": "R-ESRGAN 2x+", "path": None, "scale": 2},
+    ]
+    assert api.get_prompt_styles() == [
+        {"name": "Cinematic", "prompt": "sharp lighting", "negative_prompt": "blur"},
+        {"name": "Empty Negative", "prompt": "plain", "negative_prompt": None},
+    ]
 
 
 def test_latent_upscale_modes_lists_shared_mode_names_in_order(monkeypatch):
