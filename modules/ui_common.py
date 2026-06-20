@@ -178,6 +178,22 @@ def create_output_panel(tabname, outdir, toprow=None):
 
         util.open_folder(f)
 
+    def save_button_kwargs(make_zip, download_files):
+        return {
+            "fn": call_queue.wrap_ui_call_no_job(save_files),
+            "_js": f"(x, y, z, w) => [x, y, {str(make_zip).lower()}, selected_gallery_index()]",
+            "inputs": [
+                res.generation_info,
+                res.gallery,
+                res.infotext,
+                res.infotext,
+            ],
+            "outputs": [
+                download_files,
+                res.html_log,
+            ],
+        }
+
     with gr.Column(elem_id=f"{tabname}_results"):
         if toprow:
             toprow.create_inline_toprow_image()
@@ -230,36 +246,9 @@ def create_output_panel(tabname, outdir, toprow=None):
                             show_progress=False,
                         )
 
-                    save.click(
-                        fn=call_queue.wrap_ui_call_no_job(save_files),
-                        _js="(x, y, z, w) => [x, y, false, selected_gallery_index()]",
-                        inputs=[
-                            res.generation_info,
-                            res.gallery,
-                            res.infotext,
-                            res.infotext,
-                        ],
-                        outputs=[
-                            download_files,
-                            res.html_log,
-                        ],
-                        show_progress=False,
-                    )
+                    save.click(**save_button_kwargs(False, download_files), show_progress=False)
 
-                    save_zip.click(
-                        fn=call_queue.wrap_ui_call_no_job(save_files),
-                        _js="(x, y, z, w) => [x, y, true, selected_gallery_index()]",
-                        inputs=[
-                            res.generation_info,
-                            res.gallery,
-                            res.infotext,
-                            res.infotext,
-                        ],
-                        outputs=[
-                            download_files,
-                            res.html_log,
-                        ]
-                    )
+                    save_zip.click(**save_button_kwargs(True, download_files))
 
             else:
                 res.generation_info = gr.HTML(elem_id=f'html_info_x_{tabname}')

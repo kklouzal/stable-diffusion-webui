@@ -2042,3 +2042,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into UI component construction and paste/load/save plumbing around `modules/ui_loadsave.py`, `modules/ui_components.py`, `modules/ui_toprow.py`, and infotext/paste binding helpers, looking for duplicated Gradio update shapes or dead callback wrappers while preserving API-visible paste/settings contracts.
+
+
+## Pass 53 - UI component construction and paste/load/save plumbing (2026-06-20)
+
+### Checked scope
+- `modules/ui_loadsave.py`: `radio_choices()`, `UiLoadsave.__init__()`, `add_component()`, `add_block()`, `read_from_file()`, `write_to_file()`, `dump_defaults()`, `iter_changes()`, `ui_view()`, `ui_apply()`, `create_ui()`, and `setup_ui()`.
+- `modules/ui_components.py`: `FormComponent`, `ToolButton`, `ResizeHandleRow`, form wrapper classes, `DropdownMulti`, `DropdownEditable`, and `InputAccordion` lifecycle/accordion ID/reset helpers.
+- `modules/ui_toprow.py`: `Toprow` construction methods, prompt image import binding, submit/interrupt/skip handlers, tool-row buttons, clear-prompt JS callback, compact/classic layout split, and style UI handoff.
+- `modules/ui_common.py`: `update_generation_info()`, `plaintext_to_html()`, `update_logfile()`, `save_files()`, `OutputPanel`, `create_output_panel()` output-panel button wiring, paste/send-to registration, `create_refresh_button()`, and `setup_dialog()` as needed for adjacent update shapes.
+- `modules/infotext_utils.py`: `ParamBinding`, `PasteField`, paste-field registration, legacy `create_buttons()`/`bind_buttons()`, `register_paste_params_button()`, `connect_paste_params_buttons()`, `send_image_and_dimensions()`, and `connect_paste()` output update handling.
+- Adjacent callers/contracts: txt2img/img2img/pnginfo paste registrations in `modules/ui.py`, script-runner `paste_field_names`, `javascript/generationParams.js` gallery generation-info triggers, `tests/test_ui_loadsave_contract.py`, and `tests/test_save_serialization_contract.py`.
+
+### Findings and fixes
+- Extracted the duplicated output-panel save/save-zip callback payload in `ui_common.create_output_panel()` into local `save_button_kwargs()`. The two buttons still use the same wrapped `save_files()` callback, the same four inputs, the same two outputs, the same `selected_gallery_index()` JavaScript argument shape, and preserve the prior `show_progress=False` difference on the normal save button.
+- Preserved `UiLoadsave` component field handling. The exact type checks, `InputAccordion` open/value mapping, custom-script key prefixing, dropdown choice validation, and `component_mapping` order are UI/defaults contracts rather than dead code.
+- Preserved `ui_components` wrapper classes even though several only override `get_block_name()`. They are public script/extension-facing component classes and encode distinct Gradio/form block names; a factory would add indirection without removing a real maintenance hazard.
+- Preserved `Toprow` methods and hidden buttons. The classic/compact render split, prompt image upload binding, interrupt/skip placeholders, token counter buttons, restore-progress button, and paste/style controls are wired later by `modules/ui.py`, JavaScript, or output-panel layout.
+- Preserved infotext paste compatibility helpers. `create_buttons()` and `bind_buttons()` are explicitly legacy extension compatibility surfaces; `ParamBinding` and `PasteField` shape API-visible paste behavior, script paste-field aggregation, image/dimension send-to behavior, override-settings dropdown updates, and tab-switch JavaScript.
+- No dead paste/load/save callback wrappers were removed. Dynamic Gradio callbacks and extension/script hooks make apparently small wrappers API-visible unless proven otherwise.
+
+### Static/dynamic audit map notes
+- UI defaults chain remains: `UiLoadsave.add_block()` walks Gradio blocks -> `add_component()` records supported component fields and restores config values -> `setup_ui()` binds View/Apply to ordered `component_mapping` values.
+- Output save chain remains: output panel button -> `save_button_kwargs()` -> wrapped `save_files()` -> gallery URL/image decode -> selected/all image indexing -> CSV/log/zip/save-image side effects -> `gr.File.update(value=..., visible=True)` and HTML log output.
+- Paste/send-to chain remains: UI registers `PasteField` values -> output panels and PNG Info register `ParamBinding` objects -> `connect_paste_params_buttons()` wires image copy, source-tab field copy, parsed infotext paste, override settings, prompt recalculation, and tab switch JS.
+- Compatibility surfaces to keep conservative: `modules.generation_parameters_copypaste` alias, `ParamBinding`, `PasteField`, `create_buttons()`, `bind_buttons()`, `registered_param_bindings`, script `paste_field_names`, `UiLoadsave` saved key paths, component elem IDs, and Gradio update return shapes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass53.XXXXXX) python3 -m py_compile modules/ui_loadsave.py modules/ui_components.py modules/ui_toprow.py modules/ui_common.py modules/infotext_utils.py tests/test_ui_loadsave_contract.py tests/test_save_serialization_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass53.XXXXXX) python3 -m pytest -q tests/test_ui_loadsave_contract.py tests/test_save_serialization_contract.py` - passed: 4 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/ui_loadsave.py`, `modules/ui_components.py`, `modules/ui_toprow.py`, `modules/ui_common.py`, and `modules/infotext_utils.py` reported `duplicate nontrivial function body groups: 0`.
+- `git diff --check` - passed.
+- Live Gradio/WebUI save, paste, send-to, compact/classic toprow, and UI-defaults interactions were not exercised because they require a running WebUI session and user-visible UI state.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue through remaining UI dialog/output-adjacent and extension surfaces not covered by this pass, especially `modules/ui_postprocessing.py`, `modules/ui_checkpoint_merger.py`, `modules/ui_extra_networks*.py`, `modules/ui_html_extensions.py`, and bundled extension UI helpers, looking for duplicated callback/update payloads while preserving extension-visible Gradio contracts.
