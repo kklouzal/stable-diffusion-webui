@@ -221,11 +221,7 @@ class CreateResponse(BaseModel):
 fields = {}
 for key, metadata in opts.data_labels.items():
     optType = opts.typemap.get(type(metadata.default), type(metadata.default)) if metadata.default else Any
-
-    if metadata is not None:
-        fields.update({key: (Optional[optType], Field(default=metadata.default, description=metadata.label))})
-    else:
-        fields.update({key: (Optional[optType], Field())})
+    fields.update({key: (Optional[optType], Field(default=metadata.default, description=metadata.label))})
 
 OptionsModel = create_model("Options", **fields)
 

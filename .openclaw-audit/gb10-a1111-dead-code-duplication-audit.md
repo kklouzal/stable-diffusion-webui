@@ -3190,3 +3190,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue down `modules/api/models.py` after `TrainResponse`/`CreateResponse` into flags/options/sampler/upscaler/model-list and embedding response models plus adjacent API handlers (`get_config()`, `set_config()`, `get_cmd_flags()`, list endpoints, `get_embeddings()`), looking for stale public fields, duplicate list-item serializers, or safe helper consolidation while preserving OpenAPI schemas and runtime refresh/config side effects.
+
+## Pass 86 - API flags/options/list models and embeddings metadata (2026-06-20)
+
+### Checked scope
+- `modules/api/models.py`: dynamic `OptionsModel` generation, `FlagsModel` generation, `SamplerItem`, `SchedulerItem`, `UpscalerItem`, `LatentUpscalerModeItem`, `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `EmbeddingItem`, and `EmbeddingsResponse`.
+- `modules/api/api.py`: route registration and handlers for `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, `/sdapi/v1/latent-upscale-modes`, `/sdapi/v1/sd-models`, `/sdapi/v1/sd-vae`, `/sdapi/v1/hypernetworks`, `/sdapi/v1/embeddings`, and adjacent refresh handlers.
+- `modules/shared_items.py` and `modules/shared.py`: sampler and shared metadata list helper references relevant to API response construction.
+- Focused adjacent tests: `tests/test_api_listing_contract.py` and `tests/test_api_server_control_contract.py` route binding stubs.
+
+### Findings and fixes
+- Removed an unreachable fallback branch in dynamic `OptionsModel` generation. The loop iterates `opts.data_labels.items()`, and `Options`/UI callers treat every label entry as an `OptionInfo`-like object with `default` and `label`; the `metadata is None` fallback could not produce a meaningful public option schema and duplicated the same field update path with less metadata.
+- Added focused AST-isolated contract coverage in `tests/test_api_listing_contract.py` for config/flags sources, sampler/scheduler/upscaler/model/VAE/hypernetwork list shapes, and `EmbeddingsResponse` loaded/skipped map shaping.
+- Preserved public list response models and field names. `SamplerItem`, `SchedulerItem`, `UpscalerItem`, `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `EmbeddingItem`, and `EmbeddingsResponse` each map to distinct public endpoint payloads; merging them would collapse OpenAPI component identities or change route-specific schemas.
+- Preserved dynamic `FlagsModel` generation from parser option actions. The apparent repeated `dest` writes are argparse alias behavior and should remain compatible with public command-flag schema generation.
+- Preserved `get_config()` runtime shaping, including keys present in `shared.opts.data` but missing from `data_labels`, because it reflects live config state and migration/plugin dynamics. `set_config()` and refresh handlers were left unchanged to preserve validation and queue-lock side effects.
+- No safe shared serializer was extracted for metadata list endpoints. Each constructor is short, route-local, and binds different backing objects/field names; a generic helper would be mostly cosmetic and could obscure public schema compatibility.
+
+### Static/dynamic audit map notes
+- Options chain remains: `opts.data_labels` at import time -> `OptionsModel = create_model("Options", ...)`; runtime `/sdapi/v1/options` GET returns values from `shared.opts.data` with metadata defaults only for known labels, and POST uses `shared.opts.set(..., is_api=True)` plus config save.
+- Flags chain remains: argparse parser option actions -> `FlagsModel = create_model("Flags", ...)`; runtime `/sdapi/v1/cmd-flags` returns `vars(shared.cmd_opts)`.
+- List endpoints remain direct metadata projections from `sd_samplers.all_samplers`, `sd_schedulers.schedulers`, `shared.sd_upscalers`, `shared.latent_upscale_modes`, `sd_models.checkpoints_list`, `sd_vae.vae_dict`, and `shared.hypernetworks`.
+- Embeddings chain remains: `/sdapi/v1/embeddings` -> `sd_hijack.model_hijack.embedding_db` -> `loaded` and `skipped` dictionaries keyed by embedding name with `step`, `sd_checkpoint`, `sd_checkpoint_name`, `shape`, and `vectors`.
+- Compatibility surfaces to keep conservative: route paths/methods, dynamic `OptionsModel`/`FlagsModel` component names, option and flag field names, live `get_config()` key behavior, argparse alias handling, all list item field names, embeddings loaded/skipped map names, and refresh route side effects.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass86.XXXXXX) python3 -m py_compile modules/api/models.py modules/api/api.py tests/test_api_listing_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass86.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py` - passed: 6 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate class/function scan across `modules/api/models.py`, `modules/api/api.py`, and `tests/test_api_listing_contract.py` reports only intentional empty public wrapper classes from earlier passes: `TextToImageResponse`, `ImageToImageResponse`, and `ExtrasSingleImageRequest`.
+- `git diff --check` - passed.
+- Live `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, metadata list, and embeddings requests were not exercised because this bounded slice did not start a WebUI/model runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue immediately after embeddings into refresh endpoints and the next API metadata families in `modules/api/api.py`/`modules/api/models.py`, especially face restorers, RealESRGAN models, prompt styles, script list/script info, extension item listing, and their existing listing contract tests, looking for stale fields, duplicate serializers, or safe helper consolidation while preserving public OpenAPI schemas and refresh/list side effects.
