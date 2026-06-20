@@ -3317,3 +3317,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue past the API utility tail into adjacent server-control/runtime utility handlers after `Api.launch()`, especially `kill_webui()`, `restart_webui()`, `stop_webui()`, unload/reload checkpoint handlers, and any remaining OpenClaw runtime utility endpoints in `modules/api/api.py`, looking for stale wrappers or duplicated control responses while preserving route gating, restart/stop side effects, queue/runtime locking, and public API behavior.
+
+
+## Pass 90 - API server-control and OpenClaw runtime utility handlers (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registration after `Api.__init__()` for `/sdapi/v1/unload-checkpoint`, `/sdapi/v1/reload-checkpoint`, gated `/sdapi/v1/server-kill`, `/sdapi/v1/server-restart`, `/sdapi/v1/server-stop`, and OpenClaw runtime utility routes `/sdapi/v1/openclaw/sdpa-backend`, `/sdapi/v1/openclaw/cuda-graphs`, `/sdapi/v1/openclaw/generation-diagnostics`, `/sdapi/v1/openclaw/precision-map`, and `/sdapi/v1/precision-map`.
+- `modules/api/api.py`: `apply_openclaw_runtime_defaults()`, `_env_flag()`, `get_sdpa_backend()`, `set_sdpa_backend()`, `get_cuda_graphs()`, `set_cuda_graphs()`, `get_openclaw_generation_diagnostics()`, `get_precision_map()`, `_call_with_queue_lock()`, `unloadapi()`, `reloadapi()`, `kill_webui()`, `restart_webui()`, and `stop_webui()`.
+- Adjacent side-effect targets: `modules/restart.py`, `modules/sd_models.py` `unload_model_weights()` / `reload_model_weights()` references, and `modules/ui_extensions.py` restart/stop behavior.
+- Focused contract tests: `tests/test_api_server_control_contract.py` route gating, checkpoint reload response shape, server-control side effects, and OpenClaw runtime metadata/default behavior.
+
+### Findings / fixes
+- No safe production-code deletion or consolidation was found in this slice. The scoped functions are short but live public/API or runtime-control surfaces with intentional side effects.
+- Preserved `unloadapi()` and `reloadapi()` despite identical empty response shape. They call different model-side effects (`sd_models.unload_model_weights()` and `sd_models.send_model_to_device(shared.sd_model)`) and the public empty-object response is already pinned by focused tests.
+- Preserved gated server-control handlers as explicit methods. `kill_webui()` intentionally returns `None` after `restart.stop_program()`; `restart_webui()` preserves the historical `501` response path after the restartability check; `stop_webui()` sets `shared.state.server_command = "stop"` and returns `Response("Stopping.")`. Collapsing those into a shared response helper would be cosmetic and risk public behavior around process exit/restart side effects.
+- Preserved `/sdapi/v1/server-*` route gating behind `shared.cmd_opts.api_server_stop`; exposing or reshaping those routes would be a security/compatibility behavior change.
+- Preserved OpenClaw runtime utility endpoints. `get_precision_map()` intentionally uses `queue_lock` directly because it walks `shared.sd_model`; `_call_with_queue_lock()` remains the shared utility for other queued side effects; SDPA/CUDA graph setters delegate to separate runtime modules and keep request/fallback semantics covered by tests.
+- No duplicate AST bodies were found across `modules/api/api.py` and `tests/test_api_server_control_contract.py` in the scoped scan.
+
+### Static/dynamic audit map notes
+- Checkpoint utility chain remains: `/sdapi/v1/unload-checkpoint` -> `Api.unloadapi()` -> `sd_models.unload_model_weights()` -> `{}`; `/sdapi/v1/reload-checkpoint` -> `Api.reloadapi()` -> `sd_models.send_model_to_device(shared.sd_model)` -> `{}`.
+- Server-control chain remains gated: `--api-server-stop` / `shared.cmd_opts.api_server_stop` controls registration of `/sdapi/v1/server-kill`, `/sdapi/v1/server-restart`, and `/sdapi/v1/server-stop`.
+- Server side effects remain: kill exits via `restart.stop_program()`, restart calls `restart.restart_program()` only when `restart.is_restartable()` is true then returns `Response(status_code=501)` if control reaches the response, and stop sets `shared.state.server_command` for the server loop.
+- OpenClaw runtime chains remain: `/sdapi/v1/openclaw/sdpa-backend` delegates to `sd_hijack_optimizations`; `/sdapi/v1/openclaw/cuda-graphs` delegates to `modules.openclaw_cuda_graphs`; generation diagnostics reads `modules.openclaw_generation_diagnostics`; precision-map aliases both use `queue_lock` before `build_precision_map()`.
+- Compatibility surfaces to keep conservative: route paths/methods, disabled-by-default server-control gating, server-control response statuses/content, checkpoint empty-object responses, process exit/restart behavior, environment default parsing, queue/runtime locking, precision-map alias route, and OpenClaw endpoint request/fallback dictionaries.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass90.XXXXXX) python3 -m py_compile modules/api/api.py tests/test_api_server_control_contract.py modules/restart.py modules/ui_extensions.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass90.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate class/function scan across `modules/api/api.py` and `tests/test_api_server_control_contract.py` produced no duplicate bodies.
+- `git diff --check` - passed.
+- Live server-control and checkpoint API requests were not exercised because this bounded slice did not start or stop a WebUI runtime.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: leave the audited API utility tail and move into adjacent startup/runtime glue outside `modules/api/api.py`, especially `modules/restart.py`, `modules/initialize_util.py` queued onchange registration, and the UI/API checkpoint unload/reload callers, looking for stale wrappers or duplicated restart/reload utility paths while preserving process-control semantics and model reload locking.
