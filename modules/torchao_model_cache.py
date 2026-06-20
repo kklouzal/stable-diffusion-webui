@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Callable, Optional
+
+import torch
+
+SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
+
+
+def is_safetensors(filename: str) -> bool:
+    return os.path.splitext(filename)[1].lower() == ".safetensors"
+
+
+def sha256_file(filename: str) -> str:
+    h = hashlib.sha256()
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def stat_source(filename: str) -> dict:
+    stat = os.stat(filename)
+    return {
+        "path": os.path.abspath(filename),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(filename),
+    }
+
+
+def tensor_meta(tensor) -> dict:
+    return {
+        "shape": list(getattr(tensor, "shape", []) or []),
+        "dtype": str(getattr(tensor, "dtype", None)),
+        "device": str(getattr(tensor, "device", None)),
+        "tensor_type": type(tensor).__module__ + "." + type(tensor).__name__,
+    }
+
+
+def device_matches(actual, expected) -> bool:
+    actual_device = torch.device(str(actual))
+    expected_device = torch.device(expected)
+    if expected_device.index is None:
+        return actual_device.type == expected_device.type
+    return actual_device == expected_device
+
+
+def metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
+    if metadata:
+        actual = tensor_meta(tensor)
+        for key in ("shape", "dtype", "tensor_type"):
+            if actual.get(key) != metadata.get(key):
+                return False
+    return device_matches(getattr(tensor, "device", None), expected_device)
+
+
+def bias_metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
+    if metadata:
+        actual = tensor_meta(tensor)
+        for key in ("shape", "dtype"):
+            if actual.get(key) != metadata.get(key):
+                return False
+    return device_matches(getattr(tensor, "device", None), expected_device)
+
+
+def cached_bias_matches(bias, bias_meta: dict | None, module, expected_device) -> bool:
+    if bias is None:
+        return module.bias is None
+    if module.bias is None or list(bias.shape) != list(module.bias.shape):
+        return False
+    return bias_metadata_matches(bias, bias_meta, expected_device)
+
+
+def parameter_on_device(tensor, device: torch.device | str) -> torch.nn.Parameter:
+    if device_matches(getattr(tensor, "device", None), device):
+        return torch.nn.Parameter(tensor, requires_grad=False)
+    return torch.nn.Parameter(tensor.to(device=device), requires_grad=False)
+
+
+def is_cache_path(filename: str, cache_dir_name: str) -> bool:
+    return cache_dir_name in Path(filename).parts
+
+
+def cache_path_for(filename: Optional[str], cache_dir_name: str) -> Optional[str]:
+    if not filename or not is_safetensors(filename):
+        return None
+
+    path = Path(filename).resolve()
+    parts = path.parts
+    if cache_dir_name in parts:
+        return None
+
+    root_index = None
+    for root_name in SUPPORTED_ROOT_NAMES:
+        try:
+            root_index = parts.index(root_name)
+            break
+        except ValueError:
+            continue
+
+    if root_index is None:
+        return None
+
+    root = Path(*parts[:root_index + 1])
+    relative = Path(*parts[root_index + 1:])
+    if not relative.parts:
+        return None
+
+    return str(root / cache_dir_name / relative.with_suffix(relative.suffix + ".pt"))
+
+
+def sidecar_path(cache_path: str, suffix: str) -> str:
+    return cache_path + suffix
+
+
+def load_sidecar(cache_path: str, suffix: str) -> Optional[dict]:
+    try:
+        with open(sidecar_path(cache_path, suffix), "r", encoding="utf8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def expected_cache_metadata(filename: str, cache_version: int, config_name: str, coverage=None) -> dict:
+    return {
+        "cache_version": cache_version,
+        "config": config_name,
+        "source": stat_source(filename),
+        "coverage": sorted(coverage) if coverage is not None else None,
+    }
+
+
+def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> bool:
+    if not os.path.exists(cache_path):
+        return False
+
+    sidecar = load_sidecar(cache_path, sidecar_suffix)
+    if not sidecar:
+        return False
+
+    expected = expected_cache_metadata(filename, cache_version, config_name, coverage)
+    coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected["coverage"])
+    return (
+        sidecar.get("cache_version") == expected["cache_version"]
+        and sidecar.get("config") == expected["config"]
+        and sidecar.get("source") == expected["source"]
+        and coverage_matches
+        and sidecar.get("cache") == stat_source(cache_path)
+    )
+
+
+def write_atomic_bytes(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(path), prefix=".tmp-", suffix=".json") as f:
+        tmp = f.name
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def torch_load_cache(cache_path: str, device: torch.device | str, register_safe_globals: Callable[[], None]):
+    # A1111 monkey-patches torch.load with a legacy checkpoint pre-check that
+    # rejects TorchAO tensor subclasses before PyTorch's weights_only safe
+    # unpickler gets a chance to apply add_safe_globals(). Bypass only that
+    # outer A1111 pre-check for our own sidecar-validated cache while keeping
+    # weights_only=True.
+    try:
+        from modules import safe
+        torch_load = safe.unsafe_torch_load
+    except Exception:
+        torch_load = torch.load
+
+    register_safe_globals()
+    return torch_load(cache_path, map_location=device, weights_only=True)
+
+
+def iter_eligible_linear_modules(model, filter_fn: Callable):
+    for fqn, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and filter_fn(module, fqn):
+            yield fqn, module
+
+
+def load_into_model(
+    *,
+    model,
+    source_path: Optional[str],
+    filter_fn: Callable,
+    device: torch.device | str,
+    coverage=None,
+    cache_dir_name: str,
+    cache_version: int,
+    config_name: str,
+    sidecar_suffix: str,
+    label: str,
+    is_quant_tensor: Callable,
+    register_safe_globals: Callable[[], None],
+) -> bool:
+    cache_path = cache_path_for(source_path, cache_dir_name)
+    if cache_path is None or source_path is None or not sidecar_matches(source_path, cache_path, cache_version, config_name, sidecar_suffix, coverage):
+        return False
+
+    print(f"Loading {label} cache for {source_path} from {cache_path}", flush=True)
+    try:
+        payload = torch_load_cache(cache_path, device, register_safe_globals)
+    except Exception as e:
+        print(f"Ignoring unreadable {label} cache {cache_path}: {e}")
+        return False
+
+    if not isinstance(payload, dict):
+        print(f"Ignoring unreadable {label} cache {cache_path}: payload is not a dict")
+        return False
+
+    expected = expected_cache_metadata(source_path, cache_version, config_name, coverage)
+    payload_coverage_matches = coverage is None or payload.get("coverage") in (None, expected["coverage"])
+    if not (
+        payload.get("cache_version") == expected["cache_version"]
+        and payload.get("config") == expected["config"]
+        and payload.get("source") == expected["source"]
+        and payload_coverage_matches
+    ):
+        print(f"Ignoring stale {label} cache {cache_path}: payload metadata does not match requested source/config/coverage")
+        return False
+
+    tensors = payload.get("tensors", {})
+    metadata = payload.get("metadata", {})
+    eligible_modules = list(iter_eligible_linear_modules(model, filter_fn))
+    print(f"Validating {label} cache for {source_path}: expected {len(eligible_modules)} Linear modules", flush=True)
+    missing = []
+    incompatible = []
+    for fqn, module in eligible_modules:
+        entry = tensors.get(fqn)
+        weight = entry.get("weight") if entry is not None else None
+        if not is_quant_tensor(weight):
+            missing.append(fqn)
+            continue
+        expected_shape = list(module.weight.shape) if module.weight is not None else []
+        weight_meta = metadata.get(fqn, {}).get("weight", {})
+        cached_shape = list(getattr(weight, "shape", []) or weight_meta.get("shape", []))
+        if cached_shape != expected_shape or not metadata_matches(weight, weight_meta, device):
+            incompatible.append({"name": fqn, "expected": expected_shape, "cached": tensor_meta(weight)})
+        bias = entry.get("bias")
+        bias_meta = metadata.get(fqn, {}).get("bias")
+        if not cached_bias_matches(bias, bias_meta, module, device):
+            expected_bias = None if module.bias is None else list(module.bias.shape)
+            cached_bias = None if bias is None else tensor_meta(bias)
+            incompatible.append({"name": fqn + ".bias", "expected": expected_bias, "cached": cached_bias})
+
+    if missing:
+        print(f"Ignoring incomplete {label} cache {cache_path}: expected {len(eligible_modules)}, missing {len(missing)}")
+        return False
+    if incompatible:
+        print(f"Ignoring incompatible {label} cache {cache_path}: {incompatible[:5]}")
+        return False
+
+    print(f"Assigning {label} cache for {source_path}: {len(eligible_modules)} Linear modules", flush=True)
+    with torch.no_grad():
+        for fqn, module in eligible_modules:
+            entry = tensors[fqn]
+            module._parameters["weight"] = entry["weight"]
+            bias = entry.get("bias")
+            if bias is not None:
+                module._parameters["bias"] = parameter_on_device(bias, device)
+            elif module.bias is not None:
+                module._parameters["bias"] = None
+
+    print(f"Loaded {label} cache for {source_path} from {cache_path}", flush=True)
+    return True
+
+
+def save_from_model(
+    *,
+    model,
+    source_path: Optional[str],
+    filter_fn: Callable,
+    eligible: int,
+    skipped_linear: int,
+    skipped_reasons: dict,
+    coverage=None,
+    cache_dir_name: str,
+    cache_version: int,
+    config_name: str,
+    sidecar_suffix: str,
+    label: str,
+    is_quant_tensor: Callable,
+) -> Optional[str]:
+    cache_path = cache_path_for(source_path, cache_dir_name)
+    if cache_path is None or source_path is None or eligible == 0:
+        return None
+
+    tensors = {}
+    metadata = {}
+    for fqn, module in iter_eligible_linear_modules(model, filter_fn):
+        if not is_quant_tensor(module.weight):
+            return None
+        tensors[fqn] = {
+            "weight": module.weight.detach(),
+            "bias": module.bias.detach() if module.bias is not None else None,
+        }
+        metadata[fqn] = {
+            "weight": tensor_meta(module.weight),
+            "bias": tensor_meta(module.bias) if module.bias is not None else None,
+        }
+
+    source_stat = stat_source(source_path)
+    payload = {
+        "cache_version": cache_version,
+        "config": config_name,
+        "source": source_stat,
+        "coverage": sorted(coverage) if coverage is not None else None,
+        "eligible_linear": eligible,
+        "skipped_linear": skipped_linear,
+        "skipped_reasons": skipped_reasons,
+        "metadata": metadata,
+        "tensors": tensors,
+    }
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    tmp_path = cache_path + ".tmp"
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, cache_path)
+
+    sidecar = {
+        "cache_version": cache_version,
+        "config": config_name,
+        "source": source_stat,
+        "coverage": sorted(coverage) if coverage is not None else None,
+        "cache": stat_source(cache_path),
+        "eligible_linear": eligible,
+        "skipped_linear": skipped_linear,
+        "skipped_reasons": skipped_reasons,
+    }
+    write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+    print(f"Created {label} cache for {source_path} -> {cache_path}")
+    return cache_path

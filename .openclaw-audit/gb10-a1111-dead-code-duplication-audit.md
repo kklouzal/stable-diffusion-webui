@@ -935,3 +935,45 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: quantized-model load/reload/cache and precision diagnostics duplication outside the LoRA extension, especially the paired MXFP8/NVFP4 helper families in `modules/sd_models.py`, `modules/mxfp8_model_cache.py`, `modules/nvfp4_model_cache.py`, `modules/mxfp8_config.py`, `modules/nvfp4_config.py`, `modules/mxfp8_diagnostics.py`, and adjacent API precision stats paths. Keep this conservative unless a torch/TorchAO runtime gate is available.
+
+## Pass 22 - MXFP8/NVFP4 model-cache and precision diagnostics duplication outside Lora (2026-06-20)
+
+### Checked scope
+- Quantized weight selectors and load/reload helpers in `modules/sd_models.py`: `check_mxfp8()`, `check_nvfp4()`, TorchAO mutual exclusion/policy signature helpers, selected Linear coverage helpers, Linear region/policy/technical skip helpers, MXFP8/NVFP4 filters, and `apply_mxfp8_weight_quantization()` / `apply_nvfp4_weight_quantization()`.
+- Paired model-cache modules: `modules/mxfp8_model_cache.py` and `modules/nvfp4_model_cache.py`, including cache path detection, source/cache metadata hashing, sidecar validation, safe-global registration, weights-only cache loading, eligible Linear iteration, cache assignment, and cache save/sidecar write paths.
+- Config modules: `modules/mxfp8_config.py` and `modules/nvfp4_config.py`, including config factory functions, coverage constants, technical skip rules, and config validators.
+- Diagnostics/API precision surfaces: `modules/mxfp8_diagnostics.py`, `scripts/mxfp8_diagnostics_api.py`, and `modules/api/api.py` precision-map helpers, including precision signatures, tensor info, source/kind classification, skip-reason reporting, quantization stats, and LoRA target reporting.
+- Adjacent call sites: `modules/shared_options.py`, `modules/initialize_util.py`, `modules/processing.py`, and `extensions-builtin/Lora/networks.py` references to precision coverage, quant cache exclusion, active quantized runtime state, and precision infotext.
+- Focused duplicate/reachability checks: grep fanout for MXFP8/NVFP4 helpers, AST function duplicate scan across the pass-22 target files before and after remediation, targeted reads of cache/config/model/API diagnostics call chains, and confirmation that no `modules/nvfp4_diagnostics.py` counterpart currently exists.
+
+### Findings and fixes
+- Deduplicated the nontrivial shared MXFP8/NVFP4 model-cache mechanics by adding `modules/torchao_model_cache.py`. The shared helper now owns safetensors detection, source/cache hashing, tensor and bias metadata comparison, device matching, cache path construction, sidecar load/match/write, A1111-safe `torch.load` bypass handling, eligible Linear iteration, cache validation/assignment, and cache payload/sidecar saving.
+- Slimmed `modules/mxfp8_model_cache.py` and `modules/nvfp4_model_cache.py` into backend wrappers that retain cache identity, sidecar suffix, label text, TorchAO safe-global registration, quantized tensor predicates, public cache path predicates, and `load_into_model()` / `save_from_model()` entry points.
+- Preserved the old private helper names in both backend modules as aliases/wrappers to the shared helper where existing focused tests and possible local diagnostics touch them directly (`_tensor_meta`, `_cached_bias_matches`, `_parameter_on_device`, `_cache_path_for`, `_sidecar_matches`, etc.).
+- No safe dead-code deletion was found in the precision selectors, config validators, API precision-map helpers, or MXFP8 diagnostics route. Those surfaces are live through settings onchange reloads, infotext, diagnostics API routes, LoRA activation guards, and runtime model reload policy checks.
+
+### Preserved compatibility/dead-code decisions
+- `check_mxfp8()` and `check_nvfp4()` intentionally remain separate public helpers because callers and reload diagnostics key off specific mode names/options, even though their storage-option shape mirrors `check_fp8()`.
+- MXFP8/NVFP4 selected coverage, region, policy skip, technical skip, and apply-quantization functions still duplicate some structure in `modules/sd_models.py`. Collapsing those whole flows would mix distinct config modules, tensor subclasses, validation calls, base-backup attribute names, stats keys, device flags, cache modules, and user-visible error text; this was deferred as TorchAO/runtime-sensitive without an available torch runtime gate.
+- `mxfp8_config.py` and `nvfp4_config.py` retain separate config factories and validators because the TorchAO config classes and required kernel/scaling constraints differ. The shared coverage constants are duplicated but small and option-facing.
+- `modules/mxfp8_diagnostics.py` remains MXFP8-specific. It probes MXTensor internals, MX scaling modes, native/emulated kernel preference, and MXFP8 integration state; there is no first-party NVFP4 diagnostics counterpart in the repo to dedupe against.
+- API precision-map helpers intentionally report both `mxfp8_*` and `nvfp4_*` fields separately for stable JSON shape and diagnostics readability.
+- Tiny backend wrapper duplicates left after remediation are compatibility wrappers around the shared cache helper, not independent logic.
+
+### Static/dynamic audit map notes
+- Model load chain: `load_model()` calls `check_weight_quantization_mutual_exclusion()`, applies MXFP8 and NVFP4 quantization after model dtype setup, records `openclaw_torchao_quant_policy_signature`, and avoids checkpoint cache retention for TorchAO-mutated models.
+- Quantized cache chain: `apply_*_weight_quantization()` computes eligible Linear modules from policy and technical skip reasons, records BF16 base backups, tries `*_model_cache.load_into_model()`, otherwise quantizes with TorchAO and writes a sidecar-validated cache through `*_model_cache.save_from_model()`.
+- Reload chain: `reload_model_weights()` detects mode/coverage/forced reload changes, invalidates cached checkpoint state for TorchAO paths, and restores quantized Linears to BF16 before generic reload/device movement paths.
+- Precision-map chain: `/sdapi/v1/openclaw/precision-map` and `/sdapi/v1/precision-map` run under the model queue lock, cache by model/device/options/LoRA signature, inspect layer tensor types, include MXFP8/NVFP4 skip reasons and base-backup flags, and summarize quantization plus LoRA targeting.
+- Diagnostics chain: `scripts/mxfp8_diagnostics_api.py` exposes get/run API routes that call `modules.mxfp8_diagnostics`; diagnostics can save a last-result JSON under the data path and run a background probe guarded by a module lock.
+- Compatibility surfaces to continue treating conservatively: `mxfp8_model_cache` / `nvfp4_model_cache` public functions and private helper names used by tests, sidecar JSON suffixes and payload keys, quantization stats keys, skip-reason strings, option keys and coverage strings, API precision-map response fields, diagnostics route paths, and TorchAO safe-global loading behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycompile-pass22 python3 -m py_compile modules/sd_models.py modules/torchao_model_cache.py modules/mxfp8_model_cache.py modules/nvfp4_model_cache.py modules/mxfp8_config.py modules/nvfp4_config.py modules/mxfp8_diagnostics.py modules/api/api.py scripts/mxfp8_diagnostics_api.py test/test_openclaw_quant_cache.py` - passed.
+- `python3 -m pytest -q test/test_openclaw_quant_cache.py` - failed during collection because GB10 system Python has no `torch` module available (`ModuleNotFoundError: No module named torch`), with the existing pytest config warning `Unknown config option: base_url`.
+- Local interpreter check found no repo `venv/bin/python` or `.venv/bin/python`; `python3` also lacks `torch`, so Torch/TorchAO runtime validation was unavailable in this slice.
+- Exact duplicate-body scan across pass-22 target files after remediation reported only tiny backend cache wrapper functions in `modules/mxfp8_model_cache.py` and `modules/nvfp4_model_cache.py`; no remaining nontrivial duplicate helper bodies were reported at the 500-character threshold.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: shared generation/cache invalidation surfaces outside precision-specific caches, especially `modules/processing.py`, `modules/cache.py`, `modules/openclaw_generation_diagnostics.py`, img2img/txt2img cache-stat plumbing, infotext cache fields, and adjacent tests around cond-cache and init-image cache behavior. Keep precision runtime consolidation deferred until a torch/TorchAO-capable validation environment is available.
