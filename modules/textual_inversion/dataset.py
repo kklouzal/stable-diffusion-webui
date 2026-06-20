@@ -240,9 +240,6 @@ def collate_wrapper(batch):
     return BatchLoader(batch)
 
 class BatchLoaderRandom(BatchLoader):
-    def __init__(self, data):
-        super().__init__(data)
-
     def pin_memory(self):
         return self
 

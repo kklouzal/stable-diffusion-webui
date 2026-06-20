@@ -2654,3 +2654,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue into textual-inversion dataset/preprocessing/autocrop training-data helpers, especially `modules/textual_inversion/dataset.py`, `modules/textual_inversion/preprocess.py`, `modules/textual_inversion/autocrop.py`, preprocessing UI/API wrappers, caption/tag handling, and focused autocrop/preprocess contracts, while preserving generated dataset formats and old preprocessing behavior.
+
+## Pass 70 - Textual-inversion dataset/preprocessing/autocrop training-data helpers (2026-06-20)
+
+### Checked scope
+- `modules/textual_inversion/dataset.py`: `DatasetEntry`, `PersonalizedBase.__init__()`, `create_text()`, dataset length/item access, latent sampling mode behavior, alpha-channel loss weighting, caption `.txt` fallback/name regex handling, tag shuffle/dropout handling, `GroupedBatchSampler`, `PersonalizedDataLoader`, `BatchLoader`, `BatchLoaderRandom`, and collate wrapper selection.
+- `modules/textual_inversion/autocrop.py`: crop/focal-point selection, face/corner/entropy point collection, image entropy, point centroid/weighted average helpers, orientation helpers, OpenCV face-model cache helper, `PointOfInterest`, and `Settings`.
+- Preprocessing/training-data wrappers and contracts: `extensions-builtin/postprocessing-for-training/scripts/postprocessing_focal_crop.py` as the active focal-crop preprocessing UI script, `modules/ui.py` training tab dataset/template/tag controls, `modules/textual_inversion/ui.py` create/train wrappers, `modules/api/api.py` embedding/hypernetwork training task wrappers, `tests/test_textual_inversion_autocrop_contract.py`, and `tests/test_textual_inversion_preview_save_contract.py`.
+
+### Findings and fixes
+- Removed the redundant `BatchLoaderRandom.__init__()` override from `modules/textual_inversion/dataset.py`. It only called `super().__init__(data)` and added no state or behavior, so normal inheritance preserves construction while leaving the random-latent-specific `pin_memory()` no-op override intact.
+- Confirmed there is no `modules/textual_inversion/preprocess.py` in this branch. The active preprocessing/focal-crop path for training data is the built-in `postprocessing-for-training` script calling `autocrop.Settings()`, `download_and_cache_models()`, and `crop_image()`.
+- Preserved dataset caption/tag handling. `.txt` sidecar captions, filename fallback stripping of leading numeric prefixes, optional filename regex/join settings, comma-based tag shuffling, and tag dropout directly affect generated training prompts and old dataset semantics.
+- Preserved dataset latent/weight branches. `once`, `deterministic`, and `random` latent sampling change cache/re-sampling behavior, while alpha-channel loss weighting depends on latent sample dimensions even for random sampling.
+- Preserved autocrop helper structure despite small orientation wrappers. The focal-crop extension imports the module-level `Settings`, model downloader, and `crop_image()` contract; internal point-selection helpers are coupled to annotated debug output and OpenCV fallback behavior.
+- Preserved UI/API training wrappers. Their duplicate-looking create/train task shapes are public route/callback contracts with distinct task names, post-create refresh hooks, and hypernetwork device cleanup.
+
+### Static/dynamic audit map notes
+- Dataset prompt chain remains: image path -> optional sidecar `.txt` caption or filename-derived caption -> optional regex/join filename word extraction -> template `[filewords]`/`[name]` substitution -> optional per-access tag dropout/shuffle -> embedding/hypernetwork conditioning.
+- Dataset batch chain remains: `PersonalizedBase` groups images by size -> `GroupedBatchSampler` emits same-size batches plus weighted remainder batches -> `PersonalizedDataLoader` chooses fixed or random collate wrapper -> random mode inherits `BatchLoader` construction and skips pinning mutated per-item latent samples.
+- Focal preprocessing chain remains: postprocessing script UI options -> optional YuNet model download -> `autocrop.Settings` -> `crop_image()` chooses scale/crop around weighted corner, entropy, and face focal points -> optional annotated extra image output.
+- Compatibility surfaces to keep conservative: training dataset sidecar `.txt` format, filename regex/join options, comma tag semantics, `training_image_repeats_per_epoch`, latent sampling names, alpha-channel weight normalization, `BatchLoader` attribute names, autocrop annotation/debug image ordering, OpenCV model paths/URLs, Gradio training component IDs, API task route names, and extension-visible postprocessing script behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass70.XXXXXX) python3 -m py_compile modules/textual_inversion/dataset.py modules/textual_inversion/autocrop.py modules/textual_inversion/ui.py modules/ui.py modules/api/api.py extensions-builtin/postprocessing-for-training/scripts/postprocessing_focal_crop.py tests/test_textual_inversion_autocrop_contract.py tests/test_textual_inversion_preview_save_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass70.XXXXXX) python3 -m pytest -q tests/test_textual_inversion_autocrop_contract.py tests/test_textual_inversion_preview_save_contract.py` - passed: 3 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/textual_inversion/dataset.py`, `modules/textual_inversion/autocrop.py`, `modules/textual_inversion/ui.py`, `modules/ui.py`, `modules/api/api.py`, `extensions-builtin/postprocessing-for-training/scripts/postprocessing_focal_crop.py`, and the focused textual-inversion contract tests reported no duplicate nontrivial function body groups after the `BatchLoaderRandom.__init__()` removal.
+- Targeted reference scans confirmed autocrop is active through `extensions-builtin/postprocessing-for-training/scripts/postprocessing_focal_crop.py`, dataset loading remains shared by embedding and hypernetwork training, and training dataset tag/caption controls remain wired through the Train tab and API training paths.
+- `git diff --check` - passed.
+- Live WebUI postprocessing/preprocess UI, API training routes, and model-backed dataset construction were not exercised because they require a running WebUI/model training runtime and real image datasets.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue into postprocessing and extras training-data preparation surfaces, especially `modules/postprocessing.py`, `modules/ui_postprocessing.py`, `extensions-builtin/postprocessing-for-training/scripts/postprocessing_focal_crop.py`, split/resize/save postprocessing scripts, and API extras wrappers, looking for duplicate image-save/resize/split helper logic while preserving generated training-data output filenames and postprocessing script contracts.
