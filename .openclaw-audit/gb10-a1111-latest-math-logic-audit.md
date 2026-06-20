@@ -444,3 +444,24 @@ Validation:
 
 Next unchecked scope:
 - Continue through image save/delete/history paths (`modules/images.py`, `modules/ui_common.py`, `modules/infotext_utils.py` where not already covered), model load/config/vae surfaces, remaining `modules/sd_*` files, tests, and repo config/JS files not yet explicitly listed in ledger passes.
+
+### 2026-06-20 pass 18 - image save/history/infotext and model load/config/VAE surfaces
+Checked:
+- `modules/ui_common.py`: gallery infotext selection, save button argument mapping, selected-image-only handling, save CSV migration/padding, zip packaging from saved file list, output panel folder-open behavior, paste-button registration, refresh button update propagation, and dialog show/close wiring. No defect found in inspected paths.
+- `modules/images.py`: grid/split/combine helpers, resize modes, filename token expansion/sanitization, sequence numbering, image metadata writes for PNG/JPEG/WebP/AVIF/GIF, atomic image saves, alternate 4chan export path, sidecar txt writes, metadata reads, image data parsing, transparency flattening, EXIF transpose, and PNG transparency repair. No defect found in inspected paths.
+- `modules/infotext_utils.py`: image-from-gallery/temp-file decoding, send-image dimensions, old hires-fix restoration, indexed inpaint infotext mappings, generation-parameter parsing/defaults/backcompat, override settings extraction, and paste-field value casting. No defect found in inspected paths.
+- `modules/sd_models_config.py`: SD/SDXL/SD3/config inference from state dict keys, v-parameterization probe, and near-checkpoint config discovery; no defect found.
+- `modules/sd_vae.py`: VAE listing, setting/user-metadata/near-checkpoint resolution order, VAE cache/load/restore behavior, and reload-device/hijack callback flow; no defect found.
+- `modules/sd_models.py`: checkpoint registration/listing/alias selection, safetensors metadata/state-dict load, checkpoint state cache behavior, FP8/MXFP8/NVFP4 policy selection and reload guards, model type/config/load/reload/unload/cache reuse, VAE integration, token merging, and TorchAO move/trash helpers. Found a path-boundary defect in checkpoint display-name classification.
+- `modules/sd_models_types.py`, `modules/sd_models_xl.py`, `modules/sd_unet.py`, `modules/sd_vae_approx.py`, `modules/sd_vae_taesd.py`, `modules/sd_disable_initialization.py`, `modules/sd_hijack_checkpoint.py`, `modules/sd_hijack_utils.py`, `modules/sd_hijack_unet.py`: type annotations, SDXL compatibility shims, UNet option activation, VAE approximation/TAESD helper surfaces, initialization suppression/meta-load hooks, and hijack utility wrappers; no defect found in inspected paths.
+
+Findings/fixes:
+- `CheckpointInfo` used raw `abspath.startswith(...)` checks to decide whether a checkpoint lived under `--ckpt-dir` or the default model root. A sibling such as `/models/Stable-diffusion-extra/...` could be misclassified as inside `/models/Stable-diffusion`, corrupting display names/aliases. Added `path_is_parent()` using `os.path.commonpath()` and switched relative-name derivation to `os.path.relpath()`.
+- Added `tests/test_sd_models_checkpoint_info_contract.py` to lock the checkpoint root-boundary contract.
+
+Validation:
+- `python3 -m py_compile modules/sd_models.py tests/test_sd_models_checkpoint_info_contract.py` -> passed.
+- `python3 -m pytest -q tests/test_sd_models_checkpoint_info_contract.py` -> passed, 2 tests; existing pytest warning remains `Unknown config option: base_url`.
+
+Next unchecked scope:
+- Continue through the remaining `modules/sd_*` sampler/hijack/emphasis/CLIP files not listed in pass 18, then tests, repository config files, and JS files not yet explicitly listed in ledger passes.

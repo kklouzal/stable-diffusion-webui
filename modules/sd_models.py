@@ -36,6 +36,15 @@ class ModelType(enum.Enum):
     SD3 = 5
 
 
+def path_is_parent(parent_path, child_path):
+    parent_path = os.path.abspath(parent_path)
+    child_path = os.path.abspath(child_path)
+    try:
+        return os.path.commonpath([parent_path, child_path]) == parent_path
+    except ValueError:
+        return False
+
+
 def replace_key(d, key, new_key, value):
     keys = list(d.keys())
 
@@ -62,10 +71,10 @@ class CheckpointInfo:
 
         self.is_safetensors = os.path.splitext(filename)[1].lower() == ".safetensors"
 
-        if abs_ckpt_dir and abspath.startswith(abs_ckpt_dir):
-            name = abspath.replace(abs_ckpt_dir, '')
-        elif abspath.startswith(model_path):
-            name = abspath.replace(model_path, '')
+        if abs_ckpt_dir and path_is_parent(abs_ckpt_dir, abspath):
+            name = os.path.relpath(abspath, abs_ckpt_dir)
+        elif path_is_parent(model_path, abspath):
+            name = os.path.relpath(abspath, model_path)
         else:
             name = os.path.basename(filename)
 
