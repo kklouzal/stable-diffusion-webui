@@ -3846,7 +3846,7 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 - `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass104.XXXXXX) python3 -m pytest -q tests/test_api_server_control_contract.py tests/test_api_training_contract.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
 - Reference scan confirmed the targeted API methods, `_memory_counter_pair()`, and extension-owned `/sdapi/v1/refresh-loras` route are limited to the expected source/tests in this slice.
 - Exact AST duplicate function/class scan across `modules/api/api.py`, `tests/test_api_server_control_contract.py`, `tests/test_api_training_contract.py`, and `extensions-builtin/Lora/scripts/lora_script.py` reported no duplicate function/class bodies.
-- `git diff --check` - will be run before commit.
+- `git diff --check` - passed.
 - Live WebUI/API startup, real HTTP calls to refresh/create/train/reload/unload/memory endpoints, actual model reloads, embedding/hypernetwork creation/training, CUDA memory probing on the running server process, and LoRA refresh through FastAPI were not exercised in this bounded slice.
 
 ### Next unchecked scope
@@ -3920,3 +3920,34 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from API utility endpoints into API options/configuration, command/script metadata, and server-info endpoints, especially `get_config()`, `set_config()`, `get_cmd_flags()`, `get_samplers()`, `get_schedulers()`, `get_upscalers()`, `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `get_artist_categories()`, `get_artists()`, `get_scripts_list()`, `get_script_info()`, and adjacent API info/listing contract tests, looking for duplicated response dictionary shaping while preserving public keys and extension-visible behavior.
+
+## Pass 107 - API options/configuration and server-info listing endpoints (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: route registrations for `/sdapi/v1/options`, `/sdapi/v1/cmd-flags`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, `/sdapi/v1/sd-models`, `/sdapi/v1/sd-vae`, `/sdapi/v1/hypernetworks`, `/sdapi/v1/face-restorers`, `/sdapi/v1/realesrgan-models`, `/sdapi/v1/prompt-styles`, `/sdapi/v1/scripts`, and `/sdapi/v1/script-info`; `Api.get_config()`, `set_config()`, `get_cmd_flags()`, `get_samplers()`, `get_schedulers()`, `get_upscalers()`, `get_latent_upscale_modes()` as adjacent listing helper, `get_sd_models()`, `get_sd_vaes()`, `get_hypernetworks()`, `get_face_restorers()`, `get_realesrgan_models()`, `get_prompt_styles()`, `_script_lists()`, `get_scripts_list()`, and `get_script_info()`.
+- `modules/api/models.py`: `OptionsModel`, `FlagsModel`, `SamplerItem`, `SchedulerItem`, `UpscalerItem`, `LatentUpscalerModeItem`, `SDModelItem`, `SDVaeItem`, `HypernetworkItem`, `FaceRestorerItem`, `RealesrganItem`, `PromptStyleItem`, `ScriptsList`, and `ScriptInfo` response contracts.
+- Adjacent contract tests: `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py`, and live-style utility endpoint smoke list in `test/test_utils.py`.
+
+### Findings / fixes
+- No safe source-code remediation was made in this slice.
+- Preserved `get_config()` as an explicit `shared.opts.data` walk. The `shared.opts.data_labels` fallback expression is currently redundant for keys already present in `data`, but changing it would risk API option default semantics and dynamic option exposure without a live-options regression target.
+- Preserved `set_config()` because its checkpoint alias preflight, per-option `shared.opts.set(..., is_api=True)` mutation semantics, and config-file save side effect are public API behavior.
+- Preserved the small listing methods rather than forcing a broader generic response-shaping abstraction. The endpoints expose different source registries and public keys, and previous helper coverage already centralizes the genuinely repeated mapping case for VAE, hypernetwork, and prompt-style mappings.
+- Preserved `_script_lists()`, `get_scripts_list()`, and `get_script_info()` as the shared script listing source. They intentionally keep names and API metadata separate while using the current txt2img/img2img script runner state.
+- The requested `get_artist_categories()` and `get_artists()` functions/routes do not exist in the current tree. A targeted scan only found the previous pass handoff text, so these appear to be stale upstream-surface names rather than live unchecked functions in this branch.
+
+### Static/dynamic audit map notes
+- Options chain remains: `GET /sdapi/v1/options` -> `shared.opts.data` plus current metadata presence checks -> `OptionsModel`; `POST /sdapi/v1/options` -> optional model checkpoint alias validation -> `shared.opts.set(..., is_api=True)` for every supplied key -> `shared.opts.save(shared.config_filename)`.
+- Listing chains remain registry-specific: command flags from `vars(shared.cmd_opts)`, samplers from `sd_samplers.all_samplers`, schedulers from `sd_schedulers.schedulers`, upscalers from `shared.sd_upscalers`, checkpoints from `modules.sd_models.checkpoints_list`, VAEs from `modules.sd_vae.vae_dict`, hypernetworks from `shared.hypernetworks`, face restorers from `shared.face_restorers`, RealESRGAN models from `get_realesrgan_models(None)`, prompt styles from `shared.prompt_styles.styles`, and scripts from `scripts.scripts_txt2img/scripts_img2img`.
+- Compatibility surfaces kept conservative: public response keys, route paths, response-model bindings, option mutation/save side effects, checkpoint alias validation, dynamic registry side effects, script API metadata objects, insertion order of registry-backed lists, and existing command flag exposure.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass107.XXXXXX) python3 -m py_compile modules/api/api.py modules/api/models.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py test/test_utils.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass107.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py` - passed: 14 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact artist endpoint scan `rg -n "get_artist_categories|get_artists|artist-categories|/sdapi/v1/artists|artist_categories" modules test tests .openclaw-audit/gb10-a1111-dead-code-duplication-audit.md --glob "*.py" --glob "*.md"` found only the pass 106 handoff text, confirming no live artist endpoint functions/routes in current source/tests.
+- Exact AST duplicate function/class scan across `modules/api/api.py`, `modules/api/models.py`, `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py`, and `test/test_utils.py` reported no duplicate function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real HTTP calls to the metadata listing endpoints, actual option writes, checkpoint selection, model registry refreshes, and extension script metadata discovery through a running FastAPI server were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from API server-info/listing endpoints into API extension listing and runtime/custom OpenClaw status endpoints, especially `get_extensions_list()`, `get_sdpa_backend()`, `set_sdpa_backend()`, `get_cuda_graphs()`, `set_cuda_graphs()`, `get_openclaw_generation_diagnostics()`, `get_precision_map()`, their route registrations, and adjacent contract tests, looking for stale response shaping or duplicated status wrappers while preserving extension-visible metadata, runtime toggles, queue-lock semantics, and public OpenClaw API compatibility.
