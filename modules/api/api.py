@@ -945,6 +945,15 @@ class Api:
 
         return args, send_images, selectable_scripts, script_args, script_args_to_overrides
 
+    @staticmethod
+    def _run_generation_with_scripts(p, script_runner, selectable_scripts, script_args):
+        if selectable_scripts is not None:
+            p.script_args = script_args
+            return script_runner.run(p, *p.script_args) # Need to pass args as list here
+
+        p.script_args = tuple(script_args) # Need to pass args as tuple here
+        return process_images(p)
+
     def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
         task_id = txt2imgreq.force_task_id or create_task_id("txt2img")
 
@@ -972,12 +981,7 @@ class Api:
                     try:
                         shared.state.begin(job="scripts_txt2img")
                         start_task(task_id)
-                        if selectable_scripts is not None:
-                            p.script_args = script_args
-                            processed = scripts.scripts_txt2img.run(p, *p.script_args) # Need to pass args as list here
-                        else:
-                            p.script_args = tuple(script_args) # Need to pass args as tuple here
-                            processed = process_images(p)
+                        processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
                     finally:
                         self._finish_generation_task(task_id)
                         task_finished = True
@@ -1030,12 +1034,7 @@ class Api:
                     try:
                         shared.state.begin(job="scripts_img2img")
                         start_task(task_id)
-                        if selectable_scripts is not None:
-                            p.script_args = script_args
-                            processed = scripts.scripts_img2img.run(p, *p.script_args) # Need to pass args as list here
-                        else:
-                            p.script_args = tuple(script_args) # Need to pass args as tuple here
-                            processed = process_images(p)
+                        processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
                     finally:
                         self._finish_generation_task(task_id)
                         task_finished = True

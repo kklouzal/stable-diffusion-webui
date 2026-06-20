@@ -3851,3 +3851,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from API model-management endpoints into API script/default-argument and selectable-script request handling, especially `Api.init_default_script_args()`, `init_script_args()`, `text2imgapi()`, `img2imgapi()`, script arg override helpers, selectable always-on script handling, and adjacent API script contract tests, looking for stale compatibility branches or duplicated txt2img/img2img script argument plumbing while preserving public API request semantics and extension script behavior.
+
+
+## Pass 105 - API script/default-argument and selectable-script request handling (2026-06-20)
+
+### Scope checked
+- `modules/api/api.py`: `Api.get_selectable_script()`, `get_script()`, `init_default_script_args()`, `persist_openclaw_denoise_ramp_args()`, `init_script_args()`, `apply_infotext()` script-argument mapping path, `_prepare_generation_api_request()`, `text2imgapi()`, and `img2imgapi()`.
+- Adjacent API/script contract tests: `test/test_api_script_defaults.py`, `test/test_infotext_api_mappings.py`, and `tests/test_api_server_control_contract.py`.
+- Related runtime script plumbing references in `modules/scripts.py`, `modules/txt2img.py`, `modules/img2img.py`, and `modules/processing.py` for selectable/always-on script argument semantics.
+
+### Findings / fixes
+- Consolidated the duplicated txt2img/img2img selectable-script execution branch into `Api._run_generation_with_scripts()`. The helper preserves the existing contract that selectable script runs receive the mutable script-args list while normal processing receives tuple-converted script args before `process_images(p)`.
+- Updated `text2imgapi()` and `img2imgapi()` to call the shared helper while leaving each endpoint's task id, queue lock, `shared.state.begin()` job name, processing class, output paths, init-image decode/timing, response model, and cleanup lifecycle unchanged.
+- Preserved `init_default_script_args()` as explicit default-vector bootstrap logic. Its Gradio `Blocks` context and `script_default_ui_values()` fallback remain compatibility-sensitive for extension scripts with finalized controls or UI-only defaults.
+- Preserved `init_script_args()` always-on and selectable request handling. The infotext override path, OpenClaw Denoise Ramp default persistence, sparse script-arg extension, over-length always-on override map, selectable-in-always-on rejection, and non-list args validation are active compatibility paths rather than dead code.
+- Preserved public request fields (`script_name`, `script_args`, `alwayson_scripts`, `infotext`) and pydantic v1/v2 compatibility branches in `apply_infotext()`.
+
+### Static/dynamic audit map notes
+- Generation request chain remains: API request -> infotext field/script-arg extraction -> selectable script lookup -> sampler/scheduler normalization -> processing constructor args -> default script-args copy plus infotext/selectable/always-on overlays -> endpoint-specific processing object -> shared script execution helper -> encoded response.
+- Selectable script chain remains: `script_name` maps only against `script_runner.selectable_scripts`; position 0 stores one-based selectable index; selected script args replace only that script's range and are passed as a list to `ScriptRunner.run()`.
+- Always-on script chain remains: names map against all `script_runner.scripts`; selectable scripts are rejected in always-on params; omitted `args` keeps defaults; supplied `args` must be a list and may extend the backing vector for extension scripts whose API payload reaches past captured `args_to`.
+- Compatibility surfaces kept conservative: public route method names, request/response fields, default script arg vector shape, pydantic v1/v2 dump branch, infotext script-arg overlays, extension script controls, OpenClaw Denoise Ramp persistence, and the list-vs-tuple distinction between selectable script runs and ordinary processing.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass105.XXXXXX) python3 -m py_compile modules/api/api.py test/test_api_script_defaults.py test/test_infotext_api_mappings.py tests/test_api_server_control_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass105.XXXXXX) python3 -m pytest -q test/test_api_script_defaults.py test/test_infotext_api_mappings.py tests/test_api_server_control_contract.py` - passed: 20 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate function/class scan across `modules/api/api.py`, `test/test_api_script_defaults.py`, `test/test_infotext_api_mappings.py`, and `tests/test_api_server_control_contract.py` reported no duplicate function/class bodies after the helper extraction.
+- Reference scan confirmed the duplicate `scripts_txt2img.run()`/`scripts_img2img.run()` branch in `modules/api/api.py` was replaced by `_run_generation_with_scripts()` call sites; non-API UI generation paths in `modules/txt2img.py` and `modules/img2img.py` remain separate UI-facing code.
+- `git diff --check` - passed.
+- Live WebUI/API startup, real `/sdapi/v1/txt2img` or `/sdapi/v1/img2img` HTTP requests, actual selectable extension execution, always-on extension requests, and image generation were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from API generation script handling into API image/base64 encode-decode, response shaping, and progress/interrogate/png-info utility endpoints, especially `decode_base64_to_image()`, `encode_pil_to_base64()`, `processed_js_with_image_paths()`, `Api.progressapi()`, `interrogateapi()`, `pnginfoapi()`, and adjacent API progress/info tests, looking for duplicated image serialization or stale response helpers while preserving public API formats and task/progress semantics.
