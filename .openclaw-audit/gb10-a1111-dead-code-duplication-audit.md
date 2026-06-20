@@ -1423,3 +1423,33 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: infotext parsing/backcompat internals and option-setting override maps, especially deeper `modules/infotext_utils.py` parsing branches after the paste/API entrypoints, `modules/infotext_versions.py`, prompt/style extraction interactions, and focused parser/backcompat tests or fixtures.
+
+## Pass 34 - infotext parser backcompat internals and option override maps (2026-06-20)
+
+### Checked scope
+- `modules/infotext_utils.py`: parser internals after UI/API paste entrypoints, including prompt/negative-prompt line splitting, final-parameter regex handling, quoted value and image-size expansion, style extraction and hires prompt/negative prompt style interaction, old hires-fix restoration, defaulted inpaint/hires/scheduler/RNG/VAE/FP8/MXFP8/refiner fields, prompt-emphasis backcompat default, `infotext_versions.backcompat()` handoff, skip-field pruning, override-settings helpers, and `connect_paste()` override-setting fanout.
+- `modules/infotext_versions.py`: version parsing and all current backcompat gates (`Old prompt editing timelines`, `Pad conds v0`, `Downcast alphas_cumprod`, `Refiner switch by sampling steps`) plus `v180_hr_styles` use from the parser.
+- Prompt/style extraction interactions: `shared.prompt_styles.extract_styles_from_prompt()` call sites, `Hires prompt` / `Hires negative prompt` version gate, `Styles array` paste field behavior in `modules/ui.py`, and API/UI paste consumers.
+- Option override mapping surfaces: dynamic `OptionInfo(..., infotext=...)` labels in `modules/shared_options.py`, legacy `infotext_to_setting_name_mapping`, `create_override_settings_dict()`, `get_override_settings()`, and the extra-options extension's legacy-map inversion.
+- Focused tests/contracts: `test/test_infotext_api_mappings.py` and adjacent parser/infotext references in `tests/test_save_serialization_contract.py`, `modules/txt2img.py`, `modules/img2img.py`, `modules/api/api.py`, `modules/shared_items.py`, and `modules/processing_scripts/seed.py`.
+
+### Findings and fix decision
+- Consolidated the duplicated dynamic-plus-legacy infotext option mapping construction into `infotext_setting_name_mapping()` and reused it from both `create_override_settings_dict()` and `get_override_settings()`.
+- Added a focused contract test proving the shared mapping keeps both current `OptionInfo.infotext` entries and the legacy `infotext_to_setting_name_mapping` extension hook reachable.
+- No safe dead backcompat conversion was found. The version thresholds in `modules/infotext_versions.py` still map historical infotexts into current processing settings, and the `v180_hr_styles` threshold remains live in hires prompt/style extraction.
+- No safe parser branch deletion was found. The apparently default-heavy branches in `parse_generation_parameters()` are user-data-facing replay compatibility for old infotexts, omitted fields, and UI/API paste behavior.
+- The empty `infotext_to_setting_name_mapping` list remains an intentional legacy extension hook. It is still read by the built-in extra-options extension and now also by the shared helper used by both override paths.
+
+### Static/dynamic audit map notes
+- Parser chain: UI/API/text upload infotext -> `parse_generation_parameters()` -> prompt/style extraction and historical defaults -> `infotext_versions.backcompat()` -> skip-field pruning -> UI paste/API request mutation/override settings.
+- Override chain: UI override multiselect strings use `create_override_settings_dict()` while parsed infotext paste/API override suggestions use `get_override_settings()`; both now share the same setting-label map while preserving their different output contracts.
+- Compatibility surfaces to continue treating conservatively: infotext field labels, missing-field defaults, version threshold constants, `modules.generation_parameters_copypaste` alias, `infotext_to_setting_name_mapping`, `OptionInfo.infotext`, style extraction option modes, and `Hires prompt` / `Hires negative prompt` backcompat behavior.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass34.XXXXXX) python3 -m py_compile modules/infotext_utils.py modules/infotext_versions.py test/test_infotext_api_mappings.py modules/shared_options.py modules/shared_items.py modules/api/api.py modules/txt2img.py modules/img2img.py modules/ui.py` - passed.
+- `python3 -m pytest -q test/test_infotext_api_mappings.py` - passed: 8 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact AST duplicate-body scan across `modules/infotext_utils.py`, `modules/infotext_versions.py`, and `test/test_infotext_api_mappings.py` reported `0 duplicate nontrivial function body groups` in every file.
+- `git diff --check` - passed.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: parser/backcompat consumers just outside infotext_utils, especially `modules/shared_items.py` infotext-name enumeration, `modules/shared_options.py` `OptionInfo.infotext` coverage and duplicates, UI settings/extra-options setting surfacing, and focused checks for stale or duplicate infotext labels across `modules/ui.py`, processing scripts, and built-in extensions.

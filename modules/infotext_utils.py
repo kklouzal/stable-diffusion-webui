@@ -434,6 +434,10 @@ infotext_to_setting_name_mapping = [
 """
 
 
+def infotext_setting_name_mapping():
+    return [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext] + infotext_to_setting_name_mapping
+
+
 def create_override_settings_dict(text_pairs):
     """creates processing's override_settings parameters from a UI multiselect
 
@@ -452,8 +456,7 @@ def create_override_settings_dict(text_pairs):
 
         params[k] = v.strip()
 
-    mapping = [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext]
-    for param_name, setting_name in mapping + infotext_to_setting_name_mapping:
+    for param_name, setting_name in infotext_setting_name_mapping():
         value = params.get(param_name, None)
 
         if value is None:
@@ -483,8 +486,7 @@ def get_override_settings(params, *, skip_fields=None):
 
     res = []
 
-    mapping = [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext]
-    for param_name, setting_name in mapping + infotext_to_setting_name_mapping:
+    for param_name, setting_name in infotext_setting_name_mapping():
         if param_name in (skip_fields or {}):
             continue
 

@@ -134,3 +134,40 @@ def test_option_bool_casting_accepts_common_false_strings():
 
     for value in ("True", "true", "1", "yes", "on"):
         assert opts.cast_value("tiling", value) is True
+
+def test_infotext_setting_name_mapping_combines_optioninfo_and_legacy_entries():
+    source = Path("modules/infotext_utils.py").read_text()
+    tree = ast.parse(source)
+    wanted = {
+        "infotext_to_setting_name_mapping",
+        "infotext_setting_name_mapping",
+    }
+    module = ast.Module(
+        body=[
+            node
+            for node in tree.body
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id in wanted for target in node.targets)
+            ) or (isinstance(node, ast.FunctionDef) and node.name in wanted)
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = {
+        "shared": types.SimpleNamespace(
+            opts=types.SimpleNamespace(
+                data_labels={
+                    "CLIP_stop_at_last_layers": types.SimpleNamespace(infotext="Clip skip"),
+                    "without_infotext": types.SimpleNamespace(infotext=None),
+                }
+            )
+        )
+    }
+    exec(compile(module, "modules/infotext_utils.py", "exec"), namespace)
+    namespace["infotext_to_setting_name_mapping"].append(("Legacy field", "legacy_setting"))
+
+    assert namespace["infotext_setting_name_mapping"]() == [
+        ("Clip skip", "CLIP_stop_at_last_layers"),
+        ("Legacy field", "legacy_setting"),
+    ]
