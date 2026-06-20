@@ -398,3 +398,18 @@ Validation:
 
 Next unchecked scope:
 - Continue through remaining API/options/history/save/delete paths, scripts/hooks, tests, repository JS/config files outside the already audited frontend set, and any source files not yet listed in ledger passes.
+
+### 2026-06-20 pass 15 - options, config state, UI defaults/temp files, and API generation entrypoints
+Checked:
+- `modules/options.py`: option metadata helpers, freeze/restrict guards, callback rollback, default/type handling, legacy settings migrations, JSON dump categories, option insertion/reorder, and string-to-type casting; no defect found in inspected paths.
+- `modules/config_states.py`: config-state listing/load ordering, webui/extension config capture, webui hard-reset restore path, extension fetch/reset/enable state restore, and disabled-extension persistence; no new defect found in inspected paths. Destructive restore behavior is existing explicit UI functionality, not changed in this audit slice.
+- `modules/ui_loadsave.py`: UI component default capture, value/type normalization, dropdown/tab validation, change review/apply, and corrupted-load protection; no defect found.
+- `modules/ui_tempdir.py`: Gradio temp-file registration, PNG metadata preservation, custom temp-dir registration/cleanup, and temp path classification; no defect found.
+- `modules/api/api.py`: precision-map cache signatures and serialization, script default args, script selection and always-on arg expansion, infotext field application, API image encode/decode, request URL guard, API middleware/auth, route registration, OpenClaw runtime env defaults, and txt2img/img2img entrypoint setup through the inspected region; no new defect found in inspected paths.
+
+Validation:
+- `python3 -m py_compile modules/options.py modules/config_states.py modules/ui_loadsave.py modules/ui_tempdir.py modules/api/api.py` -> passed.
+- `git diff --check` -> passed.
+
+Next unchecked scope:
+- Continue deeper through the remainder of `modules/api/api.py` methods after txt2img/img2img setup, API models, remaining script/hook surfaces (`modules/scripts.py`, `modules/script_callbacks.py`, `modules/script_loading.py`), and remaining source/test/config files not yet explicitly listed in ledger passes.
