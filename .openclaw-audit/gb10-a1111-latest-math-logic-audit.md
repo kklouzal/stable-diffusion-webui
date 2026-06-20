@@ -295,3 +295,35 @@ References:
 
 Next unchecked scope:
 - Continue broadened audit with JavaScript frontend state/history and browser-side save/send behavior: `javascript/ui.js`, `generationParams.js`, `localStorage.js`, `progressbar.js`, `imageviewer.js`, `imageviewerGamepad.js`, `extraNetworks.js`, `extensions.js`, `settings.js`, `token-counters.js`, `dragdrop.js`, and `edit-attention.js`; then return to remaining API/postprocessing/file-history surfaces not already covered.
+
+
+### 2026-06-20 pass 11 - JavaScript frontend state/history controls
+Checked:
+- `javascript/ui.js`: gallery selection helpers, tab switching, submit/restore progress task ids, resolution paste parsing, settings JSON watcher, checkpoint hash display, restart reload polling, seed/dimension helpers, and theme selection. Found malformed theme URL construction when the current URL already had query parameters.
+- `javascript/generationParams.js`: gallery click/key listeners and modal-close infotext refresh trigger; no defect found in inspected paths.
+- `javascript/localStorage.js`: localStorage set/get/remove wrappers with exception guards; no defect found in current call sites.
+- `javascript/progressbar.js`: progress request JSON parsing/error handling, title/progress formatting, live preview loop, wake lock handling, and cleanup; no defect found in inspected paths.
+- `javascript/imageviewer.js`, `imageviewerGamepad.js`: modal/gallery navigation, save routing, live-preview toggle, keyboard/gamepad controls, and image setup idempotence; no defect found in inspected paths.
+- `javascript/extensions.js`: extension enable/update JSON collection, check/update progress, install-from-index handoff, restore confirmation, and all-toggle behavior; no defect found in inspected paths.
+- `javascript/extraNetworks.js`: CSS injection helper, prompt focus tracking, filtering/sorting, prompt insertion/removal, and preview-save handoff. Found a comparison typo that prevented existing injected CSS from being cleared before appending new CSS.
+- `javascript/settings.js`, `token-counters.js`, `dragdrop.js`, `edit-attention.js`: settings search/category labeling, token-counter debounce/visibility, image drag/drop/paste routing, prompt image URL fetch, and attention weight editing; no defect found in inspected paths.
+
+Findings/fixes:
+- `set_theme` now uses the browser `URL`/`searchParams` API via `make_theme_url`, preserving existing query strings and avoiding malformed `...?foo=bar?__theme=...` URLs.
+- `toggleCss` now clears existing style text with assignment before appending the new CSS, instead of evaluating `style.innerHTML == ''` and duplicating CSS on repeated updates.
+- Added `tests/test_javascript_ui_contract.py` to lock both frontend source contracts.
+
+Commits:
+- `a09cfc4d Fix frontend theme and style update logic`
+
+Validation:
+- `node --check` passed for `javascript/ui.js`, `extraNetworks.js`, `generationParams.js`, `localStorage.js`, `progressbar.js`, `imageviewer.js`, `extensions.js`, `settings.js`, `token-counters.js`, `dragdrop.js`, and `edit-attention.js`.
+- `python3 -m pytest -q tests/test_javascript_ui_contract.py` -> passed, 2 tests; existing pytest warning remains `Unknown config option: base_url`.
+- `git diff --check` -> passed.
+
+References:
+- Browser `URL` and `URLSearchParams` behavior for preserving and updating query parameters.
+- Local JS contract-test pattern in `tests/test_image_mask_fix_contract.py`.
+
+Next unchecked scope:
+- Continue with remaining API/postprocessing/file-history surfaces beyond previous generation passes: `modules/extras.py`, `modules/postprocessing.py`, `modules/scripts_postprocessing.py`, `modules/scripts_auto_postprocessing.py`, `modules/ui_postprocessing.py`, `modules/ui_prompt_styles.py`, `modules/ui_settings.py`, `modules/ui_extra_networks*.py`, `modules/hashes.py`, `modules/cache.py`, `modules/modelloader.py`, `modules/safe.py`, and remaining shell/launch scripts/config files where logic affects state, files, or runtime stability.
