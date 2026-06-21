@@ -4290,3 +4290,38 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from sampler wrapper handoff into scheduler implementation and sampler-adjacent special samplers, especially `modules/sd_schedulers.py`, `modules/sd_samplers_extra.py`, `modules/sd_samplers_lcm.py`, `modules/sd_samplers_timesteps_impl.py`, and adjacent scheduler/sampler tests, looking for duplicate sigma/timestep helpers, stale restart/LCM compatibility branches, or redundant scheduler option plumbing while preserving scheduler labels/aliases, beta/exponential/karras behavior, restart sampler semantics, LCM behavior, and extension-visible sampler surfaces.
+
+
+## Pass 118 - Scheduler implementation and sampler-adjacent special samplers (2026-06-21)
+
+### Scope checked
+- `modules/sd_schedulers.py`: `Scheduler`, sigma helpers `_as_sigma()`, `_stack_sigmas()`, `_append_zero()`, `_loglinear_interp_sigmas()`, `_validate_step_count()`, `_sigmas_from_timesteps()`, scheduler implementations `uniform()`, `sgm_uniform()`, `get_align_your_steps_sigmas()`, `kl_optimal()`, `simple_scheduler()`, `normal_scheduler()`, `ddim_scheduler()`, `beta_scheduler()`, scheduler registry entries, labels, aliases, and lookup map.
+- `modules/sd_samplers_extra.py`: `restart_sampler()` restart-list defaulting, restart step-list expansion, Karras restart sigma generation, callback payloads, noise injection on upward sigma jumps, and Heun/Euler fallback semantics.
+- `modules/sd_samplers_lcm.py`: `LCMCompVisDenoiser`, LCM sigma/timestep conversion, scaled-output handling, `sample_lcm()`, `CFGDenoiserLCM`, `LCMSampler`, and LCM sampler data registration.
+- `modules/sd_samplers_timesteps_impl.py`: `_step_value()`, `_model_timestep()`, `_ddim_sigmas()`, `ddim()`, `ddim_cfgpp()`, `plms()`, `UniPCCFG`, and `unipc()` timestep/alphabetic schedule consumers.
+- Adjacent tests/references: `test/test_openclaw_schedulers.py`, `test/test_openclaw_multi_sampler.py`, API scheduler listing contract references, multi-sampler scheduler chain references, `modules/sd_samplers.py`, `modules/sd_samplers_kdiffusion.py`, `modules/processing_scripts/sampler.py`, `scripts/xyz_grid.py`, `modules/images.py`, and exact reference scans for scheduler alias/map usage.
+
+### Findings / fixes
+- Fixed dead scheduler alias lookup plumbing. `Scheduler.aliases` was populated for `SGMUniform` and exposed by API/listing surfaces, and sampler infotext parsing checked aliases by scanning the scheduler list, but `schedulers_map` only accepted scheduler names and labels. Added `_scheduler_lookup_keys()` and rebuilt `schedulers_map` from name, label, and declared aliases so extension/API/multi-sampler paths that validate through `schedulers_map` can resolve the advertised aliases.
+- Added a focused scheduler test asserting that `schedulers_map` resolves the canonical name, label, and declared `SGMUniform` alias to the same scheduler object.
+- Preserved scheduler labels and aliases rather than removing or renaming them. Labels feed UI/API/infotext, aliases are public compatibility, and `Automatic` defaulting remains unchanged.
+- Preserved k-diffusion scheduler behavior for Karras, exponential, polyexponential, beta, SGM uniform, normal/simple/DDIM, KL optimal, and Align Your Steps. Existing helper consolidation already removes the obvious duplicate zero-append and timestep-to-sigma conversion paths; no further safe sigma helper merge was proven.
+- Preserved restart sampler semantics. The automatic restart-list branch, Karras restart sub-schedule, upward-jump noise injection, and Heun/Euler step fallback are behavior-bearing sampler semantics, not dead compatibility code.
+- Preserved LCM behavior and timestep sampler internals. LCM has distinct original-timestep compression and scaled-output math; DDIM/CFG++/PLMS/UniPC share small helpers where safe but still require separate method-specific update formulas and callback timing.
+
+### Static/dynamic audit map notes
+- Scheduler lookup chain now consistently treats declared aliases as first-class keys: UI/API still list scheduler labels and aliases, infotext parsing still scans labels/names/aliases, and direct `schedulers_map` consumers can resolve the same declared alias set.
+- Sigma scheduler chain remains: k-diffusion sampler selects scheduler from processing state or sampler defaults -> `schedulers_map` lookup -> scheduler-specific sigma function -> optional inner-model conversion -> sampler consumes sigma tensor.
+- Timestep sampler chain remains separate from sigma schedulers: CompVis timestep wrappers build timestep tensors and consume `alphas_cumprod`; only their internal DDIM/CFG++ helpers are shared.
+- Compatibility surfaces kept conservative: scheduler labels, declared aliases, sampler names/options, Restart sampler, LCM sampler aliases, DDIM/PLMS/UniPC public sampler behavior, API scheduler listing shape, and extension-visible scheduler map/list surfaces.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass118.XXXXXX) python3 -m py_compile modules/sd_schedulers.py modules/sd_samplers_extra.py modules/sd_samplers_lcm.py modules/sd_samplers_timesteps_impl.py test/test_openclaw_schedulers.py test/test_openclaw_multi_sampler.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass118.XXXXXX) python3 -m pytest -q test/test_openclaw_schedulers.py test/test_openclaw_multi_sampler.py` - blocked during collection because the system `python3` environment cannot import `torch` (`ModuleNotFoundError: No module named torch`), with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed scheduler map consumers in sampler selection, k-diffusion sigma generation, multi-sampler scheduler-chain validation, API/listing tests, UI scheduler dropdowns, xyz grid, infotext/image helpers, and scheduler tests. It also confirmed `SGMUniform` is the only in-repo declared scheduler alias and is now covered by the focused test.
+- Exact AST duplicate-body scan across `modules/sd_schedulers.py`, `modules/sd_samplers_extra.py`, `modules/sd_samplers_lcm.py`, and `modules/sd_samplers_timesteps_impl.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, CUDA sampler execution, actual Restart/LCM image behavior, extension scheduler alias imports, and full torch-backed scheduler tests were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from scheduler/special sampler internals into sampler UI/API/listing and infotext scheduler exposure, especially `modules/api/api.py`, `modules/processing_scripts/sampler.py`, `scripts/xyz_grid.py`, `modules/images.py`, `modules/infotext_utils.py`, and adjacent API/listing tests, looking for duplicate scheduler/sampler metadata formatting or stale alias/default handling while preserving public API response shapes, infotext compatibility, UI labels, and extension-visible scheduler metadata.

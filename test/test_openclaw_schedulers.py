@@ -129,6 +129,14 @@ class OpenClawSchedulerTests(unittest.TestCase):
             torch.tensor([14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029, 0.0]),
         )
 
+    def test_scheduler_map_resolves_names_labels_and_declared_aliases(self):
+        schedulers = load_scheduler_module()
+
+        sgm = schedulers.schedulers_map["sgm_uniform"]
+        self.assertIs(schedulers.schedulers_map["SGM Uniform"], sgm)
+        self.assertIs(schedulers.schedulers_map["SGMUniform"], sgm)
+
+
     def test_internal_schedulers_reject_nonpositive_step_counts(self):
         schedulers = load_scheduler_module()
         inner_model = VectorInnerModel()

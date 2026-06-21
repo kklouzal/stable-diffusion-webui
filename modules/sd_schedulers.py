@@ -159,4 +159,8 @@ schedulers = [
     Scheduler('beta', 'Beta', beta_scheduler, need_inner_model=True),
 ]
 
-schedulers_map = {**{x.name: x for x in schedulers}, **{x.label: x for x in schedulers}}
+def _scheduler_lookup_keys(scheduler):
+    return (scheduler.name, scheduler.label, *(scheduler.aliases or []))
+
+
+schedulers_map = {key: scheduler for scheduler in schedulers for key in _scheduler_lookup_keys(scheduler)}
