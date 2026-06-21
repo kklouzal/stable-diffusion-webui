@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-from numpy.polynomial import Polynomial
 from sgm.modules.diffusionmodules.openaimodel import timestep_embedding
 
 from modules import headless_ui as gr
@@ -27,7 +26,9 @@ SDXL_POLYNOMIAL_COEFFICIENTS = (
     4.22227031e+01,
 )
 
-_SDXL_POLYNOMIAL = Polynomial(SDXL_POLYNOMIAL_COEFFICIENTS)
+# One Python bool conversion remains in TeaCacheSession.update_condition: the
+# UNet branch must know whether to reuse a cached residual or compute the full
+# path. Distance math stays on the residual tensor device until that boundary.
 
 
 def clamp_float(value, default: float, minimum: float, maximum: float) -> float:
@@ -66,11 +67,18 @@ def normalize_args(args):
     return enabled, threshold, max_consecutive, start, end
 
 
-def relative_l1_distance(prev: torch.Tensor, curr: torch.Tensor):
+def relative_l1_distance(prev: torch.Tensor, curr: torch.Tensor) -> torch.Tensor:
     prev_f = prev.float()
     curr_f = curr.float()
     baseline = prev_f.abs().mean().clamp_min(torch.finfo(prev_f.dtype).eps)
-    return ((prev_f - curr_f).abs().mean() / baseline).item()
+    return (prev_f - curr_f).abs().mean() / baseline
+
+
+def sdxl_polynomial_distance(relative_distance: torch.Tensor, coeffs: torch.Tensor) -> torch.Tensor:
+    result = coeffs[-1]
+    for index in range(coeffs.shape[0] - 2, -1, -1):
+        result = result * relative_distance + coeffs[index]
+    return result
 
 
 def _tensor_signature(tensor: Optional[torch.Tensor]):
@@ -112,9 +120,27 @@ class TeaCacheSession:
         self.call_index = 0
         self.residuals: dict[int, tuple[tuple, torch.Tensor]] = {}
         self.previous_fb: dict[int, torch.Tensor] = {}
-        self.distances: dict[int, float] = {}
+        self.distances: dict[int, torch.Tensor] = {}
+        self._threshold_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
+        self._coefficient_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
         self.consecutive_hits = 0
         self.use_cache = True
+
+    def _device_scalar(self, value: float, reference: torch.Tensor, cache: dict[tuple[str, torch.dtype], torch.Tensor]) -> torch.Tensor:
+        key = (str(reference.device), reference.dtype)
+        tensor = cache.get(key)
+        if tensor is None:
+            tensor = reference.new_tensor(value)
+            cache[key] = tensor
+        return tensor
+
+    def _coefficient_tensor(self, reference: torch.Tensor) -> torch.Tensor:
+        key = (str(reference.device), reference.dtype)
+        coeffs = self._coefficient_tensors.get(key)
+        if coeffs is None:
+            coeffs = reference.new_tensor(SDXL_POLYNOMIAL_COEFFICIENTS)
+            self._coefficient_tensors[key] = coeffs
+        return coeffs
 
     def update_condition(self, first_block_residual: torch.Tensor, signature: tuple):
         self.use_cache = not self.disabled_reason
@@ -133,14 +159,18 @@ class TeaCacheSession:
 
         if self.use_cache:
             # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
-            p = _SDXL_POLYNOMIAL
-            distance = self.distances.get(self.call_index, 0.0)
-            distance += p(relative_l1_distance(previous_fb, first_block_residual)).item()
-            if distance >= self.threshold:
+            distance = self.distances.get(self.call_index)
+            if distance is None or distance.device != first_block_residual.device:
+                distance = first_block_residual.new_zeros(())
+            relative_distance = relative_l1_distance(previous_fb, first_block_residual)
+            distance = distance + sdxl_polynomial_distance(relative_distance, self._coefficient_tensor(relative_distance))
+            # Intentional sync point: Python must choose cached vs full UNet branch.
+            # The relative-distance and polynomial math above remain on GPU.
+            if bool(torch.ge(distance, self._device_scalar(self.threshold, distance, self._threshold_tensors))):
                 self.use_cache = False
-                self.distances[self.call_index] = 0.0
+                self.distances[self.call_index] = distance.detach().zero_()
             else:
-                self.distances[self.call_index] = distance
+                self.distances[self.call_index] = distance.detach()
                 if self.call_index == 0:
                     self.consecutive_hits += 1
 

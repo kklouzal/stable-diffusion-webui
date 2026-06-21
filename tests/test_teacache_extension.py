@@ -1,4 +1,5 @@
 import importlib.util
+import ast
 import math
 import sys
 import types
@@ -79,9 +80,67 @@ def test_relative_l1_distance_handles_zero_baseline():
 
     distance = teacache.relative_l1_distance(prev, curr)
 
-    assert math.isfinite(distance)
-    assert distance > 0
+    assert isinstance(distance, torch.Tensor)
+    assert distance.shape == torch.Size([])
+    assert distance.device == prev.device
+    assert math.isfinite(distance.item())
+    assert distance.item() > 0
 
+
+
+def test_sdxl_polynomial_distance_matches_coefficients_on_tensor_device():
+    teacache = load_teacache_module()
+    relative = torch.tensor(0.125, dtype=torch.float32)
+    coeffs = relative.new_tensor(teacache.SDXL_POLYNOMIAL_COEFFICIENTS)
+
+    distance = teacache.sdxl_polynomial_distance(relative, coeffs)
+    expected = sum(float(coeff) * (float(relative) ** power) for power, coeff in enumerate(teacache.SDXL_POLYNOMIAL_COEFFICIENTS))
+
+    assert isinstance(distance, torch.Tensor)
+    assert distance.device == relative.device
+    assert math.isclose(distance.item(), expected, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def test_session_caches_device_tensors_for_hot_path_constants():
+    teacache = load_teacache_module()
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    signature = ((1, 2), "torch.float32", "cpu")
+    old = torch.ones((1, 2), dtype=torch.float32)
+    session.previous_fb[0] = old
+    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+
+    session.update_condition(old * 1.001, signature)
+
+    assert session.use_cache
+    assert session.distances[0].device == old.device
+    assert session._threshold_tensors[(str(old.device), torch.float32)].device == old.device
+    assert session._coefficient_tensors[(str(old.device), torch.float32)].device == old.device
+
+
+def test_hot_path_sync_constructs_are_explicitly_allowlisted():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "extensions" / "sd-webui-teacache" / "scripts" / "teacache.py").read_text()
+    hot_source = source[source.index("def relative_l1_distance"):]
+    tree = ast.parse(hot_source)
+    banned_attrs = {"cpu", "numpy", "tolist", "item"}
+    banned_calls = []
+    bool_calls = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in banned_attrs:
+                banned_calls.append((func.attr, node.lineno))
+            elif isinstance(func, ast.Name) and func.id in {"float", "int", "bool"}:
+                segment = ast.get_source_segment(hot_source, node) or ""
+                if "torch.ge" in segment:
+                    bool_calls.append(node.lineno)
+                else:
+                    banned_calls.append((func.id, node.lineno))
+
+    assert banned_calls == []
+    assert len(bool_calls) == 1
+    assert "Intentional sync point" in source
 
 def test_session_requires_residual_for_current_call_index():
     teacache = load_teacache_module()
@@ -110,6 +169,7 @@ def test_session_isolates_cache_by_call_signature():
 
     assert not session.use_cache
     session.store_current_residual(signature, torch.full((1, 2), 3.0))
+    session.use_cache = True
     assert torch.equal(session.current_residual(signature), torch.full((1, 2), 3.0))
     assert session.current_residual(other_signature) is None
 
@@ -146,6 +206,9 @@ def test_masked_denoising_disables_cache():
 if __name__ == "__main__":
     test_normalize_args_clamps_and_orders_range()
     test_relative_l1_distance_handles_zero_baseline()
+    test_sdxl_polynomial_distance_matches_coefficients_on_tensor_device()
+    test_session_caches_device_tensors_for_hot_path_constants()
+    test_hot_path_sync_constructs_are_explicitly_allowlisted()
     test_session_requires_residual_for_current_call_index()
     test_session_isolates_cache_by_call_signature()
     test_session_window_and_max_consecutive_are_quality_guards()
