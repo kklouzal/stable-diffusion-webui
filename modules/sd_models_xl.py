@@ -62,8 +62,17 @@ def encode_embedding_init_text(self: sgm.modules.GeneralConditioner, init_text, 
     return torch.cat(res, dim=1)
 
 
+def first_embedder_with_attr(self: sgm.modules.GeneralConditioner, attr: str):
+    for embedder in self.embedders:
+        if hasattr(embedder, attr):
+            return embedder
+
+    return None
+
+
 def tokenize(self: sgm.modules.GeneralConditioner, texts):
-    for embedder in [embedder for embedder in self.embedders if hasattr(embedder, 'tokenize')]:
+    embedder = first_embedder_with_attr(self, 'tokenize')
+    if embedder is not None:
         return embedder.tokenize(texts)
 
     raise AssertionError('no tokenizer available')
@@ -71,12 +80,14 @@ def tokenize(self: sgm.modules.GeneralConditioner, texts):
 
 
 def process_texts(self, texts):
-    for embedder in [embedder for embedder in self.embedders if hasattr(embedder, 'process_texts')]:
+    embedder = first_embedder_with_attr(self, 'process_texts')
+    if embedder is not None:
         return embedder.process_texts(texts)
 
 
 def get_target_prompt_token_count(self, token_count):
-    for embedder in [embedder for embedder in self.embedders if hasattr(embedder, 'get_target_prompt_token_count')]:
+    embedder = first_embedder_with_attr(self, 'get_target_prompt_token_count')
+    if embedder is not None:
         return embedder.get_target_prompt_token_count(token_count)
 
 

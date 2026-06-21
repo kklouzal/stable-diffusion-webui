@@ -4186,3 +4186,39 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from model instantiation into post-load model mutation and conditioning helpers, especially `remap_sdxl_clip_text_model_state_dict_if_needed()`, `apply_alpha_schedule_override()`, `rescale_zero_terminal_snr_abar()`, `get_empty_cond()`, `sd_models_xl.extend_sdxl()`, `sd_models_xl.get_learned_conditioning()`, and adjacent prompt-conditioning/model-patch tests, looking for duplicate conditioning or stale SDXL compatibility branches while preserving prompt output shape, sampler behavior, extension patches, and inpaint/refiner compatibility.
+
+
+## Pass 115 - SDXL prompt-conditioning/model patch internals (2026-06-21)
+
+### Scope checked
+- `modules/sd_models_xl.py`: `get_learned_conditioning()`, `apply_model()`, `get_first_stage_encoding()`, `encode_embedding_init_text()`, `tokenize()`, `process_texts()`, `get_target_prompt_token_count()`, `extend_sdxl()`, and SDXL monkey-patch assignments for `DiffusionEngine` and `GeneralConditioner`.
+- `modules/sd_models.py`: SDXL adjacency in `load_model_weights()`, `remap_sdxl_clip_text_model_state_dict_if_needed()`, `rescale_zero_terminal_snr_abar()`, `apply_alpha_schedule_override()`, and `get_empty_cond()`.
+- Adjacent prompt/conditioning/model-patch consumers by reference: `modules/prompt_parser.py`, `modules/processing.py`, `modules/sd_samplers_cfg_denoiser.py`, `modules/sd_samplers_timesteps.py`, `modules/sd_hijack.py`, `modules/sd_hijack_clip.py`, `modules/sd_hijack_open_clip.py`, `modules/lowvram.py`, and SD3/legacy diffusion conditioning references.
+- Adjacent tests/references: `tests/test_sd_models_checkpoint_info_contract.py`, `test/test_openclaw_device_dtypes.py`, exact reference scans for alpha/empty-cond/SDXL extension hooks, and AST duplicate-body scan across SDXL conditioning and prompt/CLIP helper modules.
+
+### Findings / fixes
+- Consolidated duplicate first-capable-embedder lookup logic in SDXL `GeneralConditioner` compatibility helpers. Added `first_embedder_with_attr()` and reused it from `tokenize()`, `process_texts()`, and `get_target_prompt_token_count()` while preserving first-match behavior, the `tokenize()` `AssertionError`, and the previous implicit `None` result when process/count helpers have no capable embedder.
+- Preserved `encode_embedding_init_text()` aggregation across all capable embedders. Unlike the first-match helpers, this intentionally concatenates outputs from multiple text embedders and is not duplicate lookup code.
+- Preserved `get_learned_conditioning()` SDXL batch metadata construction, negative empty-prompt zeroing, aesthetic-score selection, and dict return shape. The width/height/crop/target/aesthetic tensors are the live SDXL conditioning contract consumed by SGM embedders and prompt scheduling.
+- Preserved `apply_model()` inpaint concat behavior and `get_first_stage_encoding()` compatibility patch. They are active `DiffusionEngine` monkey patches used to keep SDXL/inpaint models compatible with existing sampler/processing assumptions.
+- Preserved `extend_sdxl()` model mutation. The dtype, conditioning key, cond-stage key, v/eps parameterization, LegacyDDPM alpha schedule, and `conditioner.wrapped` compatibility field feed samplers, lowvram/hijack behavior, and extension-facing SD1-style model surfaces.
+- Preserved `get_empty_cond()` dict-to-crossattn normalization and txt2img/extra-network activation boundary; it initializes `cond_stage_model_empty_prompt` for CFG denoiser behavior and must handle both dict-returning SDXL/SD3-like paths and tensor-returning legacy conditioners.
+- Preserved zero-terminal-SNR alpha schedule helpers. The override path is externally option/checkpoint driven and mutates `alphas_cumprod` consumed by timestep samplers; no safe dead branch was found.
+
+### Static/dynamic audit map notes
+- SDXL conditioning chain remains: prompt schedules -> `DiffusionEngine.get_learned_conditioning()` -> SGM `GeneralConditioner` with SDXL size/crop/target/aesthetic metadata -> hijacked CLIP/OpenCLIP embedders preserving pooled outputs and textual inversion behavior.
+- Empty-condition chain remains: model load -> `get_empty_cond()` -> `sd_model.cond_stage_model_empty_prompt` -> CFG denoiser empty-prompt comparison path.
+- SDXL load mutation chain remains: `load_model_weights()` -> `set_model_type()` -> `extend_sdxl()` -> optional SSD conversion -> SDXL CLIP key remap -> model hijack wraps conditioner embedders and sets `cond_stage_model`.
+- Compatibility surfaces kept conservative: `DiffusionEngine` monkey-patched method names, `GeneralConditioner` SD1-style helper names, `conditioner.wrapped`, inpaint `c_concat` concat path, SDXL pooled embedding propagation, negative empty-prompt zeroing, aesthetic-score option semantics, alpha schedule override metadata, and prompt output shapes.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass115.XXXXXX) python3 -m py_compile modules/sd_models_xl.py modules/sd_models.py modules/prompt_parser.py modules/sd_hijack.py modules/sd_hijack_clip.py modules/sd_hijack_open_clip.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass115.XXXXXX) python3 -m pytest -q tests/test_sd_models_checkpoint_info_contract.py` - passed: 2 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass115.XXXXXX) python3 -m pytest -q test/test_openclaw_device_dtypes.py tests/test_sd_models_checkpoint_info_contract.py` - blocked during collection because the system `python3` environment cannot import `torch` (`ModuleNotFoundError: No module named 'torch'`). The checkpoint-info focused subset still passed because it does not import torch.
+- Exact reference scan confirmed the scoped SDXL/alpha/empty-condition helpers are referenced by expected model-load, processing, sampler, hijack, and monkey-patch surfaces.
+- Exact AST duplicate-body scan across `modules/sd_models_xl.py`, `modules/sd_models.py`, `modules/prompt_parser.py`, `modules/sd_hijack_clip.py`, and `modules/sd_hijack_open_clip.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, actual SDXL/refiner/inpaint checkpoint loading, real prompt conditioning output comparison, CUDA sampler behavior, and extension monkey-patch interactions were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from SDXL conditioning into sampler conditioning consumption and CFG denoiser internals, especially `modules/sd_samplers_cfg_denoiser.py`, `modules/prompt_parser.py` scheduled conditioning objects, `modules/processing.py` cond-cache call sites, and adjacent tests, looking for duplicate cond/uncond shape handling or stale sampler compatibility branches while preserving prompt editing, highres/refiner caches, inpaint masks, CFG scale behavior, and extension callback hooks.
