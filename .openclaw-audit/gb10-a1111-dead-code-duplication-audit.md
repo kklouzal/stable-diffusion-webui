@@ -4222,3 +4222,37 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from SDXL conditioning into sampler conditioning consumption and CFG denoiser internals, especially `modules/sd_samplers_cfg_denoiser.py`, `modules/prompt_parser.py` scheduled conditioning objects, `modules/processing.py` cond-cache call sites, and adjacent tests, looking for duplicate cond/uncond shape handling or stale sampler compatibility branches while preserving prompt editing, highres/refiner caches, inpaint masks, CFG scale behavior, and extension callback hooks.
+
+
+## Pass 116 - Sampler conditioning consumption and CFG denoiser internals (2026-06-21)
+
+### Scope checked
+- `modules/sd_samplers_cfg_denoiser.py`: `catenate_conds()`, `subscript_cond()`, `pad_cond()`, `CFGDenoiser.pad_cond_uncond()`, `CFGDenoiser.pad_cond_uncond_v0()`, `CFGDenoiser.forward()`, edit-model CFG combination, skip-uncond/NGMS handling, batched vs split cond/uncond execution, mask blending callback path, and live-preview/last-latent conditioning indexes.
+- `modules/prompt_parser.py`: `ScheduledPromptConditioning`, `ComposableScheduledPromptConditioning`, `MulticondLearnedConditioning`, `DictWithShape`, `reconstruct_cond_batch()`, `reconstruct_multicond_batch()`, and `stack_conds()`.
+- `modules/processing.py`: base `cached_params()`, `get_conds_with_caching()`, `setup_conds()`, txt2img highres `calculate_hr_conds()`, `setup_conds()`, `get_conds()`, cond-cache close/reset paths, and img2img init-cache adjacency.
+- Adjacent tests/references: `tests/test_processing_auxiliary_infotext_alignment.py`, exact reference scan for CFG denoiser conditioning helpers/cache call sites, and AST duplicate-body scan across the scoped modules/test.
+
+### Findings / fixes
+- Consolidated duplicate prompt-editing schedule selection in `prompt_parser.py`. Added `scheduled_conditioning_at_step()` and reused it from both `reconstruct_cond_batch()` and `reconstruct_multicond_batch()`, preserving the prior first-entry fallback when no schedule end step matches.
+- Preserved CFG denoiser cond/uncond shape handling. `pad_cond_uncond()` still uses the empty-prompt embedding repeat semantics for the current compatibility option, while `pad_cond_uncond_v0()` still repeats/truncates the unconditional tail token for legacy DDIM-style compatibility; merging these would change option-specific sampler behavior.
+- Preserved CFG denoiser batching branches. The same-shape path, mismatched-shape path, edit-model triplet path, `batch_cond_uncond` option, skip-uncond shortcut, `last_noise_uncond`, and extension callback mutation boundary all have distinct shape/index side effects and are not dead code.
+- Preserved prompt reconstruction output shapes. `DictWithShape`, dict conditioning reconstruction, `stack_conds()` token-length padding, and multicond `conds_list` index bookkeeping are live sampler contracts consumed by CFG denoiser combination and callback surfaces.
+- Preserved processing cond-cache call sites. Base prompt/negative caches, highres prompt/negative caches, firstpass fallback caches, old-scheduling metadata, extra-network signatures, SDXL dimensions/crop/options, LoRA signature, and highres/refiner `get_conds()` path are all part of cache invalidation or sampler/refiner behavior.
+- No dead cond-cache path or stale sampler-compatibility branch was proven safe to remove in this slice.
+
+### Static/dynamic audit map notes
+- Conditioning chain remains: processing prompt setup -> `get_conds_with_caching()` -> prompt schedules -> `reconstruct_multicond_batch()` / `reconstruct_cond_batch()` each denoiser step -> CFG denoiser cond/uncond batching -> inner model call -> weighted CFG combination.
+- Prompt editing chain now shares one schedule-entry selector for normal and multicond reconstruction while keeping exact schedule ordering, fallback behavior, and output shape.
+- Highres/refiner chain remains: txt2img `calculate_hr_conds()` builds HR-specific cached conds keyed by firstpass steps plus total HR sampler steps; refiner-triggered `setup_conds()` refreshes HR conds and `get_conds()` returns HR conds during HR pass.
+- Compatibility surfaces kept conservative: script CFG callbacks, mask blend callbacks, edit-model Image CFG scale, inpaint concat/image conditioning, `batch_cond_uncond`, `skip_early_cond`, `s_min_uncond`, `pad_cond_uncond` options, live preview modes, `cond_stage_model_empty_prompt`, and extension-visible cached cond stats.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass116.XXXXXX) python3 -m py_compile modules/sd_samplers_cfg_denoiser.py modules/prompt_parser.py modules/processing.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass116.XXXXXX) python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py` - passed: 10 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed the scoped CFG denoiser padding/batching helpers, prompt reconstruction helpers, and base/highres cond-cache call sites remain referenced by expected sampler/processing surfaces.
+- Exact AST duplicate-body scan across `modules/sd_samplers_cfg_denoiser.py`, `modules/prompt_parser.py`, `modules/processing.py`, and `tests/test_processing_auxiliary_infotext_alignment.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, CUDA sampler execution, actual prompt-editing image comparison, extension callback mutation behavior, refiner/highres sampling, and inpaint mask blending under real generation were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from CFG denoiser into sampler wrapper/runtime handoff code, especially `modules/sd_samplers.py`, `modules/sd_samplers_common.py`, `modules/sd_samplers_kdiffusion.py`, `modules/sd_samplers_timesteps.py`, and adjacent scheduler/sampler tests, looking for duplicate sampler extra-arg assembly, stale compatibility aliases, or redundant schedule/timestep handling while preserving sampler names/options, refiner hooks, live previews, ETA/noise scheduler behavior, and extension callback surfaces.

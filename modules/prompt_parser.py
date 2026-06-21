@@ -289,19 +289,23 @@ def reconstruct_cond_batch(c: list[list[ScheduledPromptConditioning]], current_s
         res = torch.zeros((len(c),) + param.shape, device=param.device, dtype=param.dtype)
 
     for i, cond_schedule in enumerate(c):
-        target_index = 0
-        for current, entry in enumerate(cond_schedule):
-            if current_step <= entry.end_at_step:
-                target_index = current
-                break
+        cond = scheduled_conditioning_at_step(cond_schedule, current_step).cond
 
         if is_dict:
-            for k, param in cond_schedule[target_index].cond.items():
+            for k, param in cond.items():
                 res[k][i] = param
         else:
-            res[i] = cond_schedule[target_index].cond
+            res[i] = cond
 
     return res
+
+
+def scheduled_conditioning_at_step(schedules: list[ScheduledPromptConditioning], current_step):
+    for entry in schedules:
+        if current_step <= entry.end_at_step:
+            return entry
+
+    return schedules[0]
 
 
 def stack_conds(tensors):
@@ -328,14 +332,8 @@ def reconstruct_multicond_batch(c: MulticondLearnedConditioning, current_step):
         conds_for_batch = []
 
         for composable_prompt in composable_prompts:
-            target_index = 0
-            for current, entry in enumerate(composable_prompt.schedules):
-                if current_step <= entry.end_at_step:
-                    target_index = current
-                    break
-
             conds_for_batch.append((len(tensors), composable_prompt.weight))
-            tensors.append(composable_prompt.schedules[target_index].cond)
+            tensors.append(scheduled_conditioning_at_step(composable_prompt.schedules, current_step).cond)
 
         conds_list.append(conds_for_batch)
 
