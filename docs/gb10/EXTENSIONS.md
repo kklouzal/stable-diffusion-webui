@@ -17,6 +17,7 @@ Expected retained directories after the 2026-05-03 cleanup pass:
 - `sd-webui-detail-daemon`
 - `sd-webui-incantations`
 - `sd-webui-model-converter`
+- `sd-webui-teacache`
 - `ultimate-upscale-for-automatic1111`
 
 ## Ownership policy
@@ -42,6 +43,9 @@ Currently first-class:
 - `sd-webui-incantations`
   - owns PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix behavior
   - replaces previous dependence on separate Incantations and Dynamic Thresholding checkouts
+- `sd-webui-teacache`
+  - owns SDXL TeaCache acceleration as a disabled-by-default experimental script
+  - adopted from `feffy380/sd-webui-teacache` under MIT license with attribution preserved
 
 ### External mounted extensions
 
@@ -142,6 +146,7 @@ Already first-class / keep:
 
 - `openclaw-clear-cond-cache`
 - `sd-webui-incantations`
+- `sd-webui-teacache`
 
 ## Proposed adoption order
 

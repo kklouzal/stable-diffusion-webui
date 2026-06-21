@@ -50,7 +50,8 @@ Host-owned persistent surfaces:
 ## Current owned extension posture
 
 - `extensions/sd-webui-incantations` is vendored in this repository under GPL-3.0
-- upstream provenance is preserved in the extension README and upstream README copy
+- `extensions/sd-webui-teacache` is vendored in this repository under MIT as a disabled-by-default SDXL acceleration experiment
+- upstream provenance is preserved in extension README files and license copies
 - the image contains the owned extension source directly
 - the repo run script syncs owned extensions into the host-mounted `Extensions/` surface before launch
 - future PAG/SEG/CFG-combiner/CFG-Fix fixes should be made in this repo, not in an untracked external extension checkout

@@ -78,9 +78,11 @@ Current defaults:
 
 The repo vendors `extensions/sd-webui-incantations` as first-class GB10 source. This replaces dependence on abandoned external checkouts for PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix behavior.
 
+The repo also vendors `extensions/sd-webui-teacache` as a first-class GB10-maintained derivative of `feffy380/sd-webui-teacache` for SDXL TeaCache experimentation. It remains disabled by default until runtime benchmarking validates thresholds and quality impact.
+
 The normal run path bind-mounts the host `Extensions/` directory over A1111's extension directory, so `gb10/run.sh` syncs the repo-owned extensions into `${HOST_ROOT}/Extensions/` before starting the container. The image does not need duplicate baked extension copies.
 
-Treat this extension as owned code: preserve GPL-3.0 provenance, keep changes reviewable here, and patch it conservatively because guidance math and hook cleanup materially affect generated image quality.
+Treat these extensions as owned code: preserve GPL-3.0 provenance for Incantations and MIT provenance for TeaCache, keep changes reviewable here, and patch generation math/cache behavior conservatively because it materially affects image quality.
 
 Mounted external extensions are tracked separately in `docs/gb10/EXTENSIONS.md`. Now that A1111-Controller is canonical for Schwi's frontend/workflow direction, UI-only external extensions should be purged or migrated into Controller-owned data rather than adopted as A1111 extensions. Generation-affecting extensions that remain should become first-class repo-owned source or be replaced by source-level modernization.
 

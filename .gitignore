@@ -35,6 +35,8 @@ notification.mp3
 !/extensions/sd-webui-incantations/**
 !/extensions/openclaw-clear-cond-cache/
 !/extensions/openclaw-clear-cond-cache/**
+!/extensions/sd-webui-teacache/
+!/extensions/sd-webui-teacache/**
 /extensions/**/__pycache__/
 /extensions/**/*.pyc
 /extensions/**/.DS_Store
