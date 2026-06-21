@@ -376,7 +376,7 @@ def patched_forward(
 
     _cache.call_index += 1
 
-    h = h.type(x.dtype)
+    h = h.to(dtype=x.dtype)
 
     return self.out(h)
 
