@@ -14,9 +14,56 @@ from modules.ui_components import InputAccordion
 
 _cache = None
 
+SDXL_POLYNOMIAL_COEFFICIENTS = (
+    4.72656327e-03,
+    1.09937816e+00,
+    4.82785530e+00,
+    -2.93749209e+01,
+    4.22227031e+01,
+)
+
+_SDXL_POLYNOMIAL = Polynomial(SDXL_POLYNOMIAL_COEFFICIENTS)
+
+
+def clamp_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+def clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(float(value))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+def normalize_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def normalize_args(args):
+    values = [False, 0.3, 0, 0.3, 1.0]
+    for index, value in enumerate(args[:len(values)]):
+        values[index] = value
+    enabled = normalize_bool(values[0])
+    threshold = clamp_float(values[1], 0.3, 0.0, 1.0)
+    max_consecutive = clamp_int(values[2], 0, 0, 150)
+    start = clamp_float(values[3], 0.3, 0.0, 1.0)
+    end = clamp_float(values[4], 1.0, 0.0, 1.0)
+    if end < start:
+        start, end = end, start
+    return enabled, threshold, max_consecutive, start, end
+
 
 def relative_l1_distance(prev: torch.Tensor, curr: torch.Tensor):
-    return ((prev - curr).abs().mean() / prev.abs().mean()).item()
+    baseline = prev.abs().mean().clamp_min(torch.finfo(prev.dtype).eps)
+    return ((prev - curr).abs().mean() / baseline).item()
 
 
 class TeaCacheSession:
@@ -49,8 +96,8 @@ class TeaCacheSession:
             self.use_cache = False
 
         if self.use_cache:
-            p = Polynomial([ 4.72656327e-03,  1.09937816e+00,  4.82785530e+00, -2.93749209e+01, 4.22227031e+01])  # NoobAI XL vpred v1.0
-            # p = Polynomial([-4.46619183e-02,  2.04088614e+00, -1.30308644e+01,  1.01387815e+02, -2.48935677e+02])  # NoobAI XL v1.1
+            # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
+            p = _SDXL_POLYNOMIAL
             n = min(self.previous_fb.shape[0], first_block_residual.shape[0])
             self.distance += p(relative_l1_distance(self.previous_fb[:n], first_block_residual[:n])).item()
             if self.distance >= self.threshold:
@@ -63,6 +110,9 @@ class TeaCacheSession:
         self.current_step += 1
         self.call_index = 0
         self.use_cache = True
+
+    def can_use_current_residual(self) -> bool:
+        return self.use_cache and self.call_index in self.residuals
 
 
 class TeaCacheScript(scripts.Script):
@@ -112,7 +162,7 @@ class TeaCacheScript(scripts.Script):
 
     def process(self, p: processing.StableDiffusionProcessing, *args):
         # patch model forward method
-        enabled = args[0]
+        enabled, _, _, _, _ = normalize_args(args)
         if not enabled:
             # fix model if patch was not reverted (due to exception, oom)
             unet = p.sd_model.model.diffusion_model
@@ -129,7 +179,7 @@ class TeaCacheScript(scripts.Script):
     def process_before_every_sampling(self, p: processing.StableDiffusionProcessing, *args, **kwargs):
         # initialize and configure cache
         global _cache
-        enabled, threshold, max_consecutive, start, end = args
+        enabled, threshold, max_consecutive, start, end = normalize_args(args)
         if not enabled:
             return
         # initial step based on denoise strength
@@ -142,7 +192,7 @@ class TeaCacheScript(scripts.Script):
             total_steps = getattr(p, "hr_second_pass_steps", 0) or p.steps
             total_steps, steps = setup_img2img_steps(p, total_steps)  # hires fix doesn't reduce steps
             initial_step = total_steps - steps
-        _cache = TeaCacheSession(threshold, max_consecutive, start, end, total_steps, initial_step)
+        _cache = TeaCacheSession(threshold, max_consecutive, start, end, max(1, total_steps), initial_step)
 
         # set infotext
         p.extra_generation_params["TeaCache threshold"] = threshold
@@ -218,10 +268,10 @@ def patched_forward(
     if _cache.call_index == 0:
         first_block_residual = h - original_h
         _cache.update_condition(first_block_residual)
-        _cache.previous_fb = first_block_residual
+        _cache.previous_fb = first_block_residual.detach().clone()
 
     # use cache or call full model
-    if _cache.use_cache:
+    if _cache.can_use_current_residual():
         h += _cache.residuals[_cache.call_index][:h.shape[0]]
     else:
         original_h = h
@@ -234,7 +284,7 @@ def patched_forward(
             h = module(h, emb, context)
 
         _cache.consecutive_hits = 0
-        _cache.residuals[_cache.call_index] = h - original_h
+        _cache.residuals[_cache.call_index] = (h - original_h).detach().clone()
 
     _cache.call_index += 1
 
