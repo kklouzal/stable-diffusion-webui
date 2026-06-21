@@ -36,13 +36,16 @@ The always-on script title is `TeaCache`. Positional API callers should preserve
 Current defaults are conservative and disabled-by-default through the closed accordion:
 
 - `enabled`: `False`
-- `threshold`: `0.3`
-- `max_consecutive`: `0`
-- `start`: `0.3`
-- `end`: `1.0`
+- `threshold`: `0.25`
+- `max_consecutive`: `4`
+- `start`: `0.35`
+- `end`: `0.90`
 
 ## Local compatibility notes
 
 - Uses this fork's `modules.headless_ui` shim instead of importing Gradio directly, so API/headless startup can discover the script without a UI-only dependency path.
 - Restores the patched UNet forward method from an explicit `_openclaw_teacache_original_forward` attribute to reduce the chance of a stale patch after exception recovery.
 - Keeps TeaCache state per sampling pass and records enabled settings in infotext only when the script is active.
+- Isolates cached residuals by UNet call signature so conditional, unconditional, batch, dtype, and shape changes do not silently share stale residuals.
+- Disables residual reuse for non-SDXL models and masked/inpaint denoising paths; those modes need empirical validation before enabling because partial-latent blending and unsupported model coefficients can amplify quality drift.
+- Uses conservative quality-preserving defaults (`threshold=0.25`, `max_consecutive=4`, `start=0.35`, `end=0.90`) to avoid early composition and late detail/final-cleanup reuse by default.

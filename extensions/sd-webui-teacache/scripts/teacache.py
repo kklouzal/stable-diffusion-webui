@@ -14,6 +14,11 @@ from modules.ui_components import InputAccordion
 
 _cache = None
 
+DEFAULT_THRESHOLD = 0.25
+DEFAULT_MAX_CONSECUTIVE = 4
+DEFAULT_START = 0.35
+DEFAULT_END = 0.90
+
 SDXL_POLYNOMIAL_COEFFICIENTS = (
     4.72656327e-03,
     1.09937816e+00,
@@ -48,42 +53,71 @@ def normalize_bool(value) -> bool:
 
 
 def normalize_args(args):
-    values = [False, 0.3, 0, 0.3, 1.0]
+    values = [False, DEFAULT_THRESHOLD, DEFAULT_MAX_CONSECUTIVE, DEFAULT_START, DEFAULT_END]
     for index, value in enumerate(args[:len(values)]):
         values[index] = value
     enabled = normalize_bool(values[0])
-    threshold = clamp_float(values[1], 0.3, 0.0, 1.0)
-    max_consecutive = clamp_int(values[2], 0, 0, 150)
-    start = clamp_float(values[3], 0.3, 0.0, 1.0)
-    end = clamp_float(values[4], 1.0, 0.0, 1.0)
+    threshold = clamp_float(values[1], DEFAULT_THRESHOLD, 0.0, 1.0)
+    max_consecutive = clamp_int(values[2], DEFAULT_MAX_CONSECUTIVE, 0, 150)
+    start = clamp_float(values[3], DEFAULT_START, 0.0, 1.0)
+    end = clamp_float(values[4], DEFAULT_END, 0.0, 1.0)
     if end < start:
         start, end = end, start
     return enabled, threshold, max_consecutive, start, end
 
 
 def relative_l1_distance(prev: torch.Tensor, curr: torch.Tensor):
-    baseline = prev.abs().mean().clamp_min(torch.finfo(prev.dtype).eps)
-    return ((prev - curr).abs().mean() / baseline).item()
+    prev_f = prev.float()
+    curr_f = curr.float()
+    baseline = prev_f.abs().mean().clamp_min(torch.finfo(prev_f.dtype).eps)
+    return ((prev_f - curr_f).abs().mean() / baseline).item()
+
+
+def _tensor_signature(tensor: Optional[torch.Tensor]):
+    if tensor is None:
+        return None
+    return (tuple(tensor.shape), str(tensor.dtype), str(tensor.device))
+
+
+def _call_signature(
+    h: torch.Tensor,
+    timesteps: Optional[torch.Tensor],
+    context: Optional[torch.Tensor],
+    y: Optional[torch.Tensor],
+    kwargs: dict,
+):
+    return (
+        _tensor_signature(h),
+        _tensor_signature(timesteps),
+        _tensor_signature(context),
+        _tensor_signature(y),
+        tuple(sorted(kwargs.keys())),
+    )
+
+
+def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
+    return any(getattr(p, name, None) is not None for name in ("mask", "nmask", "image_mask"))
 
 
 class TeaCacheSession:
-    def __init__(self, threshold: float, max_consecutive: int, start: float, end: float, steps: int, initial_step: int = 1):
+    def __init__(self, threshold: float, max_consecutive: int, start: float, end: float, steps: int, initial_step: int = 1, disabled_reason: str = ""):
         self.threshold = threshold
         self.max_consecutive = max_consecutive
         self.start = start
         self.end = end
         self.steps = steps
+        self.disabled_reason = disabled_reason
 
         self.current_step = initial_step
         self.call_index = 0
-        self.residuals: dict[int, torch.Tensor] = {}
-        self.previous_fb: Optional[torch.Tensor] = None
-        self.distance = 0.0
+        self.residuals: dict[int, tuple[tuple, torch.Tensor]] = {}
+        self.previous_fb: dict[int, torch.Tensor] = {}
+        self.distances: dict[int, float] = {}
         self.consecutive_hits = 0
         self.use_cache = True
 
-    def update_condition(self, first_block_residual: torch.Tensor):
-        self.use_cache = True
+    def update_condition(self, first_block_residual: torch.Tensor, signature: tuple):
+        self.use_cache = not self.disabled_reason
         # check step range
         progress = self.current_step / max(1, self.steps)
         if not (self.start < progress <= self.end):
@@ -91,20 +125,26 @@ class TeaCacheSession:
         # check max consecutive cache hits
         if self.max_consecutive > 0 and self.consecutive_hits >= self.max_consecutive:
             self.use_cache = False
-        # check cached value exists
-        if self.previous_fb is None or self.call_index not in self.residuals:
+        # check cached value exists for this exact UNet call shape/conditioning lane
+        previous_fb = self.previous_fb.get(self.call_index)
+        cached = self.residuals.get(self.call_index)
+        if previous_fb is None or cached is None or cached[0] != signature:
             self.use_cache = False
 
         if self.use_cache:
             # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
             p = _SDXL_POLYNOMIAL
-            n = min(self.previous_fb.shape[0], first_block_residual.shape[0])
-            self.distance += p(relative_l1_distance(self.previous_fb[:n], first_block_residual[:n])).item()
-            if self.distance >= self.threshold:
+            distance = self.distances.get(self.call_index, 0.0)
+            distance += p(relative_l1_distance(previous_fb, first_block_residual)).item()
+            if distance >= self.threshold:
                 self.use_cache = False
-                self.distance = 0.0
+                self.distances[self.call_index] = 0.0
             else:
-                self.consecutive_hits += 1
+                self.distances[self.call_index] = distance
+                if self.call_index == 0:
+                    self.consecutive_hits += 1
+
+        self.previous_fb[self.call_index] = first_block_residual.detach().clone()
 
     def next_step(self):
         self.current_step += 1
@@ -113,6 +153,15 @@ class TeaCacheSession:
 
     def can_use_current_residual(self) -> bool:
         return self.use_cache and self.call_index in self.residuals
+
+    def current_residual(self, signature: tuple) -> Optional[torch.Tensor]:
+        cached = self.residuals.get(self.call_index)
+        if not self.use_cache or cached is None or cached[0] != signature:
+            return None
+        return cached[1]
+
+    def store_current_residual(self, signature: tuple, residual: torch.Tensor):
+        self.residuals[self.call_index] = (signature, residual.detach().clone())
 
 
 class TeaCacheScript(scripts.Script):
@@ -131,20 +180,20 @@ class TeaCacheScript(scripts.Script):
                 threshold = gr.Slider(
                     label="Cache threshold",
                     info="Higher caches more aggressively.",
-                    minimum=0.0, maximum=1.0, value=0.3, step=0.01,
+                    minimum=0.0, maximum=1.0, value=DEFAULT_THRESHOLD, step=0.01,
                 )
             with gr.Row():
                 max_consecutive = gr.Number(
                     label="Max consecutive cached steps",
-                    minimum=0, maximum=150, value=0, step=1,
+                    minimum=0, maximum=150, value=DEFAULT_MAX_CONSECUTIVE, step=1,
                 )
                 start = gr.Slider(
                     label="Start",
-                    minimum=0.0, maximum=1.0, value=0.3, step=0.01,
+                    minimum=0.0, maximum=1.0, value=DEFAULT_START, step=0.01,
                 )
                 end = gr.Slider(
                     label="End",
-                    minimum=0.0, maximum=1.0, value=1.0, step=0.01,
+                    minimum=0.0, maximum=1.0, value=DEFAULT_END, step=0.01,
                 )
 
         infotext_keys = ["TeaCache threshold", "TeaCache max consecutive", "TeaCache start", "TeaCache end"]
@@ -182,6 +231,12 @@ class TeaCacheScript(scripts.Script):
         enabled, threshold, max_consecutive, start, end = normalize_args(args)
         if not enabled:
             return
+        disabled_reason = ""
+        if not getattr(p.sd_model, "is_sdxl", False):
+            disabled_reason = "non-SDXL model"
+        elif _has_masked_denoising(p):
+            disabled_reason = "masked/inpaint denoising"
+
         # initial step based on denoise strength
         total_steps = p.steps
         initial_step = 1
@@ -192,7 +247,7 @@ class TeaCacheScript(scripts.Script):
             total_steps = getattr(p, "hr_second_pass_steps", 0) or p.steps
             total_steps, steps = setup_img2img_steps(p, total_steps)  # hires fix doesn't reduce steps
             initial_step = total_steps - steps
-        _cache = TeaCacheSession(threshold, max_consecutive, start, end, max(1, total_steps), initial_step)
+        _cache = TeaCacheSession(threshold, max_consecutive, start, end, max(1, total_steps), initial_step, disabled_reason)
 
         # set infotext
         p.extra_generation_params["TeaCache threshold"] = threshold
@@ -202,6 +257,8 @@ class TeaCacheScript(scripts.Script):
             p.extra_generation_params["TeaCache start"] = start
         if end < 1.0:
             p.extra_generation_params["TeaCache end"] = end
+        if disabled_reason:
+            p.extra_generation_params["TeaCache disabled reason"] = disabled_reason
 
     def postprocess(self, p: processing.StableDiffusionProcessing, *args):
         # restore model, clear cache
@@ -265,14 +322,14 @@ def patched_forward(
             raise RuntimeError("TeaCache patched forward has no active cache or original forward")
         return original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
 
-    if _cache.call_index == 0:
-        first_block_residual = h - original_h
-        _cache.update_condition(first_block_residual)
-        _cache.previous_fb = first_block_residual.detach().clone()
+    signature = _call_signature(h, timesteps, context, y, kwargs)
+    first_block_residual = h - original_h
+    _cache.update_condition(first_block_residual, signature)
 
     # use cache or call full model
-    if _cache.can_use_current_residual():
-        h += _cache.residuals[_cache.call_index][:h.shape[0]]
+    cached_residual = _cache.current_residual(signature)
+    if cached_residual is not None:
+        h = h + cached_residual
     else:
         original_h = h
         for module in self.input_blocks[2:]:
@@ -283,8 +340,9 @@ def patched_forward(
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
 
-        _cache.consecutive_hits = 0
-        _cache.residuals[_cache.call_index] = (h - original_h).detach().clone()
+        if _cache.call_index == 0:
+            _cache.consecutive_hits = 0
+        _cache.store_current_residual(signature, h - original_h)
 
     _cache.call_index += 1
 
