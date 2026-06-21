@@ -4358,3 +4358,35 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from sampler UI/API/listing into generation API request/script-argument plumbing and infotext paste-field application, especially `modules/api/api.py` request preparation helpers, `modules/infotext_utils.py` paste-field/apply paths, `modules/generation_parameters_copypaste.py`, `modules/ui.py` paste/override wiring, and adjacent API/copypaste tests, looking for duplicated script-arg/default normalization or stale infotext branches while preserving public API request shapes, extension scripts, pasted infotext compatibility, and UI paste behavior.
+
+## Pass 120 - Generation API request/script-argument plumbing and infotext paste-field application (2026-06-21)
+
+### Scope checked
+- `modules/api/api.py`: `get_selectable_script()`, `get_script()`, `init_default_script_args()`, `persist_openclaw_denoise_ramp_args()`, `init_script_args()`, `apply_infotext()`, `_prepare_generation_api_request()`, `_run_generation_with_scripts()`, `text2imgapi()`, and `img2imgapi()` request/script-argument flow.
+- `modules/infotext_utils.py`: compatibility alias for `modules.generation_parameters_copypaste`, `PasteField`, paste-field registration, `connect_paste_params_buttons()`, `create_override_settings_dict()`, `get_override_settings()`, and `connect_paste()` UI paste application.
+- `modules/ui.py`: txt2img/img2img `PasteField` registrations, override-settings dropdown wiring, inpaint paste registration, and script infotext field inclusion.
+- Adjacent tests/references: `tests/test_api_listing_contract.py`, `tests/test_api_server_control_contract.py`, `tests/test_processing_auxiliary_infotext_alignment.py`, and exact reference scans for `apply_infotext()`, `init_script_args()`, `openclaw_script_args_to_overrides`, `connect_paste()`, `PasteField`, and the old `modules.generation_parameters_copypaste` import surface.
+
+### Findings / fixes
+- No safe source-code deletion or consolidation was made in this slice. The in-scope script-argument and infotext paste paths look intentionally split by public surface: API request preparation mutates pydantic request objects and builds script-args vectors, while UI paste application returns Gradio updates for registered components.
+- Preserved `modules.generation_parameters_copypaste` as an import alias to `modules.infotext_utils`. The file named in older scopes no longer exists as a separate source file, but the alias is an extension compatibility surface and should not be removed without extension breakage testing.
+- Preserved the separate API and UI infotext value-application logic. Although both paths consume the same `PasteField` registrations, API code needs `field.api`, pydantic field types, unset-field behavior, override-setting merging, and script-input index capture; UI code needs component-value coercion, Gradio `update()` passthrough, callback dispatch, and override dropdown choice construction.
+- Preserved OpenClaw always-on script-argument extension behavior. The `openclaw_script_args_to_overrides` path and default persistence for `OpenClaw Denoise Ramp` are behavior-bearing compatibility plumbing for composite extensions and should not be collapsed into plain slice assignment without live extension coverage.
+- Preserved duplicate-looking txt2img/img2img paste-field lists in `modules/ui.py`. Their common prompt/size/style fields are outweighed by tab-specific hires and inpaint controls, extension-provided `infotext_fields`, component identities, and API field names; extracting a shared builder would be mostly cosmetic and riskier than useful in this compatibility-heavy area.
+
+### Static/dynamic audit map notes
+- Generation API flow remains: request + infotext -> `_prepare_generation_api_request()` -> sampler/scheduler normalization -> pydantic request copy -> `init_script_args()` overlay from infotext/selectable/always-on scripts -> processing object -> selectable script runner or plain `process_images()`.
+- UI paste flow remains: UI builds tab-specific `PasteField` lists -> `add_paste_fields()` stores them and updates legacy extension globals -> paste buttons call `connect_paste()` -> parsed infotext produces Gradio updates and override-setting dropdown values.
+- Exact reference scan showed no separate `modules/generation_parameters_copypaste.py`; compatibility is currently provided only by `sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]` in `modules/infotext_utils.py`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/infotext_utils.py`, and `modules/ui.py` reported no duplicate nontrivial function/class bodies.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass120.XXXXXX) python3 -m py_compile modules/api/api.py modules/infotext_utils.py modules/ui.py tests/test_api_listing_contract.py tests/test_api_server_control_contract.py tests/test_processing_auxiliary_infotext_alignment.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass120.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py tests/test_api_server_control_contract.py tests/test_processing_auxiliary_infotext_alignment.py` - passed: 24 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Bounded reference scan confirmed the in-scope API request/script-argument hooks, UI paste hooks, `PasteField` registrations, and legacy `generation_parameters_copypaste` import alias locations.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/infotext_utils.py`, and `modules/ui.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, browser paste-button interaction, real txt2img/img2img generation, external extension imports of `modules.generation_parameters_copypaste`, and composite always-on script payload execution were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from generation API/copypaste plumbing into PNG/image metadata extraction and infotext round-trip compatibility, especially `modules/images.py`, `modules/infotext_utils.py` parsing helpers, `modules/pnginfo.py` or adjacent PNG-info API paths, and tests around image metadata/infotext normalization, looking for stale metadata compatibility branches or duplicated parameter parsing while preserving old image metadata import behavior and public PNG-info API shapes.
