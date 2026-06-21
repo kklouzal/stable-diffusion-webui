@@ -4325,3 +4325,36 @@ Scope: exhaustive function-by-function source audit for dead code and code dupli
 
 ### Next unchecked scope
 - More slices are still needed. Recommended next slice: continue from scheduler/special sampler internals into sampler UI/API/listing and infotext scheduler exposure, especially `modules/api/api.py`, `modules/processing_scripts/sampler.py`, `scripts/xyz_grid.py`, `modules/images.py`, `modules/infotext_utils.py`, and adjacent API/listing tests, looking for duplicate scheduler/sampler metadata formatting or stale alias/default handling while preserving public API response shapes, infotext compatibility, UI labels, and extension-visible scheduler metadata.
+
+## Pass 119 - Sampler UI/API/listing and infotext scheduler exposure (2026-06-21)
+
+### Scope checked
+- `modules/api/api.py`: `validate_sampler_name()`, generation API sampler/scheduler normalization in `_prepare_generation_api_request()`, `/sdapi/v1/samplers` and `/sdapi/v1/schedulers` listing response assembly, and adjacent metadata listing response shape tests.
+- `modules/processing_scripts/sampler.py`: `ScriptSampler.ui()`, sampler and scheduler UI choices, infotext paste fields, and `setup()` propagation to processing state.
+- `scripts/xyz_grid.py`: sampler confirmation, sampler/hires sampler axis choices, schedule type axis choices, and scheduler field application.
+- `modules/images.py`: filename scheduler/sampler formatting helpers, NovelAI sampler compatibility import path, and image metadata extraction adjacency.
+- `modules/infotext_utils.py`: parsed infotext defaults for hires sampler/scheduler compatibility and adjacent generation parameter normalization.
+- Adjacent surfaces: `modules/ui.py` hires scheduler dropdown choices, `modules/sd_samplers.py` sampler/scheduler infotext parsing helpers, `modules/sd_schedulers.py` scheduler labels/aliases/map, and `tests/test_api_listing_contract.py`.
+
+### Findings / fixes
+- Consolidated duplicated scheduler-label list construction. Added `sd_schedulers.scheduler_labels()` and reused it from the main sampler script UI, xyz-grid schedule axis, and hires scheduler dropdown, preserving the exact scheduler labels, ordering, and public UI choice values.
+- Preserved API sampler/scheduler listing response shapes. `get_samplers()` still returns `name`, `aliases`, and `options`; `get_schedulers()` still returns `name`, `label`, `aliases`, `default_rho`, and `need_inner_model`. No safe response-shape helper extraction was made because the current test stubs scheduler objects structurally and public API compatibility is more important than a cosmetic method move.
+- Preserved infotext scheduler compatibility. `get_sampler_from_infotext()`, `get_scheduler_from_infotext()`, hires sampler/scheduler defaults, and image filename scheduler formatting remain behavior-bearing compatibility surfaces for old metadata, Automatic defaults, and image filenames.
+- Preserved xyz-grid sampler validation and scheduler axis behavior. Sampler validation still uses the lower-case sampler alias map, while schedule type choices remain label-based to match UI/infotext-visible scheduler labels.
+- Preserved image metadata parsing branches, including NovelAI sampler compatibility parsing and existing ignored-info-key cleanup; no dead branch was proven safe to remove.
+
+### Static/dynamic audit map notes
+- Scheduler labels now have one shared source for UI/dropdown choice lists: scheduler registry -> `sd_schedulers.scheduler_labels()` -> sampler script UI, hires UI, and xyz-grid choices.
+- API generation still normalizes sampler/scheduler through `sd_samplers.get_sampler_and_scheduler()` before request population. This remains distinct from API listing serialization because one path accepts aliases/infotext/defaults and the other exposes public metadata.
+- Infotext compatibility remains split intentionally: `modules/sd_samplers.py` resolves sampler/scheduler names, `modules/infotext_utils.py` supplies missing legacy/default fields, and `modules/images.py` formats scheduler text for filenames and imported metadata.
+
+### Validation log
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pycompile-pass119.XXXXXX) python3 -m py_compile modules/api/api.py modules/processing_scripts/sampler.py scripts/xyz_grid.py modules/images.py modules/infotext_utils.py modules/sd_schedulers.py modules/ui.py tests/test_api_listing_contract.py` - passed.
+- `PYTHONPYCACHEPREFIX=$(mktemp -d /tmp/gb10-a1111-pytest-pass119-api.XXXXXX) python3 -m pytest -q tests/test_api_listing_contract.py` - passed: 7 passed, with the existing pytest config warning `Unknown config option: base_url`.
+- Exact reference scan confirmed no remaining in-scope direct `[x.label for x in sd_schedulers.schedulers]` scheduler-label list constructions; in-scope callers now use `sd_schedulers.scheduler_labels()`.
+- Exact AST duplicate-body scan across `modules/api/api.py`, `modules/processing_scripts/sampler.py`, `scripts/xyz_grid.py`, `modules/images.py`, `modules/infotext_utils.py`, `modules/sd_schedulers.py`, and `modules/ui.py` reported no duplicate nontrivial function/class bodies.
+- `git diff --check` - passed.
+- Live WebUI/API startup, browser UI interaction, CUDA image generation, actual xyz-grid generation, extension-visible scheduler metadata access, and round-trip parsing of old image metadata were not exercised in this bounded slice.
+
+### Next unchecked scope
+- More slices are still needed. Recommended next slice: continue from sampler UI/API/listing into generation API request/script-argument plumbing and infotext paste-field application, especially `modules/api/api.py` request preparation helpers, `modules/infotext_utils.py` paste-field/apply paths, `modules/generation_parameters_copypaste.py`, `modules/ui.py` paste/override wiring, and adjacent API/copypaste tests, looking for duplicated script-arg/default normalization or stale infotext branches while preserving public API request shapes, extension scripts, pasted infotext compatibility, and UI paste behavior.

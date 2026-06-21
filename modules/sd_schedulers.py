@@ -26,6 +26,10 @@ class Scheduler:
     aliases: list = None
 
 
+def scheduler_labels():
+    return [scheduler.label for scheduler in schedulers]
+
+
 def uniform(n, sigma_min, sigma_max, inner_model, device):
     n = _validate_step_count(n)
     return inner_model.get_sigmas(n).to(device)

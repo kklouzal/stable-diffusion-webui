@@ -18,7 +18,7 @@ class ScriptSampler(scripts.ScriptBuiltinUI):
 
     def ui(self, is_img2img):
         sampler_names = [x.name for x in sd_samplers.visible_samplers()]
-        scheduler_names = [x.label for x in sd_schedulers.schedulers]
+        scheduler_names = sd_schedulers.scheduler_labels()
 
         if shared.opts.samplers_in_dropdown:
             with FormRow(elem_id=f"sampler_selection_{self.tabname}"):
