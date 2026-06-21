@@ -173,13 +173,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
 
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x
-        self.sampler_extra_args = {
-            'cond': conditioning,
-            'image_cond': image_conditioning,
-            'uncond': unconditional_conditioning,
-            'cond_scale': p.cfg_scale,
-            's_min_uncond': self.s_min_uncond
-        }
+        self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
 
         samples = self.launch_sampling(t_enc + 1, lambda: self.func(self.model_wrap_cfg, xi, extra_args=self.sampler_extra_args, disable=False, callback=self.callback_state, **extra_params_kwargs))
 
@@ -219,13 +213,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             extra_params_kwargs['solver_type'] = 'heun'
 
         self.last_latent = x
-        self.sampler_extra_args = {
-            'cond': conditioning,
-            'image_cond': image_conditioning,
-            'uncond': unconditional_conditioning,
-            'cond_scale': p.cfg_scale,
-            's_min_uncond': self.s_min_uncond
-        }
+        self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
 
         samples = self.launch_sampling(steps, lambda: self.func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=False, callback=self.callback_state, **extra_params_kwargs))
 

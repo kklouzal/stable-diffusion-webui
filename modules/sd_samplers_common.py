@@ -345,6 +345,16 @@ class Sampler:
         current_iter_seeds = p.all_seeds[p.iteration * p.batch_size:(p.iteration + 1) * p.batch_size]
         return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
 
+    def set_sampler_extra_args(self, p, conditioning, unconditional_conditioning, image_conditioning):
+        self.sampler_extra_args = {
+            'cond': conditioning,
+            'image_cond': image_conditioning,
+            'uncond': unconditional_conditioning,
+            'cond_scale': p.cfg_scale,
+            's_min_uncond': self.s_min_uncond,
+        }
+        return self.sampler_extra_args
+
     def sample(self, p, x, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         raise NotImplementedError()
 
