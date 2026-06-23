@@ -1,7 +1,7 @@
 import torch
 import inspect
 import sys
-from modules import devices, sd_samplers_common, sd_samplers_timesteps_impl
+from modules import devices, sd_samplers_common, sd_samplers_timesteps_impl, openclaw_generation_profile
 from modules.sd_samplers_cfg_denoiser import CFGDenoiser
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 
@@ -94,9 +94,19 @@ class CompVisSampler(sd_samplers_common.Sampler):
             discard_next_to_last_sigma = True
             p.extra_generation_params["Discard penultimate sigma"] = True
 
+        requested_steps = int(steps)
         steps += 1 if discard_next_to_last_sigma else 0
 
-        return _make_timesteps(steps, devices.device)
+        return openclaw_generation_profile.cached_tensor(
+            "compvis_timesteps",
+            getattr(self.config, "name", self.funcname),
+            None,
+            requested_steps,
+            devices.device,
+            torch.int64,
+            lambda: _make_timesteps(steps, devices.device),
+            params=(bool(discard_next_to_last_sigma),),
+        )
 
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)

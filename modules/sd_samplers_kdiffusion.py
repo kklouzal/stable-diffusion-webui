@@ -1,7 +1,7 @@
 import torch
 import inspect
 import k_diffusion.sampling
-from modules import sd_samplers_common, sd_samplers_extra, sd_samplers_cfg_denoiser, sd_schedulers, devices
+from modules import sd_samplers_common, sd_samplers_extra, sd_samplers_cfg_denoiser, sd_schedulers, devices, openclaw_generation_profile
 from modules.sd_samplers_cfg_denoiser import CFGDenoiser  # noqa: F401
 from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 
@@ -77,6 +77,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
         self.model_wrap = self.model_wrap_cfg.inner_model
 
     def get_sigmas(self, p, steps):
+        requested_steps = int(steps)
         discard_next_to_last_sigma = self.config is not None and self.config.options.get('discard_next_to_last_sigma', False)
         if opts.always_discard_next_to_last_sigma and not discard_next_to_last_sigma:
             discard_next_to_last_sigma = True
@@ -94,10 +95,11 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
         sigma_min, sigma_max = (0.1, 10) if opts.use_old_karras_scheduler_sigmas else (m_sigma_min, m_sigma_max)
 
         if p.sampler_noise_scheduler_override:
-            sigmas = p.sampler_noise_scheduler_override(steps)
-        elif scheduler is None or scheduler.function is None:
-            sigmas = self.model_wrap.get_sigmas(steps)
-        else:
+            openclaw_generation_profile.bypass("sampler_noise_scheduler_override")
+            return p.sampler_noise_scheduler_override(steps).cpu()
+
+        sigmas_kwargs = None
+        if scheduler is not None and scheduler.function is not None:
             sigmas_kwargs = {'sigma_min': sigma_min, 'sigma_max': sigma_max}
 
             if scheduler.label != 'Automatic' and not p.is_hr_pass:
@@ -124,12 +126,38 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
                 p.extra_generation_params["Beta schedule alpha"] = opts.beta_dist_alpha
                 p.extra_generation_params["Beta schedule beta"] = opts.beta_dist_beta
 
-            sigmas = scheduler.function(n=steps, **sigmas_kwargs, device=devices.cpu)
+        def make_sigmas():
+            if sigmas_kwargs is None:
+                sigmas = self.model_wrap.get_sigmas(steps)
+            else:
+                sigmas = scheduler.function(n=steps, **sigmas_kwargs, device=devices.cpu)
 
-        if discard_next_to_last_sigma:
-            sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+            if discard_next_to_last_sigma:
+                sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
 
-        return sigmas.cpu()
+            return sigmas.to(device=devices.cpu, dtype=torch.float32)
+
+        return openclaw_generation_profile.cached_tensor(
+            "kdiffusion_sigmas",
+            getattr(self.config, "name", self.funcname),
+            scheduler_name,
+            requested_steps,
+            devices.cpu,
+            torch.float32,
+            make_sigmas,
+            params=(
+                bool(discard_next_to_last_sigma),
+                bool(opts.use_old_karras_scheduler_sigmas),
+                float(sigma_min),
+                float(sigma_max),
+                float(opts.sigma_min),
+                float(opts.sigma_max),
+                float(opts.rho),
+                float(getattr(opts, "beta_dist_alpha", 0)),
+                float(getattr(opts, "beta_dist_beta", 0)),
+                bool(getattr(p, "is_hr_pass", False)),
+            ),
+        )
 
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)

@@ -41,6 +41,15 @@ def _cuda_graph_status() -> dict[str, Any] | None:
         return {"available": False, "error": repr(exc)}
 
 
+def _generation_profile_status() -> dict[str, Any] | None:
+    try:
+        from modules import openclaw_generation_profile
+
+        return openclaw_generation_profile.status()
+    except Exception as exc:
+        return {"available": False, "error": repr(exc)}
+
+
 def _summarize_graph_key(raw_key: Any) -> dict[str, Any] | None:
     if raw_key in (None, ""):
         return None
@@ -123,6 +132,7 @@ def before_sample(p: Any, batch_index: int) -> dict[str, Any]:
         "started_at": time.time(),
         "request": _request_summary(p, batch_index),
         "cuda_graphs_before": _summarize_cuda_graph_status(_cuda_graph_status()),
+        "generation_profile_cache_before": _generation_profile_status(),
     }
 
 
@@ -141,6 +151,7 @@ def after_sample(p: Any, capture: dict[str, Any] | None, batch_index: int) -> di
         "request": _request_summary(p, batch_index),
         "cuda_graphs_after": after,
         "cuda_graphs_delta": _counter_delta(capture.get("cuda_graphs_before"), after),
+        "generation_profile_cache_after": _generation_profile_status(),
     }
     diagnostics = _json_safe(diagnostics)
     p.openclaw_generation_diagnostics = diagnostics
