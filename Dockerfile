@@ -77,7 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    python -m pip install --break-system-packages --upgrade setuptools==69.5.1
+    python -m pip install --break-system-packages --upgrade setuptools
 
 # CUDA-base doctrine:
 # - start from the NVIDIA CUDA image, not the NVIDIA PyTorch image
@@ -237,7 +237,7 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     rustc --version \
     && cargo --version \
-    && python -m pip install --break-system-packages --upgrade setuptools==69.5.1 \
+    && python -m pip install --break-system-packages --upgrade setuptools \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
     && python -m pip install --break-system-packages --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
@@ -333,7 +333,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
     && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
-    && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools==69.5.1 \
+    && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl dctorch \
     && python - <<'PY'
