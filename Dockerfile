@@ -5,7 +5,7 @@ ARG PYTHON_VERSION=3.12
 ARG PYTORCH_NIGHTLY_CUDA_TAG=cu132
 ARG TORCHAO_PACKAGE=torchao
 ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
-ARG MSLK_COMMIT=e54ee82d57492dfc08d89df65c3898d767ad8b24
+ARG MSLK_COMMIT=6a470238c3888a0df95b35c8629b77ade60524d0
 ARG MSLK_PACKAGE_NAME=mslk
 ARG STABLE_DIFFUSION_REPO=https://github.com/w-e-w/stablediffusion.git
 ARG STABLE_DIFFUSION_COMMIT=cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf
@@ -221,6 +221,7 @@ COPY --from=source /opt/build/stable-diffusion-webui /opt/build/stable-diffusion
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
 COPY requirements_versions.txt /opt/build/requirements-image.txt
+COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-sd-webui-controlnet-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
@@ -238,11 +239,13 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     rustc --version \
     && cargo --version \
     && python -m pip install --break-system-packages --upgrade setuptools \
-    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
+    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt \
     && python -m pip install --break-system-packages --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
+    && python /opt/build/assert-resolved-package.py --package mediapipe \
+    && python /opt/build/assert-resolved-package.py --package controlnet_aux --min-version 0.0.9 \
     && python /opt/build/assert-resolved-package.py --package gradio --absent \
     && python /opt/build/assert-resolved-package.py --package gradio-client --absent \
     && python /opt/build/render-resolved-requirements.py

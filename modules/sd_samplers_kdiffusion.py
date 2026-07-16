@@ -49,6 +49,45 @@ k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
 k_diffusion_scheduler = {x.name: x.function for x in sd_schedulers.schedulers}
 
 
+def _checkpoint_cache_key(checkpoint_info):
+    if checkpoint_info is None:
+        return None
+
+    return tuple(
+        str(value) if value is not None else None
+        for value in (
+            getattr(checkpoint_info, "filename", None),
+            getattr(checkpoint_info, "shorthash", None),
+            getattr(checkpoint_info, "hash", None),
+            getattr(checkpoint_info, "name", None),
+        )
+    )
+
+
+def _sigmas_cache_key(sigmas):
+    if not torch.is_tensor(sigmas) or sigmas.numel() == 0:
+        return None
+
+    sigmas_cpu = sigmas.detach().to(device=devices.cpu, dtype=torch.float32)
+    return (
+        tuple(sigmas_cpu.shape),
+        float(sigmas_cpu[0]),
+        float(sigmas_cpu[-1]),
+    )
+
+
+def _model_schedule_cache_signature(sd_model, model_wrap):
+    """Return model facts that can change scheduler/timestep conversion math."""
+
+    return (
+        _checkpoint_cache_key(getattr(sd_model, "sd_checkpoint_info", None)),
+        bool(getattr(sd_model, "is_sdxl", False)),
+        bool(getattr(sd_model, "is_sd2", False)),
+        getattr(sd_model, "parameterization", None),
+        _sigmas_cache_key(getattr(model_wrap, "sigmas", None)),
+    )
+
+
 class CFGDenoiserKDiffusion(sd_samplers_cfg_denoiser.CFGDenoiser):
     @property
     def inner_model(self):
@@ -156,6 +195,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
                 float(getattr(opts, "beta_dist_alpha", 0)),
                 float(getattr(opts, "beta_dist_beta", 0)),
                 bool(getattr(p, "is_hr_pass", False)),
+                _model_schedule_cache_signature(shared.sd_model, self.model_wrap),
             ),
         )
 

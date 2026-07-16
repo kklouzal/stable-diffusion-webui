@@ -208,6 +208,29 @@ class MultiSamplerCoreTests(unittest.TestCase):
         torch.testing.assert_close(stages[0][2], torch.tensor([10.0, 9.0, 8.0]))
         torch.testing.assert_close(stages[1][2], torch.tensor([8.0, 70.0, 0.0]))
 
+
+    def test_brownian_noise_sampler_uses_stage_sigmas_not_full_chain(self):
+        sampler = object.__new__(self.multi.MultiKDiffusionSampler)
+        stage_sigmas = torch.tensor([3.0, 2.0, 0.0])
+        full_sigmas = torch.tensor([9.0, 8.0, 7.0, 0.0])
+        seen = []
+        sampler.create_noise_sampler = lambda _x, sigmas, _p: seen.append(sigmas) or "noise"
+
+        kwargs = sampler._build_stage_kwargs(
+            p=types.SimpleNamespace(),
+            func=lambda *args, **inner_kwargs: None,
+            funcname="sample_dpmpp_2m_sde",
+            config=types.SimpleNamespace(options={"brownian_noise": True}),
+            x=torch.zeros(1),
+            sigmas=stage_sigmas,
+            full_sigmas=full_sigmas,
+            stage_steps=2,
+            is_img2img=False,
+        )
+
+        self.assertEqual(kwargs["noise_sampler"], "noise")
+        self.assertIs(seen[0], stage_sigmas)
+
     def test_denoise_ramp_helper_is_not_imported_as_fallback(self):
         original_sample_img2img = sys.modules["modules.sd_samplers_kdiffusion"].KDiffusionSampler.sample_img2img
 
@@ -215,6 +238,21 @@ class MultiSamplerCoreTests(unittest.TestCase):
 
         self.assertIs(sys.modules["modules.sd_samplers_kdiffusion"].KDiffusionSampler.sample_img2img, original_sample_img2img)
         self.assertTrue(self.multi._DENOISE_RAMP_FUNC_LOADED)
+
+
+    def test_custom_sampler_mutating_routes_hold_registration_lock(self):
+        source = (EXT_ROOT / "scripts" / "openclaw_multi_sampler.py").read_text()
+        preview_marker = '    @app.post("/sdapi/v1/openclaw/multi-sampler/preview")'
+        delete_block = source[source.index("    @app.delete"):source.index(preview_marker)]
+        preview_block = source[source.index(preview_marker):source.index("\n\n_register_definitions()")]
+
+        self.assertIn("with _LOCK:", delete_block)
+        self.assertIn("_save_custom_defs(defs)", delete_block)
+        self.assertLess(delete_block.index("with _LOCK:"), delete_block.index("_save_custom_defs(defs)"))
+        self.assertIn("with _LOCK:", preview_block)
+        self.assertIn("_TRANSIENT_DEFS[PREVIEW_NAME] = definition", preview_block)
+        self.assertLess(preview_block.index("with _LOCK:"), preview_block.index("_TRANSIENT_DEFS[PREVIEW_NAME] = definition"))
+
 
     def test_denoise_ramp_helper_uses_loaded_script_module(self):
         target = EXT_ROOT.parent / "openclaw-denoise-ramp" / "scripts" / "openclaw_denoise_ramp.py"

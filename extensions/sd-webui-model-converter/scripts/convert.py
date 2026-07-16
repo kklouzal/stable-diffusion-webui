@@ -107,7 +107,12 @@ def load_model(path: str) -> dict[str, Any]:
                 f"Could not safely load legacy checkpoint {path!r}. "
                 "Use safetensors or a checkpoint containing tensor-only weights."
             ) from exc
-    return loaded.get("state_dict", loaded) if isinstance(loaded, dict) else loaded
+    state_dict = loaded.get("state_dict", loaded) if isinstance(loaded, dict) else loaded
+    if not isinstance(state_dict, dict):
+        raise RuntimeError(
+            f"Loaded checkpoint {path!r} did not contain a tensor state_dict mapping"
+        )
+    return state_dict
 
 
 def safe_output_name(name: str, fallback: str = "") -> str:
@@ -216,6 +221,14 @@ def normalize_part_action(value: str, default: str = "convert") -> str:
 
 def normalize_precision(value: str, default: str = "inherit") -> str:
     return value if value in COMPONENT_PRECISIONS else default
+
+
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_known_junk_key(key: str) -> bool:
@@ -584,7 +597,7 @@ def convert_lora(payload: dict[str, Any]) -> str:
     if precision not in LORA_PRECISIONS:
         raise ValueError(f"unsupported LoRA precision: {precision}")
     custom_name = str(payload.get("custom_name") or "").strip()
-    cleanup = bool(payload.get("delete_known_junk_data"))
+    cleanup = normalize_bool(payload.get("delete_known_junk_data"), False)
     shared.state.begin()
     try:
         shared.state.job = "lora-convert"
@@ -968,9 +981,9 @@ def convert_single(payload: dict[str, Any]) -> str:
         payload.get("clip") or "convert",
         payload.get("vae") or "convert",
         payload.get("other") or "convert",
-        bool(payload.get("fix_clip")),
-        bool(payload.get("force_position_id", True)),
-        bool(payload.get("delete_known_junk_data")),
+        normalize_bool(payload.get("fix_clip"), False),
+        normalize_bool(payload.get("force_position_id"), True),
+        normalize_bool(payload.get("delete_known_junk_data"), False),
         payload.get("unet_precision") or "inherit",
         payload.get("clip_precision") or "inherit",
         payload.get("vae_precision") or "inherit",

@@ -405,7 +405,12 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         if "sigmas" in params:
             kwargs["sigmas"] = sigmas
         if config.options.get("brownian_noise", False):
-            kwargs["noise_sampler"] = self.create_noise_sampler(x, full_sigmas, p)
+            # Match upstream k-diffusion sampler semantics: the Brownian tree
+            # noise interval should be derived from the exact sigma schedule
+            # passed to this sampler call, not a broader multi-stage schedule.
+            # Mixed scheduler chains can otherwise seed/sample noise over the
+            # wrong sigma range for later stages.
+            kwargs["noise_sampler"] = self.create_noise_sampler(x, sigmas, p)
         if config.options.get("solver_type", None) == "heun":
             kwargs["solver_type"] = "heun"
         return kwargs
@@ -703,9 +708,10 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.delete("/sdapi/v1/openclaw/multi-sampler/custom/{name:path}")
     async def delete_multi_sampler(name: str):
         full_name = name if name.startswith(CUSTOM_PREFIX) else f"{CUSTOM_PREFIX}{name}"
-        defs = [item for item in _load_custom_defs() if item.get("name") != full_name]
-        _save_custom_defs(defs)
-        _register_definitions()
+        with _LOCK:
+            defs = [item for item in _load_custom_defs() if item.get("name") != full_name]
+            _save_custom_defs(defs)
+            _register_definitions()
         return {"ok": True, "deleted": full_name}
 
     @app.post("/sdapi/v1/openclaw/multi-sampler/preview")
@@ -713,11 +719,12 @@ def on_app_started(_: object, app: FastAPI) -> None:
         try:
             data = await request.json()
             definition = _normalize_definition({**data, "name": PREVIEW_NAME})
-            _TRANSIENT_DEFS[PREVIEW_NAME] = definition
-            _register_definitions()
             run_id = _slug(str(data.get("run_id") or f"run-{int(time.time())}"))
             snapshot_dir = SNAPSHOT_ROOT / run_id
-            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            with _LOCK:
+                _TRANSIENT_DEFS[PREVIEW_NAME] = definition
+                _register_definitions()
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
             return {"ok": True, "sampler": definition, "snapshot_dir": str(snapshot_dir), "sampler_name": PREVIEW_NAME}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}

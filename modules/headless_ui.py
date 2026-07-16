@@ -65,6 +65,8 @@ class _FallbackComponent:
     def clear(self, *args: Any, **kwargs: Any): return self
     def load(self, *args: Any, **kwargs: Any): return self
     def render(self, *args: Any, **kwargs: Any): return self
+    def preprocess(self, value: Any): return value
+    def postprocess(self, value: Any): return value
 
     def get_block_name(self):
         return self.__class__.__name__.lower()
@@ -87,6 +89,16 @@ class Block(_FallbackComponent):
 
 class BlockContext(_FallbackComponent):
     pass
+
+
+class Interface(_FallbackComponent):
+    """Minimal stand-in for gradio.Interface during API/headless startup."""
+
+    def launch(self, *args: Any, **kwargs: Any):
+        raise RuntimeError("Browser UI launch requested in headless-only build")
+
+    def close(self):
+        pass
 
 
 class Blocks(_FallbackComponent):
@@ -120,7 +132,7 @@ _COMPONENT_NAMES = {
     "ColorPicker", "Column", "Dataframe", "Dataset", "Dropdown", "File",
     "Files", "Gallery", "Group", "HTML", "HighlightedText", "Image", "Info", "JSON", "Label",
     "Markdown", "Number", "Plot", "Radio", "Row", "SelectData", "Slider", "State", "Tab", "TabItem", "Tabs",
-    "Text", "TextArea", "Textbox", "Video",
+    "Text", "TextArea", "Textbox", "UploadButton", "Video",
 }
 
 

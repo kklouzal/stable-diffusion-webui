@@ -37,6 +37,50 @@ from modules.progress import create_task_id, add_task_to_queue, start_task, fini
 _precision_map_cache_key = None
 _precision_map_cache_value = None
 
+_CONTROLNET_REMOTE_ALIAS_FIELDS = {
+    "input_image": "image",
+    "low_vram": "lowvram",
+    "processor_res": "pres",
+    "threshold_a": "pthr_a",
+    "threshold_b": "pthr_b",
+    "guidance_strength": "guidance_end",
+}
+
+
+def _normalize_controlnet_remote_aliases(args: dict[str, Any]) -> None:
+    """Normalize accepted ControlNet top-level API aliases to legacy remote-call attrs."""
+    for suffix in ("", "2", "3"):
+        for alias, canonical in _CONTROLNET_REMOTE_ALIAS_FIELDS.items():
+            alias_key = f"control_net_{alias}{suffix}"
+            canonical_key = f"control_net_{canonical}{suffix}"
+            if alias_key not in args:
+                continue
+            if args.get(canonical_key) is None:
+                args[canonical_key] = args[alias_key]
+            args.pop(alias_key, None)
+
+
+def _controlnet_remote_api_keys():
+    for suffix in ("", "2", "3"):
+        for name in (*models.CONTROL_NET_API_FIELD_TYPES, *models.CONTROL_NET_API_FIELD_ALIAS_TYPES):
+            yield f"control_net_{name}{suffix}"
+
+
+def _pop_controlnet_remote_args(args: dict[str, Any]) -> dict[str, Any]:
+    remote_args = {}
+    for key in _controlnet_remote_api_keys():
+        if key not in args:
+            continue
+        value = args.pop(key)
+        if value is not None:
+            remote_args[key] = value
+    return remote_args
+
+
+def _attach_controlnet_remote_args(p, remote_args: dict[str, Any]) -> None:
+    for key, value in remote_args.items():
+        setattr(p, key, value)
+
 
 def _precision_lora_signature(lora_networks):
     if lora_networks is None:
@@ -566,7 +610,10 @@ class Api:
         self.add_api_route("/sdapi/v1/interrogate", self.interrogateapi, methods=["POST"])
         self.add_api_route("/sdapi/v1/interrupt", self.interruptapi, methods=["POST"])
         self.add_api_route("/sdapi/v1/skip", self.skip, methods=["POST"])
-        self.add_api_route("/sdapi/v1/options", self.get_config, methods=["GET"], response_model=models.OptionsModel)
+        # Options can be registered dynamically by extensions during startup.
+        # A static response_model built at import time drops those later keys,
+        # which hides settings such as built-in Hypertile from API/headless use.
+        self.add_api_route("/sdapi/v1/options", self.get_config, methods=["GET"])
         self.add_api_route("/sdapi/v1/options", self.set_config, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.get_sdpa_backend, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.set_sdpa_backend, methods=["POST"])
@@ -936,6 +983,7 @@ class Api:
         args = vars(populate)
         for field in (*extra_pop_fields, 'script_name', 'script_args', 'alwayson_scripts', 'infotext'):
             args.pop(field, None)
+        _normalize_controlnet_remote_aliases(args)
 
         script_args = self.init_script_args(request, default_script_args, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
         script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
@@ -966,12 +1014,15 @@ class Api:
             self.default_script_arg_txt2img,
         )
 
+        controlnet_remote_args = _pop_controlnet_remote_args(args)
+
         add_task_to_queue(task_id)
         task_finished = False
 
         try:
             with self.queue_lock:
                 with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
+                    _attach_controlnet_remote_args(p, controlnet_remote_args)
                     p.is_api = True
                     p.scripts = script_runner
                     p.openclaw_script_args_to_overrides = script_args_to_overrides
@@ -1015,6 +1066,7 @@ class Api:
         )
 
         api_timing_start = time.perf_counter()
+        controlnet_remote_args = _pop_controlnet_remote_args(args)
         decoded_init_images = [decode_base64_to_image(x) for x in init_images]
         api_after_decode = time.perf_counter()
 
@@ -1024,6 +1076,7 @@ class Api:
         try:
             with self.queue_lock:
                 with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
+                    _attach_controlnet_remote_args(p, controlnet_remote_args)
                     p.init_images = decoded_init_images
                     p.is_api = True
                     p.scripts = script_runner

@@ -261,6 +261,20 @@ class DynamicThresholdingTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(out.float()).all())
 
 
+
+    def test_std_variability_handles_single_spatial_sample_without_nan(self):
+        dt = DynThresh(
+            7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 1.0, 0, 1, False, "MEAN", "STD", 1.0
+        )
+        dt.step = 0
+        uncond = torch.zeros(1, 4, 1, 1, dtype=torch.float32)
+        relative = torch.ones_like(uncond) * 0.25
+
+        out = dt.dynthresh_from_relative(relative, uncond, 9.0)
+
+        self.assertEqual(out.shape, uncond.shape)
+        self.assertTrue(torch.isfinite(out).all())
+
     def test_ragged_multicond_equivalence_with_manual_relative(self):
         dt = DynThresh(
             7.0,

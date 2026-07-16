@@ -28,6 +28,31 @@ checkpoint_alisases = checkpoint_aliases  # for compatibility with old name
 checkpoints_loaded = collections.OrderedDict()
 
 
+def _state_dict_cache_key(checkpoint_info):
+    """Return an in-memory cache key that changes when the checkpoint file changes."""
+    filename = os.path.abspath(checkpoint_info.filename)
+    try:
+        stat = os.stat(filename)
+        file_identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        file_identity = (None, None)
+
+    return (filename, file_identity, getattr(checkpoint_info, "sha256", None))
+
+
+def _cache_key_filename(cache_key):
+    if isinstance(cache_key, tuple) and cache_key:
+        return cache_key[0]
+    return os.path.abspath(getattr(cache_key, "filename", "")) if getattr(cache_key, "filename", None) else None
+
+
+def _drop_stale_state_dict_cache_entries(checkpoint_info, current_cache_key):
+    filename = os.path.abspath(checkpoint_info.filename)
+    for cache_key in list(checkpoints_loaded.keys()):
+        if cache_key != current_cache_key and _cache_key_filename(cache_key) == filename:
+            del checkpoints_loaded[cache_key]
+
+
 class ModelType(enum.Enum):
     SD1 = 1
     SD2 = 2
@@ -321,13 +346,15 @@ def read_state_dict(checkpoint_file, print_global_state=False, map_location=None
 def get_checkpoint_state_dict(checkpoint_info: CheckpointInfo, timer):
     sd_model_hash = checkpoint_info.calculate_shorthash()
     timer.record("calculate hash")
+    cache_key = _state_dict_cache_key(checkpoint_info)
+    _drop_stale_state_dict_cache_entries(checkpoint_info, cache_key)
 
-    if checkpoint_info in checkpoints_loaded:
+    if cache_key in checkpoints_loaded:
         # use checkpoint cache
         print(f"Loading weights [{sd_model_hash}] from cache")
         # move to end as latest
-        checkpoints_loaded.move_to_end(checkpoint_info)
-        return checkpoints_loaded[checkpoint_info]
+        checkpoints_loaded.move_to_end(cache_key)
+        return checkpoints_loaded[cache_key]
 
     print(f"Loading weights [{sd_model_hash}] from {checkpoint_info.filename}")
     res = read_state_dict(checkpoint_info.filename)
@@ -791,7 +818,9 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         # need a pristine state_dict because LoadStateDictOnMeta intentionally
         # mutates its input and stale/meta cache entries can later fail with
         # "Cannot copy out of meta tensor; no data!".
-        checkpoints_loaded[checkpoint_info] = state_dict.copy()
+        cache_key = _state_dict_cache_key(checkpoint_info)
+        _drop_stale_state_dict_cache_entries(checkpoint_info, cache_key)
+        checkpoints_loaded[cache_key] = state_dict.copy()
     elif mxfp8_enabled or nvfp4_enabled:
         # TorchAO quantized paths must never retain checkpoint state-dict cache
         # entries: the optimized/meta loading path can mutate cached tensors

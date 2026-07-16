@@ -658,6 +658,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
 
     @app.get("/sdapi/v1/openclaw/cond-cache")
     async def _cond_cache_status():
+        img2img_init_status = StableDiffusionProcessingImg2Img.img2img_init_cache_status()
         return {
             "ok": True,
             "last_cleared_at": _last_cleared_at,
@@ -666,9 +667,9 @@ def on_app_started(_: object, app: FastAPI) -> None:
                 "uc": StableDiffusionProcessing.cached_uc[0] is not None,
                 "hr_c": StableDiffusionProcessingTxt2Img.cached_hr_c[0] is not None,
                 "hr_uc": StableDiffusionProcessingTxt2Img.cached_hr_uc[0] is not None,
-                "img2img_init": StableDiffusionProcessing.cached_img2img_init[0] is not None,
+                "img2img_init": bool(img2img_init_status.get("cached")),
             },
-            "img2img_init": StableDiffusionProcessingImg2Img.img2img_init_cache_status(),
+            "img2img_init": img2img_init_status,
         }
 
 

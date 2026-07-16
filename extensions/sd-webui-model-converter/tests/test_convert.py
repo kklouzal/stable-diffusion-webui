@@ -79,6 +79,29 @@ class ConverterSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(FileExistsError, "overwrite"):
                 self.convert.safe_output_path(tmpdir, "model", ".safetensors")
 
+
+
+    def test_convert_single_coerces_string_booleans(self):
+        info = self.convert.MockModelInfo("/tmp/model.safetensors")
+        with mock.patch.object(self.convert, "resolve_model_info", return_value=info), mock.patch.object(self.convert, "do_convert", return_value="ok") as do_convert:
+            self.assertEqual(self.convert.convert_single({
+                "model": "model",
+                "formats": ["safetensors"],
+                "fix_clip": "false",
+                "force_position_id": "false",
+                "delete_known_junk_data": "true",
+            }), "ok")
+
+        args = do_convert.call_args.args
+        self.assertIs(args[10], False)
+        self.assertIs(args[11], False)
+        self.assertIs(args[12], True)
+
+    def test_legacy_checkpoint_load_rejects_non_mapping_payload(self):
+        with mock.patch.object(self.convert.torch, "load", return_value=["not", "a", "state_dict"]):
+            with self.assertRaisesRegex(RuntimeError, "state_dict mapping"):
+                self.convert.load_model("/tmp/model.ckpt")
+
     def test_legacy_checkpoint_load_uses_weights_only(self):
         with mock.patch.object(
             self.convert.torch,

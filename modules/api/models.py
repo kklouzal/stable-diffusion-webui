@@ -36,6 +36,52 @@ class ModelDef(BaseModel):
     field_description: Optional[str] = None
 
 
+CONTROL_NET_API_FIELD_TYPES = {
+    "enabled": bool,
+    "module": str,
+    "model": str,
+    "weight": float,
+    "image": Any,
+    "resize_mode": Any,
+    "lowvram": bool,
+    "pres": float,
+    "pthr_a": float,
+    "pthr_b": float,
+    "guidance_start": float,
+    "guidance_end": float,
+    "control_mode": Any,
+    "pixel_perfect": bool,
+}
+
+CONTROL_NET_API_FIELD_ALIAS_TYPES = {
+    # Compatibility aliases used by older ControlNet clients and newer unit
+    # schema names. modules.api.api normalizes these before processing.
+    "input_image": Any,
+    "low_vram": bool,
+    "processor_res": int,
+    "threshold_a": float,
+    "threshold_b": float,
+    "guidance_strength": float,
+}
+
+
+def control_net_api_fields():
+    """Legacy ControlNet remote API fields accepted at top level by /txt2img and /img2img.
+
+    ControlNet's legacy remote-call adapter reads these attributes from the
+    StableDiffusionProcessing object. The dynamic Pydantic request models drop
+    unknown keys, so list the compatibility fields explicitly to preserve them
+    through request.copy()/vars(populate) into processing construction.
+    """
+    fields = []
+    for suffix in ("", "2", "3"):
+        for name, field_type in CONTROL_NET_API_FIELD_TYPES.items():
+            fields.append({"key": f"control_net_{name}{suffix}", "type": field_type, "default": None})
+        for name, field_type in CONTROL_NET_API_FIELD_ALIAS_TYPES.items():
+            fields.append({"key": f"control_net_{name}{suffix}", "type": field_type, "default": None})
+    return fields
+
+
 class PydanticModelGenerator:
     """
     Takes in created classes and stubs them out in a way FastAPI/Pydantic is happy about:
@@ -116,6 +162,7 @@ StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
         {"key": "alwayson_scripts", "type": dict, "default": {}},
         {"key": "force_task_id", "type": str, "default": None},
         {"key": "infotext", "type": str, "default": None},
+        *control_net_api_fields(),
     ]
 ).generate_model()
 
@@ -135,6 +182,7 @@ StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
         {"key": "alwayson_scripts", "type": dict, "default": {}},
         {"key": "force_task_id", "type": str, "default": None},
         {"key": "infotext", "type": str, "default": None},
+        *control_net_api_fields(),
     ]
 ).generate_model()
 

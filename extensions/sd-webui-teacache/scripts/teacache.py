@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import threading
 
 import torch
 from sgm.modules.diffusionmodules.openaimodel import timestep_embedding
@@ -12,6 +13,16 @@ from modules.sd_samplers_common import setup_img2img_steps
 from modules.ui_components import InputAccordion
 
 _cache = None
+_cache_lock = threading.RLock()
+
+def _get_cache():
+    with _cache_lock:
+        return _cache
+
+def _set_cache(session):
+    global _cache
+    with _cache_lock:
+        _cache = session
 
 DEFAULT_THRESHOLD = 0.25
 DEFAULT_MAX_CONSECUTIVE = 4
@@ -103,8 +114,20 @@ def _call_signature(
     )
 
 
+def _call_original_forward(unet, x, timesteps=None, context=None, y=None, **kwargs) -> torch.Tensor:
+    original_forward = getattr(unet, "_openclaw_teacache_original_forward", None)
+    if original_forward is None:
+        raise RuntimeError("TeaCache patched forward has no active cache or original forward")
+    return original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
+
+
 def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
     return any(getattr(p, name, None) is not None for name in ("mask", "nmask", "image_mask"))
+
+
+def _has_external_unet_forward_hook(p: processing.StableDiffusionProcessing) -> bool:
+    unet = getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None)
+    return getattr(unet, "_original_forward", None) is not None
 
 
 class TeaCacheSession:
@@ -264,6 +287,8 @@ class TeaCacheScript(scripts.Script):
         disabled_reason = ""
         if not getattr(p.sd_model, "is_sdxl", False):
             disabled_reason = "non-SDXL model"
+        elif _has_external_unet_forward_hook(p):
+            disabled_reason = "external UNet forward hook"
         elif _has_masked_denoising(p):
             disabled_reason = "masked/inpaint denoising"
 
@@ -277,7 +302,7 @@ class TeaCacheScript(scripts.Script):
             total_steps = getattr(p, "hr_second_pass_steps", 0) or p.steps
             total_steps, steps = setup_img2img_steps(p, total_steps)  # hires fix doesn't reduce steps
             initial_step = total_steps - steps
-        _cache = TeaCacheSession(threshold, max_consecutive, start, end, max(1, total_steps), initial_step, disabled_reason)
+        _set_cache(TeaCacheSession(threshold, max_consecutive, start, end, max(1, total_steps), initial_step, disabled_reason))
 
         # set infotext
         p.extra_generation_params["TeaCache threshold"] = threshold
@@ -303,7 +328,7 @@ class TeaCacheScript(scripts.Script):
         if hasattr(unet, "_openclaw_teacache_original_forward"):
             delattr(unet, "_openclaw_teacache_original_forward")
         self.original_forward = None
-        _cache = None
+        _set_cache(None)
 
 
 def patched_forward(
@@ -323,11 +348,15 @@ def patched_forward(
     :return: an [N x C x ...] Tensor of outputs.
     """
 
-    global _cache
+    cache = _get_cache()
 
     assert (y is not None) == (
         self.num_classes is not None
     ), "must specify y if and only if the model is class-conditional"
+
+    if cache is None or cache.disabled_reason or kwargs or getattr(self, "_original_forward", None) is not None:
+        return _call_original_forward(self, x, timesteps=timesteps, context=context, y=y, **kwargs)
+
     hs = []
     t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
     emb = self.time_embed(t_emb)
@@ -345,19 +374,12 @@ def patched_forward(
     h = self.input_blocks[1](h, emb, context)
     hs.append(h)
 
-    # check cache condition
-    if _cache is None:
-        original_forward = getattr(self, "_openclaw_teacache_original_forward", None)
-        if original_forward is None:
-            raise RuntimeError("TeaCache patched forward has no active cache or original forward")
-        return original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
-
     signature = _call_signature(h, timesteps, context, y, kwargs)
     first_block_residual = h - original_h
-    _cache.update_condition(first_block_residual, signature)
+    cache.update_condition(first_block_residual, signature)
 
     # use cache or call full model
-    cached_residual = _cache.current_residual(signature)
+    cached_residual = cache.current_residual(signature)
     if cached_residual is not None:
         h = h + cached_residual
     else:
@@ -370,11 +392,11 @@ def patched_forward(
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
 
-        if _cache.call_index == 0:
-            _cache.consecutive_hits = 0
-        _cache.store_current_residual(signature, h - original_h)
+        if cache.call_index == 0:
+            cache.consecutive_hits = 0
+        cache.store_current_residual(signature, h - original_h)
 
-    _cache.call_index += 1
+    cache.call_index += 1
 
     h = h.to(dtype=x.dtype)
 
@@ -382,9 +404,9 @@ def patched_forward(
 
 
 def next_step(*args):
-    global _cache
-    if _cache is not None:
-        _cache.next_step()
+    cache = _get_cache()
+    if cache is not None:
+        cache.next_step()
 
 
 script_callbacks.on_cfg_after_cfg(next_step)

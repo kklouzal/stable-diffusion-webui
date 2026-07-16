@@ -114,8 +114,8 @@ class DynThresh:
 
         if self.sep_feat_channels:
             if self.variability_measure == 'STD':
-                mim_scaleref = mim_centered.std(dim=2).unsqueeze(2)
-                cfg_scaleref = cfg_centered.std(dim=2).unsqueeze(2)
+                mim_scaleref = mim_centered.std(dim=2, unbiased=False).unsqueeze(2)
+                cfg_scaleref = cfg_centered.std(dim=2, unbiased=False).unsqueeze(2)
             else: # 'AD'
                 mim_scaleref = mim_centered.abs().amax(dim=2).unsqueeze(2)
                 cfg_abs = cfg_centered.abs()
@@ -125,8 +125,8 @@ class DynThresh:
                     cfg_scaleref = torch.quantile(cfg_abs, self.threshold_percentile, dim=2).unsqueeze(2)
         else:
             if self.variability_measure == 'STD':
-                mim_scaleref = mim_centered.std()
-                cfg_scaleref = cfg_centered.std()
+                mim_scaleref = mim_centered.std(unbiased=False)
+                cfg_scaleref = cfg_centered.std(unbiased=False)
             else: # 'AD'
                 mim_scaleref = mim_centered.abs().amax()
                 cfg_abs = cfg_centered.abs()

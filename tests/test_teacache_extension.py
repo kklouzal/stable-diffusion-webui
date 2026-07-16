@@ -203,6 +203,114 @@ def test_masked_denoising_disables_cache():
     assert not teacache._has_masked_denoising(p)
 
 
+def test_external_unet_forward_hook_is_detected():
+    teacache = load_teacache_module()
+    p = types.SimpleNamespace(
+        sd_model=types.SimpleNamespace(
+            model=types.SimpleNamespace(diffusion_model=types.SimpleNamespace(_original_forward=object()))
+        )
+    )
+
+    assert teacache._has_external_unet_forward_hook(p)
+    assert not teacache._has_external_unet_forward_hook(types.SimpleNamespace())
+
+
+class _GuardLock:
+    def __init__(self):
+        self.depth = 0
+        self.entries = 0
+
+    def __enter__(self):
+        self.depth += 1
+        self.entries += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.depth -= 1
+
+
+def test_global_session_accessors_are_lock_guarded():
+    teacache = load_teacache_module()
+    guard = _GuardLock()
+    teacache._cache_lock = guard
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+
+    teacache._set_cache(session)
+    assert teacache._get_cache() is session
+    teacache._set_cache(None)
+
+    assert guard.entries == 3
+    assert guard.depth == 0
+
+
+def test_api_generation_paths_hold_queue_lock_for_teacache_global_state():
+    source = Path(__file__).resolve().parents[1].joinpath("modules/api/api.py").read_text()
+    text2img = source[source.index("    def text2imgapi"):source.index("    def img2imgapi")]
+    img2img = source[source.index("    def img2imgapi"):source.index("    def _run_extras")]
+
+    assert "with self.queue_lock:" in text2img
+    assert "processed = self._run_generation_with_scripts" in text2img
+    assert text2img.index("with self.queue_lock:") < text2img.index("processed = self._run_generation_with_scripts")
+    assert "with self.queue_lock:" in img2img
+    assert "processed = self._run_generation_with_scripts" in img2img
+    assert img2img.index("with self.queue_lock:") < img2img.index("processed = self._run_generation_with_scripts")
+
+
+def test_patched_forward_falls_back_to_original_when_session_disabled():
+    teacache = load_teacache_module()
+    x = torch.zeros((1, 1), dtype=torch.float32)
+    timesteps = torch.zeros((1,), dtype=torch.float32)
+    calls = []
+
+    def original_forward(x_arg, timesteps=None, context=None, y=None, **kwargs):
+        calls.append((x_arg, timesteps, context, y, kwargs))
+        return x_arg + 2
+
+    unet = types.SimpleNamespace(
+        num_classes=None,
+        _openclaw_teacache_original_forward=original_forward,
+    )
+    teacache._cache = teacache.TeaCacheSession(
+        threshold=1.0,
+        max_consecutive=0,
+        start=0.0,
+        end=1.0,
+        steps=10,
+        disabled_reason="external UNet forward hook",
+    )
+    try:
+        result = teacache.patched_forward(unet, x, timesteps=timesteps)
+    finally:
+        teacache._cache = None
+
+    torch.testing.assert_close(result, x + 2)
+    assert calls == [(x, timesteps, None, None, {})]
+
+
+def test_patched_forward_falls_back_to_original_for_conditioning_kwargs():
+    teacache = load_teacache_module()
+    x = torch.zeros((1, 1), dtype=torch.float32)
+    timesteps = torch.zeros((1,), dtype=torch.float32)
+    calls = []
+
+    def original_forward(x_arg, timesteps=None, context=None, y=None, **kwargs):
+        calls.append(kwargs)
+        return x_arg + 3
+
+    unet = types.SimpleNamespace(
+        num_classes=None,
+        _openclaw_teacache_original_forward=original_forward,
+    )
+    teacache._cache = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    try:
+        result = teacache.patched_forward(unet, x, timesteps=timesteps, transformer_options={"control": True})
+    finally:
+        teacache._cache = None
+
+    torch.testing.assert_close(result, x + 3)
+    assert calls == [{"transformer_options": {"control": True}}]
+
+
 if __name__ == "__main__":
     test_normalize_args_clamps_and_orders_range()
     test_relative_l1_distance_handles_zero_baseline()
@@ -213,3 +321,8 @@ if __name__ == "__main__":
     test_session_isolates_cache_by_call_signature()
     test_session_window_and_max_consecutive_are_quality_guards()
     test_masked_denoising_disables_cache()
+    test_external_unet_forward_hook_is_detected()
+    test_global_session_accessors_are_lock_guarded()
+    test_api_generation_paths_hold_queue_lock_for_teacache_global_state()
+    test_patched_forward_falls_back_to_original_when_session_disabled()
+    test_patched_forward_falls_back_to_original_for_conditioning_kwargs()

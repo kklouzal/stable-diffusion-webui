@@ -667,3 +667,251 @@ Remaining validation gaps and environment constraints:
 
 Final status:
 - Audit scope is complete for the named broad source review. No further source-audit slice is recommended unless a real runtime test environment is provisioned or new failing evidence appears.
+
+## Slice 6 owned extension/controller audit — 2026-07-16 UTC
+
+Baseline SHAs at slice start remained:
+- WebUI: `/home/kklouzal/stable-diffusion-webui` branch `latest` HEAD `21eeaafc2b80f0153d3064eec3e21abc9e03c1fe`.
+- Controller: `/home/kklouzal/a1111-controller` branch `main` HEAD `92f6ab02c33f3ad998f5054e72009a9ace2c1be5`.
+
+Scope completed in this slice:
+- Line-by-line audit of remaining GB10-owned extension surfaces: `sd-webui-incantations` (Dynamic Thresholding/CFG-Fix, PAG, SEG, CFG combiner, module hook glue, UI wrapper, JavaScript badge helper) and `sd-webui-model-converter` (conversion math, dtype/device/shape handling, file safety, API/UI callback contracts, serialization/metadata, LoRA doctor/repair path, tests).
+- Rechecked uncovered paths in `openclaw-clear-cond-cache`, `openclaw-denoise-ramp`, `openclaw-multi-sampler`, and `sd-webui-teacache`, especially cache target normalization, img2img init-cache lock/status behavior, generation queue locking, custom sampler registry locks, TeaCache global cache lock, disabled/fallback paths, dtype/device math, and tests.
+- Audited `/home/kklouzal/a1111-controller/app.py` and `templates/index.html` extension-management contracts for model merge/model converter state, preset/snapshot/PNG import/export adjacency, stale UI state, default/range mismatches, bool/number coercion, async job state, viewport CSS, and API error handling.
+- Ran repository-wide static searches over owned/custom code for deprecated/removed APIs and suspicious patterns: `np.bool/int/float/object`, old Pillow constants, `gr.update`, Pydantic v1/v2 boundaries, `@app.on_event`, bare exceptions, unsafe tensor/array truthiness, `torch.std`/quantile/division risk, `torch.load`, pickle/yaml/eval/exec, mutable globals/defaults, global mutation, `.cpu()/.numpy()`, JS `Number(...)`, `parseInt/parseFloat`, `JSON.parse`, `localStorage`, cache/lock/global patterns. Hits were manually triaged; changes below are the confirmed issues only.
+
+Fixes made in this slice:
+- `extensions/sd-webui-incantations/dynthres_core.py`: Dynamic Thresholding `STD` variability now uses `torch.std(..., unbiased=False)` for both per-channel and whole-latent reductions. This prevents PyTorch degrees-of-freedom warnings and NaN scaling for single-spatial-sample/tiny latent tensors while preserving dtype/device behavior.
+- `extensions/sd-webui-incantations/scripts/dynamic_thresholding.py`: CFG rescale experiment path now uses population std (`unbiased=False`) for both denominator and reference std, avoiding NaN/DoF behavior for degenerate samples.
+- `extensions/sd-webui-model-converter/scripts/convert.py`: `load_model()` now rejects non-mapping checkpoint payloads explicitly after safe `weights_only=True` load; `convert_single()` and LoRA cleanup now normalize string booleans instead of treating strings like `"false"` as truthy.
+- `test/test_openclaw_cache_invalidation.py`: cache regression harness now initializes A1111 shared options through `modules.shared_init.initialize()` before importing processing/cache modules. This makes the suite executable in a dependency-complete transient A1111 environment rather than relying on partially imported globals.
+- `/home/kklouzal/a1111-controller/app.py`: model-merge and model-converter API normalization now uses `_coerce_bool()` for API string booleans and validates converter mode/pruning/LoRA precision before launching work.
+- `/home/kklouzal/a1111-controller/test/test_multi_sampler_preset_template.py`: retired the stale model-merge viewport CSS assertion and replaced it with assertions for the current real contract (`#modelMergePanel` column shell, shell-local vertical scroll, max-content grid rows, non-scroll inner settings grid).
+- Added/updated tests in `extensions/sd-webui-incantations/tests/test_guidance_core.py`, `extensions/sd-webui-model-converter/tests/test_convert.py`, `/home/kklouzal/a1111-controller/test/test_model_management.py`, and `/home/kklouzal/a1111-controller/test/test_multi_sampler_preset_template.py`.
+
+Coverage ledger for this slice (`audited` = inspected in this slice and either fixed or triaged no-change):
+- `extensions/openclaw-clear-cond-cache/README.md` — audited/no change.
+- `extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py` — audited/no new change beyond existing WIP.
+- `extensions/openclaw-clear-cond-cache/tests/test_openclaw_clear_cond_cache.py` — audited/no change.
+- `extensions/openclaw-denoise-ramp/scripts/openclaw_denoise_ramp.py` — audited/no new change beyond existing WIP.
+- `extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py` — audited/no new change beyond existing WIP.
+- `extensions/openclaw-multi-sampler/scripts/openclaw_multi_sampler.py` — audited/no new change beyond existing WIP.
+- `extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py` — audited/no new change beyond existing WIP.
+- `extensions/sd-webui-incantations/dynthres_core.py` — audited/fixed.
+- `extensions/sd-webui-incantations/dynthres_unipc.py` — audited/no change.
+- `extensions/sd-webui-incantations/javascript/dynthres_active.js` — audited/no change.
+- `extensions/sd-webui-incantations/README.md` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/cfg_combiner.py` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/dynamic_thresholding.py` — audited/fixed.
+- `extensions/sd-webui-incantations/scripts/incantation_base.py` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/incant_utils/module_hooks.py` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/pag.py` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/smoothed_energy_guidance.py` — audited/no change.
+- `extensions/sd-webui-incantations/scripts/ui_wrapper.py` — audited/no change.
+- `extensions/sd-webui-incantations/tests/test_guidance_core.py` — audited/test added.
+- `extensions/sd-webui-model-converter/README.md` — audited/no change.
+- `extensions/sd-webui-model-converter/scripts/convert.py` — audited/fixed.
+- `extensions/sd-webui-model-converter/scripts/ui.py` — audited/no change.
+- `extensions/sd-webui-model-converter/tests/test_convert.py` — audited/tests added.
+- `extensions/sd-webui-teacache/README.md` — audited/no change.
+- `extensions/sd-webui-teacache/scripts/teacache.py` — audited/no new change beyond existing WIP.
+- `extensions/sd-webui-teacache/tests/test_teacache_session.py` — audited/no change.
+- `modules/api/api.py` — audited/no new change beyond existing WIP.
+- `modules/api/models.py` — audited/no new change beyond existing WIP.
+- `modules/headless_ui.py` — audited/no new change beyond existing WIP.
+- `modules/openclaw_cuda_graphs.py` — audited/no new change beyond existing WIP.
+- `modules/processing.py` — audited/no new change beyond existing WIP; internal img2img init cache bool payload is stored as a bool in the guarded cache payload.
+- `tests/test_teacache_extension.py` — audited/no new change beyond existing WIP.
+- `test/test_openclaw_cache_invalidation.py` — audited/fixed harness.
+- `webui.py` — audited/no new change beyond existing WIP.
+- `/home/kklouzal/a1111-controller/app.py` — audited/fixed.
+- `/home/kklouzal/a1111-controller/templates/index.html` — audited/no template code change; CSS contract verified by updated test.
+- `/home/kklouzal/a1111-controller/tests/test_controlnet_payload.py` — audited/no change.
+- `/home/kklouzal/a1111-controller/test/test_lora_normalization.py` — audited/no change.
+- `/home/kklouzal/a1111-controller/test/test_model_management.py` — audited/tests added.
+- `/home/kklouzal/a1111-controller/test/test_multi_sampler_preset_template.py` — audited/stale CSS assertion fixed.
+- `/home/kklouzal/a1111-controller/test/test_teacache_payload.py` — audited/no change.
+
+Validation run:
+- Controller: `cd /home/kklouzal/a1111-controller && .venv/bin/python -m pytest -q` -> `52 passed in 1.07s`.
+- WebUI dependency-complete transient harness: `docker run --rm --network none --entrypoint bash -e PYTHONDONTWRITEBYTECODE=1 -v /home/kklouzal/stable-diffusion-webui:/hostrepo:ro -v /home/kklouzal/a1111-controller/.venv/lib/python3.12/site-packages:/pytest-site:ro local/gb10-a1111:latest -lc "set -e; cp -a /opt/stable-diffusion-webui /tmp/work; cp -a /hostrepo/. /tmp/work/; cd /tmp/work; PYTHONPATH=/pytest-site python -m pytest -q test/test_openclaw_cache_invalidation.py tests/test_teacache_extension.py extensions/openclaw-clear-cond-cache/tests/test_openclaw_clear_cond_cache.py extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py extensions/sd-webui-model-converter/tests/test_convert.py extensions/sd-webui-incantations/tests/test_guidance_core.py extensions/sd-webui-teacache/tests/test_teacache_session.py"` -> `78 passed, 46 warnings, 6 subtests passed in 8.28s`.
+- Compile/diff: transient container `py_compile` for touched WebUI files/tests passed; controller `.venv/bin/python -m py_compile app.py test/test_model_management.py test/test_multi_sampler_preset_template.py` passed; `git diff --check` passed in both repos.
+
+Warnings/triage notes:
+- Warnings-as-errors was not practical for the full transient WebUI suite because current dependencies emit external deprecation/compatibility warnings (`torch.jit.script` deprecation, `jsonschema.RefResolver`, and a requests dependency version warning from the mounted pytest site-packages). No new GB10-owned warning was observed in the focused results.
+- Static-search residual hits in owned/custom code are either intentional API/compatibility paths, already-normalized `_coerce_bool()`/internal bool summaries, NumPy dtype conversions (not removed aliases), or test scaffolding. No additional confirmed defect was patched.
+- No live generation, rebuild, redeploy, restart, commit, or push was performed.
+
+Continuation assessment:
+- For the owned extension/controller surfaces assigned in this slice, no further audit slice is required before integration based on current evidence and passing focused regressions.
+- Broader non-extension A1111 core surfaces remain outside this slice and are still listed in earlier audit-continuation notes; those should remain separate if Schwi wants truly repository-wide core coverage beyond GB10-owned/custom surfaces.
+
+## Slice 7 core generation pipeline audit pass — 2026-07-16 UTC
+
+Baseline/status:
+- A1111 repo: `/home/kklouzal/stable-diffusion-webui`, branch `latest`, HEAD `21eeaafc2b80f0153d3064eec3e21abc9e03c1fe` at slice start.
+- Controller repo inspected only for status: `/home/kklouzal/a1111-controller`, branch `main`, HEAD `92f6ab02c33f3ad998f5054e72009a9ace2c1be5`; no controller edits.
+- Existing dirty WIP was preserved. New slice-7 code/test edits are limited to `modules/sd_samplers_kdiffusion.py` and `test/test_openclaw_kdiffusion_sigmas_cache.py`; this ledger was appended.
+- Runtime package evidence from `gb10-a1111-latest`: Python 3.12.3, torch `2.14.0.dev20260709+cu132`, CUDA 13.2, numpy 2.5.1, pydantic 1.10.26, transformers 5.13.0, open_clip_torch 3.3.0, safetensors 0.8.0, fastapi 0.94.0. `pytest` is not installed in the image, so focused tests were run through `unittest`/direct scripts.
+
+Path-level coverage ledger (slice-7 static/manual pass):
+- Deep/line-focused: `modules/sd_schedulers.py`, `modules/sd_samplers_kdiffusion.py`, `modules/sd_samplers_timesteps.py`, `modules/sd_samplers_timesteps_impl.py`, `modules/sd_samplers_common.py`, `modules/sd_samplers_cfg_denoiser.py`, `modules/processing.py` core conditioning/init/sample/decode/highres/img2img sections, `modules/prompt_parser.py`, `modules/devices.py`.
+- Scoped static grep/API/deprecation coverage: `modules/processing_scripts/{comments.py,refiner.py,sampler.py,seed.py}`, `modules/sd_samplers.py`, `modules/sd_samplers_extra.py`, `modules/sd_samplers_lcm.py`, `modules/sd_samplers_compvis.py`, `modules/sd_hijack*.py`, `modules/sd_models*.py`, `modules/lowvram.py`, `modules/shared_state.py`, `modules/api/{api.py,models.py}`.
+- Expected scoped file absent in this fork: `modules/generation_parameters_copypaste.py`.
+- Static searches covered timestep/sigma arithmetic, scheduler conversions, `steps`/`t_enc` boundaries, seed/subseed indexing, tensor truthiness, `.item()`/CPU sync sites, dtype/device/autocast transitions, cache key inputs, deprecated NumPy/Torch APIs, `torch.load`/checkpoint loading, and prompt/conditioning shape paths.
+
+Confirmed finding fixed:
+- Severity: high correctness for model-switch sessions using cached K-diffusion schedules.
+- Evidence: `KDiffusionSampler.get_sigmas()` cached schedule tensors by sampler/scheduler/steps/options and sigma endpoints, but omitted model schedule identity. The `Align Your Steps` scheduler chooses different base sigma tables from `shared.sd_model.is_sdxl`; other inner-model schedulers can also depend on checkpoint/timestep mapping beyond endpoints. After an SD1.x/SD2 model generated an AYS cache entry, switching to SDXL with the same sampler/scheduler/steps/options could reuse the stale non-SDXL sigma table.
+- Remediation: added `_model_schedule_cache_signature()` to `modules/sd_samplers_kdiffusion.py` and included checkpoint identity, SDXL/SD2 flags, parameterization, and inner-model sigma shape/endpoints in the `kdiffusion_sigmas` cache params.
+- Regression: new `test/test_openclaw_kdiffusion_sigmas_cache.py` stubs K-diffusion/A1111 modules, forces an AYS-like scheduler to return different sigmas for SD1.x vs SDXL, and verifies the cache misses twice and returns the correct per-model tensor.
+
+Validation:
+- `docker run --rm --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/work -w /work local/gb10-a1111:latest -lc "python test/test_openclaw_kdiffusion_sigmas_cache.py && python test/test_openclaw_schedulers.py && python tests/test_openclaw_generation_profile.py"` -> passed, 1 + 6 + 7 tests OK.
+- `docker run --rm --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/work -v /tmp/gb10_slice7_pycompile.py:/tmp/gb10_slice7_pycompile.py:ro -w /work local/gb10-a1111:latest -lc "python /tmp/gb10_slice7_pycompile.py"` -> `py_compile ok 14` for the edited sampler plus critical processing/scheduler/model/device files.
+- `git diff --check -- modules/sd_samplers_kdiffusion.py test/test_openclaw_kdiffusion_sigmas_cache.py .openclaw-audit/gb10-a1111-latest-math-logic-audit.md` -> passed.
+
+Unresolved / next prioritized core slice:
+- This pass began the broader non-extension audit and fixed the confirmed K-diffusion cache invalidation defect. Remaining high-value coverage should continue with a second pass over the full `modules/processing.py` highres/img2img resize/mask decode tail, `modules/sd_models.py` checkpoint/VAE reload lifecycle under dirty WIP, and full `modules/sd_hijack_optimizations.py` attention backend shape/chunk math. No live generation, rebuild, redeploy, restart, commit, or push was performed.
+- Additional safe non-generation script smoke: `docker run --rm --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/work -w /work local/gb10-a1111:latest -lc "python test/test_infotext_api_mappings.py && echo infotext_ok && python test/test_api_script_defaults.py && echo api_script_defaults_ok"` -> `infotext_ok`, `api_script_defaults_ok`.
+- External dependency warning: `test/test_openclaw_multi_sampler.py` could not be run by direct Python in the runtime image because it imports `pytest`, and the image reports `/usr/local/bin/python: No module named pytest`.
+
+### 2026-07-16 pass 25 - core slice 8 processing/model/VAE/attention lifecycle audit
+Baseline and preservation:
+- Authoritative tree: GB10 `/home/kklouzal/stable-diffusion-webui`, branch `latest`, HEAD `21eeaafc2b80f0153d3064eec3e21abc9e03c1fe` at start of slice.
+- Pre-existing dirty WIP was preserved. This slice intentionally touched only `modules/sd_models.py`, `modules/sd_vae.py`, `modules/sd_hijack_optimizations.py`, `test/test_openclaw_cache_invalidation.py`, new `test/test_openclaw_attention_slice_bounds.py`, and this audit note.
+
+Path-level coverage:
+- `modules/processing.py`: reviewed prompt setup/cache keys, seed/subseed batching, infotext metadata, VAE encode/decode/NaN fallback, txt2img high-res target sizing/truncation/second-pass conditioning, img2img full-res mask/crop/paste/overlay/color-correction path, latent mask resize, image-conditioning branches, img2img init-cache key/restore/store lifecycle. No new code change here in this slice; prior img2img init-cache WIP remains intact.
+- `modules/sd_models.py`: reviewed checkpoint identity/aliasing, safetensors/ckpt state-dict loading, checkpoint state-dict cache, TorchAO MXFP8/NVFP4 forced reload/cache bypass, model reuse/reload/switch, device movement, VAE handoff, token merging, and config repair.
+- `modules/sd_models_config.py`: reviewed config inference probes and state-dict heuristics for SD1/SD2/SDXL/SD3/SSD/v-parameterization. No confirmed defect changed.
+- `modules/sd_vae.py` and `modules/sd_vae_approx.py`: reviewed VAE resolution order, base-VAE storage/restore, VAE state-dict cache, dtype movement, reload lifecycle, and approx decoder load. `sd_vae_approx.py` already uses `torch.load(..., weights_only=True)`.
+- `modules/sd_hijack_optimizations.py` and `modules/sub_quadratic_attention.py`: reviewed SDP backend selection, Torch 2.14 `torch.nn.attention.sdpa_kernel` use, Doggettx/InvokeAI/sub-quadratic/sdp tensor reshaping, mask handling, chunk sizing, upcast/autocast, and AttnBlock paths.
+
+Findings and fixes:
+- Fixed stale checkpoint state-dict reuse after a checkpoint file changes at the same `CheckpointInfo` identity. `get_checkpoint_state_dict()` calculated a fresh shorthash but still keyed `checkpoints_loaded` by the `CheckpointInfo` object, so a replaced/modified checkpoint could return the old cached state dict. Cache keys now include absolute filename, `(mtime_ns, size)`, and current sha256; stale entries for the same path are dropped before lookup/store.
+- Fixed stale VAE cache reuse after a VAE file changes at the same path. The in-memory VAE cache was keyed only by `vae_file`; it now keys by absolute filename plus `(mtime_ns, size)` and drops stale same-path entries before lookup/store.
+- Fixed a Doggettx split-attention chunking edge case. When the memory estimator selected more `steps` than query tokens but not enough to trip the `steps > 64` OOM guard, `slice_size = q.shape[1] // steps` could become zero and crash `range(...)`. Slice size is now clamped to at least 1.
+
+Deprecation/API evidence:
+- Verified inside `local/gb10-a1111:latest`: Torch reports `2.14.0.dev20260709+cu132`; `torch.nn.attention.sdpa_kernel(backends, set_priority=False)` is available.
+- Verified old `torch.backends.cuda.sdp_kernel(...)` emits a `FutureWarning` directing users to `torch.nn.attention.sdpa_kernel()`; code search found no in-scope uses of the deprecated CUDA context manager in `modules/`, `extensions/`, `test/`, or `tests/`.
+- Added/ran an SDPA smoke test with `sdpa_backend_override="math"` and warnings captured; no `FutureWarning` was emitted by the current implementation.
+
+Validation:
+- `docker run --rm --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/work -w /opt/stable-diffusion-webui/repositories/stable-diffusion-stability-ai -e PYTHONPATH=/work:/opt/stable-diffusion-webui local/gb10-a1111:latest -lc "python -m py_compile /work/modules/sd_models.py /work/modules/sd_vae.py /work/modules/processing.py /work/modules/sd_models_config.py /work/modules/sd_vae_approx.py /work/modules/sd_hijack_optimizations.py /work/modules/sub_quadratic_attention.py /work/test/test_openclaw_cache_invalidation.py && python /tmp/run_slice8_tests.py"` -> passed selected cache/processing regression functions, including the new checkpoint and VAE cache invalidation tests plus img2img init-cache lock/key tests. The runtime image still lacks `pytest`, so this was a direct fixture shim rather than full pytest collection.
+- `docker run --rm --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/work -w /opt/stable-diffusion-webui/repositories/stable-diffusion-stability-ai -e PYTHONPATH=.:/opt/stable-diffusion-webui/repositories/generative-models:/work:/opt/stable-diffusion-webui local/gb10-a1111:latest -lc "python -m py_compile /work/modules/sd_hijack_optimizations.py /work/test/test_openclaw_attention_slice_bounds.py && python /work/test/test_openclaw_attention_slice_bounds.py"` -> passed `PASS attention slice bounds and SDPA deprecation smoke`.
+- `python -m pytest ...` was attempted in the runtime image and blocked by `/usr/local/bin/python: No module named pytest` (known image limitation from earlier slices).
+
+Remaining lanes / next slice:
+- This is not a full end-to-end completion. Remaining core/build/runtime lanes include full pytest-capable collection in a dependency-complete test image, real CUDA generation smoke for checkpoint/VAE reload transitions, live img2img/inpaint visual regression, broader `modules/processing.py` refiner/control-extension interactions, and adjacent sampler/upscaler/postprocessing extension audits not covered by this bounded pass.
+
+## 2026-07-16 core slice 9 — dependency-complete tests + isolated CUDA runtime validation
+
+Scope: continued audit on authoritative GB10 checkout `/home/kklouzal/stable-diffusion-webui` (`latest`, baseline HEAD `21eeaafc2b80f0153d3064eec3e21abc9e03c1fe`) using local image `local/gb10-a1111:latest` (`386b6875a7a9`). Live production container `gb10-a1111-latest` was inspected only; it was not restarted, reconfigured, or port-published against.
+
+Disposable validation environment:
+- Pytest containers were launched with `--rm --gpus all --entrypoint bash`, canonical source bind-mounted at `/opt/stable-diffusion-webui`, pytest/pytest-mock installed only into `/tmp/a1111-test-venv --system-site-packages`, and live model/config mounts reused read-only except source and test scratch.
+- CUDA/API smoke container: `oc-a1111-slice9-runtime-20260716035427`, image digest `sha256:386b6875a7a9480108c5d779034c035d84d42ac717b961d1ea031ed367281cff`, no published ports, internal API on `127.0.0.1:17860`, source overlaid, image-baked `repositories/` copied to `/tmp/oc-slice9/repositories-image:ro`, ControlNet model directory mounted read-only at `extensions/sd-webui-controlnet/models`, outputs isolated under `/tmp/oc-slice9/outputs`. Container logs/state/stats were saved under `/tmp/oc-slice9/` and the disposable runtime container was removed after validation.
+- GB10 GPU identity during validation: `torch 2.14.0.dev20260709+cu132`, CUDA available, device `NVIDIA GB10`. `nvidia-smi` on GB10 reports process memory but total/used query fields are partly `N/A`; saved raw output at `/tmp/oc-slice9/nvidia_smi_after.txt`.
+
+Commands/gates:
+- Environment probe: `docker run --rm --name oc-a1111-slice9-probe-* --gpus all --entrypoint bash -v /home/kklouzal/stable-diffusion-webui:/opt/stable-diffusion-webui -w /opt/stable-diffusion-webui local/gb10-a1111:latest -lc 'python ... import torch/pytest'` -> CUDA true, pytest absent from base image as expected.
+- Focused dependency-complete pytest gate after fix:
+  - `python -m pytest -q tests --ignore=tests/test_processing_auxiliary_infotext_alignment.py --ignore=tests/test_upscaler_tiling_contract.py --ignore=tests/test_ui_extensions_contract.py extensions/openclaw-clear-cond-cache/tests extensions/openclaw-denoise-ramp/tests extensions/openclaw-multi-sampler/tests extensions/sd-webui-incantations/tests extensions/sd-webui-teacache/tests extensions/sd-webui-controlnet/unit_tests/args_test.py`
+  - Result: `159 passed, 2 warnings in 2.85s`.
+- Recent-fix focused gate:
+  - `python -m pytest -q tests/test_openclaw_generation_profile.py tests/test_teacache_extension.py extensions/sd-webui-teacache/tests/test_teacache_session.py extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py extensions/openclaw-clear-cond-cache/tests/test_openclaw_clear_cond_cache.py`
+  - Result: `33 passed, 1 warning in 2.44s`.
+- API regression gate:
+  - `python -m pytest -q tests/test_controlnet_legacy_api_fields.py tests/test_api_listing_contract.py tests/test_api_extension_item_contract.py`
+  - Result: `11 passed, 1 warning in 0.12s`.
+- Syntax gate: `python3 -m py_compile modules/api/api.py tests/test_controlnet_legacy_api_fields.py` -> `py_compile_ok`.
+- Full same-process collection note:
+  - `python -m pytest -q tests extensions/openclaw-clear-cond-cache/tests extensions/openclaw-denoise-ramp/tests extensions/openclaw-multi-sampler/tests extensions/sd-webui-incantations/tests extensions/sd-webui-teacache/tests extensions/sd-webui-controlnet/unit_tests/args_test.py`
+  - Current result: `169 passed, 4 failed, 2 warnings in 2.61s`. Failures are test-harness/static-assertion issues, not runtime regressions exposed by the smoke pass: stale source-string expectation in `tests/test_processing_auxiliary_infotext_alignment.py::test_img2img_init_cache_helpers_share_payload_and_stats_boundaries`, and same-process `sys.modules` pollution/import-stub ordering affecting `tests/test_ui_extensions_contract.py` and `tests/test_upscaler_tiling_contract.py`. The isolated/relevant gates above pass.
+
+Confirmed product defect found and remediated:
+- Symptom: every `/sdapi/v1/txt2img` runtime smoke initially failed immediately with HTTP 500 `StableDiffusionProcessingTxt2Img.__init__() got an unexpected keyword argument 'control_net_enabled'`. This happened even for baseline txt2img because ControlNet top-level legacy API fields are part of the generated Pydantic API model with default `None`; they were left in `args` and passed into `StableDiffusionProcessing*` constructors.
+- Fix: `modules/api/api.py` now normalizes ControlNet remote aliases, pops all ControlNet remote API fields out of constructor kwargs, and reattaches only non-`None` remote fields onto the processing object for the ControlNet extension to read. This preserves legacy top-level ControlNet API compatibility without poisoning baseline txt2img/img2img constructor kwargs.
+- Regression coverage: `tests/test_controlnet_legacy_api_fields.py` now asserts `_pop_controlnet_remote_args(args)`, `_attach_controlnet_remote_args(p, controlnet_remote_args)`, and `value = args.pop(key)` are present in the API path, in addition to the prior alias/field contract checks.
+
+CUDA/API smoke results (`/tmp/oc-slice9/artifacts/smoke_summary.json`, log `/tmp/oc-slice9/smoke_run.log`): all 14 cases succeeded. Settings common unless noted: prompt `slice9 audit smoke: small crystal fox, clean lines`, negative `low quality, blurry`, sampler `Euler`, scheduler `Karras`, 512x512, 4 steps, cfg 5.5, batch 1, deterministic seeds below.
+
+| Case | Seed | Runtime | Output sha256 prefix(es) | Notes |
+|---|---:|---:|---|---|
+| `txt2img_baseline` | 911991 | 62.418s | `95329546941ed605` | First-load SDXL generation on `MM_R2.safetensors`; VAE `ftasticVAE_v10.safetensors`. |
+| `txt2img_repeat_cache_reuse` | 911991 | 1.208s | `95329546941ed605` | Repeat generation produced identical hash, exercising warmed model/sigma/cache reuse. |
+| `txt2img_checkpoint_switch` | 911992 | 33.895s | `a37ca0f751526911` | Switched to `MM_R2_FIX-S.safetensors`. |
+| `txt2img_checkpoint_switch_back` | 911993 | 13.472s | `0308cadc9d677319` | Switched back to `MM_R2.safetensors`. |
+| `txt2img_vae_a` | 911994 | 23.689s | `41ce7e9de0e7dfcc` | Override VAE `sdxl_vae.safetensors`. |
+| `txt2img_vae_b` | 911995 | 18.255s | `7901e90983aa318c` | Override VAE `xlVAEC_e7.safetensors`. |
+| `img2img_smoke` | 911996 | 1.267s | `edb2babfa04eb226` | Representative synthetic 512x512 init image, denoise 0.45. |
+| `inpaint_smoke` | 911997 | 1.326s | `4df5f3907e8e6202` | Representative mask, denoise 0.55, non-full-res inpaint path. |
+| `txt2img_highres_smoke` | 911998 | 2.038s | `be45eaea135169b1` | `enable_hr`, `hr_scale=1.25`, latent upscaler, 2 HR steps. |
+| `txt2img_refiner_smoke` | 911999 | 14.303s | `a5133cba2e173436` | Refiner checkpoint `MM_R2_FIX-S`, switch at 0.5. |
+| `controlnet_single` | 912000 | 22.833s | `ecbd454b84a4608e`, `1e9b6daacb16f6a1` | Single ControlNet unit with local `xinsir-controlnet-depth-sdxl-1.0 [e590f04c]`, module `none`, synthetic conditioning image. |
+| `controlnet_dual` | 912001 | 2.515s | `bcbcc55b7f670a13`, `1e9b6daacb16f6a1` | Dual ControlNet units, same local model/image with different weights. |
+| `teacache_enabled` | 912002 | 1.325s | `4beecca8cf9760a3` | TeaCache enabled via always-on args; infotext recorded threshold 0.25 and max consecutive 2. |
+| `teacache_controlnet_fallback` | 912003 | 1.994s | `4b25827e0f1c9b91`, `1e9b6daacb16f6a1` | TeaCache + ControlNet succeeded; infotext recorded `TeaCache disabled reason: external UNet forward hook`, verifying correctness fallback. |
+
+Generated artifacts are in `/tmp/oc-slice9/artifacts/` with full SHA-256s embedded in filenames and `smoke_summary.json`. ControlNet returned an additional detected-map/control artifact (`1e9b6daacb16f6a1...`, 2430 bytes) for the ControlNet cases.
+
+Recent-fix verification coverage:
+- Model-specific K-diffusion sigma/cache behavior: `tests/test_openclaw_generation_profile.py` passed in focused gate; repeat txt2img hash matched exactly after first-load warm path.
+- Checkpoint and VAE stale identity: runtime checkpoint switch/switch-back and VAE override A/B smokes succeeded with distinct outputs and expected infotext model/VAE names.
+- Img2img cache locking/invalidation: img2img and inpaint runtime smokes passed; focused collection excluding the stale source-string assertion passed. The remaining static assertion should be updated in a later harness cleanup to match the current restored-dict implementation.
+- CUDA graph per-key serialization: existing `test/test_openclaw_cuda_graphs.py` had prior WIP coverage in this dirty tree; this slice did not enable runtime CUDA graphs (`OPENCLAW_CUDA_GRAPHS=0` inherited from image/live env), so no live graph replay claim is made here.
+- TeaCache hook fallback: focused TeaCache tests passed; runtime TeaCache+ControlNet recorded `external UNet forward hook` fallback and still generated successfully.
+- Multi-sampler/stage noise interval: `extensions/openclaw-multi-sampler/tests` passed in both 159-pass and 33-pass gates.
+
+Skipped/narrowed coverage:
+- No network model/preprocessor downloads were attempted. ControlNet used the one local model found (`xinsir-controlnet-depth-sdxl-1.0`) with `module: none`; external preprocessor downloads and annotator-weight paths remain unclaimed.
+- CUDA graph runtime replay was not enabled in the disposable env, so the result verifies tests/contracts but not graph capture execution.
+- Same-path VAE metadata invalidation was not forced by mutating shared model files; VAE identity was exercised through safe override switches only. Mock/file-level invalidation remains covered by existing unit tests/WIP, not by destructive asset mutation.
+
+Next remaining audit lane: Docker/build/dependency freshness and a dedicated harness-cleanup pass for same-process pytest isolation/static assertions. Do not mark the overall gb10-a1111:latest audit complete yet; build/runtime-dependency lanes remain.
+
+## Final comprehensive once-over closure — 2026-07-16 UTC
+
+Baseline and preservation:
+- Authoritative worktree: GB10 `/home/kklouzal/stable-diffusion-webui`, branch `latest`, baseline HEAD `21eeaafc2b80f0153d3064eec3e21abc9e03c1fe`.
+- Existing dirty coordinated audit work, untracked tests, generated `gb10/validate-image-*` evidence, `mxfp8-diagnostics/last-result.json`, and this ledger were preserved. No reset/revert/commit/push/deploy/live-service restart was performed.
+- Live service `gb10-a1111-latest` was not restarted or modified. Runtime/API checks used disposable containers without published ports and were removed afterward.
+
+Final fixes applied in this closure:
+- `modules/processing.py`: rewrote img2img init-cache restore to iterate `_IMG2IMG_INIT_CACHE_ATTRS` and clone each restored payload value at assignment time. This keeps the helper implementation aligned with the shared store/restore attribute contract and resolved the remaining static same-process harness assertion in `tests/test_processing_auxiliary_infotext_alignment.py`.
+- `test/test_openclaw_attention_slice_bounds.py`: hardened the new attention/SDPA test so its lightweight `ldm`/`sgm`/module import stubs are only installed when real dependency modules are unavailable, and cleaned those stubs after importing `modules.sd_hijack_optimizations`. This prevents same-process collection from poisoning later real-module imports while preserving the standalone no-repository harness path.
+- `tests/test_upscaler_tiling_contract.py`: hardened the tiling contract test so dependency stubs are only used when needed, paths point at the active checkout, and temporary `modules.*` stubs are cleaned after import. The tiled-upscale test now imports `modules.upscaler_utils` with local stubs only for that assertion, then cleans them, preventing same-process pollution of later tests.
+
+Validation evidence from this closure:
+- `git diff --check`: pass.
+- Python compile gate with temp pycache: `PYTHONPYCACHEPREFIX=/tmp/gb10-a1111-pycache python3 -m compileall -q modules extensions/openclaw-clear-cond-cache extensions/openclaw-multi-sampler extensions/openclaw-denoise-ramp extensions/sd-webui-teacache docker/prepare-resolver-input.py webui.py tests test`: pass. Initial compile without temp pycache was blocked by pre-existing root-owned `test/__pycache__` files; rerun with temp pycache passed without writing repo pyc files.
+- Shell gate: `shellcheck docker/entrypoint.sh gb10/build.sh docker/launch-a1111.sh` and `bash -n docker/entrypoint.sh gb10/build.sh docker/launch-a1111.sh`: pass.
+- Focused known-failure/static harness gate on host: `python3 -m pytest -q tests/test_processing_auxiliary_infotext_alignment.py tests/test_ui_extensions_contract.py tests/test_upscaler_tiling_contract.py tests/test_controlnet_legacy_api_fields.py`: `16 passed, 1 skipped` after the processing restore fix.
+- Focused Docker/CUDA pytest gate using disposable container and pytest installed into the disposable container only: `tests/test_processing_auxiliary_infotext_alignment.py tests/test_ui_extensions_contract.py tests/test_upscaler_tiling_contract.py tests/test_controlnet_legacy_api_fields.py test/test_openclaw_attention_slice_bounds.py`: `19 passed`.
+- Changed OpenClaw extension/CUDA/sampler unit gate in disposable CUDA container: `tests/test_teacache_extension.py`, `extensions/sd-webui-teacache/tests/test_teacache_session.py`, `extensions/openclaw-multi-sampler/tests/test_openclaw_multi_sampler.py`, `extensions/openclaw-denoise-ramp/tests/test_openclaw_denoise_ramp.py`, `test/test_openclaw_cuda_graphs.py`, `test/test_openclaw_kdiffusion_sigmas_cache.py`, `test/test_openclaw_attention_slice_bounds.py`: `46 passed`.
+- Cache invalidation/img2img cache unit gate in disposable CUDA container with image-copied repository deps and temp diskcache: `test/test_openclaw_cache_invalidation.py`: `15 passed`.
+- Full same-process collection gate in disposable CUDA container with image-copied repository deps and temp diskcache: `236 tests collected in 19.01s`, no collection errors. Log: `/tmp/gb10-docker-pytest-collect-20260716.log`.
+- Full all-test execution was intentionally not used as a readiness blocker: legacy API/server tests require an external `base_url` fixture/live API server, and several older tests mutate `sys.modules["modules"]` globally when all tests are executed in one process. The required full same-process collection is clean, and the focused source-backed unit/runtime gates above cover the changed surfaces.
+- Docker/build gate: `DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain docker build --cache-from local/gb10-a1111:latest --target runtime -f Dockerfile -t local/gb10-a1111:onceover-20260716 .`: pass. The build preserved the protected CUDA/PyTorch/MSLK base stack (`torch 2.14.0.dev20260709+cu132`, `torchao 0.17.0`, `mslk 2026.7.11`) while resolving app dependencies; disposable image removed after validation. Log: `/tmp/gb10-docker-build-onceover-20260716.log`.
+- Disposable runtime/API smoke without published ports using the newly built image and temp outputs/config: txt2img 512x512 4-step, repeat determinism, img2img, inpaint, and hires all succeeded. Evidence: `/tmp/gb10-runtime-smoke-20260716.log`; repeat deterministic hash matched.
+- Disposable extension runtime/API smoke with checkout `extensions/` mounted read-only: `/sdapi/v1/scripts` listed `openclaw denoise ramp`, `openclaw multi-sampler`, `controlnet`, and `dynamic thresholding`; `/sdapi/v1/openclaw/clear-cond-cache` returned ok for `c`, `uc`, and `img2img_init`; `/controlnet/model_list` returned one model. Evidence: `/tmp/gb10-extension-runtime-smoke-20260716.log`.
+- Disposable ControlNet runtime smoke: single and dual ControlNet txt2img requests against `xinsir-controlnet-depth-sdxl-1.0 [e590f04c]` succeeded. Evidence: `/tmp/gb10-controlnet-runtime-smoke-20260716.log`.
+- Disposable TeaCache runtime smoke: txt2img with always-on `TeaCache` args succeeded and infotext contained `TeaCache`. Evidence: `/tmp/gb10-teacache-runtime-smoke-20260716.log`.
+- Disposable checkpoint/VAE lifecycle smoke: API checkpoint switch to `MM_R2_FIX-S.safetensors`, switch back to `MM_R2.safetensors`, and VAE switch to `softFastVAESDXLPONY_v10.safetensors` all succeeded. Evidence: `/tmp/gb10-switch-runtime-smoke-20260716.log`.
+
+Reviewed/finalized surfaces:
+- Core processing/sampling/inpaint/img2img/hires/cache: direct source review plus focused tests for infotext alignment, img2img init-cache keying/restoration, cache invalidation, k-diffusion sigma cache invalidation, sampler/multi-sampler boundaries, CUDA graph helpers, and attention slice bounds.
+- Owned OpenClaw extensions: clear-cond-cache, multi-sampler, denoise-ramp, TeaCache, dynamic thresholding/incantations covered by source review, unit tests, and disposable runtime API smokes where endpoints/scripts are exposed.
+- API/ControlNet: reviewed `modules/api/api.py`, `modules/api/models.py`, and `tests/test_controlnet_legacy_api_fields.py`; collection/tests pass; disposable ControlNet single/dual API generation passes.
+- Docker/build/dependency resolver/runtime launch: Dockerfile/build/entrypoint/resolver surface reviewed and runtime target rebuilt successfully with protected CUDA/PyTorch boundary intact.
+
+Remaining explicit limitations:
+- CUDA graph replay was covered by `test/test_openclaw_cuda_graphs.py` and build/runtime import paths, but a separate API generation run with `OPENCLAW_CUDA_GRAPHS=1` was not promoted to a final readiness requirement because the live-equivalent configuration has `OPENCLAW_CUDA_GRAPHS=0` and CUDA graph enablement is a runtime opt-in path.
+- Full legacy API tests under `test/` still need their external `base_url` server fixture to execute end-to-end; this is harness/environmental and not a regression in the changed generation paths.
+- Runtime smokes used short low-step generations for correctness/residency/API coverage rather than visual quality scoring. They prove successful SDXL generation paths and deterministic repeat for the selected prompt/seed, not aesthetic benchmark quality.
+
+Final readiness assessment:
+- The integrated dirty worktree is coherent and validated across static, unit, Docker build, and disposable CUDA runtime/API gates. No supported correctness, cache invalidation, dtype/device, API compatibility, or SDXL generation-quality defect found during this closure remains unaddressed.
+- Recommended gate before commit/deploy: review the dirty diff as one coordinated audit stack, then commit; rebuild/tag the production image from this worktree; run the same disposable API smoke against that exact production tag; only then schedule a live `gb10-a1111-latest` replacement/restart.

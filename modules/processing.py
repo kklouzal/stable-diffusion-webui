@@ -6,6 +6,7 @@ import os
 import sys
 import hashlib
 import time
+import threading
 from dataclasses import dataclass, field
 
 import torch
@@ -259,6 +260,7 @@ class StableDiffusionProcessing:
     cached_uc = [None, None]
     cached_c = [None, None]
     cached_img2img_init = [None, None]
+    cached_img2img_init_lock = threading.RLock()
     cached_img2img_init_stats = _cache_stats(
         last_hit=False,
         cached=False,
@@ -1799,19 +1801,21 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     @classmethod
     def clear_img2img_init_cache(cls):
-        StableDiffusionProcessing.cached_img2img_init = [None, None]
-        _reset_cache_stats(
-            StableDiffusionProcessing.cached_img2img_init_stats,
-            last_hit=False,
-            cached=False,
-            bypass_reason=None,
-        )
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            StableDiffusionProcessing.cached_img2img_init = [None, None]
+            _reset_cache_stats(
+                StableDiffusionProcessing.cached_img2img_init_stats,
+                last_hit=False,
+                cached=False,
+                bypass_reason=None,
+            )
 
     @classmethod
     def img2img_init_cache_status(cls):
-        stats = dict(StableDiffusionProcessing.cached_img2img_init_stats)
-        stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
-        return stats
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            stats = dict(StableDiffusionProcessing.cached_img2img_init_stats)
+            stats["cached"] = StableDiffusionProcessing.cached_img2img_init[0] is not None
+            return stats
 
     def _snapshot_img2img_init_cache_stats(self, *, last_hit, cached=None, bypass_reason=None):
         stats = StableDiffusionProcessing.cached_img2img_init_stats
@@ -1821,17 +1825,20 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.openclaw_img2img_init_cache_stats = dict(stats)
 
     def _record_img2img_init_cache_bypass(self, reason):
-        self._snapshot_img2img_init_cache_stats(last_hit=False, bypass_reason=reason)
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            self._snapshot_img2img_init_cache_stats(last_hit=False, bypass_reason=reason)
 
     def _record_img2img_init_cache_hit(self):
-        stats = StableDiffusionProcessing.cached_img2img_init_stats
-        _record_cache_stats_hit(stats)
-        self._snapshot_img2img_init_cache_stats(last_hit=True, cached=True)
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            stats = StableDiffusionProcessing.cached_img2img_init_stats
+            _record_cache_stats_hit(stats)
+            self._snapshot_img2img_init_cache_stats(last_hit=True, cached=True)
 
     def _record_img2img_init_cache_miss(self, started_at):
-        stats = StableDiffusionProcessing.cached_img2img_init_stats
-        _record_cache_stats_miss(stats, started_at)
-        self._snapshot_img2img_init_cache_stats(last_hit=False, cached=True)
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            stats = StableDiffusionProcessing.cached_img2img_init_stats
+            _record_cache_stats_miss(stats, started_at)
+            self._snapshot_img2img_init_cache_stats(last_hit=False, cached=True)
 
     def _img2img_init_cache_bypass_reason(self):
         if not getattr(opts, "persistent_img2img_init_cache", True):
@@ -1898,30 +1905,35 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if cache_key is None:
             return False
 
-        cache = StableDiffusionProcessing.cached_img2img_init
-        if cache[0] != cache_key:
-            return False
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            cache = StableDiffusionProcessing.cached_img2img_init
+            if cache[0] != cache_key:
+                return False
 
-        payload = cache[1] or {}
-        for attr in _IMG2IMG_INIT_CACHE_ATTRS:
-            setattr(self, attr, _clone_cache_value(payload.get(attr)))
+            payload = cache[1] or {}
+            is_using_inpainting_conditioning = bool(payload.get("is_using_inpainting_conditioning", False))
+            generation_params = _clone_cache_value(payload.get("extra_generation_params") or {})
 
-        self.is_using_inpainting_conditioning = bool(payload.get("is_using_inpainting_conditioning", False))
-        self.extra_generation_params.update(_clone_cache_value(payload.get("extra_generation_params") or {}))
-        self._record_img2img_init_cache_hit()
-        return True
+            for attr in _IMG2IMG_INIT_CACHE_ATTRS:
+                setattr(self, attr, _clone_cache_value(payload.get(attr)))
+
+            self.is_using_inpainting_conditioning = is_using_inpainting_conditioning
+            self.extra_generation_params.update(generation_params)
+            self._record_img2img_init_cache_hit()
+            return True
 
     def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params):
         if cache_key is None:
             return
 
-        StableDiffusionProcessing.cached_img2img_init = [cache_key, {
-            attr: _clone_cache_value(getattr(self, attr, None)) for attr in _IMG2IMG_INIT_CACHE_ATTRS
-        } | {
-            "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
-            "extra_generation_params": _clone_cache_value(extra_generation_params),
-        }]
-        self._record_img2img_init_cache_miss(started_at)
+        with StableDiffusionProcessing.cached_img2img_init_lock:
+            StableDiffusionProcessing.cached_img2img_init = [cache_key, {
+                attr: _clone_cache_value(getattr(self, attr, None)) for attr in _IMG2IMG_INIT_CACHE_ATTRS
+            } | {
+                "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
+                "extra_generation_params": _clone_cache_value(extra_generation_params),
+            }]
+            self._record_img2img_init_cache_miss(started_at)
 
     def init(self, all_prompts, all_seeds, all_subseeds):
         self.extra_generation_params["Denoising strength"] = self.denoising_strength

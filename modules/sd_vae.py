@@ -20,6 +20,30 @@ checkpoint_info = None
 checkpoints_loaded = collections.OrderedDict()
 
 
+def _vae_cache_key(vae_file):
+    filename = os.path.abspath(vae_file)
+    try:
+        stat = os.stat(filename)
+        file_identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        file_identity = (None, None)
+
+    return (filename, file_identity)
+
+
+def _vae_cache_key_filename(cache_key):
+    if isinstance(cache_key, tuple) and cache_key:
+        return cache_key[0]
+    return os.path.abspath(cache_key) if isinstance(cache_key, str) else None
+
+
+def _drop_stale_vae_cache_entries(vae_file, current_cache_key):
+    filename = os.path.abspath(vae_file)
+    for cache_key in list(checkpoints_loaded.keys()):
+        if cache_key != current_cache_key and _vae_cache_key_filename(cache_key) == filename:
+            del checkpoints_loaded[cache_key]
+
+
 def get_loaded_vae_name():
     if loaded_vae_file is None:
         return None
@@ -202,11 +226,13 @@ def load_vae(model, vae_file=None, vae_source="from unknown source"):
     cache_enabled = shared.opts.sd_vae_checkpoint_cache > 0
 
     if vae_file:
-        if cache_enabled and vae_file in checkpoints_loaded:
+        vae_cache_key = _vae_cache_key(vae_file)
+        _drop_stale_vae_cache_entries(vae_file, vae_cache_key)
+        if cache_enabled and vae_cache_key in checkpoints_loaded:
             # use vae checkpoint cache
             print(f"Loading VAE weights {vae_source}: cached {get_filename(vae_file)}")
             store_base_vae(model)
-            _load_vae_dict(model, checkpoints_loaded[vae_file])
+            _load_vae_dict(model, checkpoints_loaded[vae_cache_key])
         else:
             assert os.path.isfile(vae_file), f"VAE {vae_source} doesn't exist: {vae_file}"
             print(f"Loading VAE weights {vae_source}: {vae_file}")
@@ -217,7 +243,7 @@ def load_vae(model, vae_file=None, vae_source="from unknown source"):
 
             if cache_enabled:
                 # cache newly loaded vae
-                checkpoints_loaded[vae_file] = vae_dict_1.copy()
+                checkpoints_loaded[vae_cache_key] = vae_dict_1.copy()
 
         # clean up cache if limit is reached
         if cache_enabled:

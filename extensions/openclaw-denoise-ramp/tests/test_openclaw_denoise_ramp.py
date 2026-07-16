@@ -50,13 +50,14 @@ def install_a1111_stubs() -> None:
 def load_api_denoise_ramp_persist_helper():
     api_path = EXT_ROOT.parents[1] / "modules" / "api" / "api.py"
     tree = ast.parse(api_path.read_text(), filename=str(api_path))
+    set_arg_helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_set_script_arg")
     api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
     helper = next(
         node
         for node in api_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "persist_openclaw_denoise_ramp_args"
     )
-    module = ast.Module(body=[helper], type_ignores=[])
+    module = ast.Module(body=[set_arg_helper, helper], type_ignores=[])
     ast.fix_missing_locations(module)
     namespace = {}
     exec(compile(module, str(api_path), "exec"), namespace)

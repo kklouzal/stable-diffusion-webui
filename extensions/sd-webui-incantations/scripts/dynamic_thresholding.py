@@ -230,8 +230,8 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
             for i, conds in enumerate(conds_list):
                 for cond_index, weight in conds:
                     xcfg = (denoised_uncond[i] + (x_out[cond_index] - denoised_uncond[i]) * (cond_scale * weight))
-                    denom = torch.std(xcfg.float()).clamp_min(torch.finfo(torch.float32).eps)
-                    xrescaled = xcfg * (torch.std(x_out[cond_index].float()) / denom).to(dtype=xcfg.dtype)
+                    denom = torch.std(xcfg.float(), unbiased=False).clamp_min(torch.finfo(torch.float32).eps)
+                    xrescaled = xcfg * (torch.std(x_out[cond_index].float(), unbiased=False) / denom).to(dtype=xcfg.dtype)
                     xfinal = fi * xrescaled + (1.0 - fi) * xcfg
                     denoised[i] = xfinal
             return denoised

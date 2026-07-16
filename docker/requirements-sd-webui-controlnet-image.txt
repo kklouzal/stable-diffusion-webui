@@ -1,0 +1,5 @@
+# sd-webui-controlnet runtime packages that are not otherwise pulled into the
+# GB10 image dependency closure. Keep broad extension pins that conflict with
+# A1111's app closure (for example timm/pydantic) out of this image supplement.
+mediapipe
+controlnet_aux>=0.0.9

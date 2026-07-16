@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image, ImageDraw
 
-from modules import cache as cache_module, hashes, processing
+from modules import shared, shared_init
+
+if getattr(shared, "opts", None) is None:
+    shared_init.initialize()
+
+from modules import cache as cache_module, hashes, processing, sd_models, sd_vae
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 
 
@@ -218,6 +223,68 @@ def test_img2img_init_cache_bypasses_masked_requests(monkeypatch):
     assert bypasses == ["masked_request"]
 
 
+class _GuardLock:
+    def __init__(self):
+        self.depth = 0
+        self.entries = 0
+
+    def __enter__(self):
+        self.depth += 1
+        self.entries += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.depth -= 1
+
+
+def test_img2img_init_cache_restore_clones_under_cache_lock(monkeypatch):
+    guard = _GuardLock()
+    monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init_lock", guard, raising=False)
+    StableDiffusionProcessing.cached_img2img_init = [("key",), {
+        "init_latent": np.array([1], dtype=np.float32),
+        "image_conditioning": None,
+        "mask": None,
+        "nmask": None,
+        "mask_for_overlay": None,
+        "overlay_images": [],
+        "color_corrections": [],
+        "paste_to": None,
+        "is_using_inpainting_conditioning": True,
+        "extra_generation_params": {"Cached": "yes"},
+    }]
+    StableDiffusionProcessing.cached_img2img_init_stats = processing._cache_stats(last_hit=False, cached=True, bypass_reason=None)
+
+    original_clone = processing._clone_cache_value
+    def guarded_clone(value):
+        assert guard.depth > 0
+        return original_clone(value)
+    monkeypatch.setattr(processing, "_clone_cache_value", guarded_clone)
+
+    p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
+    p.extra_generation_params = {}
+
+    assert p._restore_img2img_init_cache(("key",)) is True
+    assert guard.entries >= 1
+    assert p.is_using_inpainting_conditioning is True
+    assert p.extra_generation_params == {"Cached": "yes"}
+
+
+def test_img2img_init_cache_clear_and_status_use_cache_lock(monkeypatch):
+    guard = _GuardLock()
+    monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init_lock", guard, raising=False)
+    StableDiffusionProcessing.cached_img2img_init = [("key",), {"init_latent": object()}]
+    StableDiffusionProcessing.cached_img2img_init_stats = processing._cache_stats(last_hit=True, cached=True, bypass_reason=None)
+
+    StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
+    status = StableDiffusionProcessingImg2Img.img2img_init_cache_status()
+
+    assert guard.entries == 2
+    assert StableDiffusionProcessing.cached_img2img_init == [None, None]
+    assert status["cached"] is False
+    assert status["hits"] == 0
+    assert status["misses"] == 0
+
+
 def test_resize_latent_mask_uses_area_coverage_when_rounding():
     mask = Image.new("L", (8, 8), 0)
     ImageDraw.Draw(mask).rectangle((0, 0, 3, 3), fill=255)
@@ -284,3 +351,54 @@ def test_sha256_cache_rejects_size_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(hashes, "cache", lambda _subsection: fake_cache)
 
     assert hashes.sha256_from_cache(str(source), "model") is None
+
+
+def test_checkpoint_state_dict_cache_invalidates_when_checkpoint_file_changes(tmp_path, monkeypatch):
+    sd_models.checkpoints_loaded.clear()
+    checkpoint_file = tmp_path / "model.ckpt"
+    checkpoint_file.write_bytes(b"first")
+    checkpoint_info = sd_models.CheckpointInfo(str(checkpoint_file))
+    timer = SimpleNamespace(record=lambda _label: None)
+    calls = []
+
+    def read_state_dict(filename):
+        calls.append(Path(filename).read_bytes())
+        return {"value": len(calls)}
+
+    monkeypatch.setattr(sd_models, "read_state_dict", read_state_dict)
+    monkeypatch.setattr(checkpoint_info, "calculate_shorthash", lambda: "hash")
+
+    first = sd_models.get_checkpoint_state_dict(checkpoint_info, timer)
+    assert first == {"value": 1}
+
+    checkpoint_file.write_bytes(b"second-content")
+
+    second = sd_models.get_checkpoint_state_dict(checkpoint_info, timer)
+    assert second == {"value": 2}
+    assert calls == [b"first", b"second-content"]
+
+
+def test_vae_checkpoint_cache_invalidates_when_vae_file_changes(tmp_path, monkeypatch):
+    sd_vae.checkpoints_loaded.clear()
+    vae_file = tmp_path / "model.vae.pt"
+    vae_file.write_bytes(b"first")
+    model = SimpleNamespace(
+        sd_checkpoint_info=SimpleNamespace(filename="checkpoint.safetensors"),
+        first_stage_model=SimpleNamespace(state_dict=lambda: {"base": "vae"}),
+    )
+    loaded = []
+
+    monkeypatch.setattr(sd_vae.shared.opts, "sd_vae_checkpoint_cache", 1, raising=False)
+    monkeypatch.setattr(sd_vae.shared, "weight_load_location", "cpu", raising=False)
+    monkeypatch.setattr(sd_vae, "_load_vae_dict", lambda _model, vae_dict: loaded.append(dict(vae_dict)))
+
+    def load_vae_dict(filename, map_location):
+        return {"payload": Path(filename).read_bytes()}
+
+    monkeypatch.setattr(sd_vae, "load_vae_dict", load_vae_dict)
+
+    sd_vae.load_vae(model, str(vae_file), "test")
+    vae_file.write_bytes(b"second-content")
+    sd_vae.load_vae(model, str(vae_file), "test")
+
+    assert loaded == [{"payload": b"first"}, {"payload": b"second-content"}]
