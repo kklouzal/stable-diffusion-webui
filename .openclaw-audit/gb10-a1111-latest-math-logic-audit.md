@@ -918,26 +918,25 @@ Final readiness assessment:
 
 ## 2026-07-16 pass - API-only pre-first-step delay regression
 
-- Symptom: live  accepted API/UI-equivalent generation requests before the startup SDXL model load had completed, so the first real generation after deployment paid the cold checkpoint/VAE/MXFP8 residency cost between  and sampling step 1.
-- Preserved rollback before deploy: container , image  ( from deployed commit ). Investigation artifacts:  on GB10.
+- Symptom: live gb10-a1111-latest accepted API/UI-equivalent generation requests before the startup SDXL model load had completed, so the first real generation after deployment paid the cold checkpoint/VAE/MXFP8 residency cost between Generate and sampling step 1.
+- Preserved rollback before deploy: container 42596bf897e593f56898241490b4c6aa99771db226b4c2b962d01a4ba4eb7495, image sha256:e4c02900e17badf72c90c91e97c12073692d804320c886fab91e8c899a3499c2 (local/gb10-a1111:latest from deployed commit 7eed414f85657345e6fa5945f7c32952c2c1593d). Investigation artifacts: /tmp/gb10-a1111-prestep-delay-20260716T231221Z on GB10.
 - Measurements before the fix:
-  - TXT2IMG SDXL 1024x1024 Euler 8-step: first cold-ish probe step 1 at , identical repeat step 1 at , total  -> , identical PNG bytes for the same deployed code/settings.
-  - IMG2IMG SDXL 1280x1280 Euler 8-step after the cold API-ready race: step 1 at , identical repeat , LoRA probe , total about ; this matched the user-visible ~10s+ pre-step stall class.
-  - After explicit cache clear but without a fresh deployment, img2img init cache behaved correctly (, then ) and warm first-step dropped to  then , isolating the worst regression to cold startup/model residency rather than repeated conditioning, LoRA, ControlNet, TeaCache, or image-init cache corruption.
-- Root cause: API-only startup used , which starts initial model loading in the background, and then exposed FastAPI readiness before  had completed. The heavy cold phase was model residency/MXFP8 cache load, not sampling quality math: postdeploy startup log reports  with , before Uvicorn was allowed to accept requests after the fix.
-- Fix:  now waits for  before constructing/launching the API app unless  is explicitly set, and records  in startup timing. This moves the unavoidable cold model residency cost into honest service startup readiness instead of the first generation hot path; it does not change samplers, conditioning, LoRA, ControlNet, VAE selection, TeaCache, seeds, or image math.
-- Regression guard:  asserts API-only startup waits for the startup model before FastAPI/app launch and preserves the explicit skip-load opt-out.
+  - TXT2IMG SDXL 1024x1024 Euler 8-step: first cold-ish probe step 1 at 3.968s, identical repeat step 1 at 1.889s, total 12.248s -> 8.530s, identical PNG bytes for the same deployed code/settings.
+  - IMG2IMG SDXL 1280x1280 Euler 8-step after the cold API-ready race: step 1 at 15.042s, identical repeat 14.011s, LoRA probe 13.576s, total about 25-26s; this matched the user-visible ~10s+ pre-step stall class.
+  - After explicit cache clear but without a fresh deployment, img2img init cache behaved correctly (misses=1, then hits=1) and warm first-step dropped to 4.592s then 3.481s, isolating the worst regression to cold startup/model residency rather than repeated conditioning, LoRA, ControlNet, TeaCache, or image-init cache corruption.
+- Root cause: API-only startup used initialize.initialize(), which starts initial model loading in the background, and then exposed FastAPI readiness before sd_models.model_data.get_sd_model() had completed. The heavy cold phase was model residency/MXFP8 cache load, not sampling quality math: postdeploy startup log reports Model loaded in 20.0s with load mxfp8 cache: 14.6s, before Uvicorn was allowed to accept requests after the fix.
+- Fix: webui.api_only() now waits for sd_models.model_data.get_sd_model() before constructing/launching the API app unless --skip-load-model-at-start is explicitly set, and records load startup SD model in startup timing. This moves the unavoidable cold model residency cost into honest service startup readiness instead of the first generation hot path; it does not change samplers, conditioning, LoRA, ControlNet, VAE selection, TeaCache, seeds, or image math.
+- Regression guard: tests/test_webui_api_only_startup_model_contract.py asserts API-only startup waits for the startup model before FastAPI/app launch and preserves the explicit skip-load opt-out.
 - Validation:
-  - 
-no tests ran in 0.00s -> .
-  -  passed.
-  -  succeeded, producing image .
-  - Final  succeeded with the same image id.
-  -  after deployment passed , , torch CUDA, MXFP8 TorchAO/MSLK, NVFP4 TorchAO/MSLK, and container imports.
+  - PYTHONDONTWRITEBYTECODE=1 pytest -q tests/test_webui_api_only_startup_model_contract.py tests/test_api_server_control_contract.py -> 8 passed.
+  - PYTHONPYCACHEPREFIX=/tmp/gb10-pyc python3 -m py_compile webui.py passed.
+  - IMAGE_TAG=local/gb10-a1111:prestep-gate gb10/build.sh succeeded, producing image sha256:7c2cbb3e4ceaab229d8936a4f8709f5a5eea6d9192d3b975cc00d1625ff293b0.
+  - Final IMAGE_TAG=local/gb10-a1111:latest gb10/build.sh succeeded with the same image id.
+  - gb10/smoke-test.sh after deployment passed /sdapi/v1/progress, /sdapi/v1/sd-models, torch CUDA, MXFP8 TorchAO/MSLK, NVFP4 TorchAO/MSLK, and container imports.
 - Deployment proof:
-  - Code commit pushed to :  ().
-  - Live container after deploy: , image .
-  - API readiness after container start was ; startup log shows  and Uvicorn only after model load.
-  - Postdeploy TXT2IMG 1024x1024 Euler 8-step: step 1 at , identical repeat , total  then , identical PNG bytes across repeats ().
-  - Postdeploy IMG2IMG 1280x1280 Euler 8-step: step 1 at , total , cond/img2img cache status healthy (, , no bypass).
-- Remaining limitation: a deliberate checkpoint/VAE switch or an explicit  launch can still incur legitimate model-load latency before sampling; this change prevents the live API from advertising ready while the normal startup model is still cold.
+  - Code commit pushed to origin/latest: 32163b9ba7322e3971a4857e08503f0744bad264 (Warm API startup model before serving).
+  - Live container after deploy: 96745abd6f766730e2e592948d87343e2b032887128447daef689e5fe1fd8201, image sha256:7c2cbb3e4ceaab229d8936a4f8709f5a5eea6d9192d3b975cc00d1625ff293b0.
+  - API readiness after container start was 28s; startup log shows load startup SD model: 20.1s and Uvicorn only after model load.
+  - Postdeploy TXT2IMG 1024x1024 Euler 8-step: step 1 at 1.571s, identical repeat 1.480s, total 7.069s then 6.678s, identical PNG bytes across repeats (b93d012ddf87c3aabcc3040ebe1ba68c406db2533bd7a98e977f19925d3b56b3).
+  - Postdeploy IMG2IMG 1280x1280 Euler 8-step: step 1 at 3.304s, total 11.588s, cond/img2img cache status healthy (misses=1, cached=true, no bypass).
+- Remaining limitation: a deliberate checkpoint/VAE switch or an explicit --skip-load-model-at-start launch can still incur legitimate model-load latency before sampling; this change prevents the live API from advertising ready while the normal startup model is still cold.
