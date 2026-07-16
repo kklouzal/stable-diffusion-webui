@@ -47,6 +47,16 @@ def api_only():
         from modules import errors
         errors.report("Failed to register Hypertile settings in API-only startup", exc_info=True)
 
+    # Keep API readiness honest: initialize.initialize() starts model loading in
+    # the background, so the server can otherwise accept the first generation
+    # while checkpoint/VAE weights are still cold. That presents as a long
+    # Generate-to-first-step stall. Wait for the configured startup model here
+    # unless the operator explicitly requested lazy startup loading.
+    from modules import shared, sd_models
+    if not shared.cmd_opts.skip_load_model_at_start:
+        sd_models.model_data.get_sd_model()
+        startup_timer.record("load startup SD model")
+
     app = FastAPI()
     initialize_util.setup_middleware(app)
     api = create_api(app)
