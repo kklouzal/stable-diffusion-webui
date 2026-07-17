@@ -115,6 +115,9 @@ def load_timesteps_sampler_module(device=None):
     shared_module = types.ModuleType("modules.shared")
     shared_module.opts = types.SimpleNamespace(always_discard_next_to_last_sigma=False)
     shared_module.sd_model = types.SimpleNamespace(parameterization="eps", alphas_cumprod=torch.linspace(0.999, 0.001, 1000))
+    generation_profile_module = types.ModuleType("modules.openclaw_generation_profile")
+    generation_profile_module.cached_tensor = lambda **kwargs: kwargs["factory"]()
+    modules_pkg.openclaw_generation_profile = generation_profile_module
 
     for name, module in (
         ("modules", modules_pkg),
@@ -123,6 +126,7 @@ def load_timesteps_sampler_module(device=None):
         ("modules.sd_samplers_cfg_denoiser", cfg_module),
         ("modules.sd_samplers_common", common_module),
         ("modules.sd_samplers_timesteps_impl", impl_module),
+        ("modules.openclaw_generation_profile", generation_profile_module),
         ("modules.shared", shared_module),
     ):
         put(name, module)

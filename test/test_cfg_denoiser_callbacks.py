@@ -103,6 +103,49 @@ def load_cfg_denoiser(cfg_denoised_callback):
 
 
 class CFGDenoiserCallbackTests(unittest.TestCase):
+    def test_batch_index_tensors_are_cached_for_a_stable_layout(self):
+        module = load_cfg_denoiser(lambda _params: None)
+        denoiser = module.CFGDenoiser(types.SimpleNamespace())
+
+        with mock.patch.object(module.torch, "repeat_interleave", wraps=torch.repeat_interleave) as repeat_interleave, \
+             mock.patch.object(module.torch, "arange", wraps=torch.arange) as arange, \
+             mock.patch.object(module.torch, "as_tensor", wraps=torch.as_tensor) as as_tensor:
+            first = denoiser.batch_index_tensors([2, 1], [0, 2], torch.device("cpu"))
+            second = denoiser.batch_index_tensors([2, 1], [0, 2], torch.device("cpu"))
+
+        self.assertIs(first[0], second[0])
+        self.assertIs(first[1], second[1])
+        torch.testing.assert_close(first[0], torch.tensor([0, 0, 1]))
+        torch.testing.assert_close(first[1], torch.tensor([0, 2]))
+        self.assertEqual(repeat_interleave.call_count, 1)
+        self.assertEqual(arange.call_count, 1)
+        self.assertEqual(as_tensor.call_count, 2)
+
+    def test_batch_index_cache_invalidates_when_prompt_layout_changes(self):
+        module = load_cfg_denoiser(lambda _params: None)
+        denoiser = module.CFGDenoiser(types.SimpleNamespace())
+
+        first = denoiser.batch_index_tensors([1, 1], [0, 1], "cpu")
+        second = denoiser.batch_index_tensors([2, 1], [0, 2], "cpu")
+
+        self.assertIsNot(first[0], second[0])
+        self.assertIsNot(first[1], second[1])
+        torch.testing.assert_close(second[0], torch.tensor([0, 0, 1]))
+        torch.testing.assert_close(second[1], torch.tensor([0, 2]))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_batch_index_cache_is_device_specific(self):
+        module = load_cfg_denoiser(lambda _params: None)
+        denoiser = module.CFGDenoiser(types.SimpleNamespace())
+
+        cpu_indexes = denoiser.batch_index_tensors([2], [0], "cpu")
+        cuda_indexes = denoiser.batch_index_tensors([2], [0], "cuda")
+
+        self.assertEqual(cpu_indexes[0].device.type, "cpu")
+        self.assertEqual(cuda_indexes[0].device.type, "cuda")
+        self.assertEqual(cpu_indexes[0].dtype, torch.long)
+        self.assertEqual(cuda_indexes[0].dtype, torch.long)
+
     def test_cfg_denoised_callback_can_replace_inner_model_output(self):
         def cfg_denoised_callback(params):
             params.x = params.x + 10
