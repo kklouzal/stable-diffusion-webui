@@ -1,0 +1,152 @@
+[
+  {
+    "name": "fixed_baseline_1",
+    "kind": "baseline",
+    "elapsed_s": 25.581,
+    "first_unet_from_pipeline_s": 0.67438,
+    "script_process_s": 0.026614,
+    "img2img_init_s": 0.03665,
+    "sampling_s": 22.317694,
+    "image_sha256": "26d0e89e52f5581f9f3777a64523284fcfa7ccb7142af74e6f69558d206de8d2",
+    "img2img_cache": {
+      "hits": 3,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 7,
+      "mean_util": 0.0,
+      "max_util": 0.0,
+      "mean_power_w": 15.9
+    },
+    "controlnet_process_s": 0.024715
+  },
+  {
+    "name": "fixed_baseline_2",
+    "kind": "baseline",
+    "elapsed_s": 25.584,
+    "first_unet_from_pipeline_s": 0.663859,
+    "script_process_s": 0.026432,
+    "img2img_init_s": 0.035696,
+    "sampling_s": 22.356082,
+    "image_sha256": "26d0e89e52f5581f9f3777a64523284fcfa7ccb7142af74e6f69558d206de8d2",
+    "img2img_cache": {
+      "hits": 4,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 7,
+      "mean_util": 88.9,
+      "max_util": 96.0,
+      "mean_power_w": 29.6
+    },
+    "controlnet_process_s": 0.024628
+  },
+  {
+    "name": "fixed_baseline_3",
+    "kind": "baseline",
+    "elapsed_s": 25.678,
+    "first_unet_from_pipeline_s": 0.666059,
+    "script_process_s": 0.027995,
+    "img2img_init_s": 0.036176,
+    "sampling_s": 22.452174,
+    "image_sha256": "26d0e89e52f5581f9f3777a64523284fcfa7ccb7142af74e6f69558d206de8d2",
+    "img2img_cache": {
+      "hits": 5,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 7,
+      "mean_util": 39.7,
+      "max_util": 44.0,
+      "mean_power_w": 23.0
+    },
+    "controlnet_process_s": 0.026061
+  },
+  {
+    "name": "controlnet_off",
+    "kind": "controlnet_off",
+    "elapsed_s": 13.186,
+    "first_unet_from_pipeline_s": 0.642871,
+    "script_process_s": 0.007958,
+    "img2img_init_s": 0.034269,
+    "sampling_s": 10.25382,
+    "image_sha256": "74d1caf78bd5ae933dd6e87caffdd07c22e0ad89e4fbdf8d7f7eef93712d14ff",
+    "img2img_cache": {
+      "hits": 6,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 7,
+      "mean_util": 91.9,
+      "max_util": 96.0,
+      "mean_power_w": 29.9
+    },
+    "controlnet_process_s": 0.003106
+  },
+  {
+    "name": "lora_stripped",
+    "kind": "lora_stripped",
+    "elapsed_s": 26.71,
+    "first_unet_from_pipeline_s": 1.322597,
+    "script_process_s": 0.034616,
+    "img2img_init_s": 0.040767,
+    "sampling_s": 22.826205,
+    "image_sha256": "2e7dbd8c693bdd8106b35fb9603e6527d40878f0a3425152e64a9727fc3dc76a",
+    "img2img_cache": {
+      "hits": 7,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 13,
+      "mean_util": 0.0,
+      "max_util": 0.0,
+      "mean_power_w": 31.7
+    },
+    "controlnet_process_s": 0.032713
+  },
+  {
+    "name": "teacache_off",
+    "kind": "teacache_off",
+    "elapsed_s": 29.149,
+    "first_unet_from_pipeline_s": 3.943922,
+    "script_process_s": 0.026808,
+    "img2img_init_s": 0.037941,
+    "sampling_s": 22.618545,
+    "image_sha256": "d1fa34017195f8dbbef1d848c3e39c496a6b2245d2bb7081bd574d100f511672",
+    "img2img_cache": {
+      "hits": 8,
+      "misses": 1,
+      "compute_seconds": 0.987,
+      "last_hit": true,
+      "cached": true,
+      "bypass_reason": null
+    },
+    "pre_unet_gpu": {
+      "count": 39,
+      "mean_util": 52.4,
+      "max_util": 96.0,
+      "mean_power_w": 34.7
+    },
+    "controlnet_process_s": 0.025018
+  }
+]

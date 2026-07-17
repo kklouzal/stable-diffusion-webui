@@ -102,6 +102,11 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
     --exclude '.DS_Store' \
     "${owned_extension_source}/" "${owned_extension_target}/"
 done
+
+CONTROLNET_ZOE="${HOST_ROOT}/Extensions/sd-webui-controlnet/annotator/zoe/__init__.py"
+if [[ -f "${CONTROLNET_ZOE}" ]]; then
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-zoedepth.py" "${CONTROLNET_ZOE}"
+fi
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"

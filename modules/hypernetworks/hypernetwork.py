@@ -376,7 +376,10 @@ def apply_hypernetworks(hypernetworks, context, layer=None):
     for hypernetwork in hypernetworks:
         context_k, context_v = apply_single_hypernetwork(hypernetwork, context_k, context_v, layer)
 
-    return context_k, context_v
+    # Quantized linear backends such as torchao MX flatten with view(), which
+    # requires contiguous storage. Attention hooks can return equivalent strided
+    # views, so normalize once at this shared projection boundary.
+    return context_k.contiguous(), context_v.contiguous()
 
 
 def attention_CrossAttention_forward(self, x, context=None, mask=None, **kwargs):
