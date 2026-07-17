@@ -583,7 +583,12 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
             from torchao.quantization import quantize_
             config = mxfp8_config.get_mxfp8_config()
             mxfp8_config.validate_kernel_preference(config)
-            quantize_(model, config, filter_fn=mxfp8_filter, device=devices.device)
+            # Move the BF16 model to CUDA before inserting TorchAO tensor
+            # subclasses. Passing device= to quantize_ makes TorchAO call
+            # Module.to() on parent modules after earlier children may already
+            # be MXTensor-backed, which hits unsupported shallow-copy dispatch.
+            model.to(devices.device)
+            quantize_(model, config, filter_fn=mxfp8_filter)
             mxfp8_model_cache.save_from_model(model, source_path, mxfp8_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
         model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
@@ -721,7 +726,11 @@ def apply_nvfp4_weight_quantization(model, timer, source_path=None):
             from torchao.quantization import quantize_
             config = nvfp4_config.get_nvfp4_config()
             nvfp4_config.validate_config(config)
-            quantize_(model, config, filter_fn=nvfp4_filter, device=devices.device)
+            # Move the BF16 model to CUDA before inserting TorchAO tensor
+            # subclasses; avoid quantize_(device=...) parent Module.to() calls
+            # after NVFP4Tensor children have been installed.
+            model.to(devices.device)
+            quantize_(model, config, filter_fn=nvfp4_filter)
             nvfp4_model_cache.save_from_model(model, source_path, nvfp4_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
         model.nvfp4_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": nvfp4_config.CONFIG_NAME, "cache_loaded": cache_loaded}
     finally:
@@ -1170,7 +1179,9 @@ def send_model_to_cpu(m):
         else:
             if model_has_torchao_quantization(m):
                 restore_torchao_quantized_linears_for_reload(m, target_device=devices.cpu, target_dtype=devices.dtype)
-            m.to(devices.cpu)
+                send_torchao_quant_model_to_device(m, target=devices.cpu)
+            else:
+                m.to(devices.cpu)
 
     devices.torch_gc()
 
@@ -1240,9 +1251,9 @@ def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, t
     return restored
 
 
-def send_torchao_quant_model_to_device(m):
+def send_torchao_quant_model_to_device(m, *, target=None):
     torchao_tensor_types = torchao_quant_tensor_types()
-    target = shared.device
+    target = target or shared.device
     for module in m.modules():
         for name, param in list(module._parameters.items()):
             if param is None or isinstance(param, torchao_tensor_types):
@@ -1514,6 +1525,14 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             # module tree and can fail, so build a fresh model instance.
             forced_reload = True
             torchao_quant_mode_changed = True
+        elif checkpoint_info.filename != sd_model.sd_checkpoint_info.filename and (devices.mxfp8 or devices.nvfp4 or bool(getattr(sd_model, "mxfp8_quantization_stats", None)) or bool(getattr(sd_model, "nvfp4_quantization_stats", None)) or check_mxfp8(sd_model) or check_nvfp4(sd_model)):
+            # Switching checkpoints while the current tree is TorchAO-mutated is
+            # just as unsafe as changing quantization mode/coverage: the normal
+            # reload path can copy BF16 checkpoint tensors into MXTensor/NVFP4Tensor
+            # backed modules and then ask TorchAO quantize_() to move a parent module
+            # that still contains tensor subclasses. Build a fresh model instance.
+            forced_reload = True
+            torchao_quant_mode_changed = True
         elif forced_reload and ((devices.mxfp8 and check_mxfp8(sd_model)) or (devices.nvfp4 and check_nvfp4(sd_model))):
             # Option onchange hooks pass forced_reload=True even when the selected
             # coverage value resolves to the same effective policy. The normal
@@ -1589,22 +1608,34 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
         return model_data.sd_model
 
+    reload_exc_info = None
     try:
         load_model_weights(sd_model, checkpoint_info, state_dict, timer)
     except Exception:
+        reload_exc_info = sys.exc_info()
         print("Failed to load checkpoint, restoring previous")
-        load_model_weights(sd_model, current_checkpoint_info, None, timer)
+        try:
+            load_model_weights(sd_model, current_checkpoint_info, None, timer)
+        except Exception as rollback_exception:
+            print(f"Failed to restore previous checkpoint after reload failure; preserving original exception: {rollback_exception}", flush=True)
+            raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from rollback_exception
         raise
     finally:
-        sd_hijack.model_hijack.hijack(sd_model)
-        timer.record("hijack")
+        try:
+            sd_hijack.model_hijack.hijack(sd_model)
+            timer.record("hijack")
 
-        if not sd_model.lowvram:
-            sd_model.to(devices.device)
-            timer.record("move model to device")
+            if not sd_model.lowvram:
+                send_model_to_device(sd_model)
+                timer.record("move model to device")
 
-        script_callbacks.model_loaded_callback(sd_model)
-        timer.record("script callbacks")
+            script_callbacks.model_loaded_callback(sd_model)
+            timer.record("script callbacks")
+        except Exception as finalization_exception:
+            if reload_exc_info is not None:
+                print(f"Failed to finalize model after checkpoint reload failure; preserving original exception: {finalization_exception}", flush=True)
+                raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from finalization_exception
+            raise
 
     print(f"Weights loaded in {timer.summary()}.")
 
