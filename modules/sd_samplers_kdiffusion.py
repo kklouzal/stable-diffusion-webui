@@ -68,12 +68,7 @@ def _sigmas_cache_key(sigmas):
     if not torch.is_tensor(sigmas) or sigmas.numel() == 0:
         return None
 
-    sigmas_cpu = sigmas.detach().to(device=devices.cpu, dtype=torch.float32)
-    return (
-        tuple(sigmas_cpu.shape),
-        float(sigmas_cpu[0]),
-        float(sigmas_cpu[-1]),
-    )
+    return sd_samplers_common.semantic_tensor_cache_key(sigmas)
 
 
 def _model_schedule_cache_signature(sd_model, model_wrap):

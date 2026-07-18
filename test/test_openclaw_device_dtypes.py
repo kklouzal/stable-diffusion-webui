@@ -182,6 +182,40 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sampler_module._make_timesteps(0, torch.device("cpu"))
 
+    def test_generation_profile_cache_returns_fresh_timesteps(self):
+        module = load_timesteps_sampler_module()
+        import importlib.util as _importlib_util
+        spec = _importlib_util.spec_from_file_location("modules.openclaw_generation_profile", "modules/openclaw_generation_profile.py")
+        real_profile = _importlib_util.module_from_spec(spec)
+        original_profile = sys.modules.get("modules.openclaw_generation_profile")
+        sys.modules["modules.openclaw_generation_profile"] = real_profile
+        try:
+            spec.loader.exec_module(real_profile)
+        finally:
+            if original_profile is None:
+                sys.modules.pop("modules.openclaw_generation_profile", None)
+            else:
+                sys.modules["modules.openclaw_generation_profile"] = original_profile
+        module.openclaw_generation_profile = real_profile
+
+        class Sampler(module.CompVisSampler):
+            def __init__(self):
+                self.config = types.SimpleNamespace(name="DDIM", options={})
+                self.funcname = "ddim"
+
+        real_profile.clear()
+        sampler = Sampler()
+        processing = types.SimpleNamespace(extra_generation_params={})
+
+        first = sampler.get_timesteps(processing, 20)
+        expected = first.clone()
+        first.fill_(123)
+        second = sampler.get_timesteps(processing, 20)
+
+        torch.testing.assert_close(second, expected)
+        self.assertIsNot(second, first)
+        self.assertEqual(real_profile.status()["hits"], 1)
+
     def test_vae_cheap_approximation_preserves_sample_dtype(self):
         with mock.patch.object(sys, "argv", [sys.argv[0]]):
             from modules import sd_vae_approx

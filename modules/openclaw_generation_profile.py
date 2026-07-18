@@ -123,7 +123,7 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
             _STATS["hits"] += 1
             _STATS["last_key"] = key
             _STATS["last_bypass_reason"] = None
-            return cached
+            return cached.clone()
 
         _STATS["misses"] += 1
 
@@ -131,7 +131,7 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
     if not torch.is_tensor(tensor):
         return tensor
 
-    tensor = tensor.detach()
+    stored = tensor.detach().clone()
 
     with _LOCK:
         existing = _TENSOR_CACHE.get(key)
@@ -140,12 +140,12 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
             _STATS["hits"] += 1
             _STATS["last_key"] = key
             _STATS["last_bypass_reason"] = None
-            return existing
+            return existing.clone()
 
         while len(_TENSOR_CACHE) >= max_size:
             _TENSOR_CACHE.popitem(last=False)
             _STATS["evictions"] += 1
-        _TENSOR_CACHE[key] = tensor
+        _TENSOR_CACHE[key] = stored
         _STATS["stores"] += 1
         _STATS["last_key"] = key
         _STATS["last_bypass_reason"] = None

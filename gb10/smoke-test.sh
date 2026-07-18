@@ -90,5 +90,14 @@ if torch.cuda.is_available():
         raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
     print('nvfp4 torchao/mslk: ok')
 
+try:
+    from modules.api import api as api_module
+
+    assert not api_module._precision_storage_active('Enable for SDXL', type('M', (), {'is_sdxl': False})())
+    assert api_module._precision_storage_active('Enable for SDXL', type('M', (), {'is_sdxl': True})())
+    print('precision diagnostics helpers: ok')
+except Exception as exc:
+    raise SystemExit(f'precision diagnostics smoke failed: {exc}')
+
 print('container imports: ok')
 PY

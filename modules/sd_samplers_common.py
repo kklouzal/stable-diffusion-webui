@@ -11,6 +11,28 @@ import k_diffusion.sampling
 SamplerDataTuple = namedtuple('SamplerData', ['name', 'constructor', 'aliases', 'options'])
 
 
+def semantic_tensor_cache_key(tensor):
+    """Return a value-based cache key for small deterministic schedule tensors.
+
+    Sigma/timestep schedules are frequently mutated in place by sampler
+    implementations and wrappers. Object identity and partial first/last values
+    are therefore not safe cache keys: the same tensor object can carry different
+    values later, and middle schedule values can affect generated pixels.
+    """
+
+    if not torch.is_tensor(tensor):
+        return None
+
+    detached = tensor.detach()
+    cpu_tensor = detached.to(device=devices.cpu).contiguous().reshape(-1)
+    return (
+        tuple(detached.shape),
+        str(detached.dtype),
+        str(detached.device),
+        tuple(cpu_tensor.tolist()),
+    )
+
+
 class SamplerData(SamplerDataTuple):
     def total_steps(self, steps):
         if self.options.get("second_order", False):

@@ -24,14 +24,56 @@ def sha256_file(filename: str) -> str:
     return h.hexdigest()
 
 
-def stat_source(filename: str) -> dict:
+def file_identity(filename: str) -> dict:
     stat = os.stat(filename)
     return {
         "path": os.path.abspath(filename),
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "sha256": sha256_file(filename),
+        "ctime_ns": stat.st_ctime_ns,
     }
+
+
+def stat_source(filename: str, *, identity_trusted: bool = True) -> dict:
+    return {
+        **file_identity(filename),
+        "sha256": sha256_file(filename),
+        "identity_trusted": identity_trusted,
+    }
+
+
+def file_identity_matches(filename: str, metadata: dict | None) -> bool:
+    if not metadata:
+        return False
+
+    identity = file_identity(filename)
+    required = ("path", "device", "inode", "size", "mtime_ns", "ctime_ns")
+    return all(identity.get(key) == metadata.get(key) for key in required)
+
+
+def file_metadata_matches(filename: str, metadata: dict | None) -> bool:
+    if not metadata or not metadata.get("sha256"):
+        return False
+
+    current = file_identity(filename)
+    if file_identity_matches(filename, metadata):
+        # Fast path: unchanged path/device/inode/size/mtime/ctime identity matches a previously
+        # strong-hashed file. The recorded SHA-256 remains part of the trusted
+        # metadata, so this path skips repeat hashing but never accepts metadata
+        # that was not originally hash-backed.
+        return bool(metadata.get("identity_trusted"))
+
+    if current.get("path") != metadata.get("path") or current.get("size") != metadata.get("size"):
+        return False
+
+    if sha256_file(filename) != metadata.get("sha256"):
+        return False
+
+    metadata.update(file_identity(filename))
+    metadata["identity_trusted"] = True
+    return True
 
 
 def tensor_meta(tensor) -> dict:
@@ -144,14 +186,31 @@ def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_n
     if not sidecar:
         return False
 
-    expected = expected_cache_metadata(filename, cache_version, config_name, coverage)
-    coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected["coverage"])
+    sidecar_source = sidecar.get("source")
+    sidecar_cache = sidecar.get("cache")
+    original_source = dict(sidecar_source or {})
+    original_cache = dict(sidecar_cache or {})
+    source_matches = file_metadata_matches(filename, sidecar_source)
+    cache_matches = file_metadata_matches(cache_path, sidecar_cache)
+    if source_matches or cache_matches:
+        updated = False
+        if source_matches and sidecar_source != original_source:
+            sidecar["source"] = sidecar_source
+            updated = True
+        if cache_matches and sidecar_cache != original_cache:
+            sidecar["cache"] = sidecar_cache
+            updated = True
+        if updated:
+            write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+
+    expected_coverage = sorted(coverage) if coverage is not None else None
+    coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected_coverage)
     return (
-        sidecar.get("cache_version") == expected["cache_version"]
-        and sidecar.get("config") == expected["config"]
-        and sidecar.get("source") == expected["source"]
+        sidecar.get("cache_version") == cache_version
+        and sidecar.get("config") == config_name
+        and source_matches
         and coverage_matches
-        and sidecar.get("cache") == stat_source(cache_path)
+        and cache_matches
     )
 
 
@@ -217,12 +276,12 @@ def load_into_model(
         print(f"Ignoring unreadable {label} cache {cache_path}: payload is not a dict")
         return False
 
-    expected = expected_cache_metadata(source_path, cache_version, config_name, coverage)
-    payload_coverage_matches = coverage is None or payload.get("coverage") in (None, expected["coverage"])
+    expected_coverage = sorted(coverage) if coverage is not None else None
+    payload_coverage_matches = coverage is None or payload.get("coverage") in (None, expected_coverage)
     if not (
-        payload.get("cache_version") == expected["cache_version"]
-        and payload.get("config") == expected["config"]
-        and payload.get("source") == expected["source"]
+        payload.get("cache_version") == cache_version
+        and payload.get("config") == config_name
+        and file_metadata_matches(source_path, payload.get("source"))
         and payload_coverage_matches
     ):
         print(f"Ignoring stale {label} cache {cache_path}: payload metadata does not match requested source/config/coverage")

@@ -113,6 +113,31 @@ def _precision_selected_coverage(name: str):
         return ()
 
 
+def _precision_storage_active(mode, sd_model):
+    if mode == "Enable":
+        return True
+    if mode == "Enable for SDXL":
+        return bool(getattr(sd_model, "is_sdxl", False))
+    return False
+
+
+def _precision_option_mismatch_warnings(sd_model, layers):
+    warnings = []
+    for prefix, label in (("mxfp8", "MXFP8"), ("nvfp4", "NVFP4")):
+        storage = getattr(shared.opts, f"{prefix}_storage", None)
+        requested = _precision_storage_active(storage, sd_model)
+        quantized = sum(1 for layer in layers if layer.get("weight", {}).get("kind") == prefix)
+        if requested and quantized == 0:
+            warnings.append({
+                "kind": prefix,
+                "message": f"{label} storage is configured as {storage!r} but no {label} Linear weights are active in the loaded model.",
+                "storage": storage,
+                "requested": requested,
+                "quantized_layers": quantized,
+            })
+    return warnings
+
+
 def _precision_model_signature(sd_model, lora_networks):
     checkpoint = getattr(sd_model, "sd_checkpoint_info", None)
     return (
@@ -340,6 +365,7 @@ def build_precision_map():
             "mxfp8_mha_lora_skipped_count": sum(1 for layer in layers if layer.get("mxfp8_mha_lora_skipped")),
             "nvfp4_mha_lora_skipped_count": sum(1 for layer in layers if layer.get("nvfp4_mha_lora_skipped")),
         },
+        "warnings": _precision_option_mismatch_warnings(sd_model, layers),
         "loras": loras,
         "layers": layers,
         "cache": {"hit": False},
