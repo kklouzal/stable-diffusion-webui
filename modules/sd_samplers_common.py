@@ -3,7 +3,7 @@ from collections import namedtuple
 import numpy as np
 import torch
 from PIL import Image
-from modules import devices, images, sd_vae_approx, sd_vae_taesd, shared, sd_models
+from modules import devices, images, sd_vae_approx, sd_vae_taesd, shared
 from modules.shared import opts, state
 import k_diffusion.sampling
 
@@ -223,6 +223,7 @@ def apply_refiner(cfg_denoiser, sigma=None):
     cfg_denoiser.p.extra_generation_params['Refiner'] = refiner_checkpoint_info.short_title
     cfg_denoiser.p.extra_generation_params['Refiner switch at'] = refiner_switch_at
 
+    from modules import sd_models
     with sd_models.SkipWritingToConfig():
         sd_models.reload_model_weights(info=refiner_checkpoint_info)
 

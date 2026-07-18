@@ -368,9 +368,11 @@ class OpenClawImportOrderTests(unittest.TestCase):
         top_imports = source.split("def samples_to_images_tensor", 1)[0]
         self.assertNotIn("openclaw_vae_decode_graphs", top_imports)
         self.assertNotIn("sd_samplers,", top_imports)
+        self.assertNotIn("sd_models", top_imports)
         decode_body = source.split("def decode_first_stage", 1)[1].split("def images_tensor_to_samples", 1)[0]
         self.assertIn("from modules import openclaw_vae_decode_graphs", decode_body)
         self.assertIn("from modules import sd_samplers", source)
+        self.assertIn("from modules import sd_models", source)
 
 
 class OpenClawVaeDecodeGraphTests(unittest.TestCase):
