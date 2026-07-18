@@ -13,9 +13,14 @@ import urllib.request
 
 base_url = sys.argv[1].rstrip('/')
 
-for path in ('/sdapi/v1/progress?skip_current_image=true', '/sdapi/v1/sd-models'):
+for path in (
+    '/sdapi/v1/progress?skip_current_image=true',
+    '/sdapi/v1/sd-models',
+    '/sdapi/v1/openclaw/precision-map',
+    '/sdapi/v1/openclaw/vae-decode-graphs',
+):
     url = base_url + path
-    with urllib.request.urlopen(url, timeout=10) as response:
+    with urllib.request.urlopen(url, timeout=30) as response:
         body = response.read()
         content_type = response.headers.get('content-type', '')
         if response.status != 200:
@@ -27,6 +32,15 @@ for path in ('/sdapi/v1/progress?skip_current_image=true', '/sdapi/v1/sd-models'
         if not isinstance(payload, list):
             raise SystemExit(f'{path}: expected model list')
         print(f'{path}: ok ({len(payload)} models)')
+    elif path.startswith('/sdapi/v1/openclaw/precision-map'):
+        summary = payload.get('summary', {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict) or not payload.get('ok') or 'checkpoint' not in payload or 'precision' not in summary:
+            raise SystemExit(f'{path}: expected initialized precision diagnostics payload')
+        print(f'{path}: ok (checkpoint={payload.get("checkpoint", {}).get("title")}, precision={summary.get("precision")})')
+    elif path.startswith('/sdapi/v1/openclaw/vae-decode-graphs'):
+        if not isinstance(payload, dict) or 'enabled' not in payload or 'cache_size' not in payload:
+            raise SystemExit(f'{path}: expected VAE decode graph status payload')
+        print(f'{path}: ok (enabled={payload.get("enabled")}, cache_size={payload.get("cache_size")})')
     else:
         print(f'{path}: ok (progress={payload.get("progress")})')
 PY
@@ -90,14 +104,9 @@ if torch.cuda.is_available():
         raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
     print('nvfp4 torchao/mslk: ok')
 
-try:
-    from modules.api import api as api_module
-
-    assert not api_module._precision_storage_active('Enable for SDXL', type('M', (), {'is_sdxl': False})())
-    assert api_module._precision_storage_active('Enable for SDXL', type('M', (), {'is_sdxl': True})())
-    print('precision diagnostics helpers: ok')
-except Exception as exc:
-    raise SystemExit(f'precision diagnostics smoke failed: {exc}')
-
-print('container imports: ok')
+# A1111 application modules are intentionally not imported here: API and
+# sampler/model modules require the normal WebUI bootstrap (opts, model state,
+# and hijack setup). Product diagnostics above are exercised through the
+# initialized candidate server instead.
+print('container dependencies: ok')
 PY

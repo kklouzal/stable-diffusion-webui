@@ -16,6 +16,8 @@ def load_api_control_class():
         "apply_openclaw_runtime_defaults",
         "get_cuda_graphs",
         "set_cuda_graphs",
+        "get_vae_decode_graphs",
+        "set_vae_decode_graphs",
         "get_openclaw_generation_diagnostics",
         "get_memory",
         "_memory_counter_pair",
