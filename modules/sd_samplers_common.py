@@ -3,7 +3,7 @@ from collections import namedtuple
 import numpy as np
 import torch
 from PIL import Image
-from modules import devices, images, sd_vae_approx, sd_samplers, sd_vae_taesd, shared, sd_models, openclaw_vae_decode_graphs
+from modules import devices, images, sd_vae_approx, sd_samplers, sd_vae_taesd, shared, sd_models
 from modules.shared import opts, state
 import k_diffusion.sampling
 
@@ -95,6 +95,7 @@ def single_sample_to_image(sample, approximation=None):
 def decode_first_stage(model, x):
     x = x.to(devices.dtype_vae)
     approx_index = approximation_indexes.get(opts.sd_vae_decode_method, 0)
+    from modules import openclaw_vae_decode_graphs
     decoded = openclaw_vae_decode_graphs.run(model, x, approx_index)
     if decoded is not None:
         return decoded

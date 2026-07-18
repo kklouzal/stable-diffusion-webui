@@ -361,6 +361,16 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
 
 
 
+class OpenClawImportOrderTests(unittest.TestCase):
+    def test_vae_graph_helper_is_imported_lazily_inside_decode_first_stage(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / "modules/sd_samplers_common.py").read_text()
+        top_imports = source.split("def samples_to_images_tensor", 1)[0]
+        self.assertNotIn("openclaw_vae_decode_graphs", top_imports)
+        decode_body = source.split("def decode_first_stage", 1)[1].split("def images_tensor_to_samples", 1)[0]
+        self.assertIn("from modules import openclaw_vae_decode_graphs", decode_body)
+
+
 class OpenClawVaeDecodeGraphTests(unittest.TestCase):
     def setUp(self):
         from modules import openclaw_vae_decode_graphs
