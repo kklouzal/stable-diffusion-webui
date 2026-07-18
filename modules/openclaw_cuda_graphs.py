@@ -18,12 +18,18 @@ _STATS = {
     "bypasses": 0,
     "bypass_reasons": {},
     "last_bypass_reason": None,
+    "invalidations": 0,
+    "invalidation_reasons": {},
+    "last_invalidation_reason": None,
+    "last_invalidation_details": None,
     "failures": 0,
     "last_error": None,
     "last_key": None,
 }
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 _SEEN_KEYS: set[tuple[Any, ...]] = set()
+_LIFECYCLE_STATE: dict[str, Any] = {}
+_MISSING = object()
 
 
 def _read_max_cache_size() -> int:
@@ -44,6 +50,10 @@ def _reset_stats() -> None:
         "bypasses": 0,
         "bypass_reasons": {},
         "last_bypass_reason": None,
+        "invalidations": 0,
+        "invalidation_reasons": {},
+        "last_invalidation_reason": None,
+        "last_invalidation_details": None,
         "failures": 0,
         "last_error": None,
         "last_key": None,
@@ -81,6 +91,7 @@ def status() -> dict[str, Any]:
             "allow_seg": _allow_seg_graphs(),
             "min_key_hits_before_capture": _min_key_hits_before_capture(),
             **_STATS,
+            "lifecycle_state_keys": sorted(_LIFECYCLE_STATE),
         }
 
 
@@ -93,16 +104,59 @@ def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
             _KEY_LOCKS.clear()
             _FAILED_KEYS.clear()
             _SEEN_KEYS.clear()
+            _LIFECYCLE_STATE.clear()
             _reset_stats()
+        return status()
+
+
+def _clear_cache_locked() -> bool:
+    had_state = bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS or _SEEN_KEYS)
+    _CACHE.clear()
+    _KEY_LOCKS.clear()
+    _FAILED_KEYS.clear()
+    _SEEN_KEYS.clear()
+    return had_state
+
+
+def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
+    """Clear captured CUDA graphs after a mutable runtime boundary changes."""
+    reason = str(reason or "unknown")
+    with _LOCK:
+        had_state = _clear_cache_locked()
+        if had_state:
+            _STATS["invalidations"] += 1
+            _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
+            _STATS["last_invalidation_reason"] = reason
+            _STATS["last_invalidation_details"] = repr(details)[:1000] if details is not None else None
+        return status()
+
+
+def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) -> dict[str, Any]:
+    """Invalidate once when a named lifecycle boundary changes state.
+
+    First observation is registered without thrashing an empty cache; if cache
+    state already exists, an unobserved boundary is treated as unsafe and cleared.
+    Repeated identical observations are no-ops.
+    """
+    reason = reason or boundary
+    with _LOCK:
+        previous = _LIFECYCLE_STATE.get(boundary, _MISSING)
+        if previous == state:
+            return status()
+        _LIFECYCLE_STATE[boundary] = state
+        had_state = _clear_cache_locked()
+        if had_state:
+            _STATS["invalidations"] += 1
+            _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
+            _STATS["last_invalidation_reason"] = reason
+            _STATS["last_invalidation_details"] = repr({"boundary": boundary, "previous": previous, "current": state})[:1000]
         return status()
 
 
 def clear() -> dict[str, Any]:
     with _LOCK:
-        _CACHE.clear()
-        _KEY_LOCKS.clear()
-        _FAILED_KEYS.clear()
-        _SEEN_KEYS.clear()
+        _clear_cache_locked()
+        _LIFECYCLE_STATE.clear()
         _reset_stats()
         return status()
 
@@ -145,6 +199,109 @@ def _copy_into_static(static: Any, current: Any) -> None:
     elif isinstance(static, tuple) and isinstance(current, tuple):
         for dst, src in zip(static, current):
             _copy_into_static(dst, src)
+
+
+def _runtime_boundary_state() -> tuple[Any, ...]:
+    try:
+        from modules import devices, shared, sd_hijack_optimizations
+    except Exception:
+        devices = shared = sd_hijack_optimizations = None
+
+    model = getattr(shared, "sd_model", None) if shared is not None else None
+    checkpoint_info = getattr(model, "sd_checkpoint_info", None)
+    checkpoint_key = (
+        id(model) if model is not None else None,
+        getattr(checkpoint_info, "filename", None),
+        getattr(checkpoint_info, "hash", None),
+        getattr(checkpoint_info, "sha256", None),
+        repr(getattr(model, "used_config", None)),
+    )
+    vae_key = (
+        getattr(model, "loaded_vae_file", None),
+        id(getattr(model, "first_stage_model", None)) if model is not None else None,
+    )
+    try:
+        import networks
+
+        lora_key = tuple(
+            (
+                getattr(net, "name", None),
+                getattr(net, "mentioned_name", None),
+                getattr(net, "te_multiplier", None),
+                getattr(net, "unet_multiplier", None),
+                getattr(net, "dyn_dim", None),
+                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net)
+                if hasattr(networks, "network_lora_source_signature")
+                else None,
+            )
+            for net in getattr(networks, "loaded_networks", [])
+        )
+    except Exception:
+        lora_key = None
+    try:
+        attention_key = sd_hijack_optimizations.sdpa_backend_status() if sd_hijack_optimizations is not None else None
+    except Exception:
+        attention_key = None
+    precision_key = (
+        getattr(devices, "dtype", None),
+        getattr(devices, "dtype_unet", None),
+        getattr(devices, "dtype_vae", None),
+        getattr(devices, "unet_needs_upcast", None),
+        getattr(devices, "fp8", None),
+        getattr(devices, "mxfp8", None),
+        getattr(devices, "nvfp4", None),
+        os.environ.get("OPENCLAW_SDPA_BACKEND"),
+        os.environ.get("OPENCLAW_CUDA_GRAPHS"),
+        os.environ.get("OPENCLAW_CUDA_GRAPH_ALLOW_SEG"),
+    )
+    return (checkpoint_key, vae_key, lora_key, repr(attention_key), tuple(map(str, precision_key)))
+
+
+def refresh_runtime_state() -> dict[str, Any]:
+    return invalidate_if_changed("runtime", _runtime_boundary_state(), "runtime_changed")
+
+
+def note_model_loaded(model: Any | None = None, reason: str = "model_changed") -> dict[str, Any]:
+    checkpoint_info = getattr(model, "sd_checkpoint_info", None)
+    state = (
+        id(model) if model is not None else None,
+        getattr(checkpoint_info, "filename", None),
+        getattr(checkpoint_info, "hash", None),
+        getattr(checkpoint_info, "sha256", None),
+        repr(getattr(model, "used_config", None)),
+    )
+    return invalidate_if_changed("model", state, reason)
+
+
+def note_vae_loaded(model: Any | None = None, reason: str = "vae_changed") -> dict[str, Any]:
+    state = (
+        id(model) if model is not None else None,
+        getattr(model, "loaded_vae_file", None),
+        id(getattr(model, "first_stage_model", None)) if model is not None else None,
+    )
+    return invalidate_if_changed("vae", state, reason)
+
+
+def note_lora_loaded(reason: str = "lora_changed") -> dict[str, Any]:
+    try:
+        import networks
+
+        state = tuple(
+            (
+                getattr(net, "name", None),
+                getattr(net, "mentioned_name", None),
+                getattr(net, "te_multiplier", None),
+                getattr(net, "unet_multiplier", None),
+                getattr(net, "dyn_dim", None),
+                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net)
+                if hasattr(networks, "network_lora_source_signature")
+                else None,
+            )
+            for net in getattr(networks, "loaded_networks", [])
+        )
+    except Exception:
+        state = None
+    return invalidate_if_changed("lora", state, reason)
 
 
 def _evict_if_needed_locked() -> None:

@@ -18,7 +18,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config, openclaw_cuda_graphs
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -373,6 +373,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
             gr.Warning(lora_not_found_message)
 
     purge_networks_from_memory()
+    openclaw_cuda_graphs.note_lora_loaded("lora_changed")
 
 
 def allowed_layer_without_weight(layer):

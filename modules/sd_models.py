@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -1553,6 +1553,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         torchao_quant_mode_changed = True
 
     if torchao_quant_mode_changed:
+        openclaw_cuda_graphs.invalidate("quantization_changed", getattr(checkpoint_info, "filename", None))
         # LoadStateDictOnMeta mutates the dict it receives and get_checkpoint_state_dict()
         # returns the cached dict by reference. If a cache entry from a previous
         # optimized/meta load survives, a fresh model can still try to materialize
@@ -1584,10 +1585,12 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             devices.torch_gc()
 
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
+        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model, "model_changed")
         return model_data.sd_model
 
     sd_model = reuse_model_from_already_loaded(sd_model, checkpoint_info, timer)
     if not forced_reload and sd_model is not None and sd_model.sd_checkpoint_info.filename == checkpoint_info.filename:
+        openclaw_cuda_graphs.note_model_loaded(sd_model, "model_changed")
         return sd_model
 
     if sd_model is not None:
@@ -1606,6 +1609,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             send_model_to_trash(sd_model)
 
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
+        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model, "model_changed")
         return model_data.sd_model
 
     reload_exc_info = None
@@ -1641,6 +1645,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
 
     model_data.set_sd_model(sd_model)
     sd_unet.apply_unet()
+    openclaw_cuda_graphs.note_model_loaded(sd_model, "model_changed")
 
     return sd_model
 

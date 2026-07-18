@@ -153,6 +153,98 @@ class CudaGraphSegBypassTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class CudaGraphInvalidationTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_env = os.environ.get("OPENCLAW_SDPA_BACKEND")
+        openclaw_cuda_graphs.clear()
+
+    def tearDown(self):
+        if self.previous_env is None:
+            os.environ.pop("OPENCLAW_SDPA_BACKEND", None)
+        else:
+            os.environ["OPENCLAW_SDPA_BACKEND"] = self.previous_env
+        openclaw_cuda_graphs.clear()
+
+    def seed_graph_state(self):
+        openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
+        openclaw_cuda_graphs._KEY_LOCKS[("stale",)] = object()
+        openclaw_cuda_graphs._FAILED_KEYS.add(("failed",))
+        openclaw_cuda_graphs._SEEN_KEYS.add(("seen",))
+
+    def test_invalidate_records_reason_only_when_state_is_cleared(self):
+        status = openclaw_cuda_graphs.invalidate("model_changed", "empty")
+        self.assertEqual(status["invalidations"], 0)
+
+        self.seed_graph_state()
+        status = openclaw_cuda_graphs.invalidate("model_changed", {"checkpoint": "next"})
+
+        self.assertEqual(status["cache_size"], 0)
+        self.assertEqual(openclaw_cuda_graphs._KEY_LOCKS, {})
+        self.assertEqual(openclaw_cuda_graphs._FAILED_KEYS, set())
+        self.assertEqual(openclaw_cuda_graphs._SEEN_KEYS, set())
+        self.assertEqual(status["invalidations"], 1)
+        self.assertEqual(status["invalidation_reasons"], {"model_changed": 1})
+        self.assertEqual(status["last_invalidation_reason"], "model_changed")
+
+    def test_invalidate_if_changed_does_not_thrash_repeated_state(self):
+        openclaw_cuda_graphs.invalidate_if_changed("model", ("ckpt-a",), "model_changed")
+        self.seed_graph_state()
+
+        repeated = openclaw_cuda_graphs.invalidate_if_changed("model", ("ckpt-a",), "model_changed")
+
+        self.assertEqual(repeated["invalidations"], 0)
+        self.assertEqual(repeated["cache_size"], 1)
+
+        changed = openclaw_cuda_graphs.invalidate_if_changed("model", ("ckpt-b",), "model_changed")
+
+        self.assertEqual(changed["invalidations"], 1)
+        self.assertEqual(changed["invalidation_reasons"], {"model_changed": 1})
+        self.assertEqual(changed["cache_size"], 0)
+
+        repeated_again = openclaw_cuda_graphs.invalidate_if_changed("model", ("ckpt-b",), "model_changed")
+
+        self.assertEqual(repeated_again["invalidations"], 1)
+        self.assertEqual(repeated_again["invalidation_reasons"], {"model_changed": 1})
+
+    def test_runtime_refresh_invalidates_on_backend_state_change_once(self):
+        os.environ["OPENCLAW_SDPA_BACKEND"] = "flash"
+        openclaw_cuda_graphs.refresh_runtime_state()
+        self.seed_graph_state()
+
+        unchanged = openclaw_cuda_graphs.refresh_runtime_state()
+
+        self.assertEqual(unchanged["invalidations"], 0)
+        self.assertEqual(unchanged["cache_size"], 1)
+
+        os.environ["OPENCLAW_SDPA_BACKEND"] = "math"
+        changed = openclaw_cuda_graphs.refresh_runtime_state()
+
+        self.assertEqual(changed["invalidations"], 1)
+        self.assertEqual(changed["invalidation_reasons"], {"runtime_changed": 1})
+        self.assertEqual(changed["cache_size"], 0)
+
+    def test_note_model_and_vae_loaded_are_noops_for_same_state(self):
+        checkpoint = types.SimpleNamespace(filename="a.safetensors", hash="short", sha256="long")
+        model = types.SimpleNamespace(sd_checkpoint_info=checkpoint, used_config="cfg", loaded_vae_file="vae.pt", first_stage_model=object())
+        openclaw_cuda_graphs.note_model_loaded(model)
+        openclaw_cuda_graphs.note_vae_loaded(model)
+        self.seed_graph_state()
+
+        same_model = openclaw_cuda_graphs.note_model_loaded(model)
+        same_vae = openclaw_cuda_graphs.note_vae_loaded(model)
+
+        self.assertEqual(same_model["invalidations"], 0)
+        self.assertEqual(same_vae["invalidations"], 0)
+        self.assertEqual(same_vae["cache_size"], 1)
+
+        model.loaded_vae_file = "other.vae.pt"
+        changed_vae = openclaw_cuda_graphs.note_vae_loaded(model)
+
+        self.assertEqual(changed_vae["invalidations"], 1)
+        self.assertEqual(changed_vae["invalidation_reasons"], {"vae_changed": 1})
+
+
+
 class CudaGraphCacheSizeTests(unittest.TestCase):
     def setUp(self):
         self.previous_max_cache_size = openclaw_cuda_graphs._MAX_CACHE_SIZE
