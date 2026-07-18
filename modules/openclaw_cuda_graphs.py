@@ -295,34 +295,49 @@ def _seg_graph_state_key(denoiser: Any | None) -> Any:
         module_signature,
     )
 
+def _img2img_graph_state_key(denoiser: Any | None) -> Any:
+    if denoiser is None:
+        return None
+
+    p = getattr(denoiser, "p", None)
+    return (
+        "img2img",
+        getattr(denoiser, "init_latent", None) is not None,
+        bool(getattr(denoiser, "mask_before_denoising", False)),
+        getattr(p, "init_latent", None) is not None if p is not None else False,
+        getattr(p, "image_conditioning", None) is not None if p is not None else False,
+        bool(getattr(p, "init_images", None)) if p is not None else False,
+    )
+
+
 def _denoiser_graph_key(denoiser: Any | None) -> Any:
-    return _seg_graph_state_key(denoiser)
+    return (
+        _seg_graph_state_key(denoiser),
+        _img2img_graph_state_key(denoiser),
+    )
 
 
 def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
     if denoiser is None:
         return None
 
-    # Inpaint/masked blending depends on mutable latent-mask state outside the
-    # wrapped UNet call. Keep that path eager unless it is audited separately.
+    # Masked/inpaint blending mutates the latent around the wrapped UNet call and
+    # can invoke arbitrary mask-blend scripts. Keep every mask-bearing path eager
+    # until mask tensors/script effects are modeled as explicit graph inputs.
     if getattr(denoiser, "mask", None) is not None or getattr(denoiser, "nmask", None) is not None:
         return "denoiser_mask"
-    # img2img/hires/inpaint denoising blends against init_latent and related
-    # image/mask state around the wrapped UNet call. That mutable state is not a
-    # complete CUDA graph input, and stale replay can preserve noise from a prior
-    # source image. Prefer quality and bypass until all image-sensitive inputs are
-    # explicitly modeled and validated.
-    if getattr(denoiser, "init_latent", None) is not None:
-        return "denoiser_init_latent"
 
     p = getattr(denoiser, "p", None)
     if p is not None:
         if getattr(p, "mask", None) is not None or getattr(p, "nmask", None) is not None:
             return "processing_mask"
-        if getattr(p, "init_latent", None) is not None or getattr(p, "image_conditioning", None) is not None:
-            return "processing_img2img"
-        if getattr(p, "init_images", None):
-            return "processing_img2img"
+
+        # Unmasked img2img/hires state is graphable here. By the time
+        # CFGDenoiser.run_inner_model calls us, init_latent/init_images have been
+        # consumed by sampler setup and any image conditioning used by the UNet is
+        # present in the cond argument copied into static graph inputs. The init
+        # latent itself is only used for pre/post mask blending, and mask-bearing
+        # variants remain bypassed above.
 
         seg_params = _seg_params(denoiser)
         if bool(getattr(seg_params, "seg_active", False)):
@@ -422,8 +437,14 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
             stream = torch.cuda.Stream()
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
-                static_out = fn(static_x, static_sigma, cond=static_cond)
+                warmup_out = fn(static_x, static_sigma, cond=static_cond)
             torch.cuda.current_stream().wait_stream(stream)
+            # The capture pass invokes the UNet a second time for the same denoise
+            # step. Some active attention/guidance stacks are call-sensitive even
+            # when graph replay is exact, so return the first eager result for the
+            # current step and keep the captured output only as the graph-owned
+            # static replay buffer for subsequent steps.
+            capture_return = _clone_static(warmup_out)
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
@@ -435,7 +456,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                 _STATS["captures"] += 1
                 _STATS["last_error"] = None
                 _STATS["last_key"] = repr(key)
-            return static_out.clone()
+            return capture_return
         except Exception as exc:
             with _LOCK:
                 _STATS["failures"] += 1

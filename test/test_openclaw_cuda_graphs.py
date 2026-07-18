@@ -115,22 +115,42 @@ class CudaGraphSegBypassTests(unittest.TestCase):
 
         self.assertEqual(reason, "processing_mask")
 
-    def test_img2img_init_latent_bypasses_even_when_seg_is_allowed(self):
+    def test_unmasked_img2img_init_latent_is_graphable_when_seg_is_allowed(self):
         os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
         denoiser = make_denoiser()
         denoiser.init_latent = object()
 
         reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
 
-        self.assertEqual(reason, "denoiser_init_latent")
+        self.assertIsNone(reason)
 
-    def test_processing_init_images_bypass_before_graph_key_reuse(self):
+    def test_unmasked_processing_init_images_do_not_bypass_graphs(self):
         denoiser = make_denoiser(active=False)
         denoiser.p.init_images = [object()]
 
         reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
 
-        self.assertEqual(reason, "processing_img2img")
+        self.assertIsNone(reason)
+
+    def test_processing_image_conditioning_does_not_bypass_graphs_when_unmasked(self):
+        denoiser = make_denoiser(active=False)
+        denoiser.p.image_conditioning = object()
+
+        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
+
+        self.assertIsNone(reason)
+
+    def test_img2img_graph_key_changes_without_tensor_value_explosion(self):
+        txt2img = make_denoiser(active=False)
+        img2img = make_denoiser(active=False)
+        img2img.init_latent = object()
+        img2img.p.init_images = [object()]
+        first = openclaw_cuda_graphs._denoiser_graph_key(img2img)
+        img2img.p.init_images = [object(), object()]
+        second = openclaw_cuda_graphs._denoiser_graph_key(img2img)
+
+        self.assertNotEqual(openclaw_cuda_graphs._denoiser_graph_key(txt2img), first)
+        self.assertEqual(first, second)
 
 
 class CudaGraphCacheSizeTests(unittest.TestCase):
@@ -216,6 +236,25 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
 
         self.assertEqual(len(openclaw_cuda_graphs._KEY_LOCKS), 1)
+
+
+    def test_capture_returns_first_eager_warmup_result(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for capture return-equivalence test")
+
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = 1
+        os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = "1"
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        x = torch.zeros(1, device="cuda")
+        calls = []
+
+        def fn(x_arg, sigma_arg, cond=None):
+            calls.append(len(calls) + 1)
+            return x_arg + calls[-1]
+
+        out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
+
+        self.assertTrue(torch.equal(out.cpu(), torch.ones(1)))
 
     def test_min_key_hits_can_be_set_to_one_for_immediate_capture(self):
         previous = os.environ.get("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS")
