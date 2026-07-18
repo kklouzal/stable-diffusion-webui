@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import os, threading, traceback
+from collections import OrderedDict
+from typing import Any
+import torch
+
+_ENABLED=False
+_CACHE_MAX=int(os.environ.get('OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX','4'))
+_LOCK=threading.RLock(); _CACHE=OrderedDict(); _FAILED_KEYS=set()
+_COUNTERS={'captures':0,'replays':0,'bypasses':0,'failures':0,'invalidations':0}
+_BYPASS_REASONS={}; _INVALIDATION_REASONS={}; _LAST_ERROR=None; _LAST_KEY=None; _LIFECYCLE_STATE={}
+
+def _flag(n,d=False):
+    v=os.environ.get(n)
+    return d if v is None else v.strip().lower() in {'1','true','yes','on'}
+
+def _bypass(r):
+    _COUNTERS['bypasses']+=1; _BYPASS_REASONS[r]=_BYPASS_REASONS.get(r,0)+1
+
+def _clear_cache_locked():
+    had=bool(_CACHE or _FAILED_KEYS); _CACHE.clear(); _FAILED_KEYS.clear(); return had
+
+def status():
+    with _LOCK:
+        return {'enabled':_ENABLED,'cache_size':len(_CACHE),'max_cache_size':_CACHE_MAX,**_COUNTERS,'bypass_reasons':dict(_BYPASS_REASONS),'invalidation_reasons':dict(_INVALIDATION_REASONS),'last_error':_LAST_ERROR,'last_key':repr(_LAST_KEY) if _LAST_KEY is not None else None,'lifecycle_state_keys':sorted(_LIFECYCLE_STATE)}
+
+def set_enabled(enabled:bool, clear_cache:bool=False):
+    global _ENABLED
+    with _LOCK:
+        _ENABLED=bool(enabled)
+        if clear_cache:
+            _clear_cache_locked()
+            for k in _COUNTERS: _COUNTERS[k]=0
+            _BYPASS_REASONS.clear(); _INVALIDATION_REASONS.clear()
+    return status()
+
+def invalidate(reason:str, details:Any|None=None):
+    with _LOCK:
+        if _clear_cache_locked():
+            _COUNTERS['invalidations']+=1; _INVALIDATION_REASONS[reason]=_INVALIDATION_REASONS.get(reason,0)+1
+    return status()
+
+def invalidate_if_changed(boundary:str,state:Any,reason:str|None=None):
+    marker=repr(state)
+    with _LOCK:
+        old=_LIFECYCLE_STATE.get(boundary); _LIFECYCLE_STATE[boundary]=marker
+        if old is None or old==marker: return status()
+        if _clear_cache_locked():
+            why=reason or f'{boundary}_changed'; _COUNTERS['invalidations']+=1; _INVALIDATION_REASONS[why]=_INVALIDATION_REASONS.get(why,0)+1
+    return status()
+
+def note_model_loaded(state=None): return invalidate_if_changed('model', state if state is not None else _runtime_identity()[0], 'model_changed')
+def note_vae_loaded(state=None): return invalidate_if_changed('vae', state if state is not None else _runtime_identity()[1], 'vae_changed')
+
+def _tensor_key(x): return (tuple(x.shape),str(x.dtype),str(x.device))
+
+def _runtime_identity():
+    try:
+        from modules import shared, devices
+        sd_model=getattr(shared,'sd_model',None); vae=getattr(sd_model,'first_stage_model',None); info=getattr(sd_model,'sd_checkpoint_info',None)
+        return ((getattr(info,'filename',None),getattr(info,'shorthash',None),getattr(sd_model,'sd_model_hash',None),id(sd_model)),(getattr(sd_model,'loaded_vae_file',None),str(type(getattr(sd_model,'base_vae',None)).__name__),str(getattr(vae,'dtype',None)),id(vae)),(str(getattr(devices,'dtype_vae',None)),str(getattr(devices,'device',None))))
+    except Exception:
+        return (None,None,None)
+
+def _bypass_reason(model,x,approximation):
+    if not _ENABLED: return 'disabled'
+    if approximation!=0: return 'vae_approximation'
+    if not torch.is_tensor(x): return 'not_tensor'
+    if not x.is_cuda: return 'not_cuda'
+    if x.ndim!=4 or x.shape[1]!=4: return 'unsupported_shape'
+    try:
+        from modules import shared, lowvram
+        opts=getattr(shared,'opts',None)
+        if getattr(opts,'sd_vae_decode_method','Full')!='Full': return 'vae_decode_method'
+        if getattr(opts,'hypertile_enable_vae',False): return 'hypertile_vae'
+        if lowvram.is_enabled(model): return 'lowvram'
+    except Exception:
+        return 'state_probe_failed'
+    if getattr(model,'first_stage_model',None) is None or not hasattr(model,'decode_first_stage'): return 'missing_vae'
+    return None
+
+def _key(model,x,approximation): return (_runtime_identity(),_tensor_key(x),approximation,os.environ.get('OPENCLAW_VAE_DECODE_GRAPHS'))
+
+def _decode(model,x):
+    from modules import devices
+    with torch.no_grad(), devices.without_autocast():
+        return model.decode_first_stage(x.to(model.first_stage_model.dtype))
+
+def run(model,x,approximation=0):
+    global _LAST_ERROR,_LAST_KEY
+    reason=_bypass_reason(model,x,approximation)
+    if reason is not None:
+        with _LOCK: _bypass(reason)
+        return None
+    key=_key(model,x,approximation); _LAST_KEY=key
+    with _LOCK:
+        entry=_CACHE.get(key)
+        if entry is not None:
+            entry['input'].copy_(x); entry['graph'].replay(); _CACHE.move_to_end(key); _COUNTERS['replays']+=1; return entry['output'].clone()
+        if key in _FAILED_KEYS:
+            _bypass('failed_key'); return None
+    try:
+        torch.cuda.synchronize(x.device); static_input=x.detach().contiguous(); warmup_output=_decode(model,static_input); torch.cuda.synchronize(x.device)
+        graph=torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph): static_output=_decode(model,static_input)
+        torch.cuda.synchronize(x.device)
+        with _LOCK:
+            _CACHE[key]={'graph':graph,'input':static_input,'output':static_output}; _CACHE.move_to_end(key)
+            while len(_CACHE)>_CACHE_MAX: _CACHE.popitem(last=False)
+            _COUNTERS['captures']+=1
+        return warmup_output
+    except Exception as exc:
+        with _LOCK:
+            _FAILED_KEYS.add(key); _COUNTERS['failures']+=1; _LAST_ERROR=''.join(traceback.format_exception_only(type(exc),exc)).strip(); _bypass('capture_failed')
+        return None
+
+set_enabled(_flag('OPENCLAW_VAE_DECODE_GRAPHS',False), clear_cache=True)

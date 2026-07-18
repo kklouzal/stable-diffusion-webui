@@ -645,6 +645,8 @@ class Api:
         self.add_api_route("/sdapi/v1/openclaw/sdpa-backend", self.set_sdpa_backend, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.get_cuda_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/vae-decode-graphs", self.get_vae_decode_graphs, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/vae-decode-graphs", self.set_vae_decode_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/generation-diagnostics", self.get_openclaw_generation_diagnostics, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/precision-map", self.get_precision_map, methods=["GET"])
         self.add_api_route("/sdapi/v1/precision-map", self.get_precision_map, methods=["GET"])
@@ -748,6 +750,16 @@ class Api:
         enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
         clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
         return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
+
+    def get_vae_decode_graphs(self):
+        from modules import openclaw_vae_decode_graphs
+        return openclaw_vae_decode_graphs.status()
+
+    def set_vae_decode_graphs(self, req: dict[str, Any]):
+        from modules import openclaw_vae_decode_graphs
+        enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
+        clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
+        return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
 
     def get_precision_map(self):
         # The precision map walks shared.sd_model. Keep it out of the model

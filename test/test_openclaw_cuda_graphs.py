@@ -360,5 +360,29 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
                 os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = previous
 
 
+
+class OpenClawVaeDecodeGraphTests(unittest.TestCase):
+    def setUp(self):
+        from modules import openclaw_vae_decode_graphs
+        self.graphs = openclaw_vae_decode_graphs
+        self.graphs.set_enabled(False, clear_cache=True)
+
+    def test_disabled_status_and_toggle(self):
+        self.assertFalse(self.graphs.status()["enabled"])
+        self.assertTrue(self.graphs.set_enabled(True, clear_cache=True)["enabled"])
+
+    def test_lifecycle_state_repeats_are_noop(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        first = self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
+        second = self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
+        self.assertEqual(second["invalidations"], first["invalidations"])
+        self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
+        self.assertIn("vae", self.graphs.status()["lifecycle_state_keys"])
+
+    def test_non_full_approximation_bypasses(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        self.assertIsNone(self.graphs.run(object(), object(), approximation=1))
+        self.assertEqual(self.graphs.status()["bypass_reasons"].get("vae_approximation"), 1)
+
 if __name__ == "__main__":
     unittest.main()
