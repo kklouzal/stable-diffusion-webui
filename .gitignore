@@ -61,3 +61,16 @@ gb10/rebuild-*.pid
 gb10/redeploy-*.log
 gb10/redeploy-*.meta
 gb10/redeploy-*.pid
+
+# GB10 generated proof/audit artifacts (archive under /home/kklouzal before cleanup)
+.audit/
+gb10/alt-refiner-*.json
+gb10/controlnet-*-probe-*.json
+gb10/deploy-*.json
+gb10/deploy-*.txt
+gb10/deploy-*-container.log
+gb10/smoke-*.json
+gb10/smoke-*.log
+gb10/warm-delay-*.json
+gb10/warm-delay-*.txt
+gb10/warm-delay-*.patch

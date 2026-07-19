@@ -115,6 +115,15 @@ class CudaGraphSegBypassTests(unittest.TestCase):
 
         self.assertEqual(reason, "processing_mask")
 
+    def test_external_unet_forward_hook_bypasses_graphs(self):
+        unet = types.SimpleNamespace(_original_forward=object())
+        denoiser = make_denoiser(active=False)
+        denoiser.p.sd_model = types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=unet))
+
+        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
+
+        self.assertEqual(reason, "external_unet_forward_hook")
+
     def test_unmasked_img2img_init_latent_is_graphable_when_seg_is_allowed(self):
         os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
         denoiser = make_denoiser()
@@ -392,6 +401,20 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         self.assertEqual(second["invalidations"], first["invalidations"])
         self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
         self.assertIn("vae", self.graphs.status()["lifecycle_state_keys"])
+
+
+    def test_cache_max_env_parse_is_clamped_and_fallback_safe(self):
+        previous = os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX")
+        try:
+            os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = "-7"
+            self.assertEqual(self.graphs._read_cache_max(), 0)
+            os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = "not-an-int"
+            self.assertEqual(self.graphs._read_cache_max(), 4)
+        finally:
+            if previous is None:
+                os.environ.pop("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX", None)
+            else:
+                os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = previous
 
     def test_non_full_approximation_bypasses(self):
         self.graphs.set_enabled(True, clear_cache=True)

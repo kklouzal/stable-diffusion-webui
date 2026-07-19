@@ -489,6 +489,13 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
         if getattr(p, "mask", None) is not None or getattr(p, "nmask", None) is not None:
             return "processing_mask"
 
+        unet = getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None)
+        if getattr(unet, "_original_forward", None) is not None:
+            # Extensions such as ControlNet install a Python UNet forward hook that
+            # mutates conditioning state around each call. Capturing beneath that
+            # hook can fail or replay stale hook state; keep these paths eager.
+            return "external_unet_forward_hook"
+
         # Unmasked img2img/hires state is graphable here. By the time
         # CFGDenoiser.run_inner_model calls us, init_latent/init_images have been
         # consumed by sampler setup and any image conditioning used by the UNet is

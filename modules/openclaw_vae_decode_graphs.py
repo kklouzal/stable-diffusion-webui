@@ -6,7 +6,14 @@ from typing import Any
 import torch
 
 _ENABLED=False
-_CACHE_MAX=int(os.environ.get('OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX','4'))
+
+def _read_cache_max():
+    try:
+        return max(0, int(os.environ.get('OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX', '4') or 0))
+    except ValueError:
+        return 4
+
+_CACHE_MAX=_read_cache_max()
 _LOCK=threading.RLock(); _CACHE=OrderedDict(); _FAILED_KEYS=set()
 _COUNTERS={'captures':0,'replays':0,'bypasses':0,'failures':0,'invalidations':0}
 _BYPASS_REASONS={}; _INVALIDATION_REASONS={}; _LAST_ERROR=None; _LAST_KEY=None; _LIFECYCLE_STATE={}
@@ -93,18 +100,26 @@ def run(model,x,approximation=0):
     if reason is not None:
         with _LOCK: _bypass(reason)
         return None
-    key=_key(model,x,approximation); _LAST_KEY=key
+    if _CACHE_MAX<=0:
+        with _LOCK: _bypass('cache_disabled')
+        return None
+    key=_key(model,x,approximation)
     with _LOCK:
+        _LAST_KEY=key
         entry=_CACHE.get(key)
         if entry is not None:
-            entry['input'].copy_(x); entry['graph'].replay(); _CACHE.move_to_end(key); _COUNTERS['replays']+=1; return entry['output'].clone()
+            entry['input'].copy_(x, non_blocking=True); entry['graph'].replay(); _CACHE.move_to_end(key); _COUNTERS['replays']+=1; return entry['output'].clone()
         if key in _FAILED_KEYS:
             _bypass('failed_key'); return None
     try:
-        torch.cuda.synchronize(x.device); static_input=x.detach().contiguous(); warmup_output=_decode(model,static_input); torch.cuda.synchronize(x.device)
+        static_input=x.detach().contiguous().clone()
+        stream=torch.cuda.Stream(device=x.device)
+        stream.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(stream):
+            warmup_output=_decode(model,static_input)
+        torch.cuda.current_stream(x.device).wait_stream(stream)
         graph=torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph): static_output=_decode(model,static_input)
-        torch.cuda.synchronize(x.device)
         with _LOCK:
             _CACHE[key]={'graph':graph,'input':static_input,'output':static_output}; _CACHE.move_to_end(key)
             while len(_CACHE)>_CACHE_MAX: _CACHE.popitem(last=False)
