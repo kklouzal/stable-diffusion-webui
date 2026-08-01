@@ -21,12 +21,12 @@ def main() -> int:
     patched = original.replace("@torch.jit.script_method", "@torch.jit.export")
     if patched == original:
         if "@torch.jit.export" in original:
-            print(f"Torch MKLDNN deprecation patch already applied: {target}")
+            print(f"Torch MKLDNN compatibility patch already applied: {target}")
         else:
-            raise SystemExit(f"expected deprecated torch.jit.script_method decorators not found in {target}")
+            raise SystemExit(f"expected torch.jit.script_method decorators not found in {target}")
     else:
         target.write_text(patched, encoding="utf-8")
-        print(f"Patched deprecated torch.jit.script_method decorators in {target}")
+        print(f"Patched torch.jit script_method decorators in {target}")
 
     subprocess.run(
         [

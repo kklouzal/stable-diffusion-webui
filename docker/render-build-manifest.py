@@ -11,13 +11,17 @@ DIRECT_REQUIREMENTS = Path(os.environ.get('DIRECT_REQUIREMENTS', '/opt/requireme
 A1111_DIR = Path(os.environ.get('A1111_DIR', '/opt/stable-diffusion-webui'))
 OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST.txt')))
 OUTPUT_JSON = Path(os.environ.get('OUTPUT_JSON', str(A1111_DIR / 'BUILD_MANIFEST.json')))
+OUTPUT_LATEST_AUDIT = Path(os.environ.get('OUTPUT_LATEST_AUDIT', str(A1111_DIR / 'BUILD_MANIFEST_LATEST_AUDIT.json')))
 PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu132')
 PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
+PYTORCH_NIGHTLY_OPTIONAL_ABSENT = {'torchaudio'}
 TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
 MSLK_NIGHTLY_INDEX_URL = os.environ.get('MSLK_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu132')
 MSLK_SOURCE_REPO = os.environ.get('MSLK_SOURCE_REPO')
 MSLK_SOURCE_COMMIT = os.environ.get('MSLK_SOURCE_COMMIT')
 EXTRA_DIRECT = {'clip'}
+LATEST_QUERY_MODE = os.environ.get('GB10_PACKAGE_LATEST_QUERIES', '0')
+latest_audit: list[dict] = []
 
 
 def normalize(name: str) -> str:
@@ -123,22 +127,40 @@ def latest_visible(name: str, extra_index_url: str | None = None) -> str:
     if name == 'clip':
         latest_cache[key] = 'source-archive'
         return latest_cache[key]
-    cmd = ['python', '-m', 'pip', 'index', 'versions', '--disable-pip-version-check']
+    if LATEST_QUERY_MODE != '1':
+        latest_cache[key] = 'not checked (network query disabled)'
+        return latest_cache[key]
+    cmd = ['python', '-m', 'pip', 'index', 'versions', '--disable-pip-version-check', '--timeout', '8']
     if extra_index_url:
         cmd.extend(['--extra-index-url', extra_index_url])
     cmd.append(name)
     try:
         out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError:
-        latest_cache[key] = 'query-failed'
+    except subprocess.CalledProcessError as exc:
+        latest_cache[key] = 'latest-unavailable'
+        latest_audit.append({
+            'package': name,
+            'extra_index_url': extra_index_url,
+            'status': 'latest-unavailable',
+            'reason': f'pip index exited {exc.returncode}',
+            'output_tail': exc.output.splitlines()[-8:],
+        })
         return latest_cache[key]
-    result = 'unknown'
+    result = 'latest-unknown'
     for line in out.splitlines():
         line = line.strip()
         if line.startswith('Available versions:'):
             vals = [x.strip() for x in line.split(':', 1)[1].split(',') if x.strip()]
-            result = vals[0] if vals else 'unknown'
+            result = vals[0] if vals else 'latest-unknown'
             break
+    if result == 'latest-unknown':
+        latest_audit.append({
+            'package': name,
+            'extra_index_url': extra_index_url,
+            'status': 'latest-unknown',
+            'reason': 'pip index output did not include an Available versions line',
+            'output_tail': out.splitlines()[-8:],
+        })
     latest_cache[key] = result
     return result
 
@@ -155,6 +177,8 @@ def direct_reason(name: str) -> str:
 
 
 def base_reason(name: str) -> str:
+    if name in PYTORCH_NIGHTLY_OPTIONAL_ABSENT and name not in all_dists:
+        return 'Base-Provided|PyTorch-Nightly|Optional-Absent-Allowed'
     if name in PYTORCH_NIGHTLY_PKGS:
         return 'Base-Provided|PyTorch-Nightly'
     if name.startswith('nvidia-') or name.startswith('cuda-') or name == 'triton':
@@ -201,8 +225,23 @@ for name in sorted(all_dists):
         item['source_reason'] = indirect_reason(name)
         sections['indirect'].append(item)
 
+for name in sorted(PYTORCH_NIGHTLY_OPTIONAL_ABSENT):
+    if name not in all_dists:
+        sections['base'].append({
+            'name': name,
+            'normalized': name,
+            'installed': 'optional-absent',
+            'roots': [],
+            'category': 'base',
+            'source_reason': base_reason(name),
+            'optional_absent': True,
+            'latest': 'not-queried',
+        })
+
 for items in sections.values():
     for item in items:
+        if item.get('optional_absent'):
+            continue
         if item['normalized'] in PYTORCH_NIGHTLY_PKGS:
             extra = PYTORCH_NIGHTLY_INDEX_URL
         elif item['normalized'] == 'mslk' and MSLK_SOURCE_COMMIT:
@@ -221,6 +260,7 @@ lines.append('[classification summary]')
 lines.append('base-layer-provided = CUDA/PyTorch/base packages protected before A1111 app dependency installation')
 lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt; base matches stay protected')
 lines.append('a1111-indirect = transitive dependencies pulled in under the direct set')
+lines.append('torchaudio = optional for the NGC CUDA 13.3 lane; absence is accepted unless a runtime import requirement is proven')
 lines.append(f"base_layer_provided: {len(sections['base'])}")
 lines.append(f"a1111_direct: {len(sections['direct'])}")
 lines.append(f"a1111_indirect: {len(sections['indirect'])}")
@@ -233,8 +273,8 @@ for key, title in (
     lines.append(title)
     for item in sections[key]:
         line = f"{item['name']} ({item['installed']})"
-        latest = item['latest']
-        if latest != item['installed']:
+        latest = item.get('latest')
+        if latest and latest not in {item['installed'], 'not-queried'}:
             line += f" --> Latest: {latest} [{item['source_reason']}]"
         else:
             line += f" [{item['source_reason']}]"
@@ -249,5 +289,11 @@ OUTPUT_JSON.write_text(json.dumps({
     'upstream_direct_count': len(upstream_direct),
     'repo_direct_count': len(repo_direct),
     'packages': sections,
+    'latest_audit_path': str(OUTPUT_LATEST_AUDIT),
 }, indent=2) + '\n')
+OUTPUT_LATEST_AUDIT.write_text(json.dumps({
+    'schema': 'gb10-a1111-build-manifest-latest-audit-v1',
+    'entries': latest_audit,
+}, indent=2, sort_keys=True) + '\n')
 print(text)
+print(f'latest-version lookup audit: {OUTPUT_LATEST_AUDIT} entries={len(latest_audit)}')

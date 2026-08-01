@@ -1,0 +1,14 @@
+diff --git a/sgm/modules/encoders/modules.py b/sgm/modules/encoders/modules.py
+--- a/sgm/modules/encoders/modules.py
++++ b/sgm/modules/encoders/modules.py
+@@ -349,8 +349,8 @@ class FrozenCLIPEmbedder(AbstractEmbModel):
+     ):  # clip-vit-base-patch32
+         super().__init__()
+         assert layer in self.LAYERS
+-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
+-        self.transformer = CLIPTextModel.from_pretrained(version)
++        self.tokenizer = CLIPTokenizer.from_pretrained(version, local_files_only=True)
++        self.transformer = CLIPTextModel.from_pretrained(version)
+         self.device = device
+         self.max_length = max_length
+         if freeze:

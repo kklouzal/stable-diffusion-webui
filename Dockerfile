@@ -141,6 +141,7 @@ print(json.dumps({
     'torch': md.version('torch'),
     'torchvision': md.version('torchvision'),
     'torchaudio': version('torchaudio'),
+    'torchaudio_optional_absent': version('torchaudio') is None,
     'torchao': md.version('torchao'),
     'mslk': md.version('mslk'),
 }, indent=2))
@@ -176,15 +177,15 @@ COPY . /opt/build/stable-diffusion-webui
 RUN cd stable-diffusion-webui \
     && mkdir -p repositories \
     && git clone --filter=blob:none "${STABLE_DIFFUSION_REPO}" repositories/stable-diffusion-stability-ai \
-    && git -c advice.detachedHead=false -C repositories/stable-diffusion-stability-ai checkout "${STABLE_DIFFUSION_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/stable-diffusion-stability-ai checkout --quiet "${STABLE_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${GENERATIVE_MODELS_REPO}" repositories/generative-models \
-    && git -c advice.detachedHead=false -C repositories/generative-models checkout "${GENERATIVE_MODELS_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/generative-models checkout --quiet "${GENERATIVE_MODELS_COMMIT}" \
     && git clone --filter=blob:none "${K_DIFFUSION_REPO}" repositories/k-diffusion \
-    && git -c advice.detachedHead=false -C repositories/k-diffusion checkout "${K_DIFFUSION_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/k-diffusion checkout --quiet "${K_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${BLIP_REPO}" repositories/BLIP \
-    && git -c advice.detachedHead=false -C repositories/BLIP checkout "${BLIP_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/BLIP checkout --quiet "${BLIP_COMMIT}" \
     && git clone --filter=blob:none "${ASSETS_REPO}" repositories/stable-diffusion-webui-assets \
-    && git -c advice.detachedHead=false -C repositories/stable-diffusion-webui-assets checkout "${ASSETS_COMMIT}" \
+    && git -c advice.detachedHead=false -C repositories/stable-diffusion-webui-assets checkout --quiet "${ASSETS_COMMIT}" \
     && ln -sfn repositories/generative-models ../generative-models \
     && ln -sfn repositories/k-diffusion ../k-diffusion \
     && ln -sfn repositories/BLIP ../BLIP \
@@ -244,7 +245,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
-    && python /opt/build/assert-resolved-package.py --package mediapipe \
+    && python /opt/build/assert-resolved-package.py --package mediapipe --max-version 0.10.99 \
     && python /opt/build/assert-resolved-package.py --package controlnet_aux --min-version 0.0.9 \
     && python /opt/build/assert-resolved-package.py --package gradio --absent \
     && python /opt/build/assert-resolved-package.py --package gradio-client --absent \
@@ -297,16 +298,18 @@ COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/bas
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
 COPY requirements_versions.txt /opt/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
+COPY docker/check-protected-stack.py /usr/local/bin/gb10-a1111-check-protected-stack
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
-COPY docker/patch-torch-mkldnn-deprecation.py /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation
+COPY docker/patch-torch-mkldnn-compat.py /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat
+COPY docker/patch-controlnet-aux-compat.py /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2
 COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 
 # Container-owned environment doctrine:
 # - do not let upstream webui.sh create/manage its own venv here
 # - do not let upstream launch bootstrap replace the CUDA-base + PyTorch package set
-# - do aggressively protect all packages present in the torch-base layer so later
-#   A1111 installs cannot upgrade or shadow CUDA/PyTorch/base-image packages
+# - protect the CUDA/PyTorch/NGC package boundary from application deps while
+#   allowing ordinary Python application packages to satisfy A1111 requirements
 # - do install the repo-owned A1111 dependency closure from requirements_versions.txt
 #   as normal application dependencies, filtered only against the protected base set
 RUN python - <<'PY'
@@ -324,6 +327,7 @@ print(json.dumps({
         'torch': version('torch'),
         'torchvision': version('torchvision'),
         'torchaudio': version('torchaudio'),
+    'torchaudio_optional_absent': version('torchaudio') is None,
         'torchao': version('torchao'),
         'mslk': version('mslk'),
         'browser_ui': None,
@@ -333,12 +337,14 @@ print(json.dumps({
 }, indent=2))
 PY
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
-    && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-deprecation \
+    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-check-protected-stack /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
+    && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat \
+    && /usr/local/bin/gb10-a1111-check-protected-stack --snapshot /opt/protected-packages-before.json \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
     && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt -r /opt/requirements-runtime.txt \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -c /opt/base-python-protected-constraints.txt /opt/wheels/clip-*.whl dctorch \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -r /opt/requirements-runtime.txt \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels /opt/wheels/clip-*.whl dctorch \
+    && /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
     && python - <<'PY'
 import importlib.metadata as md
 import json
@@ -354,6 +360,7 @@ print(json.dumps({
         'torch': md.version('torch'),
         'torchvision': md.version('torchvision'),
         'torchaudio': version('torchaudio'),
+    'torchaudio_optional_absent': version('torchaudio') is None,
         'torchao': md.version('torchao'),
         'mslk': md.version('mslk'),
         'browser_ui': None,
@@ -362,6 +369,7 @@ print(json.dumps({
     }
 }, indent=2))
 PY
+RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
     && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
        MSLK_SOURCE_REPO="${MSLK_REPO}" \

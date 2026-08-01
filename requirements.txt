@@ -1,7 +1,9 @@
 # GB10/A1111 maintained Python requirements.
 # This is now the canonical direct dependency surface for the GB10 image and
-# normal launch bootstrap. Keep torch/torchvision/torchaudio unpinned here:
-# the GB10 Docker image installs the selected CUDA/PyTorch lane explicitly.
+# normal launch bootstrap. Do not list torch, torchvision, torchaudio, triton,
+# CUDA, or NVIDIA packages here: the GB10 Docker image inherits and protects
+# the selected NGC CUDA/PyTorch lane explicitly. torchaudio is optional-absent
+# in that lane unless a real runtime import requirement is proven.
 setuptools==69.5.1
 GitPython
 Pillow
@@ -38,11 +40,10 @@ scikit-image
 spandrel
 spandrel-extra-arches
 tomesd
-torch
 torchdiffeq
 torchsde
 transformers
-tokenizers
+tokenizers>=0.22.2,<=0.23.0
 pillow-avif-plugin
 chardet
 PyExecJS

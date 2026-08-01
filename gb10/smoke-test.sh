@@ -61,6 +61,12 @@ missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit(f'missing required modules: {", ".join(missing)}')
 
+# torchaudio is intentionally optional/absent for the NGC CUDA 13.3 lane unless
+# a real A1111 or mounted-extension runtime import requirement is discovered.
+if importlib.util.find_spec('torchaudio') is not None:
+    raise SystemExit('torchaudio is present; NGC lane expects it to stay absent so app deps cannot replace torch')
+print('torchaudio optional absent: ok')
+
 optional_absent = [name for name in ['xformers'] if importlib.util.find_spec(name) is None]
 if optional_absent:
     print(f'optional absent: {", ".join(optional_absent)}')

@@ -24,6 +24,7 @@ def main() -> int:
     ap.add_argument('--report', default='/opt/build/report.json')
     ap.add_argument('--package', required=True)
     ap.add_argument('--min-version')
+    ap.add_argument('--max-version')
     ap.add_argument('--absent', action='store_true', help='fail if the package is present in the pip report')
     ap.add_argument('--require-wheel', action='store_true')
     args = ap.parse_args()
@@ -51,6 +52,8 @@ def main() -> int:
             raise SystemExit(f'{args.package}: not present in pip report or installed environment')
         if args.min_version and version_key(installed_version) < version_key(args.min_version):
             raise SystemExit(f'{args.package}: installed {installed_version}, below required floor {args.min_version}')
+        if args.max_version and version_key(installed_version) > version_key(args.max_version):
+            raise SystemExit(f'{args.package}: installed {installed_version}, above required ceiling {args.max_version}')
         print(f'{args.package}: already installed {installed_version}; artifact=<installed>')
         return 0
     if len(matches) != 1:
@@ -64,6 +67,8 @@ def main() -> int:
 
     if args.min_version and version_key(version) < version_key(args.min_version):
         raise SystemExit(f'{args.package}: resolved {version}, below required floor {args.min_version}')
+    if args.max_version and version_key(version) > version_key(args.max_version):
+        raise SystemExit(f'{args.package}: resolved {version}, above required ceiling {args.max_version}')
 
     url = ((item.get('download_info') or {}).get('url') or '')
     path = urlparse(url).path
