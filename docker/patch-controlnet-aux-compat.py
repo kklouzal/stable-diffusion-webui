@@ -19,6 +19,7 @@ def main() -> int:
         'register_model(fn)': 'return fn',
         'from timm.models.layers import ': 'from timm.layers import ',
         'from timm.models.registry import ': 'from timm.models import ',
+        'from scipy.ndimage.filters import ': 'from scipy.ndimage import ',
     }
     for path in root.rglob('*.py'):
         text = path.read_text(encoding='utf-8')
