@@ -81,7 +81,7 @@ class DisableInitialization(ReplaceHelper):
                 args = args[0:3] + ('/', ) + args[4:]  # resolved_archive_file; must set it to something to prevent what seems to be a bug
             return self.transformers_modeling_utils_load_pretrained_model(*args, **kwargs)
 
-        def transformers_utils_hub_get_file_from_cache(original, url, *args, **kwargs):
+        def transformers_utils_hub_get_file_from_cache(original, url, *args, local_files_only=False, **kwargs):
 
             # this file is always 404, prevent making request
             if url == f'{shared.hf_endpoint}/openai/clip-vit-large-patch14/resolve/main/added_tokens.json' or url == 'openai/clip-vit-large-patch14' and args[0] == 'added_tokens.json':
@@ -89,10 +89,12 @@ class DisableInitialization(ReplaceHelper):
 
             try:
                 res = original(url, *args, local_files_only=True, **kwargs)
-                if res is None:
+                if res is None and not local_files_only:
                     res = original(url, *args, local_files_only=False, **kwargs)
                 return res
             except Exception:
+                if local_files_only:
+                    raise
                 return original(url, *args, local_files_only=False, **kwargs)
 
         def transformers_utils_hub_get_from_cache(url, *args, local_files_only=False, **kwargs):

@@ -292,6 +292,7 @@ RUN groupadd --gid ${A1111_GID} a1111 \
     && useradd --uid ${A1111_UID} --gid ${A1111_GID} --create-home --shell /bin/bash a1111
 
 COPY --from=source /opt/build/stable-diffusion-webui /opt/stable-diffusion-webui
+COPY docker/hf-cache/openai-clip-vit-large-patch14 /opt/gb10/hf-cache/openai-clip-vit-large-patch14
 COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
@@ -382,6 +383,7 @@ RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /opt/requirements-runtime.
 
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV A1111_HOME=/opt/stable-diffusion-webui
+ENV GB10_A1111_CLIP_VIT_LARGE_PATCH14_PATH=/opt/gb10/hf-cache/openai-clip-vit-large-patch14
 ENV A1111_RUN_AS_USER=a1111
 ENV COMMANDLINE_ARGS=
 ENV TORCH_COMMAND=true
