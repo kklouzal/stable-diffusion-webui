@@ -3,10 +3,10 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="${DOCKERFILE:-${PROJECT_ROOT}/Dockerfile}"
-BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04}"
-PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu132}"
+BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.07-py3}"
+PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu133}"
 MSLK_REPO="${MSLK_REPO:-https://github.com/meta-pytorch/MSLK.git}"
-MSLK_COMMIT="${MSLK_COMMIT:-6a470238c3888a0df95b35c8629b77ade60524d0}"
+MSLK_COMMIT="${MSLK_COMMIT:-88d06bc2784f3b550d7ec851d4ca67a16a844fe2}"
 IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
 BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
 CACHE_FROM="${CACHE_FROM:-${IMAGE_TAG}}"
@@ -41,6 +41,7 @@ Cache-from image:          ${CACHE_FROM} (${CACHE_FROM_STATUS})
 EOM
 
 sudo env DOCKER_BUILDKIT="${DOCKER_BUILDKIT}" BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS}" docker build \
+  --pull \
   "${CACHE_ARGS[@]}" \
   -f "${DOCKERFILE}" \
   -t "${IMAGE_TAG}" \

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import importlib.metadata as md
 import json
 from pathlib import Path
 from urllib.parse import urlparse
@@ -44,7 +45,14 @@ def main() -> int:
         return 0
 
     if not matches:
-        raise SystemExit(f'{args.package}: not present in pip report')
+        try:
+            installed_version = md.version(args.package)
+        except md.PackageNotFoundError:
+            raise SystemExit(f'{args.package}: not present in pip report or installed environment')
+        if args.min_version and version_key(installed_version) < version_key(args.min_version):
+            raise SystemExit(f'{args.package}: installed {installed_version}, below required floor {args.min_version}')
+        print(f'{args.package}: already installed {installed_version}; artifact=<installed>')
+        return 0
     if len(matches) != 1:
         raise SystemExit(f'{args.package}: expected one report entry, found {len(matches)}')
 

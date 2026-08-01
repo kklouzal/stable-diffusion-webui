@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
 ARG PYTHON_VERSION=3.12
-ARG PYTORCH_NIGHTLY_CUDA_TAG=cu132
+ARG PYTORCH_NIGHTLY_CUDA_TAG=cu133
 ARG TORCHAO_PACKAGE=torchao
 ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
-ARG MSLK_COMMIT=6a470238c3888a0df95b35c8629b77ade60524d0
+ARG MSLK_COMMIT=88d06bc2784f3b550d7ec851d4ca67a16a844fe2
 ARG MSLK_PACKAGE_NAME=mslk
 ARG STABLE_DIFFUSION_REPO=https://github.com/w-e-w/stablediffusion.git
 ARG STABLE_DIFFUSION_COMMIT=cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf
@@ -76,22 +76,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
-RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    python -m pip install --break-system-packages --upgrade setuptools
-
-# CUDA-base doctrine:
-# - start from the NVIDIA CUDA image, not the NVIDIA PyTorch image
-# - install the PyTorch nightly lane explicitly from the selected CUDA wheel index
-# - install TorchAO beside torch so NVFP4 support is protected with the framework stack
-# - build MSLK from source against the same CUDA 13.2 / PyTorch nightly stack so
+# NGC PyTorch base doctrine:
+# - inherit the official NVIDIA NGC PyTorch image selected for GB10/Blackwell
+# - preserve NVIDIA /etc/pip/constraint.txt intent by treating the NGC
+#   Python package set as the protected CUDA/PyTorch/base boundary
+# - do not replace torch, torchvision, CUDA, cuDNN, TensorRT, Triton, or other
+#   inherited NGC packages from A1111 application requirements
+# - build MSLK from source against the inherited CUDA 13.3 / NGC PyTorch stack so
 #   the native mslk.so baseline stays aligned with GB10 bf16/NVFP4 work
 # - freeze the resulting system-Python package set so later app deps cannot overwrite it
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    python -m pip install --break-system-packages --pre \
-      torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG} \
-    && python -m pip install --break-system-packages --pre ${TORCHAO_PACKAGE} \
-    && python /opt/build/patch-torchao.py \
+    python /opt/build/patch-torchao.py \
     && python -m pip install --break-system-packages \
       scikit-build cmake ninja setuptools-git-versioning tabulate wheel build
 
@@ -121,6 +116,12 @@ from pathlib import Path
 def normalize(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name.strip().lower())
 
+def version(name: str):
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return None
+
 pins = []
 seen = set()
 for dist in sorted(md.distributions(), key=lambda d: normalize(d.metadata.get('Name', ''))):
@@ -139,7 +140,7 @@ print(json.dumps({
     'protected_count': len(pins),
     'torch': md.version('torch'),
     'torchvision': md.version('torchvision'),
-    'torchaudio': md.version('torchaudio'),
+    'torchaudio': version('torchaudio'),
     'torchao': md.version('torchao'),
     'mslk': md.version('mslk'),
 }, indent=2))
@@ -238,7 +239,6 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     rustc --version \
     && cargo --version \
-    && python -m pip install --break-system-packages --upgrade setuptools \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt \
     && python -m pip install --break-system-packages --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
@@ -353,7 +353,7 @@ print(json.dumps({
     'after_runtime_install': {
         'torch': md.version('torch'),
         'torchvision': md.version('torchvision'),
-        'torchaudio': md.version('torchaudio'),
+        'torchaudio': version('torchaudio'),
         'torchao': md.version('torchao'),
         'mslk': md.version('mslk'),
         'browser_ui': None,
