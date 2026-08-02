@@ -113,6 +113,10 @@ CONTROLNET_HOOK="${HOST_ROOT}/Extensions/sd-webui-controlnet/scripts/hook.py"
 if [[ -f "${CONTROLNET_HOOK}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
 fi
+CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
+if [[ -d "${CONTROLNET_ROOT}/annotator/teed" ]]; then
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
+fi
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"

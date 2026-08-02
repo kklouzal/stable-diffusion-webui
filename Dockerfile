@@ -304,6 +304,7 @@ COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-mani
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
 COPY docker/patch-torch-mkldnn-compat.py /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat
 COPY docker/patch-controlnet-aux-compat.py /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2
+COPY docker/patch-kornia-torch-jit-compat.py /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat
 COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 
 # Container-owned environment doctrine:
@@ -338,7 +339,7 @@ print(json.dumps({
 }, indent=2))
 PY
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-check-protected-stack /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
+    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-check-protected-stack /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat \
     && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat \
     && /usr/local/bin/gb10-a1111-check-protected-stack --snapshot /opt/protected-packages-before.json \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
@@ -346,6 +347,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -r /opt/requirements-runtime.txt \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels /opt/wheels/clip-*.whl dctorch \
     && /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
+    && /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat \
     && python - <<'PY'
 import importlib.metadata as md
 import json
