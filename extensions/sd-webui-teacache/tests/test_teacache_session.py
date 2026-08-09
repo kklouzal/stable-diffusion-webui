@@ -91,6 +91,25 @@ class TeaCacheSessionTests(unittest.TestCase):
         self.assertNotEqual(sig_a, sig_b)
         self.assertNotEqual(sig_a, sig_c)
 
+
+    def test_nonfinite_distance_forces_refresh_and_resets_accumulator(self):
+        session = self.teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+        signature = ((1,),)
+        session.previous_fb[0] = torch.ones(1)
+        session.residuals[0] = (signature, torch.ones(1))
+        session.update_condition(torch.full((1,), float("inf")), signature)
+        self.assertFalse(session.use_cache)
+        torch.testing.assert_close(session.distances[0], torch.zeros(()))
+
+    def test_first_block_residual_state_is_detached(self):
+        session = self.teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+        signature = ((1,),)
+        session.previous_fb[0] = torch.zeros(1)
+        session.residuals[0] = (signature, torch.ones(1))
+        session.update_condition(torch.zeros(1, requires_grad=True), signature)
+        self.assertFalse(session.previous_fb[0].requires_grad)
+        self.assertFalse(session.distances[0].requires_grad)
+
     def test_cached_residual_is_cloned_not_mutable_alias(self):
         session = self.teacache.TeaCacheSession(threshold=1.0, max_consecutive=4, start=0.0, end=1.0, steps=10)
         signature = ((1,),)

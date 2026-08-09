@@ -133,7 +133,7 @@ def test_hot_path_sync_constructs_are_explicitly_allowlisted():
                 banned_calls.append((func.attr, node.lineno))
             elif isinstance(func, ast.Name) and func.id in {"float", "int", "bool"}:
                 segment = ast.get_source_segment(hot_source, node) or ""
-                if "torch.ge" in segment:
+                if segment == "bool(should_refresh)":
                     bool_calls.append(node.lineno)
                 else:
                     banned_calls.append((func.id, node.lineno))
@@ -256,6 +256,104 @@ def test_api_generation_paths_hold_queue_lock_for_teacache_global_state():
     assert img2img.index("with self.queue_lock:") < img2img.index("processed = self._run_generation_with_scripts")
 
 
+
+def test_session_refreshes_on_nonfinite_distance_and_does_not_cache_nan():
+    teacache = load_teacache_module()
+    signature = ((1, 2), "torch.float32", "cpu")
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    session.previous_fb[0] = torch.ones((1, 2), dtype=torch.float32)
+    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+
+    session.update_condition(torch.full((1, 2), float("nan"), dtype=torch.float32), signature)
+
+    assert not session.use_cache
+    assert torch.equal(session.distances[0], torch.zeros((), dtype=torch.float32))
+
+
+def test_session_detaches_first_block_residual_before_distance_math():
+    teacache = load_teacache_module()
+    signature = ((1, 2), "torch.float32", "cpu")
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    session.previous_fb[0] = torch.ones((1, 2), dtype=torch.float32)
+    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+
+    session.update_condition(torch.ones((1, 2), dtype=torch.float32, requires_grad=True), signature)
+
+    assert session.use_cache
+    assert not session.previous_fb[0].requires_grad
+    assert not session.distances[0].requires_grad
+
+
+def test_postprocess_clears_session_even_when_current_unet_is_unpatched():
+    teacache = load_teacache_module()
+    script = teacache.TeaCacheScript()
+    current_unet = types.SimpleNamespace(_teacache_patched=False)
+    p = types.SimpleNamespace(sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=current_unet)))
+    teacache._set_cache(teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10))
+
+    script.postprocess(p)
+
+    assert teacache._get_cache() is None
+    assert script.original_forward is None
+    assert script.patched_unet is None
+
+
+def test_process_restores_previous_patched_unet_when_model_object_changes_before_disable():
+    teacache = load_teacache_module()
+    script = teacache.TeaCacheScript()
+
+    def original_forward(x, timesteps=None, context=None, y=None, **kwargs):
+        return x + 1
+
+    first_unet = types.SimpleNamespace(forward=original_forward)
+    first_p = types.SimpleNamespace(sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=first_unet)))
+    script.process(first_p, True)
+    patched_forward = first_unet.forward
+    assert getattr(first_unet, "_teacache_patched", False)
+    assert patched_forward is not original_forward
+
+    second_unet = types.SimpleNamespace(forward=lambda x, **kwargs: x)
+    second_p = types.SimpleNamespace(sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=second_unet)))
+    script.process(second_p, False)
+
+    assert first_unet.forward is original_forward
+    assert not first_unet._teacache_patched
+    assert not hasattr(first_unet, "_openclaw_teacache_original_forward")
+    assert teacache._get_cache() is None
+
+
+def test_storing_fresh_residual_resets_accumulated_distance():
+    teacache = load_teacache_module()
+    signature = ((1, 2), "torch.float32", "cpu")
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    session.distances[0] = torch.tensor(0.75)
+
+    session.store_current_residual(signature, torch.ones((1, 2), dtype=torch.float32))
+
+    torch.testing.assert_close(session.distances[0], torch.zeros(()))
+
+
+def test_process_restores_old_unet_before_patching_new_model_object():
+    teacache = load_teacache_module()
+    script = teacache.TeaCacheScript()
+
+    def first_forward(x, timesteps=None, context=None, y=None, **kwargs):
+        return x + 1
+
+    def second_forward(x, timesteps=None, context=None, y=None, **kwargs):
+        return x + 2
+
+    first_unet = types.SimpleNamespace(forward=first_forward)
+    second_unet = types.SimpleNamespace(forward=second_forward)
+    script.process(types.SimpleNamespace(sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=first_unet))), True)
+    script.process(types.SimpleNamespace(sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=second_unet))), True)
+
+    assert first_unet.forward is first_forward
+    assert not first_unet._teacache_patched
+    assert not hasattr(first_unet, "_openclaw_teacache_original_forward")
+    assert getattr(second_unet, "_teacache_patched", False)
+    assert second_unet._openclaw_teacache_original_forward is second_forward
+
 def test_patched_forward_falls_back_to_original_when_session_disabled():
     teacache = load_teacache_module()
     x = torch.zeros((1, 1), dtype=torch.float32)
@@ -324,5 +422,11 @@ if __name__ == "__main__":
     test_external_unet_forward_hook_is_detected()
     test_global_session_accessors_are_lock_guarded()
     test_api_generation_paths_hold_queue_lock_for_teacache_global_state()
+    test_session_refreshes_on_nonfinite_distance_and_does_not_cache_nan()
+    test_session_detaches_first_block_residual_before_distance_math()
+    test_postprocess_clears_session_even_when_current_unet_is_unpatched()
+    test_process_restores_previous_patched_unet_when_model_object_changes_before_disable()
+    test_storing_fresh_residual_resets_accumulated_distance()
+    test_process_restores_old_unet_before_patching_new_model_object()
     test_patched_forward_falls_back_to_original_when_session_disabled()
     test_patched_forward_falls_back_to_original_for_conditioning_kwargs()

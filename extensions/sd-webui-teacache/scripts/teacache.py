@@ -166,6 +166,7 @@ class TeaCacheSession:
         return coeffs
 
     def update_condition(self, first_block_residual: torch.Tensor, signature: tuple):
+        current_fb = first_block_residual.detach()
         self.use_cache = not self.disabled_reason
         # check step range
         progress = self.current_step / max(1, self.steps)
@@ -183,13 +184,15 @@ class TeaCacheSession:
         if self.use_cache:
             # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
             distance = self.distances.get(self.call_index)
-            if distance is None or distance.device != first_block_residual.device:
-                distance = first_block_residual.new_zeros(())
-            relative_distance = relative_l1_distance(previous_fb, first_block_residual)
+            if distance is None or distance.device != current_fb.device:
+                distance = current_fb.new_zeros(())
+            relative_distance = relative_l1_distance(previous_fb, current_fb)
             distance = distance + sdxl_polynomial_distance(relative_distance, self._coefficient_tensor(relative_distance))
+            threshold = self._device_scalar(self.threshold, distance, self._threshold_tensors)
+            should_refresh = torch.logical_or(torch.logical_not(torch.isfinite(distance)), torch.ge(distance, threshold))
             # Intentional sync point: Python must choose cached vs full UNet branch.
             # The relative-distance and polynomial math above remain on GPU.
-            if bool(torch.ge(distance, self._device_scalar(self.threshold, distance, self._threshold_tensors))):
+            if bool(should_refresh):
                 self.use_cache = False
                 self.distances[self.call_index] = distance.detach().zero_()
             else:
@@ -197,7 +200,7 @@ class TeaCacheSession:
                 if self.call_index == 0:
                     self.consecutive_hits += 1
 
-        self.previous_fb[self.call_index] = first_block_residual.detach().clone()
+        self.previous_fb[self.call_index] = current_fb.clone()
 
     def next_step(self):
         self.current_step += 1
@@ -213,13 +216,19 @@ class TeaCacheSession:
             return None
         return cached[1]
 
+    def reset_current_distance(self, reference: torch.Tensor):
+        self.distances[self.call_index] = reference.detach().new_zeros(())
+
     def store_current_residual(self, signature: tuple, residual: torch.Tensor):
-        self.residuals[self.call_index] = (signature, residual.detach().clone())
+        residual = residual.detach()
+        self.residuals[self.call_index] = (signature, residual.clone())
+        self.reset_current_distance(residual)
 
 
 class TeaCacheScript(scripts.Script):
     def __init__(self):
         self.original_forward = None
+        self.patched_unet = None
 
     def title(self):
         return "TeaCache"
@@ -266,17 +275,26 @@ class TeaCacheScript(scripts.Script):
         # patch model forward method
         enabled, _, _, _, _ = normalize_args(args)
         if not enabled:
-            # fix model if patch was not reverted (due to exception, oom)
-            unet = p.sd_model.model.diffusion_model
-            if getattr(unet, "_teacache_patched", False):
-                self.postprocess(p)
+            # Fix and clear any prior patch/session if a previous run ended through
+            # exception/OOM or if the model object changed before cleanup.
+            self.postprocess(p)
             return
         unet = p.sd_model.model.diffusion_model
-        if not self.original_forward:
-            self.original_forward = unet.forward
+        if self.patched_unet is not None and self.patched_unet is not unet and getattr(self.patched_unet, "_teacache_patched", False):
+            # Model/refiner switches can replace the active UNet object before the
+            # previous postprocess hook observes the old one. Restore the owned
+            # patch before installing a patch on the new UNet.
+            self.postprocess(p)
+        original_forward = getattr(unet, "_openclaw_teacache_original_forward", None)
+        if original_forward is None:
+            if getattr(unet, "_teacache_patched", False):
+                raise RuntimeError("TeaCache UNet patch is missing its original forward")
+            original_forward = unet.forward
+        self.original_forward = original_forward
+        self.patched_unet = unet
         unet.forward = patched_forward.__get__(unet)
         unet._teacache_patched = True
-        unet._openclaw_teacache_original_forward = self.original_forward
+        unet._openclaw_teacache_original_forward = original_forward
 
     def process_before_every_sampling(self, p: processing.StableDiffusionProcessing, *args, **kwargs):
         # initialize and configure cache
@@ -317,17 +335,16 @@ class TeaCacheScript(scripts.Script):
 
     def postprocess(self, p: processing.StableDiffusionProcessing, *args):
         # restore model, clear cache
-        global _cache
-        unet = p.sd_model.model.diffusion_model
-        if not getattr(unet, "_teacache_patched", False):
-            return
-        original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or self.original_forward
-        if original_forward is not None:
-            unet.forward = original_forward
-        unet._teacache_patched = False
-        if hasattr(unet, "_openclaw_teacache_original_forward"):
-            delattr(unet, "_openclaw_teacache_original_forward")
+        unet = self.patched_unet or p.sd_model.model.diffusion_model
+        if getattr(unet, "_teacache_patched", False):
+            original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or self.original_forward
+            if original_forward is not None:
+                unet.forward = original_forward
+            unet._teacache_patched = False
+            if hasattr(unet, "_openclaw_teacache_original_forward"):
+                delattr(unet, "_openclaw_teacache_original_forward")
         self.original_forward = None
+        self.patched_unet = None
         _set_cache(None)
 
 
@@ -384,13 +401,17 @@ def patched_forward(
         h = h + cached_residual
     else:
         original_h = h
-        for module in self.input_blocks[2:]:
-            h = module(h, emb, context)
-            hs.append(h)
-        h = self.middle_block(h, emb, context)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+        try:
+            for module in self.input_blocks[2:]:
+                h = module(h, emb, context)
+                hs.append(h)
+            h = self.middle_block(h, emb, context)
+            for module in self.output_blocks:
+                h = th.cat([h, hs.pop()], dim=1)
+                h = module(h, emb, context)
+        except Exception:
+            cache.reset_current_distance(original_h)
+            raise
 
         if cache.call_index == 0:
             cache.consecutive_hits = 0
@@ -401,7 +422,6 @@ def patched_forward(
     h = h.to(dtype=x.dtype)
 
     return self.out(h)
-
 
 def next_step(*args):
     cache = _get_cache()
