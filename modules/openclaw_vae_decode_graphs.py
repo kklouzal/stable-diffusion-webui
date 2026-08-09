@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-import os, threading, traceback
+import os
+import threading
+import traceback
+import weakref
 from collections import OrderedDict
 from typing import Any
 import torch
@@ -14,7 +17,10 @@ def _read_cache_max():
         return 4
 
 _CACHE_MAX=_read_cache_max()
-_LOCK=threading.RLock(); _CACHE=OrderedDict(); _FAILED_KEYS=set()
+_LOCK=threading.RLock()
+_CACHE=OrderedDict()
+_KEY_LOCKS=weakref.WeakValueDictionary()
+_FAILED_KEYS=set()
 _COUNTERS={'captures':0,'replays':0,'bypasses':0,'failures':0,'invalidations':0}
 _BYPASS_REASONS={}; _INVALIDATION_REASONS={}; _LAST_ERROR=None; _LAST_KEY=None; _LIFECYCLE_STATE={}
 
@@ -26,7 +32,19 @@ def _bypass(r):
     _COUNTERS['bypasses']+=1; _BYPASS_REASONS[r]=_BYPASS_REASONS.get(r,0)+1
 
 def _clear_cache_locked():
-    had=bool(_CACHE or _FAILED_KEYS); _CACHE.clear(); _FAILED_KEYS.clear(); return had
+    had=bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS)
+    _CACHE.clear()
+    _KEY_LOCKS.clear()
+    _FAILED_KEYS.clear()
+    return had
+
+def _key_lock(key):
+    with _LOCK:
+        key_lock=_KEY_LOCKS.get(key)
+        if key_lock is None:
+            key_lock=threading.RLock()
+            _KEY_LOCKS[key]=key_lock
+        return key_lock
 
 def status():
     with _LOCK:
@@ -106,28 +124,45 @@ def run(model,x,approximation=0):
     key=_key(model,x,approximation)
     with _LOCK:
         _LAST_KEY=key
-        entry=_CACHE.get(key)
+    key_lock=_key_lock(key)
+    # Each graph entry owns mutable static input/output tensors. Serialize the
+    # same key from input copy through output clone so concurrent API requests
+    # cannot replay with mixed latent data; distinct shapes/devices still run
+    # independently under separate locks.
+    with key_lock:
+        with _LOCK:
+            entry=_CACHE.get(key)
+            failed_before=key in _FAILED_KEYS
         if entry is not None:
-            entry['input'].copy_(x, non_blocking=True); entry['graph'].replay(); _CACHE.move_to_end(key); _COUNTERS['replays']+=1; return entry['output'].clone()
-        if key in _FAILED_KEYS:
-            _bypass('failed_key'); return None
-    try:
-        static_input=x.detach().contiguous().clone()
-        stream=torch.cuda.Stream(device=x.device)
-        stream.wait_stream(torch.cuda.current_stream(x.device))
-        with torch.cuda.stream(stream):
-            warmup_output=_decode(model,static_input)
-        torch.cuda.current_stream(x.device).wait_stream(stream)
-        graph=torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph): static_output=_decode(model,static_input)
-        with _LOCK:
-            _CACHE[key]={'graph':graph,'input':static_input,'output':static_output}; _CACHE.move_to_end(key)
-            while len(_CACHE)>_CACHE_MAX: _CACHE.popitem(last=False)
-            _COUNTERS['captures']+=1
-        return warmup_output
-    except Exception as exc:
-        with _LOCK:
-            _FAILED_KEYS.add(key); _COUNTERS['failures']+=1; _LAST_ERROR=''.join(traceback.format_exception_only(type(exc),exc)).strip(); _bypass('capture_failed')
-        return None
+            entry['input'].copy_(x, non_blocking=True)
+            entry['graph'].replay()
+            output=entry['output'].clone()
+            with _LOCK:
+                if key in _CACHE:
+                    _CACHE.move_to_end(key)
+                _COUNTERS['replays']+=1
+            return output
+        if failed_before:
+            with _LOCK: _bypass('failed_key')
+            return None
+        try:
+            static_input=x.detach().contiguous().clone()
+            stream=torch.cuda.Stream(device=x.device)
+            stream.wait_stream(torch.cuda.current_stream(x.device))
+            with torch.cuda.stream(stream):
+                warmup_output=_decode(model,static_input)
+            torch.cuda.current_stream(x.device).wait_stream(stream)
+            graph=torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph): static_output=_decode(model,static_input)
+            with _LOCK:
+                _CACHE[key]={'graph':graph,'input':static_input,'output':static_output}; _CACHE.move_to_end(key)
+                while len(_CACHE)>_CACHE_MAX:
+                    _CACHE.popitem(last=False)
+                _COUNTERS['captures']+=1
+            return warmup_output
+        except Exception as exc:
+            with _LOCK:
+                _FAILED_KEYS.add(key); _COUNTERS['failures']+=1; _LAST_ERROR=''.join(traceback.format_exception_only(type(exc),exc)).strip(); _bypass('capture_failed')
+            return None
 
 set_enabled(_flag('OPENCLAW_VAE_DECODE_GRAPHS',False), clear_cache=True)

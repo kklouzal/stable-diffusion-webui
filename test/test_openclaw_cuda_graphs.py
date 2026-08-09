@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -402,6 +403,85 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
         self.assertIn("vae", self.graphs.status()["lifecycle_state_keys"])
 
+
+    def test_clear_cache_removes_per_key_locks(self):
+        key_lock = self.graphs._key_lock(("stale",))
+        self.assertIsNotNone(key_lock)
+
+        self.graphs.set_enabled(False, clear_cache=True)
+
+        self.assertEqual(len(self.graphs._KEY_LOCKS), 0)
+
+    def test_unused_per_key_lock_is_reclaimed(self):
+        key_lock = self.graphs._key_lock(("stale",))
+        self.assertEqual(len(self.graphs._KEY_LOCKS), 1)
+
+        del key_lock
+
+        self.assertEqual(len(self.graphs._KEY_LOCKS), 0)
+
+    def test_same_key_replay_is_serialized_through_output_clone(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        key = (("model",), ((1,), "torch.float32", "cuda:0"), 0, "1")
+        first_copy_started = threading.Event()
+        release_first_copy = threading.Event()
+        second_copy_started = threading.Event()
+        events = []
+
+        class FakeInput:
+            def copy_(self, value, non_blocking=False):
+                events.append(("copy", value.name))
+                if value.name == "first":
+                    first_copy_started.set()
+                    release_first_copy.wait(1)
+                else:
+                    second_copy_started.set()
+
+        class FakeGraph:
+            def replay(self):
+                events.append(("replay", None))
+
+        class FakeOutput:
+            def clone(self):
+                events.append(("clone", None))
+                return "output"
+
+        entry = {"input": FakeInput(), "graph": FakeGraph(), "output": FakeOutput()}
+        self.graphs._CACHE[key] = entry
+        results = []
+
+        def replay(name):
+            x = types.SimpleNamespace(name=name)
+            results.append(self.graphs.run(object(), x))
+
+        with mock.patch.object(self.graphs, "_bypass_reason", return_value=None), \
+             mock.patch.object(self.graphs, "_key", return_value=key):
+            first = threading.Thread(target=replay, args=("first",))
+            second = threading.Thread(target=replay, args=("second",))
+            first.start()
+            self.assertTrue(first_copy_started.wait(1))
+            second.start()
+            self.assertFalse(second_copy_started.wait(0.05))
+            release_first_copy.set()
+            first.join(1)
+            second.join(1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(results, ["output", "output"])
+        self.assertEqual(
+            events,
+            [
+                ("copy", "first"),
+                ("replay", None),
+                ("clone", None),
+                ("copy", "second"),
+                ("replay", None),
+                ("clone", None),
+            ],
+        )
+        self.assertNotIn(key, self.graphs._KEY_LOCKS)
+        self.assertEqual(self.graphs.status()["replays"], 2)
 
     def test_cache_max_env_parse_is_clamped_and_fallback_safe(self):
         previous = os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX")
