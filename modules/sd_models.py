@@ -1179,15 +1179,17 @@ def _invalidate_model_acceleration_caches(reason, details=None):
 
 def send_model_to_cpu(m):
     if m is not None:
-        _invalidate_model_acceleration_caches("model_to_cpu", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
-        if m.lowvram:
-            lowvram.send_everything_to_cpu()
-        else:
-            if model_has_torchao_quantization(m):
-                restore_torchao_quantized_linears_for_reload(m, target_device=devices.cpu, target_dtype=devices.dtype)
-                send_torchao_quant_model_to_device(m, target=devices.cpu)
+        details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
+        with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_cpu", details):
+            openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_cpu")
+            if m.lowvram:
+                lowvram.send_everything_to_cpu()
             else:
-                m.to(devices.cpu)
+                if model_has_torchao_quantization(m):
+                    restore_torchao_quantized_linears_for_reload(m, target_device=devices.cpu, target_dtype=devices.dtype)
+                    send_torchao_quant_model_to_device(m, target=devices.cpu)
+                else:
+                    m.to(devices.cpu)
 
     devices.torch_gc()
 
@@ -1275,30 +1277,34 @@ def send_torchao_quant_model_to_device(m, *, target=None):
 
 
 def send_model_to_device(m):
-    _invalidate_model_acceleration_caches("model_to_device", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
-    lowvram.apply(m)
+    details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
+    with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_device", details):
+        openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_device")
+        lowvram.apply(m)
 
-    if not m.lowvram:
-        if model_has_torchao_quantization(m):
-            # TorchAO tensor subclasses do not implement all tensor-moving /
-            # aliasing ops that nn.Module.to() may call. Move ordinary
-            # parameters/buffers around quantized leaves instead so skipped
-            # BF16 regions are not stranded on CPU.
-            send_torchao_quant_model_to_device(m)
-            return
-        m.to(shared.device)
+        if not m.lowvram:
+            if model_has_torchao_quantization(m):
+                # TorchAO tensor subclasses do not implement all tensor-moving /
+                # aliasing ops that nn.Module.to() may call. Move ordinary
+                # parameters/buffers around quantized leaves instead so skipped
+                # BF16 regions are not stranded on CPU.
+                send_torchao_quant_model_to_device(m)
+                return
+            m.to(shared.device)
 
 
 def send_model_to_trash(m):
-    _invalidate_model_acceleration_caches("model_to_trash", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
-    if model_has_torchao_quantization(m):
-        # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
-        # trash path. The caller is discarding the tree, so just drop references
-        # and let GC reclaim it.
+    details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
+    with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_trash", details):
+        openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_trash")
+        if model_has_torchao_quantization(m):
+            # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
+            # trash path. The caller is discarding the tree, so just drop references
+            # and let GC reclaim it.
+            devices.torch_gc()
+            return
+        m.to(device="meta")
         devices.torch_gc()
-        return
-    m.to(device="meta")
-    devices.torch_gc()
 
 
 def instantiate_from_config(config, state_dict=None):

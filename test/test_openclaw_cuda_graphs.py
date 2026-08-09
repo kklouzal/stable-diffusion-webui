@@ -369,6 +369,68 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             else:
                 os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = previous
 
+    def test_model_invalidation_waits_for_inflight_replay_and_clone(self):
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        key = (("model",), ("x",), ("sigma",), ("cond",), None, None)
+        copy_started = threading.Event()
+        release_copy = threading.Event()
+        invalidate_done = threading.Event()
+        events = []
+
+        class FakeStatic:
+            def __init__(self, name):
+                self.name = name
+
+            def copy_(self, _value, non_blocking=False):
+                events.append(("copy", self.name))
+                if self.name == "x":
+                    copy_started.set()
+                    release_copy.wait(1)
+
+        class FakeGraph:
+            def replay(self):
+                events.append(("replay", None))
+
+        class FakeOutput:
+            def clone(self):
+                events.append(("clone", None))
+                return "replayed"
+
+        openclaw_cuda_graphs._CACHE[key] = {
+            "x": FakeStatic("x"),
+            "sigma": FakeStatic("sigma"),
+            "cond": {"c": FakeStatic("cond")},
+            "graph": FakeGraph(),
+            "out": FakeOutput(),
+        }
+
+        def replay():
+            result = openclaw_cuda_graphs.run(object(), object(), object(), cond={"c": object()})
+            events.append(("result", result))
+
+        with mock.patch.object(openclaw_cuda_graphs, "_cache_key", return_value=key), \
+             mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None), \
+             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
+             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", return_value=True), \
+             mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False):
+            replay_thread = threading.Thread(target=replay)
+            replay_thread.start()
+            self.assertTrue(copy_started.wait(1))
+
+            invalidate_thread = threading.Thread(target=lambda: (openclaw_cuda_graphs.invalidate("model_to_cpu"), invalidate_done.set()))
+            invalidate_thread.start()
+            self.assertFalse(invalidate_done.wait(0.05))
+
+            release_copy.set()
+            replay_thread.join(1)
+            invalidate_thread.join(1)
+
+        self.assertFalse(replay_thread.is_alive())
+        self.assertFalse(invalidate_thread.is_alive())
+        self.assertEqual(events[-1], ("result", "replayed"))
+        self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
+        self.assertEqual(openclaw_cuda_graphs.status()["invalidations"], 1)
+
 
 
 class OpenClawImportOrderTests(unittest.TestCase):

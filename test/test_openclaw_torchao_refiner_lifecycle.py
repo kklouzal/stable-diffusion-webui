@@ -318,6 +318,41 @@ def test_torchao_fresh_load_bypasses_meta_state_dict_loader(monkeypatch):
     assert calls == ["load", "device", "hijack", "set", "embeddings", "callback"]
 
 
+def test_model_move_mutation_is_serialized_with_unet_graph_runtime(monkeypatch):
+    model = NoGenericToModel()
+    entered = []
+    invalidations = []
+
+    class Boundary:
+        def __enter__(self):
+            entered.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            entered.append("exit")
+
+    def boundary(reason, details=None):
+        invalidations.append(("unet-boundary", reason, details))
+        return Boundary()
+
+    monkeypatch.setattr(sd_models, "model_has_torchao_quantization", lambda _model: True)
+    monkeypatch.setattr(sd_models.lowvram, "apply", lambda _model: entered.append("lowvram"))
+    monkeypatch.setattr(sd_models.shared, "device", torch.device("cpu"), raising=False)
+    monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "mutable_runtime_boundary", boundary)
+    monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "invalidate", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("direct invalidate should be inside mutable_runtime_boundary")))
+    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate_if_changed", lambda boundary, state, reason: invalidations.append(("vae", boundary, reason)))
+
+    sd_models.send_model_to_device(model)
+
+    assert invalidations == [
+        ("unet-boundary", "model_to_device", "base.safetensors"),
+        ("vae", "model_acceleration", "model_to_device"),
+    ]
+    assert entered[0] == "enter"
+    assert entered[-1] == "exit"
+    assert "lowvram" in entered
+    assert model.generic_to_calls == []
+
+
 def test_model_moves_invalidate_unet_and_vae_graph_caches(monkeypatch):
     model = NoGenericToModel()
     invalidations = []

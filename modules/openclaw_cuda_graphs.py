@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import traceback
@@ -11,6 +12,7 @@ _ENABLED = False
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _KEY_LOCKS: dict[tuple[Any, ...], threading.RLock] = {}
 _LOCK = threading.RLock()
+_RUNTIME_LOCK = threading.RLock()
 _STATS = {
     "captures": 0,
     "replays": 0,
@@ -121,14 +123,34 @@ def _clear_cache_locked() -> bool:
 def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
     """Clear captured CUDA graphs after a mutable runtime boundary changes."""
     reason = str(reason or "unknown")
-    with _LOCK:
-        had_state = _clear_cache_locked()
-        if had_state:
-            _STATS["invalidations"] += 1
-            _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
-            _STATS["last_invalidation_reason"] = reason
-            _STATS["last_invalidation_details"] = repr(details)[:1000] if details is not None else None
-        return status()
+    # Invalidation can run from model CPU/device/trash movement while API workers
+    # are concurrently copying static graph inputs or capturing a new graph. Hold
+    # the runtime lock so invalidation cannot clear per-key ownership underneath
+    # an in-flight replay/capture, and so a capture cannot publish a stale entry
+    # after the boundary has changed.
+    with _RUNTIME_LOCK:
+        with _LOCK:
+            had_state = _clear_cache_locked()
+            if had_state:
+                _STATS["invalidations"] += 1
+                _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
+                _STATS["last_invalidation_reason"] = reason
+                _STATS["last_invalidation_details"] = repr(details)[:1000] if details is not None else None
+            return status()
+
+
+@contextlib.contextmanager
+def mutable_runtime_boundary(reason: str, details: Any | None = None):
+    """Serialize graph invalidation with a model/UNet mutation boundary.
+
+    CUDA graph replay skips Python and owns static tensors captured against the
+    current CUDA module storage. Model movement or quantized parameter rewrites
+    must not overlap replay/capture, and replay/capture must not start again
+    until the movement is complete.
+    """
+    with _RUNTIME_LOCK:
+        invalidate(reason, details)
+        yield
 
 
 def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) -> dict[str, Any]:
@@ -139,19 +161,19 @@ def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) 
     Repeated identical observations are no-ops.
     """
     reason = reason or boundary
-    with _LOCK:
-        previous = _LIFECYCLE_STATE.get(boundary, _MISSING)
-        if previous == state:
+    with _RUNTIME_LOCK:
+        with _LOCK:
+            previous = _LIFECYCLE_STATE.get(boundary, _MISSING)
+            if previous == state:
+                return status()
+            _LIFECYCLE_STATE[boundary] = state
+            had_state = _clear_cache_locked()
+            if had_state:
+                _STATS["invalidations"] += 1
+                _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
+                _STATS["last_invalidation_reason"] = reason
+                _STATS["last_invalidation_details"] = repr({"boundary": boundary, "previous": previous, "current": state})[:1000]
             return status()
-        _LIFECYCLE_STATE[boundary] = state
-        had_state = _clear_cache_locked()
-        if had_state:
-            _STATS["invalidations"] += 1
-            _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
-            _STATS["last_invalidation_reason"] = reason
-            _STATS["last_invalidation_details"] = repr({"boundary": boundary, "previous": previous, "current": state})[:1000]
-        return status()
-
 
 def clear() -> dict[str, Any]:
     with _LOCK:
@@ -592,56 +614,57 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
     # concurrent API workers with the same shape/model key can interleave static
     # input copies and replay stale or mixed conditioning. Keep the lock narrow
     # to preserve concurrency across distinct graph keys.
-    with key_lock:
-        with _LOCK:
-            entry = _CACHE.get(key)
-            failed_before = key in _FAILED_KEYS
-        if failed_before:
+    with _RUNTIME_LOCK:
+        with key_lock:
             with _LOCK:
-                _STATS["fallbacks"] += 1
-                _STATS["last_key"] = repr(key)
-            return fn(x, sigma, cond=cond)
-        if entry is not None:
-            _copy_into_static(entry["x"], x)
-            _copy_into_static(entry["sigma"], sigma)
-            _copy_into_static(entry["cond"], cond)
-            entry["graph"].replay()
-            with _LOCK:
-                _STATS["replays"] += 1
-                _STATS["last_key"] = repr(key)
-            return entry["out"].clone()
+                entry = _CACHE.get(key)
+                failed_before = key in _FAILED_KEYS
+            if failed_before:
+                with _LOCK:
+                    _STATS["fallbacks"] += 1
+                    _STATS["last_key"] = repr(key)
+                return fn(x, sigma, cond=cond)
+            if entry is not None:
+                _copy_into_static(entry["x"], x)
+                _copy_into_static(entry["sigma"], sigma)
+                _copy_into_static(entry["cond"], cond)
+                entry["graph"].replay()
+                with _LOCK:
+                    _STATS["replays"] += 1
+                    _STATS["last_key"] = repr(key)
+                return entry["out"].clone()
 
-        try:
-            static_x = _clone_static(x)
-            static_sigma = _clone_static(sigma)
-            static_cond = _clone_static(cond)
-            stream = torch.cuda.Stream()
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream):
-                warmup_out = fn(static_x, static_sigma, cond=static_cond)
-            torch.cuda.current_stream().wait_stream(stream)
-            # The capture pass invokes the UNet a second time for the same denoise
-            # step. Some active attention/guidance stacks are call-sensitive even
-            # when graph replay is exact, so return the first eager result for the
-            # current step and keep the captured output only as the graph-owned
-            # static replay buffer for subsequent steps.
-            capture_return = _clone_static(warmup_out)
+            try:
+                static_x = _clone_static(x)
+                static_sigma = _clone_static(sigma)
+                static_cond = _clone_static(cond)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    warmup_out = fn(static_x, static_sigma, cond=static_cond)
+                torch.cuda.current_stream().wait_stream(stream)
+                # The capture pass invokes the UNet a second time for the same denoise
+                # step. Some active attention/guidance stacks are call-sensitive even
+                # when graph replay is exact, so return the first eager result for the
+                # current step and keep the captured output only as the graph-owned
+                # static replay buffer for subsequent steps.
+                capture_return = _clone_static(warmup_out)
 
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                static_out = fn(static_x, static_sigma, cond=static_cond)
-            entry = {"graph": graph, "x": static_x, "sigma": static_sigma, "cond": static_cond, "out": static_out}
-            with _LOCK:
-                _evict_if_needed_locked()
-                _CACHE[key] = entry
-                _STATS["captures"] += 1
-                _STATS["last_error"] = None
-                _STATS["last_key"] = repr(key)
-            return capture_return
-        except Exception as exc:
-            with _LOCK:
-                _STATS["failures"] += 1
-                _FAILED_KEYS.add(key)
-                _STATS["last_error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:]
-                _STATS["last_key"] = repr(key)
-            return fn(x, sigma, cond=cond)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    static_out = fn(static_x, static_sigma, cond=static_cond)
+                entry = {"graph": graph, "x": static_x, "sigma": static_sigma, "cond": static_cond, "out": static_out}
+                with _LOCK:
+                    _evict_if_needed_locked()
+                    _CACHE[key] = entry
+                    _STATS["captures"] += 1
+                    _STATS["last_error"] = None
+                    _STATS["last_key"] = repr(key)
+                return capture_return
+            except Exception as exc:
+                with _LOCK:
+                    _STATS["failures"] += 1
+                    _FAILED_KEYS.add(key)
+                    _STATS["last_error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:]
+                    _STATS["last_key"] = repr(key)
+                return fn(x, sigma, cond=cond)
