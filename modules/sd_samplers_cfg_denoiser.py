@@ -22,12 +22,20 @@ def subscript_cond(cond, a, b):
     return {key: vec[a:b] for key, vec in cond.items()}
 
 
+def copy_condition_dict(cond):
+    try:
+        return cond.__class__(cond)
+    except Exception:
+        return dict(cond)
+
+
 def pad_cond(tensor, repeats, empty):
     if not isinstance(tensor, dict):
         return torch.cat([tensor, empty.repeat((tensor.shape[0], repeats, 1))], axis=1)
 
-    tensor['crossattn'] = pad_cond(tensor['crossattn'], repeats, empty)
-    return tensor
+    padded = copy_condition_dict(tensor)
+    padded['crossattn'] = pad_cond(tensor['crossattn'], repeats, empty)
+    return padded
 
 
 class CFGDenoiser(torch.nn.Module):
@@ -175,6 +183,7 @@ class CFGDenoiser(torch.nn.Module):
             self.padded_cond_uncond_v0 = True
 
         if is_dict_cond:
+            uncond = copy_condition_dict(uncond)
             uncond['crossattn'] = uncond_vec
         else:
             uncond = uncond_vec
@@ -294,19 +303,22 @@ class CFGDenoiser(torch.nn.Module):
                     x_out[a:b] = self.run_inner_model(x_in[a:b], sigma_in[a:b], make_condition_dict(subscript_cond(cond_in, a, b), image_cond_in[a:b]))
         else:
             x_out = torch.zeros_like(x_in)
-            batch_size = batch_size*2 if shared.opts.batch_cond_uncond else batch_size
-            for batch_offset in range(0, tensor.shape[0], batch_size):
+            model_batch_size = batch_size*2 if shared.opts.batch_cond_uncond else batch_size
+            for batch_offset in range(0, tensor.shape[0], model_batch_size):
                 a = batch_offset
-                b = min(a + batch_size, tensor.shape[0])
-
-                if not is_edit_model:
-                    c_crossattn = subscript_cond(tensor, a, b)
-                else:
-                    c_crossattn = torch.cat([tensor[a:b], uncond], dim=0)
-
+                b = min(a + model_batch_size, tensor.shape[0])
+                c_crossattn = subscript_cond(tensor, a, b)
                 x_out[a:b] = self.run_inner_model(x_in[a:b], sigma_in[a:b], make_condition_dict(c_crossattn, image_cond_in[a:b]))
 
-            if not skip_uncond:
+            if is_edit_model:
+                uncond_in = catenate_conds([uncond, uncond])
+                edit_uncond_start = tensor.shape[0]
+                for batch_offset in range(0, uncond_in.shape[0], model_batch_size):
+                    a = batch_offset
+                    b = min(a + model_batch_size, uncond_in.shape[0])
+                    x_slice = slice(edit_uncond_start + a, edit_uncond_start + b)
+                    x_out[x_slice] = self.run_inner_model(x_in[x_slice], sigma_in[x_slice], make_condition_dict(subscript_cond(uncond_in, a, b), image_cond_in[x_slice]))
+            elif not skip_uncond:
                 x_out[-uncond.shape[0]:] = self.run_inner_model(x_in[-uncond.shape[0]:], sigma_in[-uncond.shape[0]:], make_condition_dict(uncond, image_cond_in[-uncond.shape[0]:]))
 
         _, denoised_image_indexes_tensor = self.batch_index_tensors(repeats, denoised_image_indexes, x_out.device)

@@ -210,6 +210,80 @@ class CFGDenoiserCallbackTests(unittest.TestCase):
         torch.testing.assert_close(denoised, torch.tensor([[[[4.0]]]]))
         self.assertNotIn("Skip Early CFG", denoiser.p.extra_generation_params)
 
+    def test_pad_cond_dict_does_not_mutate_cached_condition(self):
+        module = load_cfg_denoiser(lambda _params: None)
+        original_crossattn = torch.zeros(1, 2, 3)
+        original = {"crossattn": original_crossattn, "vector": torch.ones(1, 4)}
+        empty = torch.zeros(1, 1, 3)
+
+        padded = module.pad_cond(original, 2, empty)
+
+        self.assertIsNot(padded, original)
+        self.assertIs(padded["vector"], original["vector"])
+        self.assertIs(original["crossattn"], original_crossattn)
+        self.assertEqual(original["crossattn"].shape, (1, 2, 3))
+        self.assertEqual(padded["crossattn"].shape, (1, 4, 3))
+
+    def test_pad_cond_uncond_v0_dict_does_not_mutate_cached_uncond(self):
+        module = load_cfg_denoiser(lambda _params: None)
+        denoiser = module.CFGDenoiser(types.SimpleNamespace())
+        cond = torch.zeros(1, 4, 3)
+        original_crossattn = torch.ones(1, 2, 3)
+        uncond = {"crossattn": original_crossattn, "vector": torch.ones(1, 4)}
+
+        _cond, padded_uncond = denoiser.pad_cond_uncond_v0(cond, uncond)
+
+        self.assertIsNot(padded_uncond, uncond)
+        self.assertIs(padded_uncond["vector"], uncond["vector"])
+        self.assertIs(uncond["crossattn"], original_crossattn)
+        self.assertEqual(uncond["crossattn"].shape, (1, 2, 3))
+        self.assertEqual(padded_uncond["crossattn"].shape, (1, 4, 3))
+        self.assertTrue(denoiser.padded_cond_uncond_v0)
+
+    def test_edit_model_unpadded_unequal_prompt_lengths_are_denoised_in_aligned_slices(self):
+        module = load_cfg_denoiser(lambda params: None)
+        module.shared.sd_model.cond_stage_key = "edit"
+        module.shared.opts.batch_cond_uncond = False
+
+        class TestDenoiser(module.CFGDenoiser):
+            @property
+            def inner_model(self):
+                return object()
+
+            def run_inner_model(self, x, sigma, cond):
+                self.calls.append((x.clone(), sigma.clone(), cond["c_crossattn"][0].clone(), cond["c_concat"][0].clone()))
+                values = []
+                for c_crossattn, c_concat in zip(cond["c_crossattn"][0], cond["c_concat"][0]):
+                    if torch.count_nonzero(c_concat).item() == 0:
+                        values.append(1.0)
+                    elif torch.count_nonzero(c_crossattn).item() == 0:
+                        values.append(4.0)
+                    else:
+                        values.append(10.0)
+                return torch.tensor(values, device=x.device, dtype=x.dtype).reshape(-1, 1, 1, 1)
+
+        sampler = types.SimpleNamespace(sampler_extra_args={}, last_latent=None)
+        denoiser = TestDenoiser(sampler)
+        denoiser.calls = []
+        denoiser.p = types.SimpleNamespace(extra_generation_params={}, scripts=None)
+        denoiser.steps = 1
+        denoiser.total_steps = 1
+        denoiser.image_cfg_scale = 1.5
+        denoiser.init_latent = torch.zeros(1, 1, 1, 1)
+
+        x = torch.zeros(1, 1, 1, 1)
+        sigma = torch.ones(1)
+        cond = torch.full((1, 3, 2), 9.0)
+        uncond = torch.zeros(1, 2, 2)
+        image_cond = torch.full((1, 1, 1, 1), 5.0)
+
+        denoised = denoiser(x, sigma, uncond, cond, 2.0, 0.0, image_cond)
+
+        torch.testing.assert_close(denoised, torch.tensor([[[[17.5]]]]))
+        self.assertEqual([call[0].shape[0] for call in denoiser.calls], [1, 1, 1])
+        self.assertEqual([call[2].shape[1] for call in denoiser.calls], [3, 2, 2])
+        self.assertEqual([float(call[3][0, 0, 0, 0]) for call in denoiser.calls], [5.0, 5.0, 0.0])
+
 
 if __name__ == "__main__":
     unittest.main()
