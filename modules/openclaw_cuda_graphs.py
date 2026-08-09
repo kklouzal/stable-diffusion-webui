@@ -468,9 +468,19 @@ def _img2img_graph_state_key(denoiser: Any | None) -> Any:
 
 
 def _denoiser_graph_key(denoiser: Any | None) -> Any:
+    p = getattr(denoiser, "p", None) if denoiser is not None else None
+    sd_model = getattr(p, "sd_model", None) if p is not None else None
+    unet = getattr(getattr(sd_model, "model", None), "diffusion_model", None)
     return (
         _seg_graph_state_key(denoiser),
         _img2img_graph_state_key(denoiser),
+        # TeaCache is implemented as a per-request Python UNet.forward patch. The
+        # CUDA graph cache key must include this active hook state; otherwise a graph
+        # captured by a disabled request can replay for a later TeaCache-enabled
+        # request and bypass TeaCache entirely while infotext still records accepted
+        # TeaCache args.
+        bool(getattr(unet, "_teacache_patched", False)),
+        getattr(unet, "_openclaw_teacache_original_forward", None) is not None,
     )
 
 
@@ -490,6 +500,13 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
             return "processing_mask"
 
         unet = getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None)
+        if getattr(unet, "_teacache_patched", False) or getattr(unet, "_openclaw_teacache_original_forward", None) is not None:
+            # TeaCache is implemented as a per-request Python UNet.forward patch.
+            # CUDA graph replay bypasses that Python hook after capture, making
+            # TeaCache-enabled requests report accepted args while recording zero
+            # TeaCache cache hits/full refreshes. Keep active TeaCache requests eager
+            # so the TeaCache gate can choose cached vs full UNet branches itself.
+            return "teacache_unet_forward_hook"
         if getattr(unet, "_original_forward", None) is not None:
             # Extensions such as ControlNet install a Python UNet forward hook that
             # mutates conditioning state around each call. Capturing beneath that
