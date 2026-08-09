@@ -1021,6 +1021,7 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
     if p.scripts is not None:
         p.scripts.before_process(p)
 
+    p._active_extra_network_data = None
     stored_opts = store_processing_override_settings(p)
 
     try:
@@ -1035,11 +1036,17 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             res = process_images_inner(p)
 
     finally:
-        sd_models.apply_token_merging(p.sd_model, 0)
+        try:
+            active_extra_network_data = p._active_extra_network_data
+            if active_extra_network_data is not None:
+                extra_networks.deactivate(p, active_extra_network_data)
+        finally:
+            p._active_extra_network_data = None
+            sd_models.apply_token_merging(p.sd_model, 0)
 
-        # restore opts to original state
-        if p.override_settings_restore_afterwards:
-            restore_processing_override_settings(stored_opts)
+            # restore opts to original state
+            if p.override_settings_restore_afterwards:
+                restore_processing_override_settings(stored_opts)
 
     return res
 
@@ -1143,6 +1150,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             p.parse_extra_network_prompts()
 
             if not p.disable_extra_networks:
+                p._active_extra_network_data = p.extra_network_data
                 with devices.autocast():
                     extra_networks.activate(p, p.extra_network_data)
 
@@ -1323,9 +1331,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 index_of_first_image = 1
             if opts.grid_save:
                 images.save_image(grid, p.outpath_grids, "grid", p.all_seeds[0], p.all_prompts[0], opts.grid_format, info=infotext(use_main_prompt=True), short_filename=not opts.grid_extended_filename, p=p, grid=True)
-
-    if not p.disable_extra_networks and p.extra_network_data:
-        extra_networks.deactivate(p, p.extra_network_data)
 
     devices.torch_gc()
 
