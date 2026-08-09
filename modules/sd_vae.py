@@ -1,5 +1,6 @@
 import os
 import collections
+import sys
 from dataclasses import dataclass
 
 from modules import paths, shared, devices, script_callbacks, sd_models, extra_networks, lowvram, sd_hijack, hashes, openclaw_cuda_graphs
@@ -294,21 +295,36 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
     if loaded_vae_file == vae_file:
         return
 
-    if sd_model.lowvram:
-        lowvram.send_everything_to_cpu()
-    else:
-        sd_model.to(devices.cpu)
+    reload_exc_info = None
+    needs_finalization = False
+    try:
+        if sd_model.lowvram:
+            lowvram.send_everything_to_cpu()
+        else:
+            sd_models.send_model_to_cpu(sd_model)
 
-    sd_hijack.model_hijack.undo_hijack(sd_model)
+        sd_hijack.model_hijack.undo_hijack(sd_model)
+        needs_finalization = True
 
-    load_vae(sd_model, vae_file, vae_source)
+        try:
+            load_vae(sd_model, vae_file, vae_source)
+        except Exception:
+            reload_exc_info = sys.exc_info()
+            raise
+    finally:
+        if needs_finalization:
+            try:
+                sd_hijack.model_hijack.hijack(sd_model)
 
-    sd_hijack.model_hijack.hijack(sd_model)
+                if not sd_model.lowvram:
+                    sd_models.send_model_to_device(sd_model)
 
-    if not sd_model.lowvram:
-        sd_model.to(devices.device)
-
-    script_callbacks.model_loaded_callback(sd_model)
+                script_callbacks.model_loaded_callback(sd_model)
+            except Exception as finalization_exception:
+                if reload_exc_info is not None:
+                    print(f"Failed to finalize model after VAE reload failure; preserving original exception: {finalization_exception}", flush=True)
+                    raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from finalization_exception
+                raise
 
     print("VAE weights loaded.")
     return sd_model

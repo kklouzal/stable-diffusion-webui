@@ -213,3 +213,72 @@ def test_mxfp8_cache_miss_pre_moves_model_and_does_not_pass_device_to_quantize(m
     assert save_calls
     assert model.first_stage_model is not None
     assert model.mxfp8_quantization_stats["cache_loaded"] is False
+
+class FakeFirstStage:
+    def load_state_dict(self, state):
+        pass
+
+    def to(self, dtype):
+        self.dtype = dtype
+        return self
+
+
+class VaeReloadModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lowvram = False
+        self.first_stage_model = FakeFirstStage()
+        self.sd_checkpoint_info = SimpleNamespace(filename="base.safetensors")
+        self.to_calls = []
+        self.mxfp8_quantization_stats = {"selected_linear_coverage": []}
+
+    def to(self, *args, **kwargs):  # pragma: no cover - any call is the regression
+        self.to_calls.append((args, kwargs))
+        raise AssertionError("generic model.to() must not be used for TorchAO VAE reload")
+
+
+def test_reload_vae_uses_torchao_safe_model_movers(monkeypatch):
+    from modules import sd_vae
+
+    model = VaeReloadModel()
+    calls = []
+
+    monkeypatch.setattr(sd_vae, "loaded_vae_file", "old.vae")
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_cpu", lambda m: calls.append(("cpu", m)))
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_device", lambda m: calls.append(("device", m)))
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "undo_hijack", lambda m: calls.append(("undo", m)))
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "hijack", lambda m: calls.append(("hijack", m)))
+    monkeypatch.setattr(sd_vae.script_callbacks, "model_loaded_callback", lambda m: calls.append(("callback", m)))
+    monkeypatch.setattr(sd_vae, "load_vae", lambda *args, **kwargs: calls.append(("load", args[0])))
+
+    sd_vae.reload_vae_weights(model, vae_file="new.vae")
+
+    assert [name for name, _ in calls] == ["cpu", "undo", "load", "hijack", "device", "callback"]
+    assert model.to_calls == []
+
+
+def test_reload_vae_finalizes_after_load_failure(monkeypatch):
+    from modules import sd_vae
+
+    model = VaeReloadModel()
+    calls = []
+
+    monkeypatch.setattr(sd_vae, "loaded_vae_file", "old.vae")
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_cpu", lambda m: calls.append(("cpu", m)))
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_device", lambda m: calls.append(("device", m)))
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "undo_hijack", lambda m: calls.append(("undo", m)))
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "hijack", lambda m: calls.append(("hijack", m)))
+    monkeypatch.setattr(sd_vae.script_callbacks, "model_loaded_callback", lambda m: calls.append(("callback", m)))
+
+    def fail_load(*args, **kwargs):
+        calls.append(("load", args[0]))
+        raise RuntimeError("vae load failed")
+
+    monkeypatch.setattr(sd_vae, "load_vae", fail_load)
+
+    with pytest.raises(RuntimeError, match="vae load failed"):
+        sd_vae.reload_vae_weights(model, vae_file="bad.vae")
+
+    assert [name for name, _ in calls] == ["cpu", "undo", "load", "hijack", "device", "callback"]
+    assert model.to_calls == []
+
