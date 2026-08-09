@@ -121,6 +121,17 @@ def _call_original_forward(unet, x, timesteps=None, context=None, y=None, **kwar
     return original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
 
 
+def _restore_patched_unet(unet, original_forward=None) -> None:
+    if unet is None or not getattr(unet, "_teacache_patched", False):
+        return
+    original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or original_forward
+    if original_forward is not None:
+        unet.forward = original_forward
+    unet._teacache_patched = False
+    if hasattr(unet, "_openclaw_teacache_original_forward"):
+        delattr(unet, "_openclaw_teacache_original_forward")
+
+
 def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
     return any(getattr(p, name, None) is not None for name in ("mask", "nmask", "image_mask"))
 
@@ -333,22 +344,19 @@ class TeaCacheScript(scripts.Script):
         if disabled_reason:
             p.extra_generation_params["TeaCache disabled reason"] = disabled_reason
 
-    def postprocess(self, p: processing.StableDiffusionProcessing, *args):
+    def postprocess(self, p: processing.StableDiffusionProcessing | None, *args):
         # restore model, clear cache
-        unet = self.patched_unet or p.sd_model.model.diffusion_model
-        if getattr(unet, "_teacache_patched", False):
-            original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or self.original_forward
-            if original_forward is not None:
-                unet.forward = original_forward
-            unet._teacache_patched = False
-            if hasattr(unet, "_openclaw_teacache_original_forward"):
-                delattr(unet, "_openclaw_teacache_original_forward")
+        unet = self.patched_unet
+        if unet is None and p is not None:
+            unet = p.sd_model.model.diffusion_model
+        _restore_patched_unet(unet, self.original_forward)
+        _set_cache(None)
         self.original_forward = None
         self.patched_unet = None
         _set_cache(None)
 
 
-def patched_forward(
+def _patched_forward_inner(
     self,
     x: torch.Tensor,
     timesteps: Optional[torch.Tensor] = None,
@@ -422,6 +430,24 @@ def patched_forward(
     h = h.to(dtype=x.dtype)
 
     return self.out(h)
+
+
+def patched_forward(
+    self,
+    x: torch.Tensor,
+    timesteps: Optional[torch.Tensor] = None,
+    context: Optional[torch.Tensor] = None,
+    y: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> torch.Tensor:
+    try:
+        return _patched_forward_inner(self, x, timesteps=timesteps, context=context, y=y, **kwargs)
+    except Exception:
+        if getattr(self, "_teacache_patched", False):
+            _restore_patched_unet(self)
+            _set_cache(None)
+        raise
+
 
 def next_step(*args):
     cache = _get_cache()

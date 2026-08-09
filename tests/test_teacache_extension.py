@@ -298,6 +298,31 @@ def test_postprocess_clears_session_even_when_current_unet_is_unpatched():
     assert script.patched_unet is None
 
 
+
+def test_patched_forward_exception_restores_unet_and_clears_cache():
+    teacache = load_teacache_module()
+
+    def original_forward(x, timesteps=None, context=None, y=None, **kwargs):
+        raise RuntimeError("synthetic model failure")
+
+    unet = types.SimpleNamespace(num_classes=None)
+    unet.forward = teacache.patched_forward.__get__(unet)
+    unet._teacache_patched = True
+    unet._openclaw_teacache_original_forward = original_forward
+    teacache._set_cache(teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10))
+
+    try:
+        unet.forward(torch.zeros((1, 1)))
+    except RuntimeError as exc:
+        assert "synthetic model failure" in str(exc)
+    else:
+        raise AssertionError("expected synthetic model failure")
+
+    assert unet.forward is original_forward
+    assert unet._teacache_patched is False
+    assert not hasattr(unet, "_openclaw_teacache_original_forward")
+    assert teacache._get_cache() is None
+
 def test_process_restores_previous_patched_unet_when_model_object_changes_before_disable():
     teacache = load_teacache_module()
     script = teacache.TeaCacheScript()
