@@ -114,6 +114,9 @@ if [[ -f "${CONTROLNET_HOOK}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
 fi
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
+if [[ -d "${CONTROLNET_ROOT}" ]]; then
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
+fi
 if [[ -d "${CONTROLNET_ROOT}/annotator/teed" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
 fi
