@@ -6,7 +6,7 @@ A1111_PORT="${A1111_PORT:-7860}"
 A1111_RUN_AS_USER="${A1111_RUN_AS_USER:-a1111}"
 COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${A1111_PORT}}"
 
-mkdir -p "$A1111_HOME/tmp" "$A1111_HOME/models/ControlNet"
+mkdir -p "$A1111_HOME/tmp" "$A1111_HOME/models/ControlNet" "$A1111_HOME/models/VAE-approx"
 
 for f in "$A1111_HOME/config.json" "$A1111_HOME/ui-config.json"; do
   if [[ ! -e "$f" || ! -s "$f" ]]; then
@@ -20,7 +20,8 @@ fi
 
 chown -R "$A1111_RUN_AS_USER:$A1111_RUN_AS_USER" \
   "$A1111_HOME/tmp" \
-  "$A1111_HOME/models/ControlNet"
+  "$A1111_HOME/models/ControlNet" \
+  "$A1111_HOME/models/VAE-approx"
 chown "$A1111_RUN_AS_USER:$A1111_RUN_AS_USER" \
   "$A1111_HOME/config.json" \
   "$A1111_HOME/ui-config.json" \
