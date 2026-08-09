@@ -68,11 +68,12 @@ def load_multi_sampler(monkeypatch):
     monkeypatch.setitem(sys.modules, "modules.sd_samplers_kdiffusion", _module(
         "modules.sd_samplers_kdiffusion",
         KDiffusionSampler=type("KDiffusionSampler", (), {}),
-        samplers_k_diffusion=[("Euler", "sample_euler"), ("Heun", "sample_heun"), ("DPM++ 2M SDE", "sample_dpmpp_2m_sde")],
+        samplers_k_diffusion=[("Euler", "sample_euler"), ("Heun", "sample_heun"), ("DPM++ 2M SDE", "sample_dpmpp_2m_sde"), ("DPM2", "sample_dpm_2")],
         k_diffusion_samplers_map={
             "Euler": types.SimpleNamespace(options={}, total_steps=lambda steps: steps),
             "Heun": types.SimpleNamespace(options={}, total_steps=lambda steps: steps),
             "DPM++ 2M SDE": types.SimpleNamespace(options={}, total_steps=lambda steps: steps),
+            "DPM2": types.SimpleNamespace(options={"discard_next_to_last_sigma": True}, total_steps=lambda steps: steps),
         },
         sampler_extra_params={},
     ))
@@ -98,6 +99,7 @@ def load_multi_sampler(monkeypatch):
         sample_euler=sample_euler,
         sample_heun=sample_heun,
         sample_dpmpp_2m_sde=sample_dpmpp_2m_sde,
+        sample_dpm_2=lambda *args, **kwargs: None,
     )
     monkeypatch.setitem(sys.modules, "k_diffusion", _module("k_diffusion", sampling=sampling_module))
     monkeypatch.setitem(sys.modules, "k_diffusion.sampling", sampling_module)
@@ -145,6 +147,14 @@ def test_stage_sigmas_must_cover_expected_span(monkeypatch):
 
     with pytest.raises(ValueError, match="expected 3 sigma value"):
         sampler._build_stages(None, [4, 3, 2, 1], 4)
+
+
+def test_multi_sampler_data_propagates_penultimate_sigma_discard(monkeypatch):
+    module = load_multi_sampler(monkeypatch)
+
+    data = module._sampler_data_for({"name": "Multi: dpm2", "samplers": ["Euler", "DPM2"], "switch_ats": [1]})
+
+    assert data.options["discard_next_to_last_sigma"] is True
 
 
 def test_terminal_one_step_dpmpp_2m_sde_uses_direct_denoise(monkeypatch):

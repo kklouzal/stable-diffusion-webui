@@ -85,7 +85,15 @@ def load_timesteps_sampler_module(device=None):
 
     class CFGDenoiser:
         def __init__(self, sampler):
+            self.sampler = sampler
             self.model_wrap = None
+            self.p = None
+
+        def update_inner_model(self):
+            self.model_wrap = None
+            cond, uncond = self.p.get_conds()
+            self.sampler.sampler_extra_args["cond"] = cond
+            self.sampler.sampler_extra_args["uncond"] = uncond
 
     class Sampler:
         def __init__(self, funcname):
@@ -215,6 +223,30 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
         torch.testing.assert_close(second, expected)
         self.assertIsNot(second, first)
         self.assertEqual(real_profile.status()["hits"], 1)
+
+    def test_timesteps_refiner_refreshes_alphas(self):
+        module = load_timesteps_sampler_module()
+
+        class Denoiser(module.CFGDenoiserTimesteps):
+            @property
+            def inner_model(self):
+                return object()
+
+        sampler = types.SimpleNamespace(sampler_extra_args={})
+        denoiser = Denoiser(sampler)
+        original = denoiser.alphas
+        module.shared.sd_model = types.SimpleNamespace(
+            parameterization="eps",
+            alphas_cumprod=torch.linspace(0.5, 0.25, 1000),
+        )
+        denoiser.p = types.SimpleNamespace(get_conds=lambda: ("cond", "uncond"))
+
+        denoiser.update_inner_model()
+
+        self.assertIs(denoiser.alphas, module.shared.sd_model.alphas_cumprod)
+        self.assertIsNot(denoiser.alphas, original)
+        self.assertEqual(sampler.sampler_extra_args["cond"], "cond")
+        self.assertEqual(sampler.sampler_extra_args["uncond"], "uncond")
 
     def test_vae_cheap_approximation_preserves_sample_dtype(self):
         with mock.patch.object(sys, "argv", [sys.argv[0]]):

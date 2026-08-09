@@ -51,6 +51,10 @@ class CFGDenoiserTimesteps(CFGDenoiser):
         self.alphas = shared.sd_model.alphas_cumprod
         self.mask_before_denoising = True
 
+    def update_inner_model(self):
+        super().update_inner_model()
+        self.alphas = shared.sd_model.alphas_cumprod
+
     def get_pred_x0(self, x_in, x_out, sigma):
         ts = sigma.to(dtype=int)
 

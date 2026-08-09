@@ -625,6 +625,8 @@ def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerD
         opts_union["uses_ensd"] = True
     if any(config.options.get("brownian_noise") for config in configs):
         opts_union["brownian_noise"] = True
+    if any(config.options.get("discard_next_to_last_sigma") for config in configs):
+        opts_union["discard_next_to_last_sigma"] = True
     return MultiSamplerData(name, lambda model, chain=chain: MultiKDiffusionSampler(model, chain), [], opts_union)
 
 
