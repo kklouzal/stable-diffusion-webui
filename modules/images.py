@@ -295,8 +295,8 @@ def resize_image(resize_mode, im, width, height, upscaler_name=None):
         ratio = width / height
         src_ratio = im.width / im.height
 
-        src_w = width if ratio > src_ratio else im.width * height // im.height
-        src_h = height if ratio <= src_ratio else im.height * width // im.width
+        src_w = width if ratio > src_ratio else math.ceil(im.width * height / im.height)
+        src_h = height if ratio <= src_ratio else math.ceil(im.height * width / im.width)
 
         resized = resize(im, src_w, src_h)
         res = Image.new("RGB", (width, height))
@@ -306,8 +306,8 @@ def resize_image(resize_mode, im, width, height, upscaler_name=None):
         ratio = width / height
         src_ratio = im.width / im.height
 
-        src_w = width if ratio < src_ratio else im.width * height // im.height
-        src_h = height if ratio >= src_ratio else im.height * width // im.width
+        src_w = width if ratio < src_ratio else max(1, math.floor(im.width * height / im.height))
+        src_h = height if ratio >= src_ratio else max(1, math.floor(im.height * width / im.width))
 
         resized = resize(im, src_w, src_h)
         res = Image.new("RGB", (width, height))

@@ -1,3 +1,5 @@
+import math
+
 from PIL import Image, ImageFilter, ImageOps
 
 
@@ -47,7 +49,7 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
 
     if ratio_crop_region > ratio_processing:
         desired_height = (x2 - x1) / ratio_processing
-        desired_height_diff = int(desired_height - (y2-y1))
+        desired_height_diff = math.ceil(desired_height - (y2-y1))
         y1 -= desired_height_diff//2
         y2 += desired_height_diff - desired_height_diff//2
         if y2 >= image_height:
@@ -61,7 +63,7 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
             y2 = image_height
     else:
         desired_width = (y2 - y1) * ratio_processing
-        desired_width_diff = int(desired_width - (x2-x1))
+        desired_width_diff = math.ceil(desired_width - (x2-x1))
         x1 -= desired_width_diff//2
         x2 += desired_width_diff - desired_width_diff//2
         if x2 >= image_width:
