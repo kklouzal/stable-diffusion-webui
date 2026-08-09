@@ -274,7 +274,7 @@ class TeaCacheScript(scripts.Script):
     def process(self, p: processing.StableDiffusionProcessing, *args):
         # patch model forward method
         enabled, _, _, _, _ = normalize_args(args)
-        if not enabled:
+        if not enabled or _has_masked_denoising(p):
             # Fix and clear any prior patch/session if a previous run ended through
             # exception/OOM or if the model object changed before cleanup.
             self.postprocess(p)
