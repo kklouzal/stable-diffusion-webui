@@ -282,3 +282,57 @@ def test_reload_vae_finalizes_after_load_failure(monkeypatch):
     assert [name for name, _ in calls] == ["cpu", "undo", "load", "hijack", "device", "callback"]
     assert model.to_calls == []
 
+
+
+def test_torchao_fresh_load_bypasses_meta_state_dict_loader(monkeypatch):
+    model = NoGenericToModel()
+    model.is_sdxl = True
+    state_dict = {"state_dict": "weights"}
+    calls = []
+
+    monkeypatch.setattr(sd_models, "instantiate_from_config", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(sd_models, "repair_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sd_models.OmegaConf, "load", lambda _config: SimpleNamespace(model="model-config"))
+    monkeypatch.setattr(sd_models, "set_model_type", lambda _model, _state_dict: setattr(_model, "is_sdxl", True))
+    monkeypatch.setattr(sd_models, "set_model_fields", lambda _model: None)
+    monkeypatch.setattr(sd_models, "check_mxfp8", lambda _model: True)
+    monkeypatch.setattr(sd_models, "check_nvfp4", lambda _model: False)
+    monkeypatch.setattr(sd_models, "load_model_weights", lambda *_args, **_kwargs: calls.append("load"))
+    monkeypatch.setattr(sd_models, "get_empty_cond", lambda _model: "empty-cond")
+    monkeypatch.setattr(sd_models, "send_model_to_device", lambda _model: calls.append("device"))
+    monkeypatch.setattr(sd_models.devices, "autocast", lambda: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(sd_models.sd_hijack.model_hijack, "hijack", lambda _model: calls.append("hijack"))
+    monkeypatch.setattr(sd_models.script_callbacks, "model_loaded_callback", lambda _model: calls.append("callback"))
+    monkeypatch.setattr(sd_models.model_data, "set_sd_model", lambda _model: calls.append("set"))
+    monkeypatch.setattr(sd_models.sd_hijack.model_hijack.embedding_db, "load_textual_inversion_embeddings", lambda **_kwargs: calls.append("embeddings"))
+
+    class ForbiddenMetaLoader:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("TorchAO fresh loads must not enter LoadStateDictOnMeta")
+
+    monkeypatch.setattr(sd_models.sd_disable_initialization, "LoadStateDictOnMeta", ForbiddenMetaLoader)
+
+    result = sd_models.load_model(SimpleNamespace(filename="torchao.safetensors"), already_loaded_state_dict=state_dict, checkpoint_config="cfg")
+
+    assert result is model
+    assert calls == ["load", "device", "hijack", "set", "embeddings", "callback"]
+
+
+def test_model_moves_invalidate_unet_and_vae_graph_caches(monkeypatch):
+    model = NoGenericToModel()
+    invalidations = []
+
+    monkeypatch.setattr(sd_models, "model_has_torchao_quantization", lambda _model: True)
+    monkeypatch.setattr(sd_models.lowvram, "apply", lambda _model: None)
+    monkeypatch.setattr(sd_models.devices, "torch_gc", lambda: None)
+    monkeypatch.setattr(sd_models.shared, "device", torch.device("cpu"), raising=False)
+    monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "invalidate", lambda reason, details=None: invalidations.append(("unet", reason, details)))
+    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate_if_changed", lambda boundary, state, reason: invalidations.append(("vae", boundary, reason)))
+
+    sd_models.send_model_to_device(model)
+    sd_models.send_model_to_cpu(model)
+
+    assert ("unet", "model_to_device", "base.safetensors") in invalidations
+    assert ("vae", "model_acceleration", "model_to_device") in invalidations
+    assert ("unet", "model_to_cpu", "base.safetensors") in invalidations
+    assert ("vae", "model_acceleration", "model_to_cpu") in invalidations

@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs, openclaw_vae_decode_graphs
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -1172,8 +1172,14 @@ def model_has_torchao_quantization(m):
     )
 
 
+def _invalidate_model_acceleration_caches(reason, details=None):
+    openclaw_cuda_graphs.invalidate(reason, details)
+    openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), reason)
+
+
 def send_model_to_cpu(m):
     if m is not None:
+        _invalidate_model_acceleration_caches("model_to_cpu", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
         if m.lowvram:
             lowvram.send_everything_to_cpu()
         else:
@@ -1269,6 +1275,7 @@ def send_torchao_quant_model_to_device(m, *, target=None):
 
 
 def send_model_to_device(m):
+    _invalidate_model_acceleration_caches("model_to_device", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
     lowvram.apply(m)
 
     if not m.lowvram:
@@ -1283,6 +1290,7 @@ def send_model_to_device(m):
 
 
 def send_model_to_trash(m):
+    _invalidate_model_acceleration_caches("model_to_trash", getattr(getattr(m, "sd_checkpoint_info", None), "filename", None))
     if model_has_torchao_quantization(m):
         # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
         # trash path. The caller is discarding the tree, so just drop references
@@ -1377,7 +1385,15 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
     # meta-device RAM optimization: the optimized path can strand meta placeholders when
     # custom SDXL/OpenCLIP/VAE loaders bypass the patched Module path, producing
     # "Cannot copy out of meta tensor; no data!" on later reloads.
-    with DisableFastModelLoadingForTorchAOQuant():
+    if check_mxfp8(sd_model) or check_nvfp4(sd_model):
+        # Load TorchAO-targeted trees eagerly. LoadStateDictOnMeta intentionally
+        # pops used tensors from the checkpoint dict and swaps meta placeholders
+        # in-place; when MXFP8/NVFP4 later needs to fall back through refiner
+        # model switches, that lifecycle can leave stale CUDA/TorchAO storage and
+        # poison the next repeated request. Keep the generic meta optimization for
+        # non-TorchAO loads, but preserve a fully materialized TorchAO source tree.
+        load_model_weights(sd_model, checkpoint_info, state_dict, timer)
+    else:
         with sd_disable_initialization.LoadStateDictOnMeta(state_dict, device=model_target_device(sd_model), weight_dtype_conversion=weight_dtype_conversion):
             load_model_weights(sd_model, checkpoint_info, state_dict, timer)
 
