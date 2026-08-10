@@ -1,5 +1,6 @@
 from __future__ import annotations
 from modules import headless_ui as gr
+import copy
 import logging
 import os
 import re
@@ -158,9 +159,30 @@ class BundledTIHash(str):
 def network_file_signature(filename):
     try:
         stat = os.stat(filename)
-        return (stat.st_size, stat.st_mtime_ns)
+        return (stat.st_mtime_ns, stat.st_size)
     except OSError:
         return None
+
+
+def clone_network_for_use(net):
+    """Return an independent per-prompt-use Network wrapper.
+
+    LoRA module objects store a back-reference to their owning Network so they
+    can read te/unet/dyn multipliers while calculating deltas. If the same LoRA
+    is mentioned more than once in a prompt, reusing one Network object for every
+    occurrence makes the last occurrence overwrite multipliers for all earlier
+    occurrences. Share the immutable loaded tensors, but give each prompt
+    occurrence its own Network/module wrapper and multiplier state.
+    """
+
+    cloned = copy.copy(net)
+    cloned.modules = {}
+    for key, module in getattr(net, "modules", {}).items():
+        module_clone = copy.copy(module)
+        module_clone.network = cloned
+        cloned.modules[key] = module_clone
+    cloned.bundle_embeddings = dict(getattr(net, "bundle_embeddings", {}))
+    return cloned
 
 
 def load_network(name, network_on_disk):
@@ -310,20 +332,37 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     if unavailable_networks:
         update_available_networks_by_names(unavailable_networks)
 
-    networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
+    def resolve_network_on_disk(name):
+        return available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None)
+
+    networks_on_disk = [resolve_network_on_disk(name) for name in names]
     if any(x is None for x in networks_on_disk):
         list_available_networks()
 
-        networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
+        networks_on_disk = [resolve_network_on_disk(name) for name in names]
+
+    alias_keys = [
+        next((key for key, value in available_network_aliases.items() if value is network_on_disk), name) if network_on_disk is not None else None
+        for network_on_disk, name in zip(networks_on_disk, names)
+    ]
 
     failed_to_load_networks = []
 
+    source_keys = [id(network_on_disk) if network_on_disk is not None else None for network_on_disk in networks_on_disk]
+    duplicate_source_keys = {source_key for source_key in source_keys if source_key is not None and source_keys.count(source_key) > 1}
+    loaded_source_networks = {}
+
     for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
-        net = already_loaded.get(name, None)
+        alias_key = alias_keys[i]
+        net = already_loaded.get(alias_key, None)
+        source_key = id(network_on_disk) if network_on_disk is not None else None
 
         if network_on_disk is not None:
             if net is None:
-                net = networks_in_memory.get(name)
+                net = loaded_source_networks.get(source_key)
+
+            if net is None:
+                net = networks_in_memory.get(alias_key)
 
             if net is None or network_file_signature(network_on_disk.filename) != getattr(net, "source_signature", None):
                 try:
@@ -335,7 +374,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                     errors.display(e, f"loading network {network_on_disk.filename}")
                     continue
 
-            net.mentioned_name = name
+            loaded_source_networks[source_key] = net
 
             network_on_disk.read_hash()
 
@@ -344,6 +383,10 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
             logging.info(f"Couldn't find network with name {name}")
             continue
 
+        if source_key in duplicate_source_keys:
+            net = clone_network_for_use(net)
+
+        net.mentioned_name = name
         net.te_multiplier = te_multipliers[i] if te_multipliers else 1.0
         net.unet_multiplier = unet_multipliers[i] if unet_multipliers else 1.0
         net.dyn_dim = dyn_dims[i] if dyn_dims else 1.0
@@ -430,7 +473,7 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         return
 
     current_names = getattr(self, "network_current_names", ())
-    wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    wanted_names = network_wanted_names()
 
     weights_backup = getattr(self, "network_weights_backup", None)
     if weights_backup is None and wanted_names != ():
@@ -589,8 +632,23 @@ def is_mxfp8_weight(weight):
     return type(weight).__name__ == "MXTensor" and type(weight).__module__.startswith("torchao.")
 
 
+def network_loaded_weight_signature(net):
+    network_on_disk = getattr(net, "network_on_disk", None)
+    return (
+        getattr(net, "name", None),
+        getattr(net, "mentioned_name", None),
+        getattr(net, "te_multiplier", None),
+        getattr(net, "unet_multiplier", None),
+        getattr(net, "dyn_dim", None),
+        getattr(network_on_disk, "filename", None),
+        getattr(network_on_disk, "shorthash", None),
+        getattr(net, "mtime", None),
+        getattr(net, "source_signature", None),
+    )
+
+
 def network_wanted_names():
-    return tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    return tuple(network_loaded_weight_signature(x) for x in loaded_networks)
 
 
 def network_mxfp8_wanted_names():
