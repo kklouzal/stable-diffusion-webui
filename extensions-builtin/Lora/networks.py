@@ -185,6 +185,13 @@ def clone_network_for_use(net):
     return cloned
 
 
+def network_source_key(network_on_disk):
+    if network_on_disk is None:
+        return None
+
+    return os.path.realpath(os.fspath(network_on_disk.filename))
+
+
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
@@ -314,8 +321,9 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     already_loaded = {}
 
     for net in loaded_networks:
-        if net.name in names:
-            already_loaded[net.name] = net
+        source_key = network_source_key(getattr(net, "network_on_disk", None))
+        if source_key is not None:
+            already_loaded[source_key] = net
         for emb_name, embedding in net.bundle_embeddings.items():
             if embedding.loaded:
                 emb_db.register_embedding_by_name(None, shared.sd_model, emb_name)
@@ -341,35 +349,29 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
         networks_on_disk = [resolve_network_on_disk(name) for name in names]
 
-    alias_keys = [
-        next((key for key, value in available_network_aliases.items() if value is network_on_disk), name) if network_on_disk is not None else None
-        for network_on_disk, name in zip(networks_on_disk, names)
-    ]
-
     failed_to_load_networks = []
 
-    source_keys = [id(network_on_disk) if network_on_disk is not None else None for network_on_disk in networks_on_disk]
+    source_keys = [network_source_key(network_on_disk) for network_on_disk in networks_on_disk]
     duplicate_source_keys = {source_key for source_key in source_keys if source_key is not None and source_keys.count(source_key) > 1}
     loaded_source_networks = {}
 
     for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
-        alias_key = alias_keys[i]
-        net = already_loaded.get(alias_key, None)
-        source_key = id(network_on_disk) if network_on_disk is not None else None
+        source_key = source_keys[i]
+        net = already_loaded.get(source_key, None)
 
         if network_on_disk is not None:
             if net is None:
                 net = loaded_source_networks.get(source_key)
 
             if net is None:
-                net = networks_in_memory.get(alias_key)
+                net = networks_in_memory.get(source_key)
 
             if net is None or network_file_signature(network_on_disk.filename) != getattr(net, "source_signature", None):
                 try:
                     net = load_network(name, network_on_disk)
 
-                    networks_in_memory.pop(name, None)
-                    networks_in_memory[name] = net
+                    networks_in_memory.pop(source_key, None)
+                    networks_in_memory[source_key] = net
                 except Exception as e:
                     errors.display(e, f"loading network {network_on_disk.filename}")
                     continue

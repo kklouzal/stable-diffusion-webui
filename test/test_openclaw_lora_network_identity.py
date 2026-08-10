@@ -58,7 +58,7 @@ def lora_networks(monkeypatch):
 
     on_disk = SimpleNamespace(filename="alpha.safetensors", shorthash="abc", read_hash=lambda: None)
     monkeypatch.setattr(networks, "available_networks", {"alpha": on_disk}, raising=False)
-    monkeypatch.setattr(networks, "available_network_aliases", {"alpha": on_disk, "alpha-alias": on_disk}, raising=False)
+    monkeypatch.setattr(networks, "available_network_aliases", {"alpha-alias": on_disk, "alpha": on_disk}, raising=False)
     monkeypatch.setattr(networks, "forbidden_network_aliases", {}, raising=False)
     monkeypatch.setattr(networks, "networks_in_memory", {}, raising=False)
     networks.loaded_networks.clear()
@@ -172,3 +172,69 @@ def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_
     assert second.te_multiplier == 0.8
     assert first.unet_multiplier == 0.3
     assert second.unet_multiplier == 1.3
+
+
+def test_repeated_requested_name_reuses_cache_despite_alias_insertion_order(lora_networks, monkeypatch):
+    networks = lora_networks
+    base, _module, tensor_payload = _base_network(networks)
+    calls = []
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: base.source_signature)
+    monkeypatch.setattr(networks, "load_network", lambda name, on_disk: calls.append(name) or base)
+
+    networks.load_networks(["alpha"], [0.2], [0.3], [3])
+    first = networks.loaded_networks[0]
+    networks.load_networks(["alpha"], [0.8], [1.3], [9])
+    second = networks.loaded_networks[0]
+
+    assert calls == ["alpha"]
+    assert second is first
+    assert second.modules["layer"].tensor_payload is tensor_payload
+    assert second.modules["layer"].network is second
+    assert second.te_multiplier == 0.8
+    assert second.unet_multiplier == 1.3
+    assert second.dyn_dim == 9
+
+
+def test_alias_switch_reuses_source_tensors_and_multiplier_owner(lora_networks, monkeypatch):
+    networks = lora_networks
+    base, _module, tensor_payload = _base_network(networks)
+    calls = []
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: base.source_signature)
+    monkeypatch.setattr(networks, "load_network", lambda name, on_disk: calls.append(name) or base)
+
+    networks.load_networks(["alpha"], [0.2], [0.3], [3])
+    networks.load_networks(["alpha-alias"], [0.8], [1.3], [9])
+    switched = networks.loaded_networks[0]
+
+    assert calls == ["alpha"]
+    assert switched.modules["layer"].tensor_payload is tensor_payload
+    assert switched.modules["layer"].network is switched
+    assert switched.mentioned_name == "alpha-alias"
+    assert switched.te_multiplier == 0.8
+    assert switched.unet_multiplier == 1.3
+    assert switched.dyn_dim == 9
+
+
+def test_changed_source_signature_forces_reload(lora_networks, monkeypatch):
+    networks = lora_networks
+    signature = [(20, 10)]
+    calls = []
+
+    def load_network(name, on_disk):
+        net, _module, _payload = _base_network(networks, name=name)
+        net.source_signature = signature[0]
+        calls.append((name, net))
+        return net
+
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: signature[0])
+    monkeypatch.setattr(networks, "load_network", load_network)
+
+    networks.load_networks(["alpha-alias"])
+    first = networks.loaded_networks[0]
+    signature[0] = (21, 10)
+    networks.load_networks(["alpha-alias"])
+    second = networks.loaded_networks[0]
+
+    assert len(calls) == 2
+    assert second is not first
+    assert second.source_signature == (21, 10)
