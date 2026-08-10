@@ -120,6 +120,14 @@ fi
 if [[ -d "${CONTROLNET_ROOT}/annotator/teed" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
 fi
+MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
+if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
+fi
+ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
+if [[ -d "${ULTIMATE_UPSCALE_ROOT}" ]]; then
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
+fi
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"
