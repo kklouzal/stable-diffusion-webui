@@ -378,6 +378,11 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         events = []
 
         class FakeStatic:
+            shape = (1,)
+            dtype = "float32"
+            device = types.SimpleNamespace(type="cuda")
+            requires_grad = False
+
             def __init__(self, name):
                 self.name = name
 
@@ -386,6 +391,12 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
                 if self.name == "x":
                     copy_started.set()
                     release_copy.wait(1)
+
+        class FakeTensor:
+            shape = (1,)
+            dtype = "float32"
+            device = types.SimpleNamespace(type="cuda")
+            requires_grad = False
 
         class FakeGraph:
             def replay(self):
@@ -404,14 +415,20 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             "out": FakeOutput(),
         }
 
+        thread_errors = []
+
         def replay():
-            result = openclaw_cuda_graphs.run(object(), object(), object(), cond={"c": object()})
-            events.append(("result", result))
+            try:
+                tensor = FakeTensor()
+                result = openclaw_cuda_graphs.run(tensor, tensor, tensor, cond={"c": tensor})
+                events.append(("result", result))
+            except Exception as exc:  # pragma: no cover - asserted below from the parent thread
+                thread_errors.append(exc)
 
         with mock.patch.object(openclaw_cuda_graphs, "_cache_key", return_value=key), \
              mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None), \
              mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", return_value=True), \
+             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))), \
              mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False):
             replay_thread = threading.Thread(target=replay)
             replay_thread.start()
@@ -427,6 +444,7 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
 
         self.assertFalse(replay_thread.is_alive())
         self.assertFalse(invalidate_thread.is_alive())
+        self.assertEqual(thread_errors, [])
         self.assertEqual(events[-1], ("result", "replayed"))
         self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
         self.assertEqual(openclaw_cuda_graphs.status()["invalidations"], 1)
