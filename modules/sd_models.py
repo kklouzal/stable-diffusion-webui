@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs, openclaw_vae_decode_graphs
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs, openclaw_vae_decode_graphs, openclaw_lifecycle_epochs
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -1179,6 +1179,7 @@ def _invalidate_model_acceleration_caches(reason, details=None):
 
 def send_model_to_cpu(m):
     if m is not None:
+        movement_before = openclaw_lifecycle_epochs.model_location_marker(m)
         details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
         with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_cpu", details):
             openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_cpu")
@@ -1190,6 +1191,7 @@ def send_model_to_cpu(m):
                     send_torchao_quant_model_to_device(m, target=devices.cpu)
                 else:
                     m.to(devices.cpu)
+        openclaw_lifecycle_epochs.publish_model_movement_commit(m, before=movement_before, to_cpu=True)
 
     devices.torch_gc()
 
@@ -1277,6 +1279,9 @@ def send_torchao_quant_model_to_device(m, *, target=None):
 
 
 def send_model_to_device(m):
+    if m is None:
+        return
+    movement_before = openclaw_lifecycle_epochs.model_location_marker(m)
     details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
     with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_device", details):
         openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_device")
@@ -1289,8 +1294,10 @@ def send_model_to_device(m):
                 # parameters/buffers around quantized leaves instead so skipped
                 # BF16 regions are not stranded on CPU.
                 send_torchao_quant_model_to_device(m)
+                openclaw_lifecycle_epochs.publish_model_movement_commit(m, before=movement_before, to_cpu=False)
                 return
             m.to(shared.device)
+    openclaw_lifecycle_epochs.publish_model_movement_commit(m, before=movement_before, to_cpu=False)
 
 
 def send_model_to_trash(m):
@@ -1430,6 +1437,9 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
     timer.record("calculate empty prompt")
 
     print(f"Model loaded in {timer.summary()}.")
+
+    vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
+    openclaw_lifecycle_epochs.publish_checkpoint_commit(changed=True, vae_bytes_changed=vae_bytes_changed, vae_object_changed=vae_object_changed)
 
     return sd_model
 
@@ -1663,11 +1673,17 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
                 raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from finalization_exception
             raise
 
+    if reload_exc_info is not None:
+        openclaw_lifecycle_epochs.discard_pending_vae_commit(sd_model)
+        raise reload_exc_info[1].with_traceback(reload_exc_info[2])
+
     print(f"Weights loaded in {timer.summary()}.")
 
     model_data.set_sd_model(sd_model)
     sd_unet.apply_unet()
     openclaw_cuda_graphs.note_model_loaded(sd_model, "model_changed")
+    vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
+    openclaw_lifecycle_epochs.publish_checkpoint_commit(changed=True, vae_bytes_changed=vae_bytes_changed, vae_object_changed=vae_object_changed)
 
     return sd_model
 

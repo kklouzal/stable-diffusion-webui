@@ -3,7 +3,7 @@ import collections
 import sys
 from dataclasses import dataclass
 
-from modules import paths, shared, devices, script_callbacks, sd_models, extra_networks, lowvram, sd_hijack, hashes, openclaw_cuda_graphs
+from modules import paths, shared, devices, script_callbacks, sd_models, extra_networks, lowvram, sd_hijack, hashes, openclaw_cuda_graphs, openclaw_lifecycle_epochs
 
 import glob
 from copy import deepcopy
@@ -87,6 +87,7 @@ def restore_base_vae(model):
         print("Restoring base VAE")
         _load_vae_dict(model, base_vae)
         loaded_vae_file = None
+        openclaw_lifecycle_epochs.note_vae_commit(model, bytes_changed=False, object_changed=True, publish=False)
     delete_base_vae()
 
 
@@ -264,6 +265,8 @@ def load_vae(model, vae_file=None, vae_source="from unknown source"):
     model.base_vae = base_vae
     model.loaded_vae_file = loaded_vae_file
     openclaw_cuda_graphs.note_vae_loaded(model, "vae_changed")
+    openclaw_lifecycle_epochs.note_vae_commit(model, bytes_changed=vae_file is not None, object_changed=True, publish=False)
+    openclaw_lifecycle_epochs.note_vae_commit(model, bytes_changed=vae_file is not None, object_changed=True, publish=False)
 
 
 # don't call this from outside
@@ -326,5 +329,7 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
                     raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from finalization_exception
                 raise
 
+    vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
+    openclaw_lifecycle_epochs.note_vae_commit(sd_model, bytes_changed=vae_bytes_changed, object_changed=vae_object_changed, publish=True)
     print("VAE weights loaded.")
     return sd_model
