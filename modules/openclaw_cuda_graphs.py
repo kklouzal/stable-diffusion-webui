@@ -548,10 +548,15 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
             # TeaCache cache hits/full refreshes. Keep active TeaCache requests eager
             # so the TeaCache gate can choose cached vs full UNet branches itself.
             return "teacache_unet_forward_hook"
-        if getattr(unet, "_original_forward", None) is not None:
+        if (
+            getattr(unet, "_original_forward", None) is not None
+            or getattr(unet, "_controlnet_forward_hook_owner", None) is not None
+        ):
             # Extensions such as ControlNet install a Python UNet forward hook that
-            # mutates conditioning state around each call. Capturing beneath that
-            # hook can fail or replay stale hook state; keep these paths eager.
+            # mutates conditioning state around each call. The owner-scoped
+            # ControlNet lifecycle no longer uses the legacy _original_forward
+            # marker, so include its explicit live-owner marker as well. Capturing
+            # beneath either form can fail or replay stale hook state.
             return "external_unet_forward_hook"
 
         # Unmasked img2img/hires state is graphable here. By the time

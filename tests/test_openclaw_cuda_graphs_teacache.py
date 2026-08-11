@@ -36,3 +36,12 @@ def test_cuda_graph_key_distinguishes_active_teacache_patch_state():
     assert disabled != active_original
     assert active_patch[-2:] == (True, False)
     assert active_original[-2:] == (False, True)
+
+
+
+def test_controlnet_owner_marker_bypasses_cuda_graph_capture():
+    owner = object()
+    unet = SimpleNamespace(_controlnet_forward_hook_owner=owner)
+
+    assert openclaw_cuda_graphs._graph_denoiser_bypass_reason(_denoiser_with_unet(unet)) == "external_unet_forward_hook"
+    assert unet._controlnet_forward_hook_owner is owner
