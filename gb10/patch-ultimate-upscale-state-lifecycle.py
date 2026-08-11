@@ -1,90 +1,93 @@
 #!/usr/bin/env python3
-"""Patch Ultimate Upscale state lifecycle so state.end() runs exactly once."""
+"""Patch and verify Ultimate Upscale state lifecycle."""
 from __future__ import annotations
 
+import argparse
+import ast
 from pathlib import Path
-import sys
 
 TARGET_RELATIVE = Path("scripts") / "ultimate-upscale.py"
-
-ORIGINAL = '''    def process(self):
-        state.begin()
-        self.calc_jobs_count()
-        self.result_images = []
-        if self.redraw.enabled:
-            self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)
-            self.initial_info = self.redraw.initial_info
-        self.result_images.append(self.image)
-        if self.redraw.save:
-            self.save_image()
-
-        if self.seams_fix.enabled:
-            self.image = self.seams_fix.start(self.p, self.image, self.rows, self.cols)
-            self.initial_info = self.seams_fix.initial_info
-            self.result_images.append(self.image)
-            if self.seams_fix.save:
-                self.save_image()
-        state.end()
-'''
-
-PATCHED = '''    def process(self):
-        state.begin()
-        try:
-            self.calc_jobs_count()
-            self.result_images = []
-            if self.redraw.enabled:
-                self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)
-                self.initial_info = self.redraw.initial_info
-            self.result_images.append(self.image)
-            if self.redraw.save:
-                self.save_image()
-
-            if self.seams_fix.enabled:
-                self.image = self.seams_fix.start(self.p, self.image, self.rows, self.cols)
-                self.initial_info = self.seams_fix.initial_info
-                self.result_images.append(self.image)
-                if self.seams_fix.save:
-                    self.save_image()
-        finally:
-            state.end()
-'''
+MARKER = "OPENCLAW_ULTIMATE_UPSCALE_STATE_FINALLY_V2"
 
 
-def resolve_target(arg: str) -> Path:
-    path = Path(arg)
-    if path.is_dir():
-        path = path / TARGET_RELATIVE
-    return path
+def target_for(path: Path) -> Path:
+    return path / TARGET_RELATIVE if path.is_dir() else path
 
 
-def patch_file(path: Path) -> bool:
-    if not path.exists():
-        raise SystemExit(f"Ultimate Upscale source not found: {path}")
-    if path.name != "ultimate-upscale.py" or path.parent.name != "scripts":
-        raise SystemExit(f"refusing unexpected Ultimate Upscale target (expected scripts/ultimate-upscale.py): {path}")
-    source = path.read_text(encoding="utf-8")
-    if PATCHED in source:
-        if ORIGINAL in source:
-            raise SystemExit(f"ambiguous Ultimate Upscale source contains original and patched blocks: {path}")
-        return False
-    if source.count(ORIGINAL) != 1:
-        raise SystemExit(f"unsupported Ultimate Upscale process lifecycle implementation: {path}")
-    path.write_text(source.replace(ORIGINAL, PATCHED, 1), encoding="utf-8")
-    return True
+def process_node(source: str, target: Path) -> ast.FunctionDef:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise SystemExit(f"invalid Ultimate Upscale source: {target}: {exc}") from exc
+    matches = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "process"]
+    if len(matches) != 1:
+        raise SystemExit(f"unsupported Ultimate Upscale process implementation: {target}")
+    return matches[0]
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(f"usage: {Path(argv[0]).name} /path/to/ultimate-upscale-for-automatic1111-or-ultimate-upscale.py", file=sys.stderr)
-        return 2
-    target = resolve_target(argv[1])
-    changed = patch_file(target)
-    if changed:
+def calls(node: ast.AST, name: str) -> list[ast.Call]:
+    return [
+        child
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and isinstance(child.func.value, ast.Name)
+        and child.func.value.id == "state"
+        and child.func.attr == name
+    ]
+
+
+def verify(source: str, target: Path) -> None:
+    node = process_node(source, target)
+    if source.count(MARKER) != 1 or len(calls(node, "begin")) != 1 or len(calls(node, "end")) != 1:
+        raise SystemExit(f"Ultimate Upscale lifecycle verification failed (partial markers): {target}")
+    finalizers = [child for child in node.body if isinstance(child, ast.Try)]
+    if len(finalizers) != 1 or len(finalizers[0].finalbody) != 1 or len(calls(finalizers[0].finalbody[0], "end")) != 1:
+        raise SystemExit(f"Ultimate Upscale lifecycle verification failed (state.end not in finally): {target}")
+
+
+def patch(source: str, target: Path) -> str:
+    node = process_node(source, target)
+    begins = calls(node, "begin")
+    ends = calls(node, "end")
+    if len(begins) != 1 or len(ends) != 1 or not node.body:
+        raise SystemExit(f"unsupported or partial Ultimate Upscale state lifecycle: {target}")
+    if not isinstance(node.body[0], ast.Expr) or node.body[0].value is not begins[0]:
+        raise SystemExit(f"unsupported Ultimate Upscale state.begin placement: {target}")
+    if not isinstance(node.body[-1], ast.Expr) or node.body[-1].value is not ends[0]:
+        raise SystemExit(f"unsupported Ultimate Upscale state.end placement: {target}")
+
+    lines = source.splitlines(keepends=True)
+    indent = " " * (node.col_offset + 4)
+    body_start = node.body[1].lineno - 1
+    body_end = node.body[-1].lineno - 1
+    body = lines[body_start:body_end]
+    indented_body = [indent + "    " + line[len(indent) :] if line.strip() else line for line in body]
+    replacement = [
+        f"{indent}try:\n",
+        f"{indent}    # {MARKER}: one begin owns one end.\n",
+        *indented_body,
+        f"{indent}finally:\n",
+        f"{indent}    state.end()\n",
+    ]
+    return "".join(lines[:body_start] + replacement + lines[body_end + 1 :])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", type=Path)
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    target = target_for(args.path)
+    source = target.read_text(encoding="utf-8")
+    if not args.check and MARKER not in source:
+        source = patch(source, target)
+        target.write_text(source, encoding="utf-8")
         print(f"Patched Ultimate Upscale state lifecycle: {target}")
-    else:
-        print(f"Ultimate Upscale state lifecycle already patched: {target}")
+    verify(source, target)
+    print(f"Ultimate Upscale lifecycle verified: {target}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main())

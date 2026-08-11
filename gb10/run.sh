@@ -110,9 +110,12 @@ if [[ -f "${CONTROLNET_ZOE}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-zoedepth.py" "${CONTROLNET_ZOE}"
 fi
 CONTROLNET_HOOK="${HOST_ROOT}/Extensions/sd-webui-controlnet/scripts/hook.py"
-if [[ -f "${CONTROLNET_HOOK}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
+if [[ ! -f "${CONTROLNET_HOOK}" ]]; then
+  echo "ERROR: required ControlNet hook missing: ${CONTROLNET_HOOK}" >&2
+  exit 1
 fi
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" --check "${CONTROLNET_HOOK}"
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
 if [[ -d "${CONTROLNET_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
@@ -125,9 +128,12 @@ if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
 fi
 ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
-if [[ -d "${ULTIMATE_UPSCALE_ROOT}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
+if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then
+  echo "ERROR: required Ultimate Upscale script missing: ${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" >&2
+  exit 1
 fi
+sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" --check "${ULTIMATE_UPSCALE_ROOT}"
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"
