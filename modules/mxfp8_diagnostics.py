@@ -12,6 +12,8 @@ from typing import Any
 
 import torch
 
+from modules import openclaw_cache_epochs
+
 _LOCK = threading.Lock()
 _LAST_RESULT: dict[str, Any] | None = None
 _LAST_RUNNING = False
@@ -351,6 +353,9 @@ def _diagnostic_summary(result: dict[str, Any]) -> dict[str, Any]:
 def run_probe(include_benchmarks: bool = True, save: bool = True) -> dict[str, Any]:
     started = time.time()
     result: dict[str, Any] = {"ok": True, "started_at": started, "started_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))}
+    result["dependency_epochs"] = dict(openclaw_cache_epochs.epoch_subset((
+        "checkpoint_object_epoch", "precision_epoch", "device_epoch", "lora_applied_epoch",
+    )))
     result["feature_versions"] = feature_version_probe()
     result["torchao_mx_smoke"] = torchao_mx_smoke_test()
     result["shape_rejection_matrix"] = shape_rejection_matrix()

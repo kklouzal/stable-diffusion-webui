@@ -68,7 +68,10 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                 p.extra_generation_params["Lora hashes"] = ', '.join(f'{k}: {v}' for k, v in p.lora_hashes.items())
 
     def deactivate(self, p):
-        if self.errors:
-            p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
+        try:
+            networks.unload_networks()
+        finally:
+            if self.errors:
+                p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
 
             self.errors.clear()

@@ -1,9 +1,10 @@
 from __future__ import annotations
-from modules import headless_ui as gr
 import copy
+import hashlib
 import logging
 import os
 import re
+import threading
 
 import lora_patches
 import network
@@ -23,7 +24,12 @@ from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
-from lora_logger import logger
+
+LORA_SOURCE_SCHEMA_REVISION = "lora-source-v2"
+LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v2"
+_network_application_lock = threading.RLock()
+_applied_state_key = None
+
 
 module_types = [
     network_lora.ModuleTypeLora(),
@@ -157,12 +163,26 @@ class BundledTIHash(str):
 
 
 def network_file_signature(filename):
+    """Return exact source-byte identity; stat data is deliberately not semantic."""
     try:
-        stat = os.stat(filename)
-        return (stat.st_mtime_ns, stat.st_size)
+        digest = hashlib.sha256()
+        with open(filename, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return ("sha256", digest.hexdigest())
     except OSError:
         return None
 
+
+def _execution_identity():
+    return (
+        str(getattr(devices, "device", None)),
+        str(getattr(devices, "dtype", None)),
+        str(getattr(devices, "dtype_unet", None)),
+        openclaw_cache_epochs.epoch_subset((
+            "checkpoint_object_epoch", "precision_epoch", "device_epoch",
+        )),
+    )
 
 def clone_network_for_use(net):
     """Return an independent per-prompt-use Network wrapper.
@@ -185,17 +205,88 @@ def clone_network_for_use(net):
     return cloned
 
 
-def network_source_key(network_on_disk):
+def network_source_key(network_on_disk, source_signature=None):
+    """Semantic parsed-artifact key: canonical source bytes plus parser contract."""
     if network_on_disk is None:
         return None
+    filename = os.path.realpath(os.fspath(network_on_disk.filename))
+    if source_signature is None:
+        source_signature = network_file_signature(filename)
+    parse_execution = openclaw_cache_epochs.epoch_subset((
+        "checkpoint_object_epoch", "precision_epoch", "device_epoch",
+    ))
+    return (filename, source_signature, LORA_SOURCE_SCHEMA_REVISION, parse_execution)
 
-    return os.path.realpath(os.fspath(network_on_disk.filename))
 
+def network_applied_state_key(networks_to_apply):
+    """Identity of the complete ordered effective LoRA state."""
+    ordered = tuple((
+        getattr(net, "source_key", network_source_key(getattr(net, "network_on_disk", None), getattr(net, "source_signature", None))),
+        float(getattr(net, "te_multiplier", 1.0)).hex(),
+        float(getattr(net, "unet_multiplier", 1.0)).hex(),
+        getattr(net, "dyn_dim", None),
+        tuple(sorted(getattr(net, "modules", {}).keys())),
+    ) for net in networks_to_apply)
+    return (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+
+
+def _apply_loaded_state_to_model():
+    if getattr(shared.opts, "lora_functional", False):
+        return
+    model = getattr(shared, "sd_model", None)
+    mapping = getattr(model, "network_layer_mapping", {})
+    seen = set()
+    for layer in mapping.values():
+        marker = id(layer)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        network_apply_weights(layer)
+
+
+def _publish_applied_state(new_networks):
+    """Compare/apply/publish under epoch-first lock ordering, with rollback."""
+    global _applied_state_key
+    wanted_key = network_applied_state_key(new_networks)
+    with openclaw_cache_epochs.epoch_transaction():
+        with _network_application_lock:
+            if wanted_key == _applied_state_key:
+                loaded_networks[:] = new_networks
+                openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=wanted_key)
+                return False
+            previous = list(loaded_networks)
+            previous_key = _applied_state_key
+            try:
+                loaded_networks[:] = new_networks
+                _apply_loaded_state_to_model()
+            except Exception:
+                loaded_networks[:] = previous
+                try:
+                    _apply_loaded_state_to_model()
+                except Exception as rollback_error:
+                    loaded_networks.clear()
+                    _applied_state_key = None
+                    openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=wanted_key)
+                    raise RuntimeError("LoRA application rollback failed closed") from rollback_error
+                _applied_state_key = previous_key
+                openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=wanted_key)
+                raise
+            _applied_state_key = wanted_key
+            openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="published")
+            openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=wanted_key)
+            openclaw_cuda_graphs.note_lora_loaded("lora_changed")
+            return True
+
+
+def unload_networks():
+    """Restore/unhook the current state and publish one coherent empty state."""
+    return _publish_applied_state([])
 
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
     net.source_signature = network_file_signature(network_on_disk.filename)
+    net.source_key = network_source_key(network_on_disk, net.source_signature)
 
     sd = sd_models.read_state_dict(network_on_disk.filename)
 
@@ -319,123 +410,82 @@ def purge_networks_from_memory():
 
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):
+    """Stage parsing off-lock, then atomically publish source and applied state."""
     emb_db = sd_hijack.model_hijack.embedding_db
-    already_loaded = {}
 
-    for net in loaded_networks:
-        source_key = network_source_key(getattr(net, "network_on_disk", None))
-        if source_key is not None:
-            already_loaded[source_key] = net
-        for emb_name, embedding in net.bundle_embeddings.items():
-            if embedding.loaded:
-                emb_db.register_embedding_by_name(None, shared.sd_model, emb_name)
+    def resolve(name):
+        return available_networks.get(name) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name)
 
-    loaded_networks.clear()
-
-    unavailable_networks = []
-    for name in names:
-        if name.lower() in forbidden_network_aliases and available_networks.get(name) is None:
-            unavailable_networks.append(name)
-        elif available_network_aliases.get(name) is None:
-            unavailable_networks.append(name)
-
-    if unavailable_networks:
-        update_available_networks_by_names(unavailable_networks)
-
-    def resolve_network_on_disk(name):
-        return available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None)
-
-    networks_on_disk = [resolve_network_on_disk(name) for name in names]
-    if any(x is None for x in networks_on_disk):
+    unavailable = [name for name in names if resolve(name) is None]
+    if unavailable:
+        update_available_networks_by_names(unavailable)
+    networks_on_disk = [resolve(name) for name in names]
+    if any(item is None for item in networks_on_disk):
         list_available_networks()
+        networks_on_disk = [resolve(name) for name in names]
+    if any(item is None for item in networks_on_disk):
+        openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=("missing", len(names)))
+        raise RuntimeError("one or more requested LoRA sources are unavailable")
 
-        networks_on_disk = [resolve_network_on_disk(name) for name in names]
+    signatures = [network_file_signature(item.filename) for item in networks_on_disk]
+    source_keys = [network_source_key(item, signature) for item, signature in zip(networks_on_disk, signatures)]
+    active_by_key = {getattr(net, "source_key", network_source_key(net.network_on_disk, getattr(net, "source_signature", None))): net for net in loaded_networks}
+    staged_cache = {}
+    staged_publications = []
+    prepared = []
 
-    failed_to_load_networks = []
+    # Disk parsing is intentionally outside epoch_transaction and application lock.
+    for index, (name, item, signature, source_key) in enumerate(zip(names, networks_on_disk, signatures, source_keys)):
+        net = active_by_key.get(source_key) or staged_cache.get(source_key) or networks_in_memory.get(source_key)
+        if net is not None:
+            openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=source_key)
+        else:
+            openclaw_cache_epochs.observe("E12", "miss", reason="cache_miss", semantic_key=source_key)
+            try:
+                net = load_network(name, item)
+                net.source_signature = signature
+                net.source_key = source_key
+            except Exception as error:
+                openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=source_key)
+                raise RuntimeError("LoRA source parse rejected") from error
+            staged_publications.append((source_key, net))
+        staged_cache[source_key] = net
+        # Cached parsed networks are immutable; every activation owns wrappers and multipliers.
+        use = clone_network_for_use(net)
+        use.mentioned_name = name
+        use.te_multiplier = te_multipliers[index] if te_multipliers else 1.0
+        use.unet_multiplier = unet_multipliers[index] if unet_multipliers else 1.0
+        use.dyn_dim = dyn_dims[index] if dyn_dims else None
+        prepared.append(use)
 
-    source_keys = [network_source_key(network_on_disk) for network_on_disk in networks_on_disk]
-    duplicate_source_keys = {source_key for source_key in source_keys if source_key is not None and source_keys.count(source_key) > 1}
-    loaded_source_networks = {}
-
-    for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
-        source_key = source_keys[i]
-        net = already_loaded.get(source_key, None)
-
-        if network_on_disk is not None:
-            if net is None:
-                net = loaded_source_networks.get(source_key)
-
-            from_memory_cache = False
-            if net is None:
-                net = networks_in_memory.get(source_key)
-                from_memory_cache = net is not None
-
-            source_valid = net is not None and network_file_signature(network_on_disk.filename) == getattr(net, "source_signature", None)
-            if from_memory_cache:
-                openclaw_cache_epochs.observe("E12", "hit" if source_valid else "miss", reason="cache_hit" if source_valid else "entry_invalid", semantic_key=source_key)
-            elif net is None:
-                openclaw_cache_epochs.observe("E12", "miss", reason="cache_miss", semantic_key=source_key)
-            if not source_valid:
-                if net is not None:
-                    openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=source_key)
-                try:
-                    net = load_network(name, network_on_disk)
-
-                    replaced = networks_in_memory.pop(source_key, None)
-                    if replaced is not None:
-                        openclaw_cache_epochs.observe("E12", "eviction", reason="entry_invalid", semantic_key=source_key)
-                    networks_in_memory[source_key] = net
+    with openclaw_cache_epochs.epoch_transaction():
+        with _network_application_lock:
+            for source_key, net in staged_publications:
+                canonical_path = source_key[0]
+                stale_keys = [key for key in networks_in_memory if key != source_key and key[0] == canonical_path]
+                for stale_key in stale_keys:
+                    networks_in_memory.pop(stale_key, None)
+                    openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=stale_key)
+                networks_in_memory[source_key] = net
+            if staged_publications:
+                openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="published")
+                for source_key, _net in staged_publications:
                     openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=source_key)
-                    openclaw_cache_epochs.set_size("E12", current_size=len(networks_in_memory), capacity=shared.opts.lora_in_memory_limit)
-                except Exception as e:
-                    openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=source_key)
-                    errors.display(e, f"loading network {network_on_disk.filename}")
-                    continue
+            _publish_applied_state(prepared)
 
-            loaded_source_networks[source_key] = net
-
-            network_on_disk.read_hash()
-
-        if net is None:
-            failed_to_load_networks.append(name)
-            logging.info(f"Couldn't find network with name {name}")
-            continue
-
-        if source_key in duplicate_source_keys:
-            net = clone_network_for_use(net)
-
-        net.mentioned_name = name
-        net.te_multiplier = te_multipliers[i] if te_multipliers else 1.0
-        net.unet_multiplier = unet_multipliers[i] if unet_multipliers else 1.0
-        net.dyn_dim = dyn_dims[i] if dyn_dims else 1.0
-        loaded_networks.append(net)
-
-        for emb_name, embedding in net.bundle_embeddings.items():
-            if embedding.loaded is None and emb_name in emb_db.word_embeddings:
-                logger.warning(
-                    f'Skip bundle embedding: "{emb_name}"'
-                    ' as it was already loaded from embeddings folder'
-                )
-                continue
-
-            embedding.loaded = False
-            if emb_db.expected_shape == -1 or emb_db.expected_shape == embedding.shape:
-                embedding.loaded = True
-                emb_db.register_embedding(embedding, shared.sd_model)
-            else:
-                emb_db.skipped_embeddings[name] = embedding
-
-    if failed_to_load_networks:
-        lora_not_found_message = f'Lora not found: {", ".join(failed_to_load_networks)}'
-        sd_hijack.model_hijack.comments.append(lora_not_found_message)
-        if shared.opts.lora_not_found_warning_console:
-            print(f'\n{lora_not_found_message}\n')
-        if shared.opts.lora_not_found_gradio_warning:
-            gr.Warning(lora_not_found_message)
+            for net in prepared:
+                item = net.network_on_disk
+                item.read_hash()
+                for emb_name, embedding in net.bundle_embeddings.items():
+                    if embedding.loaded is None and emb_name in emb_db.word_embeddings:
+                        continue
+                    embedding.loaded = emb_db.expected_shape == -1 or emb_db.expected_shape == embedding.shape
+                    if embedding.loaded:
+                        emb_db.register_embedding(embedding, shared.sd_model)
+                    else:
+                        emb_db.skipped_embeddings[net.mentioned_name] = embedding
 
     purge_networks_from_memory()
-    openclaw_cuda_graphs.note_lora_loaded("lora_changed")
-
 
 def allowed_layer_without_weight(layer):
     if isinstance(layer, torch.nn.LayerNorm) and not layer.elementwise_affine:
@@ -651,19 +701,13 @@ def is_mxfp8_weight(weight):
 
 
 def network_loaded_weight_signature(net):
-    network_on_disk = getattr(net, "network_on_disk", None)
     return (
-        getattr(net, "name", None),
-        getattr(net, "mentioned_name", None),
-        getattr(net, "te_multiplier", None),
-        getattr(net, "unet_multiplier", None),
+        getattr(net, "source_key", network_source_key(getattr(net, "network_on_disk", None), getattr(net, "source_signature", None))),
+        float(getattr(net, "te_multiplier", 1.0)).hex(),
+        float(getattr(net, "unet_multiplier", 1.0)).hex(),
         getattr(net, "dyn_dim", None),
-        getattr(network_on_disk, "filename", None),
-        getattr(network_on_disk, "shorthash", None),
-        getattr(net, "mtime", None),
-        getattr(net, "source_signature", None),
+        LORA_APPLIED_IMPLEMENTATION_REVISION,
     )
-
 
 def network_wanted_names():
     return tuple(network_loaded_weight_signature(x) for x in loaded_networks)

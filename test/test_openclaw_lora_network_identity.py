@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -62,8 +63,11 @@ def lora_networks(monkeypatch):
     monkeypatch.setattr(networks, "forbidden_network_aliases", {}, raising=False)
     monkeypatch.setattr(networks, "networks_in_memory", {}, raising=False)
     networks.loaded_networks.clear()
+    monkeypatch.setattr(networks, "_applied_state_key", None, raising=False)
+    networks.openclaw_cache_epochs.reset_for_tests()
     yield networks
     networks.loaded_networks.clear()
+    networks.openclaw_cache_epochs.reset_for_tests()
     sys.path = [p for p in sys.path if p != "extensions-builtin/Lora"]
 
 
@@ -133,24 +137,20 @@ def test_wanted_names_include_source_signature_for_stale_weight_invalidation(lor
     second_signature = networks.network_wanted_names()
 
     assert first_signature != second_signature
-    assert second_signature[0][-1] == (9999, 5678)
+    assert second_signature[0][0][1] == (9999, 5678)
 
 
-def test_network_file_signature_uses_mtime_ns_then_size(lora_networks, tmp_path):
+def test_same_size_restored_mtime_rewrite_misses(lora_networks, tmp_path):
     networks = lora_networks
     lora_file = tmp_path / "same-name.safetensors"
     lora_file.write_bytes(b"abcd")
     os.utime(lora_file, ns=(111_000_000_001, 222_000_000_002))
-    assert networks.network_file_signature(lora_file) == (222_000_000_002, 4)
-
     first = networks.network_file_signature(lora_file)
     lora_file.write_bytes(b"wxyz")
-    os.utime(lora_file, ns=(333_000_000_003, 444_000_000_004))
+    os.utime(lora_file, ns=(111_000_000_001, 222_000_000_002))
     second = networks.network_file_signature(lora_file)
-
     assert first != second
-    assert second == (444_000_000_004, 4)
-
+    assert first[0] == second[0] == "sha256"
 
 def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_networks, monkeypatch):
     networks = lora_networks
@@ -187,7 +187,7 @@ def test_repeated_requested_name_reuses_cache_despite_alias_insertion_order(lora
     second = networks.loaded_networks[0]
 
     assert calls == ["alpha"]
-    assert second is first
+    assert second is not first
     assert second.modules["layer"].tensor_payload is tensor_payload
     assert second.modules["layer"].network is second
     assert second.te_multiplier == 0.8
@@ -238,3 +238,141 @@ def test_changed_source_signature_forces_reload(lora_networks, monkeypatch):
     assert len(calls) == 2
     assert second is not first
     assert second.source_signature == (21, 10)
+
+
+def _epoch(networks, dimension):
+    return dict(networks.openclaw_cache_epochs.epoch_subset((dimension,)))[dimension]
+
+
+def test_applied_identity_change_only_bumps(lora_networks, monkeypatch):
+    networks = lora_networks
+    base, _module, _payload = _base_network(networks)
+    base.source_key = ("opaque", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "network_source_key", lambda *_args: base.source_key)
+    monkeypatch.setattr(networks, "load_network", lambda *_args: base)
+
+    networks.load_networks(["alpha"], [0.5], [0.5], [4])
+    first = _epoch(networks, "lora_applied_epoch")
+    networks.load_networks(["alpha"], [0.5], [0.5], [4])
+    assert _epoch(networks, "lora_applied_epoch") == first
+    networks.load_networks(["alpha"], [0.75], [0.5], [4])
+    assert _epoch(networks, "lora_applied_epoch") == first + 1
+    assert networks.unload_networks()
+    assert _epoch(networks, "lora_applied_epoch") == first + 2
+    assert not networks.unload_networks()
+
+
+def test_reorder_dyn_dim_checkpoint_precision_device_change_identity(lora_networks, monkeypatch):
+    networks = lora_networks
+    a, _, _ = _base_network(networks, "a")
+    b, _, _ = _base_network(networks, "b")
+    a.source_key = ("a",); b.source_key = ("b",)
+    a.te_multiplier = a.unet_multiplier = b.te_multiplier = b.unet_multiplier = 1.0
+    a.dyn_dim = b.dyn_dim = 4
+    monkeypatch.setattr(networks, "_execution_identity", lambda: ("cpu", "float32", (("checkpoint_object_epoch", 0),)))
+    assert networks.network_applied_state_key([a, b]) != networks.network_applied_state_key([b, a])
+    before = networks.network_applied_state_key([a])
+    a.dyn_dim = 8
+    assert before != networks.network_applied_state_key([a])
+    before = networks.network_applied_state_key([a])
+    monkeypatch.setattr(networks, "_execution_identity", lambda: ("cuda:0", "float16", (("checkpoint_object_epoch", 1),)))
+    assert before != networks.network_applied_state_key([a])
+
+
+def test_failed_apply_restores_without_epoch_or_stale_publish(lora_networks, monkeypatch):
+    networks = lora_networks
+    old, _, _ = _base_network(networks, "old")
+    old.source_key = ("old",); old.te_multiplier = old.unet_multiplier = 1.0; old.dyn_dim = None
+    networks.loaded_networks[:] = [old]
+    networks._applied_state_key = networks.network_applied_state_key([old])
+    new, _, _ = _base_network(networks, "new")
+    new.source_key = ("new",); new.te_multiplier = new.unet_multiplier = 1.0; new.dyn_dim = None
+    calls = []
+    def apply():
+        calls.append(tuple(x.source_key for x in networks.loaded_networks))
+        if networks.loaded_networks and networks.loaded_networks[0] is new:
+            raise RuntimeError("injected")
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", apply)
+    before = _epoch(networks, "lora_applied_epoch")
+    with pytest.raises(RuntimeError, match="injected"):
+        networks._publish_applied_state([new])
+    assert networks.loaded_networks == [old]
+    assert networks._applied_state_key == networks.network_applied_state_key([old])
+    assert _epoch(networks, "lora_applied_epoch") == before
+    assert calls == [(("new",),), (("old",),)]
+
+
+def test_irrelevant_generation_inputs_not_in_applied_key(lora_networks):
+    source = Path("extensions-builtin/Lora/networks.py").read_text()
+    key_block = source[source.index("def network_applied_state_key"):source.index("def _apply_loaded_state_to_model")]
+    for forbidden in ("prompt", "seed", "cfg", "sampler"):
+        assert forbidden not in key_block.lower()
+
+
+def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts():
+    source = Path("extensions-builtin/Lora/networks.py").read_text()
+    publish = source[source.index("def _publish_applied_state"):source.index("def unload_networks")]
+    assert publish.index("epoch_transaction") < publish.index("_network_application_lock")
+    assert publish.count('bump_epoch("lora_applied_epoch"') == 1
+    assert 'observe("E12", "reject"' in publish
+    assert "semantic_key=wanted_key" in publish
+    assert "lora_applied_epoch" in Path("modules/processing.py").read_text()
+    assert "lora_applied_epoch" in Path("modules/openclaw_cuda_graphs.py").read_text()
+    assert "lora_applied_epoch" in Path("modules/mxfp8_diagnostics.py").read_text()
+
+
+def test_epoch_transaction_prevents_lifecycle_interleave_with_apply_publication(lora_networks):
+    import threading
+    networks = lora_networks
+    entered = threading.Event(); release = threading.Event(); lifecycle_done = threading.Event()
+    def apply_publish():
+        with networks.openclaw_cache_epochs.epoch_transaction():
+            entered.set()
+            assert release.wait(2)
+            networks.openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="published")
+    def lifecycle():
+        assert entered.wait(2)
+        networks.openclaw_cache_epochs.bump_epoch("checkpoint_object_epoch", reason="checkpoint_commit")
+        lifecycle_done.set()
+    first = threading.Thread(target=apply_publish); second = threading.Thread(target=lifecycle)
+    first.start(); second.start()
+    assert entered.wait(2) and not lifecycle_done.wait(0.05)
+    release.set(); first.join(2); second.join(2)
+    assert lifecycle_done.is_set()
+
+
+def test_generation_owner_rejects_cross_request_overlap_and_cleans_exception(lora_networks):
+    import threading
+    networks = lora_networks
+    entered = threading.Event()
+    release = threading.Event()
+    rejected = []
+
+    def first_request():
+        with networks.openclaw_cache_epochs.generation_owner():
+            entered.set()
+            assert release.wait(2)
+
+    def second_request():
+        assert entered.wait(2)
+        try:
+            with networks.openclaw_cache_epochs.generation_owner():
+                pass
+        except networks.openclaw_cache_epochs.GenerationOwnerError:
+            rejected.append(True)
+
+    first = threading.Thread(target=first_request)
+    second = threading.Thread(target=second_request)
+    first.start()
+    second.start()
+    second.join(2)
+    assert rejected == [True]
+    release.set()
+    first.join(2)
+    assert not networks.openclaw_cache_epochs.generation_owner_public_summary()["active"]
+
+    with pytest.raises(RuntimeError, match="injected"):
+        with networks.openclaw_cache_epochs.generation_owner():
+            raise RuntimeError("injected")
+    assert not networks.openclaw_cache_epochs.generation_owner_public_summary()["active"]

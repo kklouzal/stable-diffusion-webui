@@ -289,7 +289,12 @@ def _runtime_boundary_state() -> tuple[Any, ...]:
         os.environ.get("OPENCLAW_CUDA_GRAPHS"),
         os.environ.get("OPENCLAW_CUDA_GRAPH_ALLOW_SEG"),
     )
-    return (checkpoint_key, vae_key, lora_key, repr(attention_key), tuple(map(str, precision_key)))
+    dependency_epochs = openclaw_cache_epochs.epoch_subset((
+        "checkpoint_object_epoch", "model_movement_epoch", "vae_object_epoch",
+        "lora_applied_epoch", "forward_hook_epoch", "precision_epoch",
+        "device_epoch", "attention_epoch", "compile_epoch",
+    ))
+    return (checkpoint_key, vae_key, lora_key, repr(attention_key), tuple(map(str, precision_key)), dependency_epochs)
 
 
 def refresh_runtime_state() -> dict[str, Any]:
