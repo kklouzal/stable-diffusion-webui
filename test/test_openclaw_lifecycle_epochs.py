@@ -1,3 +1,4 @@
+import ast
 from types import SimpleNamespace
 
 from modules import openclaw_lifecycle_epochs
@@ -50,3 +51,38 @@ def test_static_commit_sites_follow_final_commit_points():
     assert models.index("Model loaded in", models.index("def load_model(")) < models.index("publish_checkpoint_commit", models.index("def load_model("))
     assert vae.index("finally:", vae.index("def reload_vae_weights")) < vae.index("publish=True", vae.index("def reload_vae_weights"))
     assert "Precision, attention, and compile epochs are intentionally deferred" in open("modules/openclaw_lifecycle_epochs.py", encoding="utf-8").read()
+
+def test_lifecycle_reason_literals_are_validated_epoch_reasons():
+    source = open("modules/openclaw_lifecycle_epochs.py", encoding="utf-8").read()
+    tree = ast.parse(source)
+    reason_literals = {
+        keyword.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "reason"
+        and isinstance(keyword.value, ast.Constant)
+        and isinstance(keyword.value.value, str)
+    }
+    assert reason_literals
+    assert reason_literals <= openclaw_lifecycle_epochs.openclaw_cache_epochs.EPOCH_BUMP_REASONS
+
+
+def test_load_vae_records_one_pending_commit_note():
+    source = open("modules/sd_vae.py", encoding="utf-8").read()
+    tree = ast.parse(source)
+    load_vae = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "load_vae")
+    pending_notes = [
+        node
+        for node in ast.walk(load_vae)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "note_vae_commit"
+        and any(
+            keyword.arg == "publish"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is False
+            for keyword in node.keywords
+        )
+    ]
+    assert len(pending_notes) == 1

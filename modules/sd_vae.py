@@ -266,7 +266,6 @@ def load_vae(model, vae_file=None, vae_source="from unknown source"):
     model.loaded_vae_file = loaded_vae_file
     openclaw_cuda_graphs.note_vae_loaded(model, "vae_changed")
     openclaw_lifecycle_epochs.note_vae_commit(model, bytes_changed=vae_file is not None, object_changed=True, publish=False)
-    openclaw_lifecycle_epochs.note_vae_commit(model, bytes_changed=vae_file is not None, object_changed=True, publish=False)
 
 
 # don't call this from outside

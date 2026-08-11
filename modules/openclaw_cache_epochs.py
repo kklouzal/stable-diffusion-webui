@@ -48,6 +48,7 @@ EPOCH_BUMP_REASONS = frozenset({
     "attention_changed", "compile_changed", "textual_inversion_reloaded",
     "lora_reloaded", "extension_reloaded", "input_changed", "mask_changed",
     "preprocessor_changed", "controller_changed",
+    "checkpoint_commit", "model_movement_commit", "vae_commit",
 })
 
 # Static S00 contract declaration. Later slices strengthen runtime keys/epochs without
