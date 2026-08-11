@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +52,7 @@ def lora_networks(monkeypatch):
             self.expected_shape = -1
             self.skipped_embeddings = {}
             self.register_calls = []
+            self._publication_lock = threading.RLock()
             self.fail_name = None
 
         def register_embedding_by_name(self, embedding, _model, name):
@@ -469,6 +471,46 @@ def test_bundled_ti_switch_deduplicates_names_and_preserves_folder_collision(lor
     assert "old" not in db.word_embeddings
     assert _epochs(networks) == {name: value + 1 for name, value in before.items()}
     assert sum(name == "shared" and embedding is not None for name, embedding in db.register_calls) == 1
+
+
+def test_multi_name_bundled_ti_switch_publishes_complete_maps_atomically(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    old_a = _embedding("old-a")
+    old_b = _embedding("old-b")
+    new_a = _embedding("new-a")
+    new_b = _embedding("new-b")
+    previous = {"old-a": old_a, "old-b": old_b}
+    planned = {"new-a": new_a, "new-b": new_b}
+    for name, embedding in previous.items():
+        db.register_embedding_by_name(embedding, networks.shared.sd_model, name)
+
+    reached_intermediate = threading.Event()
+    allow_completion = threading.Event()
+    original_register = type(db).register_embedding_by_name
+
+    def pausing_register(staged_db, embedding, model, name):
+        original_register(staged_db, embedding, model, name)
+        if name == "new-a":
+            reached_intermediate.set()
+            assert allow_completion.wait(timeout=5)
+
+    monkeypatch.setattr(type(db), "register_embedding_by_name", pausing_register)
+    worker = threading.Thread(target=networks._replace_bundled_embeddings, args=(db, previous, planned))
+    worker.start()
+    assert reached_intermediate.wait(timeout=5)
+
+    # The intermediate staged maps must not leak to raw or lock-following readers.
+    assert db.word_embeddings == previous
+    with db._publication_lock:
+        assert db.word_embeddings == previous
+        assert {entry[1].name for entries in db.ids_lookup.values() for entry in entries} == set(previous)
+
+    allow_completion.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert db.word_embeddings == planned
+    assert {entry[1].name for entries in db.ids_lookup.values() for entry in entries} == set(planned)
 
 
 def test_register_failure_restores_exact_db_weights_state_and_epochs(lora_networks, monkeypatch):

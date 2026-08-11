@@ -266,18 +266,28 @@ def _embedding_db_snapshot(emb_db):
 
 def _restore_embedding_db(emb_db, snapshot):
     words, lookup = snapshot
-    emb_db.word_embeddings.clear()
-    emb_db.word_embeddings.update(words)
-    emb_db.ids_lookup.clear()
-    emb_db.ids_lookup.update({token: list(entries) for token, entries in lookup.items()})
+    restored_words = dict(words)
+    restored_lookup = {token: list(entries) for token, entries in lookup.items()}
+    with emb_db._publication_lock:
+        emb_db.ids_lookup, emb_db.word_embeddings = restored_lookup, restored_words
 
 
 def _replace_bundled_embeddings(emb_db, previous, planned):
+    """Stage a complete bundled-TI replacement, then publish it atomically."""
+    staged_db = copy.copy(emb_db)
+    staged_db.word_embeddings = emb_db.word_embeddings.copy()
+    staged_db.ids_lookup = {token: entries.copy() for token, entries in emb_db.ids_lookup.items()}
+
     for name, embedding in previous.items():
-        if emb_db.word_embeddings.get(name) is embedding:
-            emb_db.register_embedding_by_name(None, shared.sd_model, name)
+        if staged_db.word_embeddings.get(name) is embedding:
+            staged_db.register_embedding_by_name(None, shared.sd_model, name)
     for name, embedding in planned.items():
-        emb_db.register_embedding_by_name(embedding, shared.sd_model, name)
+        staged_db.register_embedding_by_name(embedding, shared.sd_model, name)
+
+    # Keep publication inside the surrounding epoch transaction, matching the
+    # global epoch transaction -> TI publication lock order used by folder TIs.
+    with emb_db._publication_lock:
+        emb_db.ids_lookup, emb_db.word_embeddings = staged_db.ids_lookup, staged_db.word_embeddings
 
 
 def _publish_applied_state(new_networks, emb_db=None):
