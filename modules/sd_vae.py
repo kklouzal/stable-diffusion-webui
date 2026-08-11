@@ -300,6 +300,7 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
 
     reload_exc_info = None
     needs_finalization = False
+    openclaw_lifecycle_epochs.discard_pending_vae_commit(sd_model)
     try:
         if sd_model.lowvram:
             lowvram.send_everything_to_cpu()
@@ -324,11 +325,14 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
 
                 script_callbacks.model_loaded_callback(sd_model)
             except Exception as finalization_exception:
+                openclaw_lifecycle_epochs.discard_pending_vae_commit(sd_model)
                 if reload_exc_info is not None:
                     print(f"Failed to finalize model after VAE reload failure; preserving original exception: {finalization_exception}", flush=True)
                     raise reload_exc_info[1].with_traceback(reload_exc_info[2]) from finalization_exception
                 raise
 
+    if reload_exc_info is not None:
+        openclaw_lifecycle_epochs.discard_pending_vae_commit(sd_model)
     vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
     openclaw_lifecycle_epochs.note_vae_commit(sd_model, bytes_changed=vae_bytes_changed, object_changed=vae_object_changed, publish=True)
     print("VAE weights loaded.")

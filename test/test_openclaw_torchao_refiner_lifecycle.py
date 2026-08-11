@@ -8,7 +8,7 @@ from modules import shared, shared_init
 if getattr(shared, "opts", None) is None:
     shared_init.initialize()
 
-from modules import sd_models
+from modules import sd_models, sd_vae
 
 
 class NoGenericToModel(torch.nn.Module):
@@ -371,3 +371,35 @@ def test_model_moves_invalidate_unet_and_vae_graph_caches(monkeypatch):
     assert ("vae", "model_acceleration", "model_to_device") in invalidations
     assert ("unet", "model_to_cpu", "base.safetensors") in invalidations
     assert ("vae", "model_acceleration", "model_to_cpu") in invalidations
+
+
+def test_vae_reload_finalization_failure_discards_pending_and_next_success_is_fresh(monkeypatch):
+    model = VaeReloadModel()
+    notes = []
+    pending = []
+
+    monkeypatch.setattr(sd_vae, "loaded_vae_file", "old.vae")
+    monkeypatch.setattr(sd_vae, "load_vae", lambda target, *_: pending.append("new"))
+    monkeypatch.setattr(sd_vae.openclaw_lifecycle_epochs, "discard_pending_vae_commit", lambda target: pending.clear())
+    monkeypatch.setattr(sd_vae.openclaw_lifecycle_epochs, "take_pending_vae_commit", lambda target: (bool(pending.pop()) if pending else False, False))
+    monkeypatch.setattr(sd_vae.openclaw_lifecycle_epochs, "note_vae_commit", lambda target, **kwargs: notes.append(kwargs))
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_cpu", lambda target: None)
+    monkeypatch.setattr(sd_vae.sd_models, "send_model_to_device", lambda target: None)
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "undo_hijack", lambda target: None)
+    monkeypatch.setattr(sd_vae.sd_hijack.model_hijack, "hijack", lambda target: None)
+    monkeypatch.setattr(sd_vae.script_callbacks, "model_loaded_callback", lambda target: (_ for _ in ()).throw(RuntimeError("finalize")))
+
+    with pytest.raises(RuntimeError, match="finalize"):
+        sd_vae.reload_vae_weights(model, vae_file="new.vae")
+    assert pending == []
+    assert notes == []
+
+    monkeypatch.setattr(sd_vae.script_callbacks, "model_loaded_callback", lambda target: None)
+    sd_vae.reload_vae_weights(model, vae_file="new.vae")
+    assert notes == [{"bytes_changed": True, "object_changed": False, "publish": True}]
+
+
+def test_vae_load_has_single_pending_note_contract():
+    source = open("modules/sd_vae.py", encoding="utf-8").read()
+    load_body = source[source.index("def load_vae("):source.index("# don't call this from outside")]
+    assert load_body.count("note_vae_commit(") == 1
