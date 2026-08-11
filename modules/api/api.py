@@ -1064,21 +1064,22 @@ class Api:
 
         try:
             with self.queue_lock:
-                with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
-                    _attach_controlnet_remote_args(p, controlnet_remote_args)
-                    p.is_api = True
-                    p.scripts = script_runner
-                    p.openclaw_script_args_to_overrides = script_args_to_overrides
-                    p.outpath_grids = opts.outdir_txt2img_grids
-                    p.outpath_samples = opts.outdir_txt2img_samples
+                with openclaw_cache_epochs.generation_owner():
+                    with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
+                        _attach_controlnet_remote_args(p, controlnet_remote_args)
+                        p.is_api = True
+                        p.scripts = script_runner
+                        p.openclaw_script_args_to_overrides = script_args_to_overrides
+                        p.outpath_grids = opts.outdir_txt2img_grids
+                        p.outpath_samples = opts.outdir_txt2img_samples
 
-                    try:
-                        shared.state.begin(job="scripts_txt2img")
-                        start_task(task_id)
-                        processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
-                    finally:
-                        self._finish_generation_task(task_id)
-                        task_finished = True
+                        try:
+                            shared.state.begin(job="scripts_txt2img")
+                            start_task(task_id)
+                            processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
+                        finally:
+                            self._finish_generation_task(task_id)
+                            task_finished = True
         finally:
             self._clear_pending_task_unless_finished(task_id, task_finished)
 
@@ -1118,22 +1119,23 @@ class Api:
 
         try:
             with self.queue_lock:
-                with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
-                    _attach_controlnet_remote_args(p, controlnet_remote_args)
-                    p.init_images = decoded_init_images
-                    p.is_api = True
-                    p.scripts = script_runner
-                    p.openclaw_script_args_to_overrides = script_args_to_overrides
-                    p.outpath_grids = opts.outdir_img2img_grids
-                    p.outpath_samples = opts.outdir_img2img_samples
+                with openclaw_cache_epochs.generation_owner():
+                    with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
+                        _attach_controlnet_remote_args(p, controlnet_remote_args)
+                        p.init_images = decoded_init_images
+                        p.is_api = True
+                        p.scripts = script_runner
+                        p.openclaw_script_args_to_overrides = script_args_to_overrides
+                        p.outpath_grids = opts.outdir_img2img_grids
+                        p.outpath_samples = opts.outdir_img2img_samples
 
-                    try:
-                        shared.state.begin(job="scripts_img2img")
-                        start_task(task_id)
-                        processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
-                    finally:
-                        self._finish_generation_task(task_id)
-                        task_finished = True
+                        try:
+                            shared.state.begin(job="scripts_img2img")
+                            start_task(task_id)
+                            processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
+                        finally:
+                            self._finish_generation_task(task_id)
+                            task_finished = True
         finally:
             self._clear_pending_task_unless_finished(task_id, task_finished)
 

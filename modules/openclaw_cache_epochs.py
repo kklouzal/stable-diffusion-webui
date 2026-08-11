@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import threading
 from collections import Counter, OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_REASON_CODES = 32
 MAX_KEY_SUMMARIES = 32
 KEY_DIGEST_LENGTH = 16
@@ -34,6 +37,18 @@ DEPENDENCY_DIMENSIONS = (
     "input_content_epoch", "mask_epoch", "preprocessor_transform_epoch",
     "controller_runtime_epoch", "request_owner",
 )
+
+EPOCH_DIMENSIONS = tuple(
+    dimension for dimension in DEPENDENCY_DIMENSIONS if dimension != "request_owner"
+)
+EPOCH_BUMP_REASONS = frozenset({
+    "startup", "manual", "dependency_changed", "published", "other",
+    "checkpoint_loaded", "checkpoint_unloaded", "checkpoint_moved",
+    "vae_loaded", "vae_unloaded", "precision_changed", "device_changed",
+    "attention_changed", "compile_changed", "textual_inversion_reloaded",
+    "lora_reloaded", "extension_reloaded", "input_changed", "mask_changed",
+    "preprocessor_changed", "controller_changed",
+})
 
 # Static S00 contract declaration. Later slices strengthen runtime keys/epochs without
 # changing the coverage schema or exposing source/request material.
@@ -310,6 +325,171 @@ def _opaque_fallback(value: Any) -> dict[str, str]:
     return {"type": f"{cls.__module__}.{cls.__qualname__}"}
 
 
+class EpochRegistry:
+    """Process-local, monotonic dependency generations."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._epochs = dict.fromkeys(EPOCH_DIMENSIONS, 0)
+        self._bump_counts = dict.fromkeys(EPOCH_DIMENSIONS, 0)
+        self._reason_counts: Counter[str] = Counter()
+
+    @staticmethod
+    def _digest(epochs: Mapping[str, int]) -> str:
+        payload = json.dumps(
+            epochs, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+        return hashlib.blake2b(payload, digest_size=8).hexdigest()
+
+    def bump(self, dimension: str, *, reason: str) -> int:
+        if dimension not in self._epochs:
+            raise ValueError(f"unknown epoch dimension: {dimension}")
+        if reason not in EPOCH_BUMP_REASONS:
+            raise ValueError("invalid epoch bump reason")
+        with self._lock:
+            self._epochs[dimension] += 1
+            self._bump_counts[dimension] += 1
+            self._reason_counts[reason] += 1
+            return self._epochs[dimension]
+
+    def atomic_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            epochs = dict(self._epochs)
+        return {"epochs": epochs, "digest": self._digest(epochs)}
+
+    def public_summary(self) -> dict[str, Any]:
+        with self._lock:
+            epochs = dict(self._epochs)
+            bump_counts = dict(self._bump_counts)
+            reason_counts = dict(sorted(self._reason_counts.items()))
+        return {
+            "digest": self._digest(epochs),
+            "epochs": epochs,
+            "bump_counts": bump_counts,
+            "reason_counts": reason_counts,
+            "reason_vocabulary": sorted(EPOCH_BUMP_REASONS),
+        }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._epochs = dict.fromkeys(EPOCH_DIMENSIONS, 0)
+            self._bump_counts = dict.fromkeys(EPOCH_DIMENSIONS, 0)
+            self._reason_counts.clear()
+
+
+class GenerationOwnerError(RuntimeError):
+    """The generation owner invariant was rejected or violated."""
+
+
+class GenerationOwnerRegistry:
+    """Opaque owner state; callers must already hold the outer queue lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._context_owner: ContextVar[object | None] = ContextVar(
+            "openclaw_generation_owner", default=None
+        )
+        self._context_depth: ContextVar[int] = ContextVar(
+            "openclaw_generation_owner_depth", default=0
+        )
+        self._active_owner: object | None = None
+        self._active_execution: object | None = None
+        self._depth = 0
+        self._owner_generation = 0
+        self._acquire_count = 0
+        self._release_count = 0
+        self._reject_count = 0
+
+    @contextmanager
+    def owner(self) -> Iterator[None]:
+        owner = self._context_owner.get()
+        owner_token: Token[object | None] | None = None
+        if owner is None:
+            owner = object()
+            owner_token = self._context_owner.set(owner)
+
+        expected_depth = self._context_depth.get() + 1
+        depth_token = self._context_depth.set(expected_depth)
+        try:
+            execution = asyncio.current_task()
+        except RuntimeError:
+            execution = None
+        if execution is None:
+            execution = threading.current_thread()
+        acquired = False
+        try:
+            with self._lock:
+                if self._active_owner is None:
+                    self._active_owner = owner
+                    self._active_execution = execution
+                    self._depth = 1
+                    self._owner_generation += 1
+                elif (
+                    self._active_owner is owner
+                    and self._active_execution is execution
+                    and self._depth == expected_depth - 1
+                ):
+                    self._depth += 1
+                else:
+                    self._reject_count += 1
+                    raise GenerationOwnerError("generation owner already active or mismatched")
+                self._acquire_count += 1
+                acquired = True
+            yield
+        finally:
+            mismatch = False
+            if acquired:
+                with self._lock:
+                    if (
+                        self._active_owner is not owner
+                        or self._active_execution is not execution
+                        or self._depth != expected_depth
+                        or self._context_owner.get() is not owner
+                        or self._context_depth.get() != expected_depth
+                    ):
+                        self._reject_count += 1
+                        self._active_owner = None
+                        self._active_execution = None
+                        self._depth = 0
+                        mismatch = True
+                    else:
+                        self._depth -= 1
+                        self._release_count += 1
+                        if self._depth == 0:
+                            self._active_owner = None
+                            self._active_execution = None
+            self._context_depth.reset(depth_token)
+            if owner_token is not None:
+                self._context_owner.reset(owner_token)
+            if mismatch:
+                raise GenerationOwnerError("generation owner state mismatch")
+
+    def public_summary(self) -> dict[str, int | bool]:
+        with self._lock:
+            return {
+                "active": self._active_owner is not None,
+                "depth": self._depth,
+                "owner_generation": self._owner_generation,
+                "acquire_count": self._acquire_count,
+                "release_count": self._release_count,
+                "reject_count": self._reject_count,
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._active_owner = None
+            self._active_execution = None
+            self._depth = 0
+            self._owner_generation = 0
+            self._acquire_count = 0
+            self._release_count = 0
+            self._reject_count = 0
+        self._context_owner.set(None)
+        self._context_depth.set(0)
+
+
+epoch_registry = EpochRegistry()
+generation_owner_registry = GenerationOwnerRegistry()
 registry = CacheTelemetryRegistry()
 
 
@@ -329,9 +509,36 @@ def set_size(family_id: str, *, current_size: int | None = None, capacity: int |
     registry.set_size(family_id, current_size=current_size, capacity=capacity)
 
 
+def bump_epoch(dimension: str, *, reason: str) -> int:
+    return epoch_registry.bump(dimension, reason=reason)
+
+
+def epoch_snapshot() -> dict[str, Any]:
+    return epoch_registry.atomic_snapshot()
+
+
+def epoch_public_summary() -> dict[str, Any]:
+    return epoch_registry.public_summary()
+
+
+@contextmanager
+def generation_owner() -> Iterator[None]:
+    with generation_owner_registry.owner():
+        yield
+
+
+def generation_owner_public_summary() -> dict[str, int | bool]:
+    return generation_owner_registry.public_summary()
+
+
 def snapshot() -> dict[str, Any]:
-    return registry.snapshot()
+    result = registry.snapshot()
+    result["epochs"] = epoch_public_summary()
+    result["generation_owner"] = generation_owner_public_summary()
+    return result
 
 
 def reset_for_tests() -> None:
     registry.reset()
+    epoch_registry.reset()
+    generation_owner_registry.reset()

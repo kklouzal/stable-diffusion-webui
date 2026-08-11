@@ -108,11 +108,12 @@ def test_all_caches_declare_dependency_contract():
 
 def test_endpoint_schema_is_read_only_and_bounded():
     snapshot = openclaw_cache_epochs.snapshot()
-    assert snapshot["schema_version"] == 1
+    assert snapshot["schema_version"] == 2
     assert snapshot["read_only"] is True
     assert set(snapshot) == {
         "schema_version", "read_only", "limits", "reason_code_vocabulary",
-        "dependency_dimensions", "totals", "families",
+        "dependency_dimensions", "totals", "families", "epochs",
+        "generation_owner",
     }
     assert set(snapshot["totals"]) == openclaw_cache_epochs.EVENTS
     assert set(snapshot["reason_code_vocabulary"]) == openclaw_cache_epochs.REASON_CODES
