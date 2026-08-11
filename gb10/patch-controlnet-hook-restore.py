@@ -25,6 +25,9 @@ INIT_PATCHED = '''        self.current_uc_indices = []
 FORWARD_ORIGINAL = '''        def forward_webui(*args, **kwargs):
             # webui will handle other compoments
             try:
+                if shared.cmd_opts.lowvram:
+                    lowvram.send_everything_to_cpu()
+                return forward(*args, **kwargs)
 '''
 FORWARD_OLD_PATCH = '''        def forward_webui(*args, **kwargs):
             # webui will handle other compoments
@@ -33,13 +36,20 @@ FORWARD_OLD_PATCH = '''        def forward_webui(*args, **kwargs):
             if outer.control_params is None:
                 return outer.original_forward(*args, **kwargs)
             try:
+                if shared.cmd_opts.lowvram:
+                    lowvram.send_everything_to_cpu()
+                return forward(*args, **kwargs)
 '''
-FORWARD_PATCHED = '''        def forward_webui(*args, **kwargs):
+FORWARD_PATCHED = '''        def forward_webui(self, x, timesteps=None, context=None, y=None, **kwargs):
             # webui will handle other compoments
-            # Disabled/no-unit execution is the exact captured baseline call.
+            # Disabled/no-unit execution calls the captured bound baseline
+            # without forwarding the wrapper's bound self a second time.
             if not outer.control_params:
-                return outer.original_forward(*args, **kwargs)
+                return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
             try:
+                if shared.cmd_opts.lowvram:
+                    lowvram.send_everything_to_cpu()
+                return forward(self, x, timesteps=timesteps, context=context, y=y, **kwargs)
 '''
 
 INSTALL_ORIGINAL = '''        model._original_forward = model.forward

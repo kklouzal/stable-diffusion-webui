@@ -309,7 +309,9 @@ def test_patched_forward_exception_restores_unet_and_clears_cache():
     unet.forward = teacache.patched_forward.__get__(unet)
     unet._teacache_patched = True
     unet._openclaw_teacache_original_forward = original_forward
-    teacache._set_cache(teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10))
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    session.disabled_reason = "synthetic exception path"
+    teacache._set_cache(session)
 
     try:
         unet.forward(torch.zeros((1, 1)))

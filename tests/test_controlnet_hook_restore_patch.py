@@ -2,47 +2,43 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).parents[1]
 PATCH = ROOT / "gb10" / "patch-controlnet-hook-restore.py"
 SOURCE = ROOT / "extensions" / "sd-webui-controlnet" / "scripts" / "hook.py"
 
 
-def apply_patch(target):
-    return subprocess.run([sys.executable, PATCH, target], check=True, capture_output=True, text=True)
+def apply_patch(target, *extra):
+    return subprocess.run([sys.executable, PATCH, *extra, target], check=True, capture_output=True, text=True)
 
 
-def test_controlnet_hook_restore_patch_is_idempotent(tmp_path):
+def patched_hook(tmp_path):
+    target = tmp_path / "hook.py"
+    target.write_text(SOURCE.read_text(encoding="utf-8"), encoding="utf-8")
+    apply_patch(target)
+    return _load_patched_hook(target.read_text(encoding="utf-8"), tmp_path), target
+
+
+def test_controlnet_hook_restore_patch_is_idempotent_and_verifiable(tmp_path):
     target = tmp_path / "hook.py"
     target.write_text(SOURCE.read_text(encoding="utf-8"), encoding="utf-8")
     first = apply_patch(target)
     patched = target.read_text(encoding="utf-8")
     second = apply_patch(target)
-    assert "Patched ControlNet" in first.stdout or "already present" in first.stdout
-    assert "already present" in second.stdout
+    checked = apply_patch(target, "--check")
+    assert "ControlNet lifecycle verified" in first.stdout
+    assert "ControlNet lifecycle verified" in second.stdout
+    assert "ControlNet lifecycle verified" in checked.stdout
     assert target.read_text(encoding="utf-8") == patched
-    forward = patched.index("def forward_webui")
-    assert patched.index("if outer.control_params is None:", forward) < patched.index("return forward(*args, **kwargs)", forward)
-    assert "return outer.original_forward(*args, **kwargs)" in patched[forward:]
-    init = patched.index("def __init__(self, lowvram=False)")
-    assert "self._forward_hook_installed = False" in patched[init:patched.index("def hook(self, model")]
-    install = patched.index("original_forward = getattr(model, \"_original_forward\", None)")
-    assert patched.index("outer.original_forward = original_forward", install) < patched.index("model.forward = forward_webui.__get__(model, UNetModel)", install)
-    assert patched.count("model.forward = forward_webui.__get__(model, UNetModel)") == 1
-    assert patched.index("outer._forward_hook_installed = False", install) < patched.index("model.forward = forward_webui.__get__(model, UNetModel)", install)
-    assert patched.index("outer._forward_hook_installed = True", install) > patched.index("model.forward = forward_webui.__get__(model, UNetModel)", install)
-    restore = patched.index("def restore(self):")
-    assert patched.index("if self.model is not None:", restore) < patched.index("self.control_params = None", restore)
-    assert "if self._forward_hook_installed and hasattr(self.model, \"_original_forward\"):" in patched[restore:]
+    assert patched.count("OPENCLAW_CONTROLNET_FORWARD_OWNER_V2") == 1
+    assert "model._original_forward = model.forward" not in patched
+    assert "self._forward_hook_installed" not in patched
+    assert "if not outer.control_params:" in patched
 
 
-def test_controlnet_hook_patch_prevents_repeated_forward_webui_self_chaining(tmp_path):
-    target = tmp_path / "hook.py"
-    target.write_text(SOURCE.read_text(encoding="utf-8"), encoding="utf-8")
-    apply_patch(target)
-    patched = target.read_text(encoding="utf-8")
-
-    hook = _load_patched_hook(patched, tmp_path)
+def test_controlnet_wrapper_calls_bound_baseline_once_and_restores(tmp_path):
+    hook, _ = patched_hook(tmp_path)
     calls = []
 
     def baseline_forward(x, timesteps=None, context=None, y=None, **kwargs):
@@ -50,29 +46,52 @@ def test_controlnet_hook_patch_prevents_repeated_forward_webui_self_chaining(tmp
         return x
 
     model = _FakeUNet(baseline_forward)
-    sd_ldm = type("SD", (), {"is_sdxl": False})()
-    process = type("Process", (), {"sample": lambda self, *args, **kwargs: None})()
-
-    first = hook.UnetHook()
-    first.hook(model, sd_ldm, [], process)
-    first_forward = model.forward
-    second = hook.UnetHook()
-    second.hook(model, sd_ldm, [], process)
-
-    assert model._original_forward is baseline_forward
-    assert second.original_forward is baseline_forward
-    assert model.forward is not baseline_forward
-    assert second.original_forward("x", "t", context="c") == "x"
+    owner = hook.UnetHook()
+    owner.hook(model, type("SD", (), {"is_sdxl": False})(), [], type("P", (), {"sample": lambda self, *a, **k: None})())
+    wrapper = model.forward
+    assert wrapper("x", timesteps="t", context="c") == "x"
     assert calls == [("x", "t", "c", None, {})]
-
-    second.restore()
-    assert model.forward is not baseline_forward
-    assert hasattr(model, "_original_forward")
-
-    first.restore()
+    assert model._controlnet_forward_hook_baseline is baseline_forward
+    assert model._controlnet_forward_hook_owner is owner._forward_hook_owner_token
+    owner.restore()
     assert model.forward is baseline_forward
-    assert not hasattr(model, "_original_forward")
+    assert not hasattr(model, "_controlnet_forward_hook_owner")
+    assert owner.control_params is None
 
+
+def test_controlnet_rehook_same_owner_is_idempotent_but_rejects_stale_owner(tmp_path):
+    hook, _ = patched_hook(tmp_path)
+    baseline = lambda x, timesteps=None, **kwargs: x
+    model = _FakeUNet(baseline)
+    sd = type("SD", (), {"is_sdxl": False})()
+    process = type("P", (), {"sample": lambda self, *a, **k: None})()
+    first = hook.UnetHook()
+    first.hook(model, sd, [], process)
+    wrapper = model.forward
+    first.hook(model, sd, [], process)
+    assert _same_callable(model.forward, wrapper)
+    second = hook.UnetHook()
+    with pytest.raises(RuntimeError, match="another live hook"):
+        second.hook(model, sd, [], process)
+    first.restore()
+    second.hook(model, sd, [], process)
+    second.restore()
+    assert model.forward is baseline
+
+
+def test_restore_never_clobbers_foreign_forward_or_owner_metadata(tmp_path):
+    hook, _ = patched_hook(tmp_path)
+    model = _FakeUNet(lambda x, **kwargs: x)
+    owner = hook.UnetHook()
+    owner.hook(model, type("SD", (), {"is_sdxl": False})(), [], type("P", (), {"sample": lambda self, *a, **k: None})())
+    foreign = lambda x, **kwargs: "foreign"
+    model.forward = foreign
+    owner.restore()
+    assert model.forward is foreign
+    assert hasattr(model, "_controlnet_forward_hook_owner")
+    # A later request fails closed rather than binding through stale ownership.
+    with pytest.raises(RuntimeError, match="another live hook"):
+        hook.UnetHook().hook(model, type("SD", (), {"is_sdxl": False})(), [], type("P", (), {"sample": lambda self, *a, **k: None})())
 
 def _same_callable(left, right):
     if left is right:
@@ -94,7 +113,6 @@ class _FakeUNet:
 
 def _load_patched_hook(source, tmp_path):
     import importlib.util
-    import types
 
     path = tmp_path / "patched_hook.py"
     path.write_text(source, encoding="utf-8")
@@ -108,6 +126,7 @@ def _load_patched_hook(source, tmp_path):
 def _install_hook_import_stubs():
     import sys
     import types
+
     import torch
 
     scripts_pkg = types.ModuleType("scripts")
