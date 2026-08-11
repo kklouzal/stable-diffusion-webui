@@ -44,13 +44,36 @@ def lora_networks(monkeypatch):
     sys.path.insert(0, "extensions-builtin/Lora")
     import networks
 
-    embedding_db = SimpleNamespace(
-        word_embeddings={},
-        expected_shape=-1,
-        skipped_embeddings={},
-        register_embedding_by_name=lambda *args, **kwargs: None,
-        register_embedding=lambda *args, **kwargs: None,
-    )
+    class FakeEmbeddingDB:
+        def __init__(self):
+            self.word_embeddings = {}
+            self.ids_lookup = {}
+            self.expected_shape = -1
+            self.skipped_embeddings = {}
+            self.register_calls = []
+            self.fail_name = None
+
+        def register_embedding_by_name(self, embedding, _model, name):
+            self.register_calls.append((name, embedding))
+            if embedding is not None and name == self.fail_name:
+                raise RuntimeError("injected register failure")
+            token = sum(name.encode())
+            entries = [entry for entry in self.ids_lookup.get(token, []) if entry[1].name != name]
+            if embedding is None:
+                self.word_embeddings.pop(name, None)
+            else:
+                entries.append(([token], embedding))
+                self.word_embeddings[name] = embedding
+            if entries:
+                self.ids_lookup[token] = entries
+            else:
+                self.ids_lookup.pop(token, None)
+            return embedding
+
+        def register_embedding(self, embedding, model):
+            return self.register_embedding_by_name(embedding, model, embedding.name)
+
+    embedding_db = FakeEmbeddingDB()
     monkeypatch.setattr(networks.sd_hijack.model_hijack, "embedding_db", embedding_db, raising=False)
     monkeypatch.setattr(networks.sd_hijack.model_hijack, "comments", [], raising=False)
     monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(network_layer_mapping={}), raising=False)
@@ -63,6 +86,7 @@ def lora_networks(monkeypatch):
     monkeypatch.setattr(networks, "forbidden_network_aliases", {}, raising=False)
     monkeypatch.setattr(networks, "networks_in_memory", {}, raising=False)
     networks.loaded_networks.clear()
+    monkeypatch.setattr(networks, "loaded_bundle_embeddings", {}, raising=False)
     monkeypatch.setattr(networks, "_applied_state_key", None, raising=False)
     networks.openclaw_cache_epochs.reset_for_tests()
     yield networks
@@ -314,7 +338,7 @@ def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts(
     source = Path("extensions-builtin/Lora/networks.py").read_text()
     publish = source[source.index("def _publish_applied_state"):source.index("def unload_networks")]
     assert publish.index("epoch_transaction") < publish.index("_network_application_lock")
-    assert publish.count('bump_epoch("lora_applied_epoch"') == 1
+    assert publish.count('bump_epoch("lora_applied_epoch"') == 2
     assert 'observe("E12", "reject"' in publish
     assert "semantic_key=wanted_key" in publish
     assert "lora_applied_epoch" in Path("modules/processing.py").read_text()
@@ -376,3 +400,147 @@ def test_generation_owner_rejects_cross_request_overlap_and_cleans_exception(lor
         with networks.openclaw_cache_epochs.generation_owner():
             raise RuntimeError("injected")
     assert not networks.openclaw_cache_epochs.generation_owner_public_summary()["active"]
+
+
+def _embedding(name, shape=4):
+    return SimpleNamespace(name=name, shape=shape, loaded=None)
+
+
+def _applied_network(networks, key, bundles=None):
+    net, _, _ = _base_network(networks, key)
+    net.source_key = (key,)
+    net.te_multiplier = net.unet_multiplier = 1.0
+    net.dyn_dim = None
+    net.bundle_embeddings = bundles or {}
+    return net
+
+
+def _epochs(networks):
+    return {name: _epoch(networks, name) for name in (
+        "lora_applied_epoch", "textual_inversion_epoch", "tokenizer_epoch",
+    )}
+
+
+def test_bundled_ti_load_noop_and_unload_are_atomic(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    emb = _embedding("hero")
+    net = _applied_network(networks, "a", {"hero": emb})
+    graph_observations = []
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda _reason: graph_observations.append((dict(db.word_embeddings), _epochs(networks))))
+
+    before = _epochs(networks)
+    assert networks._publish_applied_state([net], db)
+    loaded = _epochs(networks)
+    assert db.word_embeddings == {"hero": emb}
+    assert all(loaded[name] == before[name] + 1 for name in loaded)
+    assert not networks._publish_applied_state([net], db)
+    assert _epochs(networks) == loaded
+    assert len(db.register_calls) == 1
+    assert networks.unload_networks()
+    unloaded = _epochs(networks)
+    assert db.word_embeddings == {}
+    assert all(unloaded[name] == loaded[name] + 1 for name in unloaded)
+    assert len(graph_observations) == 2
+    assert graph_observations[0][0] == {"hero": emb}
+    assert graph_observations[0][1] == loaded
+    assert graph_observations[1][0] == {}
+    assert graph_observations[1][1] == unloaded
+
+
+def test_bundled_ti_switch_deduplicates_names_and_preserves_folder_collision(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    old = _embedding("old")
+    first_shared = _embedding("shared")
+    duplicate_shared = _embedding("shared")
+    folder = _embedding("folder")
+    db.register_embedding_by_name(folder, networks.shared.sd_model, "folder")
+    first = _applied_network(networks, "a", {"old": old})
+    second = _applied_network(networks, "b", {"shared": first_shared, "folder": _embedding("folder")})
+    duplicate = _applied_network(networks, "c", {"shared": duplicate_shared})
+
+    networks._publish_applied_state([first], db)
+    before = _epochs(networks)
+    networks._publish_applied_state([second, duplicate], db)
+    assert db.word_embeddings == {"folder": folder, "shared": first_shared}
+    assert "old" not in db.word_embeddings
+    assert _epochs(networks) == {name: value + 1 for name, value in before.items()}
+    assert sum(name == "shared" and embedding is not None for name, embedding in db.register_calls) == 1
+
+
+def test_register_failure_restores_exact_db_weights_state_and_epochs(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    old_emb = _embedding("old")
+    old = _applied_network(networks, "old", {"old": old_emb})
+    new = _applied_network(networks, "new", {"new": _embedding("new")})
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    networks._publish_applied_state([old], db)
+    snapshot = (dict(db.word_embeddings), {key: list(value) for key, value in db.ids_lookup.items()})
+    before = _epochs(networks)
+    graphs = []
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda reason: graphs.append(reason))
+    db.fail_name = "new"
+
+    with pytest.raises(RuntimeError, match="register failure"):
+        networks._publish_applied_state([new], db)
+    assert networks.loaded_networks == [old]
+    assert networks.loaded_bundle_embeddings == {"old": old_emb}
+    assert db.word_embeddings == snapshot[0]
+    assert db.ids_lookup == snapshot[1]
+    assert _epochs(networks) == before
+    assert graphs == []
+
+
+def test_weight_failure_restores_bundles_weights_and_no_publication(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    old = _applied_network(networks, "old", {"old": _embedding("old")})
+    new = _applied_network(networks, "new", {"new": _embedding("new")})
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    networks._publish_applied_state([old], db)
+    before = _epochs(networks)
+    calls = []
+    def apply():
+        calls.append(list(networks.loaded_networks))
+        if networks.loaded_networks == [new]:
+            raise RuntimeError("injected weight failure")
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", apply)
+
+    with pytest.raises(RuntimeError, match="weight failure"):
+        networks._publish_applied_state([new], db)
+    assert calls == [[new], [old]]
+    assert networks.loaded_networks == [old]
+    assert set(db.word_embeddings) == {"old"}
+    assert _epochs(networks) == before
+
+
+def test_rollback_failure_publishes_explicit_empty_fail_closed_state(lora_networks, monkeypatch):
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    old = _applied_network(networks, "old", {"old": _embedding("old")})
+    new = _applied_network(networks, "new", {"new": _embedding("new")})
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    networks._publish_applied_state([old], db)
+    before = _epochs(networks)
+    graphs = []
+    attempts = []
+    def apply():
+        attempts.append(list(networks.loaded_networks))
+        if networks.loaded_networks:
+            raise RuntimeError("injected apply/rollback failure")
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", apply)
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda reason: graphs.append(reason))
+
+    with pytest.raises(RuntimeError, match="rollback failed closed"):
+        networks._publish_applied_state([new], db)
+    assert attempts == [[new], [old], []]
+    assert networks.loaded_networks == []
+    assert networks.loaded_bundle_embeddings == {}
+    assert networks._applied_state_key is None
+    assert db.word_embeddings == {}
+    assert _epochs(networks) == {name: value + 1 for name, value in before.items()}
+    assert graphs == ["lora_changed"]

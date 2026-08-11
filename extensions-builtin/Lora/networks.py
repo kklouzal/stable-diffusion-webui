@@ -244,43 +244,115 @@ def _apply_loaded_state_to_model():
         network_apply_weights(layer)
 
 
-def _publish_applied_state(new_networks):
-    """Compare/apply/publish under epoch-first lock ordering, with rollback."""
-    global _applied_state_key
+def _bundled_embedding_plan(new_networks, emb_db, previous_bundle_embeddings):
+    """Choose one deterministic bundled embedding per name without replacing folder TIs."""
+    planned = {}
+    for net in new_networks:
+        for name, embedding in net.bundle_embeddings.items():
+            if name in planned:
+                continue
+            existing = emb_db.word_embeddings.get(name)
+            if existing is not None and existing is not previous_bundle_embeddings.get(name):
+                continue
+            if emb_db.expected_shape != -1 and emb_db.expected_shape != embedding.shape:
+                continue
+            planned[name] = embedding
+    return planned
+
+
+def _embedding_db_snapshot(emb_db):
+    return dict(emb_db.word_embeddings), {token: list(entries) for token, entries in emb_db.ids_lookup.items()}
+
+
+def _restore_embedding_db(emb_db, snapshot):
+    words, lookup = snapshot
+    emb_db.word_embeddings.clear()
+    emb_db.word_embeddings.update(words)
+    emb_db.ids_lookup.clear()
+    emb_db.ids_lookup.update({token: list(entries) for token, entries in lookup.items()})
+
+
+def _replace_bundled_embeddings(emb_db, previous, planned):
+    for name, embedding in previous.items():
+        if emb_db.word_embeddings.get(name) is embedding:
+            emb_db.register_embedding_by_name(None, shared.sd_model, name)
+    for name, embedding in planned.items():
+        emb_db.register_embedding_by_name(embedding, shared.sd_model, name)
+
+
+def _publish_applied_state(new_networks, emb_db=None):
+    """Apply weights, bundled TIs, epochs, and graph state as one transaction."""
+    global _applied_state_key, loaded_bundle_embeddings
+    emb_db = emb_db or sd_hijack.model_hijack.embedding_db
     wanted_key = network_applied_state_key(new_networks)
     with openclaw_cache_epochs.epoch_transaction():
         with _network_application_lock:
             if wanted_key == _applied_state_key:
-                loaded_networks[:] = new_networks
                 openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=wanted_key)
                 return False
-            previous = list(loaded_networks)
+
+            previous_networks = list(loaded_networks)
             previous_key = _applied_state_key
+            previous_bundles = dict(loaded_bundle_embeddings)
+            planned_bundles = _bundled_embedding_plan(new_networks, emb_db, previous_bundles)
+            db_snapshot = _embedding_db_snapshot(emb_db)
+            bundle_changed = previous_bundles != planned_bundles
+            touched_embeddings = list({id(embedding): embedding for embedding in (*previous_bundles.values(), *planned_bundles.values())}.values())
+            loaded_flags = [(embedding, embedding.loaded) for embedding in touched_embeddings]
+
             try:
+                if bundle_changed:
+                    _replace_bundled_embeddings(emb_db, previous_bundles, planned_bundles)
                 loaded_networks[:] = new_networks
                 _apply_loaded_state_to_model()
-            except Exception:
-                loaded_networks[:] = previous
+            except Exception as application_error:
+                loaded_networks[:] = previous_networks
                 try:
                     _apply_loaded_state_to_model()
+                    _restore_embedding_db(emb_db, db_snapshot)
+                    for embedding, loaded in loaded_flags:
+                        embedding.loaded = loaded
                 except Exception as rollback_error:
                     loaded_networks.clear()
                     _applied_state_key = None
-                    openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=wanted_key)
+                    try:
+                        _restore_embedding_db(emb_db, db_snapshot)
+                        _replace_bundled_embeddings(emb_db, previous_bundles, {})
+                        _apply_loaded_state_to_model()
+                    except Exception as fail_closed_error:
+                        raise RuntimeError("LoRA application rollback and fail-closed cleanup failed") from fail_closed_error
+                    loaded_bundle_embeddings = {}
+                    for embedding in touched_embeddings:
+                        embedding.loaded = False
+                    openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="other")
+                    if previous_bundles:
+                        openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="other")
+                        openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="other")
+                    openclaw_cache_epochs.observe("E12", "reject", reason="other", semantic_key=wanted_key)
+                    openclaw_cuda_graphs.note_lora_loaded("lora_changed")
                     raise RuntimeError("LoRA application rollback failed closed") from rollback_error
                 _applied_state_key = previous_key
+                loaded_bundle_embeddings = previous_bundles
                 openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=wanted_key)
-                raise
+                raise application_error
+
             _applied_state_key = wanted_key
+            loaded_bundle_embeddings = planned_bundles
+            for embedding in touched_embeddings:
+                embedding.loaded = planned_bundles.get(embedding.name) is embedding
             openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="published")
+            if bundle_changed:
+                openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="published")
+                openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="published")
             openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=wanted_key)
             openclaw_cuda_graphs.note_lora_loaded("lora_changed")
             return True
 
 
 def unload_networks():
-    """Restore/unhook the current state and publish one coherent empty state."""
+    """Restore/unhook weights and bundled TIs as one coherent empty state."""
     return _publish_applied_state([])
+
 
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
@@ -471,19 +543,10 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                 openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="published")
                 for source_key, _net in staged_publications:
                     openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=source_key)
-            _publish_applied_state(prepared)
+            _publish_applied_state(prepared, emb_db=emb_db)
 
             for net in prepared:
-                item = net.network_on_disk
-                item.read_hash()
-                for emb_name, embedding in net.bundle_embeddings.items():
-                    if embedding.loaded is None and emb_name in emb_db.word_embeddings:
-                        continue
-                    embedding.loaded = emb_db.expected_shape == -1 or emb_db.expected_shape == embedding.shape
-                    if embedding.loaded:
-                        emb_db.register_embedding(embedding, shared.sd_model)
-                    else:
-                        emb_db.skipped_embeddings[net.mentioned_name] = embedding
+                net.network_on_disk.read_hash()
 
     purge_networks_from_memory()
 
