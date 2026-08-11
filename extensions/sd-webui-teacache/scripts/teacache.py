@@ -138,7 +138,14 @@ def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
 
 def _has_external_unet_forward_hook(p: processing.StableDiffusionProcessing) -> bool:
     unet = getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None)
-    return getattr(unet, "_original_forward", None) is not None
+    # ControlNet's owner-scoped wrapper deliberately no longer uses the legacy
+    # _original_forward attribute. Treat its live ownership marker as an
+    # external hook too, so TeaCache never wraps above ControlNet and later
+    # restores across its ownership boundary.
+    return (
+        getattr(unet, "_original_forward", None) is not None
+        or getattr(unet, "_controlnet_forward_hook_owner", None) is not None
+    )
 
 
 class TeaCacheSession:
@@ -285,7 +292,7 @@ class TeaCacheScript(scripts.Script):
     def process(self, p: processing.StableDiffusionProcessing, *args):
         # patch model forward method
         enabled, _, _, _, _ = normalize_args(args)
-        if not enabled or _has_masked_denoising(p):
+        if not enabled or _has_external_unet_forward_hook(p) or _has_masked_denoising(p):
             # Fix and clear any prior patch/session if a previous run ended through
             # exception/OOM or if the model object changed before cleanup.
             self.postprocess(p)

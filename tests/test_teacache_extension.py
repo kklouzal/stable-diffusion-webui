@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 
@@ -203,15 +204,35 @@ def test_masked_denoising_disables_cache():
     assert not teacache._has_masked_denoising(p)
 
 
-def test_external_unet_forward_hook_is_detected():
+@pytest.mark.parametrize("marker", ["_original_forward", "_controlnet_forward_hook_owner"])
+def test_external_unet_forward_hook_is_detected(marker):
     teacache = load_teacache_module()
+    unet = types.SimpleNamespace()
+    setattr(unet, marker, object())
     p = types.SimpleNamespace(
-        sd_model=types.SimpleNamespace(
-            model=types.SimpleNamespace(diffusion_model=types.SimpleNamespace(_original_forward=object()))
-        )
+        sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=unet))
     )
 
     assert teacache._has_external_unet_forward_hook(p)
+
+
+def test_process_does_not_wrap_controlnet_owned_unet():
+    teacache = load_teacache_module()
+    original_forward = lambda x, **kwargs: x
+    owner = object()
+    unet = types.SimpleNamespace(
+        forward=original_forward,
+        _controlnet_forward_hook_owner=owner,
+    )
+    p = types.SimpleNamespace(
+        sd_model=types.SimpleNamespace(model=types.SimpleNamespace(diffusion_model=unet))
+    )
+
+    teacache.TeaCacheScript().process(p, True)
+
+    assert unet.forward is original_forward
+    assert unet._controlnet_forward_hook_owner is owner
+    assert not getattr(unet, "_teacache_patched", False)
     assert not teacache._has_external_unet_forward_hook(types.SimpleNamespace())
 
 
