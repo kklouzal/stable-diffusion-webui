@@ -331,7 +331,10 @@ class EpochRegistry:
     """Process-local, monotonic dependency generations."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # One re-entrant transaction lock serializes dependency publication with
+        # cache capture/compute/publication. Callers acquire this before any
+        # narrower cache or publication lock.
+        self._lock = threading.RLock()
         self._epochs = dict.fromkeys(EPOCH_DIMENSIONS, 0)
         self._bump_counts = dict.fromkeys(EPOCH_DIMENSIONS, 0)
         self._reason_counts: Counter[str] = Counter()
@@ -342,6 +345,12 @@ class EpochRegistry:
             epochs, sort_keys=True, separators=(",", ":")
         ).encode("ascii")
         return hashlib.blake2b(payload, digest_size=8).hexdigest()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize one dependency/cache transaction against every epoch bump."""
+        with self._lock:
+            yield
 
     def bump(self, dimension: str, *, reason: str) -> int:
         if dimension not in self._epochs:
@@ -509,6 +518,13 @@ def register_size_provider(family_id: str, provider: Callable[[], tuple[int | No
 
 def set_size(family_id: str, *, current_size: int | None = None, capacity: int | None = None) -> None:
     registry.set_size(family_id, current_size=current_size, capacity=capacity)
+
+
+@contextmanager
+def epoch_transaction() -> Iterator[None]:
+    """Hold the public epoch transaction lock; acquire narrower locks inside it."""
+    with epoch_registry.transaction():
+        yield
 
 
 def bump_epoch(dimension: str, *, reason: str) -> int:

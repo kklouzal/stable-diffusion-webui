@@ -590,37 +590,41 @@ class StableDiffusionProcessing:
             if old_schedules != new_schedules:
                 self.extra_generation_params["Old prompt editing timelines"] = True
 
-        cached_params = self.cached_params(cache_namespace, required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
-        stats = getattr(self, "openclaw_cond_cache_stats", None)
-        if stats is None:
-            stats = self.openclaw_cond_cache_stats = _cache_stats()
-        semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
+        # Global order: epoch transaction -> conditioning cache lock. Holding the
+        # epoch transaction across capture, compare, compute, and publication
+        # prevents any dependency bump from making this result stale in flight.
+        with openclaw_cache_epochs.epoch_transaction():
+            cached_params = self.cached_params(cache_namespace, required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
+            stats = getattr(self, "openclaw_cond_cache_stats", None)
+            if stats is None:
+                stats = self.openclaw_cond_cache_stats = _cache_stats()
+            semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
 
-        with StableDiffusionProcessing.conditioning_cache_lock:
-            if cache[0] is not None and cached_params == cache[0]:
-                _record_cache_stats_hit(stats)
-                openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
-                return cache[1]
+            with StableDiffusionProcessing.conditioning_cache_lock:
+                if cache[0] is not None and cached_params == cache[0]:
+                    _record_cache_stats_hit(stats)
+                    openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
+                    return cache[1]
 
-            reason = "dependency_changed" if cache[0] is not None else "cache_miss"
-            openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
-            started = time.perf_counter()
-            try:
-                with devices.autocast():
-                    computed = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
-            except Exception:
-                openclaw_cache_epochs.observe("E05", "reject", reason="rejected", semantic_key=semantic_key)
-                raise
+                reason = "dependency_changed" if cache[0] is not None else "cache_miss"
+                openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
+                started = time.perf_counter()
+                try:
+                    with devices.autocast():
+                        computed = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
+                except Exception:
+                    openclaw_cache_epochs.observe("E05", "reject", reason="rejected", semantic_key=semantic_key)
+                    raise
 
-            cache[:] = [cached_params, computed]
-            _record_cache_stats_miss(stats, started)
-            openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
-            openclaw_cache_epochs.set_size(
-                "E05",
-                current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
-                capacity=4,
-            )
-            return computed
+                cache[:] = [cached_params, computed]
+                _record_cache_stats_miss(stats, started)
+                openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
+                openclaw_cache_epochs.set_size(
+                    "E05",
+                    current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
+                    capacity=4,
+                )
+                return computed
 
     def setup_conds(self):
         prompts = prompt_parser.SdConditioning(self.prompts, width=self.width, height=self.height)

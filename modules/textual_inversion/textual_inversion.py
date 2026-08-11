@@ -260,27 +260,32 @@ class EmbeddingDatabase:
         for embdir in staged.embedding_dirs.values():
             staged.load_from_dir(embdir)
 
-        old_signature = self._snapshot_signature(self.word_embeddings, self.skipped_embeddings)
         new_signature = self._snapshot_signature(staged.word_embeddings, staged.skipped_embeddings)
-        if new_signature == old_signature:
-            for embdir in self.embedding_dirs.values():
-                embdir.update()
-            openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped", semantic_key=new_signature)
-            return False
 
-        with self._publication_lock:
-            self.ids_lookup, self.word_embeddings, self.skipped_embeddings = (
-                staged.ids_lookup, staged.word_embeddings, staged.skipped_embeddings
-            )
-            self.expected_shape = staged.expected_shape
-            for embdir in self.embedding_dirs.values():
-                embdir.update()
+        # Global order: epoch transaction -> TI publication lock. Conditioning
+        # readers hold the same outer transaction, so maps and both epochs are
+        # observed as one coherent commit. Staging remains outside the lock.
+        with openclaw_cache_epochs.epoch_transaction():
+            old_signature = self._snapshot_signature(self.word_embeddings, self.skipped_embeddings)
+            if new_signature == old_signature:
+                for embdir in self.embedding_dirs.values():
+                    embdir.update()
+                openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped", semantic_key=new_signature)
+                return False
 
-        openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="textual_inversion_reloaded")
-        openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="textual_inversion_reloaded")
-        openclaw_cache_epochs.observe("E07", "invalidate", reason="dependency_changed", semantic_key=new_signature)
-        openclaw_cache_epochs.observe("E07", "publish", reason="published", semantic_key=new_signature)
-        return True
+            with self._publication_lock:
+                self.ids_lookup, self.word_embeddings, self.skipped_embeddings = (
+                    staged.ids_lookup, staged.word_embeddings, staged.skipped_embeddings
+                )
+                self.expected_shape = staged.expected_shape
+                for embdir in self.embedding_dirs.values():
+                    embdir.update()
+                openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="textual_inversion_reloaded")
+                openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="textual_inversion_reloaded")
+
+            openclaw_cache_epochs.observe("E07", "invalidate", reason="dependency_changed", semantic_key=new_signature)
+            openclaw_cache_epochs.observe("E07", "publish", reason="published", semantic_key=new_signature)
+            return True
     def find_embedding_at_position(self, tokens, offset):
         token = tokens[offset]
         possible_matches = self.ids_lookup.get(token, None)
