@@ -19,7 +19,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config, openclaw_cuda_graphs
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config, openclaw_cuda_graphs, openclaw_cache_epochs
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -312,7 +312,9 @@ def purge_networks_from_memory():
     while len(networks_in_memory) > shared.opts.lora_in_memory_limit and len(networks_in_memory) > 0:
         name = next(iter(networks_in_memory))
         networks_in_memory.pop(name, None)
+        openclaw_cache_epochs.observe("E12", "eviction", reason="capacity", semantic_key=name)
 
+    openclaw_cache_epochs.set_size("E12", current_size=len(networks_in_memory), capacity=shared.opts.lora_in_memory_limit)
     devices.torch_gc()
 
 
@@ -363,16 +365,30 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
             if net is None:
                 net = loaded_source_networks.get(source_key)
 
+            from_memory_cache = False
             if net is None:
                 net = networks_in_memory.get(source_key)
+                from_memory_cache = net is not None
 
-            if net is None or network_file_signature(network_on_disk.filename) != getattr(net, "source_signature", None):
+            source_valid = net is not None and network_file_signature(network_on_disk.filename) == getattr(net, "source_signature", None)
+            if from_memory_cache:
+                openclaw_cache_epochs.observe("E12", "hit" if source_valid else "miss", reason="cache_hit" if source_valid else "entry_invalid", semantic_key=source_key)
+            elif net is None:
+                openclaw_cache_epochs.observe("E12", "miss", reason="cache_miss", semantic_key=source_key)
+            if not source_valid:
+                if net is not None:
+                    openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=source_key)
                 try:
                     net = load_network(name, network_on_disk)
 
-                    networks_in_memory.pop(source_key, None)
+                    replaced = networks_in_memory.pop(source_key, None)
+                    if replaced is not None:
+                        openclaw_cache_epochs.observe("E12", "eviction", reason="entry_invalid", semantic_key=source_key)
                     networks_in_memory[source_key] = net
+                    openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=source_key)
+                    openclaw_cache_epochs.set_size("E12", current_size=len(networks_in_memory), capacity=shared.opts.lora_in_memory_limit)
                 except Exception as e:
+                    openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=source_key)
                     errors.display(e, f"loading network {network_on_disk.filename}")
                     continue
 

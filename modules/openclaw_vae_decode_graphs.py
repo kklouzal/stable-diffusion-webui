@@ -8,6 +8,8 @@ from collections import OrderedDict
 from typing import Any
 import torch
 
+from modules import openclaw_cache_epochs
+
 _ENABLED=False
 
 def _read_cache_max():
@@ -30,6 +32,7 @@ def _flag(n,d=False):
 
 def _bypass(r):
     _COUNTERS['bypasses']+=1; _BYPASS_REASONS[r]=_BYPASS_REASONS.get(r,0)+1
+    openclaw_cache_epochs.observe('E11','bypass',reason='cache_disabled' if r in {'disabled','cache_disabled'} else 'unsafe_input')
 
 def _clear_cache_locked():
     had=bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS)
@@ -55,15 +58,19 @@ def set_enabled(enabled:bool, clear_cache:bool=False):
     with _LOCK:
         _ENABLED=bool(enabled)
         if clear_cache:
-            _clear_cache_locked()
+            had_state=_clear_cache_locked()
             for k in _COUNTERS: _COUNTERS[k]=0
             _BYPASS_REASONS.clear(); _INVALIDATION_REASONS.clear()
+            if had_state: openclaw_cache_epochs.observe('E11','invalidate',reason='cache_cleared')
+            openclaw_cache_epochs.set_size('E11',current_size=0,capacity=_CACHE_MAX)
     return status()
 
 def invalidate(reason:str, details:Any|None=None):
     with _LOCK:
         if _clear_cache_locked():
             _COUNTERS['invalidations']+=1; _INVALIDATION_REASONS[reason]=_INVALIDATION_REASONS.get(reason,0)+1
+            openclaw_cache_epochs.observe('E11','invalidate',reason='dependency_changed')
+            openclaw_cache_epochs.set_size('E11',current_size=0,capacity=_CACHE_MAX)
     return status()
 
 def invalidate_if_changed(boundary:str,state:Any,reason:str|None=None):
@@ -73,6 +80,8 @@ def invalidate_if_changed(boundary:str,state:Any,reason:str|None=None):
         if old is None or old==marker: return status()
         if _clear_cache_locked():
             why=reason or f'{boundary}_changed'; _COUNTERS['invalidations']+=1; _INVALIDATION_REASONS[why]=_INVALIDATION_REASONS.get(why,0)+1
+            openclaw_cache_epochs.observe('E11','invalidate',reason='dependency_changed')
+            openclaw_cache_epochs.set_size('E11',current_size=0,capacity=_CACHE_MAX)
     return status()
 
 def note_model_loaded(state=None): return invalidate_if_changed('model', state if state is not None else _runtime_identity()[0], 'model_changed')
@@ -134,6 +143,7 @@ def run(model,x,approximation=0):
             entry=_CACHE.get(key)
             failed_before=key in _FAILED_KEYS
         if entry is not None:
+            openclaw_cache_epochs.observe('E11','hit',reason='cache_hit',semantic_key=key)
             entry['input'].copy_(x, non_blocking=True)
             entry['graph'].replay()
             output=entry['output'].clone()
@@ -145,6 +155,7 @@ def run(model,x,approximation=0):
         if failed_before:
             with _LOCK: _bypass('failed_key')
             return None
+        openclaw_cache_epochs.observe('E11','miss',reason='cache_miss',semantic_key=key)
         try:
             static_input=x.detach().contiguous().clone()
             stream=torch.cuda.Stream(device=x.device)
@@ -157,12 +168,15 @@ def run(model,x,approximation=0):
             with _LOCK:
                 _CACHE[key]={'graph':graph,'input':static_input,'output':static_output}; _CACHE.move_to_end(key)
                 while len(_CACHE)>_CACHE_MAX:
-                    _CACHE.popitem(last=False)
+                    evicted_key,_=_CACHE.popitem(last=False)
+                    openclaw_cache_epochs.observe('E11','eviction',reason='capacity',semantic_key=evicted_key)
                 _COUNTERS['captures']+=1
+                openclaw_cache_epochs.observe('E11','publish',reason='published',semantic_key=key)
+                openclaw_cache_epochs.set_size('E11',current_size=len(_CACHE),capacity=_CACHE_MAX)
             return warmup_output
         except Exception as exc:
             with _LOCK:
-                _FAILED_KEYS.add(key); _COUNTERS['failures']+=1; _LAST_ERROR=''.join(traceback.format_exception_only(type(exc),exc)).strip(); _bypass('capture_failed')
+                _FAILED_KEYS.add(key); _COUNTERS['failures']+=1; _LAST_ERROR=''.join(traceback.format_exception_only(type(exc),exc)).strip(); openclaw_cache_epochs.observe('E11','reject',reason='capture_failed',semantic_key=key); _bypass('capture_failed')
             return None
 
 set_enabled(_flag('OPENCLAW_VAE_DECODE_GRAPHS',False), clear_cache=True)

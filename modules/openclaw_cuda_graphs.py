@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 
+from modules import openclaw_cache_epochs
+
 _ENABLED = False
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _KEY_LOCKS: dict[tuple[Any, ...], threading.RLock] = {}
@@ -102,12 +104,16 @@ def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
     with _LOCK:
         _ENABLED = bool(enabled)
         if clear or not _ENABLED:
+            cleared = len(_CACHE)
             _CACHE.clear()
             _KEY_LOCKS.clear()
             _FAILED_KEYS.clear()
             _SEEN_KEYS.clear()
             _LIFECYCLE_STATE.clear()
             _reset_stats()
+            if cleared:
+                openclaw_cache_epochs.observe("E11", "invalidate", reason="cache_disabled" if not _ENABLED else "cache_cleared", count=cleared)
+            openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
         return status()
 
 
@@ -132,6 +138,8 @@ def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
         with _LOCK:
             had_state = _clear_cache_locked()
             if had_state:
+                openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
+                openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
                 _STATS["invalidations"] += 1
                 _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
                 _STATS["last_invalidation_reason"] = reason
@@ -169,6 +177,8 @@ def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) 
             _LIFECYCLE_STATE[boundary] = state
             had_state = _clear_cache_locked()
             if had_state:
+                openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
+                openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
                 _STATS["invalidations"] += 1
                 _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
                 _STATS["last_invalidation_reason"] = reason
@@ -177,9 +187,12 @@ def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) 
 
 def clear() -> dict[str, Any]:
     with _LOCK:
-        _clear_cache_locked()
+        had_state = _clear_cache_locked()
         _LIFECYCLE_STATE.clear()
         _reset_stats()
+        if had_state:
+            openclaw_cache_epochs.observe("E11", "invalidate", reason="cache_cleared")
+        openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
         return status()
 
 
@@ -335,6 +348,7 @@ def _evict_if_needed_locked() -> None:
         evicted_key = next(iter(_CACHE))
         _CACHE.pop(evicted_key)
         _KEY_LOCKS.pop(evicted_key, None)
+        openclaw_cache_epochs.observe("E11", "eviction", reason="capacity", semantic_key=evicted_key)
 
 
 def _model_signature(fn: Any) -> tuple[Any, ...]:
@@ -572,6 +586,7 @@ def _record_bypass(reason: str) -> None:
         reasons[reason] = reasons.get(reason, 0) + 1
         _STATS["bypass_reasons"] = reasons
         _STATS["last_bypass_reason"] = reason
+    openclaw_cache_epochs.observe("E11", "bypass", reason="cache_disabled" if reason == "cache_disabled" else "unsafe_input")
 
 
 def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: Any | None = None):
@@ -625,6 +640,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                     _STATS["last_key"] = repr(key)
                 return fn(x, sigma, cond=cond)
             if entry is not None:
+                openclaw_cache_epochs.observe("E11", "hit", reason="cache_hit", semantic_key=key)
                 _copy_into_static(entry["x"], x)
                 _copy_into_static(entry["sigma"], sigma)
                 _copy_into_static(entry["cond"], cond)
@@ -634,6 +650,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                     _STATS["last_key"] = repr(key)
                 return entry["out"].clone()
 
+            openclaw_cache_epochs.observe("E11", "miss", reason="cache_miss", semantic_key=key)
             try:
                 static_x = _clone_static(x)
                 static_sigma = _clone_static(sigma)
@@ -658,6 +675,8 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                     _evict_if_needed_locked()
                     _CACHE[key] = entry
                     _STATS["captures"] += 1
+                    openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
+                    openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_MAX_CACHE_SIZE)
                     _STATS["last_error"] = None
                     _STATS["last_key"] = repr(key)
                 return capture_return
@@ -665,6 +684,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                 with _LOCK:
                     _STATS["failures"] += 1
                     _FAILED_KEYS.add(key)
+                    openclaw_cache_epochs.observe("E11", "reject", reason="capture_failed", semantic_key=key)
                     _STATS["last_error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:]
                     _STATS["last_key"] = repr(key)
                 return fn(x, sigma, cond=cond)

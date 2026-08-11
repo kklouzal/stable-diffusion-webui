@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
-from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models
+from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, openclaw_cache_epochs
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 from modules.textual_inversion import textual_inversion
 
@@ -577,6 +577,12 @@ def clear_cond_cache(targets: Any | None = None) -> dict:
     if "img2img_init" in normalized_targets:
         StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
         cleared.append("StableDiffusionProcessing.cached_img2img_init")
+
+    cond_cleared = sum(name.endswith((".cached_c", ".cached_uc", ".cached_hr_c", ".cached_hr_uc")) for name in cleared)
+    if cond_cleared:
+        openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_cleared", count=cond_cleared)
+        remaining = sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None)
+        openclaw_cache_epochs.set_size("E05", current_size=remaining, capacity=4)
 
     _last_cleared_at = time.time()
     return {

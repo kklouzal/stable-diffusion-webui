@@ -18,7 +18,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
@@ -490,8 +490,12 @@ class StableDiffusionProcessing:
         self.c = None
         self.uc = None
         if not opts.persistent_cond_cache:
+            cleared = sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc) if item[0] is not None)
             StableDiffusionProcessing.cached_c = [None, None]
             StableDiffusionProcessing.cached_uc = [None, None]
+            if cleared:
+                openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_disabled", count=cleared)
+            openclaw_cache_epochs.set_size("E05", current_size=0, capacity=4)
 
     def get_token_merging_ratio(self, for_hr=False):
         if for_hr:
@@ -595,11 +599,14 @@ class StableDiffusionProcessing:
         if stats is None:
             stats = self.openclaw_cond_cache_stats = _cache_stats()
 
+        semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
         for cache in caches:
             if cache[0] is not None and cached_params == cache[0]:
                 _record_cache_stats_hit(stats)
+                openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
                 return cache[1]
 
+        openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss", semantic_key=semantic_key)
         cache = caches[0]
 
         started = time.perf_counter()
@@ -608,6 +615,12 @@ class StableDiffusionProcessing:
         _record_cache_stats_miss(stats, started)
 
         cache[0] = cached_params
+        openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
+        openclaw_cache_epochs.set_size(
+            "E05",
+            current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
+            capacity=4,
+        )
         return cache[1]
 
     def setup_conds(self):

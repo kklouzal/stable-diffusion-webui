@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 import torch
 
+from modules import openclaw_cache_epochs
+
 
 @dataclass(frozen=True)
 class GenerationProfileKey:
@@ -71,6 +73,7 @@ def status() -> dict[str, Any]:
 
 def clear() -> dict[str, Any]:
     with _LOCK:
+        cleared = len(_TENSOR_CACHE)
         _TENSOR_CACHE.clear()
         _STATS.update({
             "hits": 0,
@@ -81,6 +84,9 @@ def clear() -> dict[str, Any]:
             "last_key": None,
             "last_bypass_reason": None,
         })
+        if cleared:
+            openclaw_cache_epochs.observe("E08", "invalidate", reason="cache_cleared", count=cleared)
+        openclaw_cache_epochs.set_size("E08", current_size=0, capacity=_max_size())
         return status()
 
 
@@ -88,6 +94,7 @@ def bypass(reason: str) -> None:
     with _LOCK:
         _STATS["bypasses"] += 1
         _STATS["last_bypass_reason"] = reason
+    openclaw_cache_epochs.observe("E08", "bypass", reason="cache_disabled" if reason == "max_size_zero" else "other")
 
 
 def make_key(
@@ -123,9 +130,11 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
             _STATS["hits"] += 1
             _STATS["last_key"] = key
             _STATS["last_bypass_reason"] = None
+            openclaw_cache_epochs.observe("E08", "hit", reason="cache_hit", semantic_key=key)
             return cached.clone()
 
         _STATS["misses"] += 1
+        openclaw_cache_epochs.observe("E08", "miss", reason="cache_miss", semantic_key=key)
 
     tensor = factory()
     if not torch.is_tensor(tensor):
@@ -140,13 +149,17 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
             _STATS["hits"] += 1
             _STATS["last_key"] = key
             _STATS["last_bypass_reason"] = None
+            openclaw_cache_epochs.observe("E08", "hit", reason="cache_hit", semantic_key=key)
             return existing.clone()
 
         while len(_TENSOR_CACHE) >= max_size:
-            _TENSOR_CACHE.popitem(last=False)
+            evicted_key, _ = _TENSOR_CACHE.popitem(last=False)
             _STATS["evictions"] += 1
+            openclaw_cache_epochs.observe("E08", "eviction", reason="capacity", semantic_key=evicted_key)
         _TENSOR_CACHE[key] = stored
         _STATS["stores"] += 1
+        openclaw_cache_epochs.observe("E08", "publish", reason="published", semantic_key=key)
+        openclaw_cache_epochs.set_size("E08", current_size=len(_TENSOR_CACHE), capacity=max_size)
         _STATS["last_key"] = key
         _STATS["last_bypass_reason"] = None
 
