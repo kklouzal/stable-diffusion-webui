@@ -47,7 +47,8 @@ EPOCH_BUMP_REASONS = frozenset({
     "vae_loaded", "vae_unloaded", "precision_changed", "device_changed",
     "attention_changed", "compile_changed", "textual_inversion_reloaded",
     "lora_reloaded", "extension_reloaded", "input_changed", "mask_changed",
-    "preprocessor_changed", "controller_changed",
+    "preprocessor_changed", "controller_changed", "conditioning_cleared",
+    "conditioning_hook_changed",
     "checkpoint_commit", "model_movement_commit", "vae_commit",
 })
 
@@ -164,7 +165,7 @@ _FAMILY_DEPENDENCIES = {
     "E34": (("request_owner", "lifecycle", "sampler_registry"), ("fresh_processing_reuse",)),
 }
 
-INSTRUMENTED_FAMILIES = frozenset({"E05", "E08", "E11", "E12"})
+INSTRUMENTED_FAMILIES = frozenset({"E05", "E06", "E07", "E08", "E11", "E12"})
 
 
 @dataclass
@@ -516,6 +517,15 @@ def bump_epoch(dimension: str, *, reason: str) -> int:
 
 def epoch_snapshot() -> dict[str, Any]:
     return epoch_registry.atomic_snapshot()
+
+
+def epoch_subset(dimensions: tuple[str, ...]) -> tuple[tuple[str, int], ...]:
+    """Capture an ordered subset from one atomic registry snapshot."""
+    snapshot = epoch_registry.atomic_snapshot()["epochs"]
+    unknown = set(dimensions) - set(snapshot)
+    if unknown:
+        raise ValueError("unknown epoch dimension")
+    return tuple((dimension, snapshot[dimension]) for dimension in dimensions)
 
 
 def epoch_public_summary() -> dict[str, Any]:

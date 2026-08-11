@@ -259,6 +259,7 @@ class StableDiffusionProcessing:
 
     cached_uc = [None, None]
     cached_c = [None, None]
+    conditioning_cache_lock = threading.RLock()
     cached_img2img_init = [None, None]
     cached_img2img_init_lock = threading.RLock()
     cached_img2img_init_stats = _cache_stats(
@@ -529,10 +530,17 @@ class StableDiffusionProcessing:
         self.main_prompt = self.all_prompts[0]
         self.main_negative_prompt = self.all_negative_prompts[0]
 
-    def cached_params(self, required_prompts, steps, extra_network_data, hires_steps=None, use_old_scheduling=False):
-        """Returns parameters that invalidate the cond cache if changed"""
-
+    def cached_params(self, cache_namespace, required_prompts, steps, extra_network_data, hires_steps=None, use_old_scheduling=False):
+        """Return the complete semantic conditioning key and atomic dependency snapshot."""
+        relevant_epochs = openclaw_cache_epochs.epoch_subset((
+            "checkpoint_object_epoch", "conditioner_epoch", "textual_inversion_epoch",
+            "tokenizer_epoch", "conditioning_hook_epoch", "lora_applied_epoch",
+            "precision_epoch", "device_epoch",
+        ))
+        openclaw_cache_epochs.observe_dependency("E05", dict(relevant_epochs))
         return (
+            cache_namespace,
+            relevant_epochs,
             required_prompts,
             steps,
             hires_steps,
@@ -574,54 +582,45 @@ class StableDiffusionProcessing:
             tuple(loras),
         )
 
-    def get_conds_with_caching(self, function, required_prompts, steps, caches, extra_network_data, hires_steps=None):
-        """
-        Returns the result of calling function(shared.sd_model, required_prompts, steps)
-        using a cache to store the result if the same arguments have been used before.
-
-        cache is an array containing two elements. The first element is a tuple
-        representing the previously used arguments, or None if no arguments
-        have been used before. The second element is where the previously
-        computed result is stored.
-
-        caches is a list with items described above.
-        """
-
+    def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):
+        """Return conditioning from one namespace-owned, atomically published cache slot."""
         if shared.opts.use_old_scheduling:
             old_schedules = prompt_parser.get_learned_conditioning_prompt_schedules(required_prompts, steps, hires_steps, False)
             new_schedules = prompt_parser.get_learned_conditioning_prompt_schedules(required_prompts, steps, hires_steps, True)
             if old_schedules != new_schedules:
                 self.extra_generation_params["Old prompt editing timelines"] = True
 
-        cached_params = self.cached_params(required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
-
+        cached_params = self.cached_params(cache_namespace, required_prompts, steps, extra_network_data, hires_steps, shared.opts.use_old_scheduling)
         stats = getattr(self, "openclaw_cond_cache_stats", None)
         if stats is None:
             stats = self.openclaw_cond_cache_stats = _cache_stats()
-
         semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
-        for cache in caches:
+
+        with StableDiffusionProcessing.conditioning_cache_lock:
             if cache[0] is not None and cached_params == cache[0]:
                 _record_cache_stats_hit(stats)
                 openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
                 return cache[1]
 
-        openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss", semantic_key=semantic_key)
-        cache = caches[0]
+            reason = "dependency_changed" if cache[0] is not None else "cache_miss"
+            openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
+            started = time.perf_counter()
+            try:
+                with devices.autocast():
+                    computed = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
+            except Exception:
+                openclaw_cache_epochs.observe("E05", "reject", reason="rejected", semantic_key=semantic_key)
+                raise
 
-        started = time.perf_counter()
-        with devices.autocast():
-            cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
-        _record_cache_stats_miss(stats, started)
-
-        cache[0] = cached_params
-        openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
-        openclaw_cache_epochs.set_size(
-            "E05",
-            current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
-            capacity=4,
-        )
-        return cache[1]
+            cache[:] = [cached_params, computed]
+            _record_cache_stats_miss(stats, started)
+            openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
+            openclaw_cache_epochs.set_size(
+                "E05",
+                current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
+                capacity=4,
+            )
+            return computed
 
     def setup_conds(self):
         prompts = prompt_parser.SdConditioning(self.prompts, width=self.width, height=self.height)
@@ -632,8 +631,8 @@ class StableDiffusionProcessing:
         self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
 
-        self.uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, total_steps, [self.cached_uc], self.extra_network_data)
-        self.c = self.get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, total_steps, [self.cached_c], self.extra_network_data)
+        self.uc = self.get_conds_with_caching("uc", prompt_parser.get_learned_conditioning, negative_prompts, total_steps, self.cached_uc, self.extra_network_data)
+        self.c = self.get_conds_with_caching("c", prompt_parser.get_multicond_learned_conditioning, prompts, total_steps, self.cached_c, self.extra_network_data)
 
     def get_conds(self):
         return self.c, self.uc
@@ -1717,8 +1716,8 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         steps = self.hr_second_pass_steps or self.steps
         total_steps = sampler_config.total_steps(steps) if sampler_config else steps
 
-        self.hr_uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, [self.cached_hr_uc, self.cached_uc], self.hr_extra_network_data, total_steps)
-        self.hr_c = self.get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, hr_prompts, self.firstpass_steps, [self.cached_hr_c, self.cached_c], self.hr_extra_network_data, total_steps)
+        self.hr_uc = self.get_conds_with_caching("hr_uc", prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, self.cached_hr_uc, self.hr_extra_network_data, total_steps)
+        self.hr_c = self.get_conds_with_caching("hr_c", prompt_parser.get_multicond_learned_conditioning, hr_prompts, self.firstpass_steps, self.cached_hr_c, self.hr_extra_network_data, total_steps)
 
     def setup_conds(self):
         if self.is_hr_pass:

@@ -557,40 +557,37 @@ def _normalize_cache_targets(targets: Any | None) -> set[str]:
 
 
 def clear_cond_cache(targets: Any | None = None) -> dict:
-    """Clear A1111 reusable generation caches."""
+    """Clear reusable generation caches and commit conditioning lifecycle epochs."""
     global _last_cleared_at
-
     normalized_targets = _normalize_cache_targets(targets)
     cleared = []
-    if "c" in normalized_targets:
-        StableDiffusionProcessing.cached_c = [None, None]
-        cleared.append("StableDiffusionProcessing.cached_c")
-    if "uc" in normalized_targets:
-        StableDiffusionProcessing.cached_uc = [None, None]
-        cleared.append("StableDiffusionProcessing.cached_uc")
-    if "hr_c" in normalized_targets:
-        StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
-        cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_c")
-    if "hr_uc" in normalized_targets:
-        StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
-        cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_uc")
+    cond_targets = normalized_targets & {"c", "uc", "hr_c", "hr_uc"}
+    with StableDiffusionProcessing.conditioning_cache_lock:
+        if "c" in normalized_targets:
+            StableDiffusionProcessing.cached_c = [None, None]
+            cleared.append("StableDiffusionProcessing.cached_c")
+        if "uc" in normalized_targets:
+            StableDiffusionProcessing.cached_uc = [None, None]
+            cleared.append("StableDiffusionProcessing.cached_uc")
+        if "hr_c" in normalized_targets:
+            StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
+            cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_c")
+        if "hr_uc" in normalized_targets:
+            StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
+            cleared.append("StableDiffusionProcessingTxt2Img.cached_hr_uc")
     if "img2img_init" in normalized_targets:
         StableDiffusionProcessingImg2Img.clear_img2img_init_cache()
         cleared.append("StableDiffusionProcessing.cached_img2img_init")
 
-    cond_cleared = sum(name.endswith((".cached_c", ".cached_uc", ".cached_hr_c", ".cached_hr_uc")) for name in cleared)
-    if cond_cleared:
-        openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_cleared", count=cond_cleared)
+    if cond_targets:
+        openclaw_cache_epochs.bump_epoch("conditioner_epoch", reason="conditioning_cleared")
+        openclaw_cache_epochs.bump_epoch("conditioning_hook_epoch", reason="conditioning_hook_changed")
+        openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_cleared", count=len(cond_targets))
         remaining = sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None)
         openclaw_cache_epochs.set_size("E05", current_size=remaining, capacity=4)
 
     _last_cleared_at = time.time()
-    return {
-        "ok": True,
-        "cleared_at": _last_cleared_at,
-        "cleared": cleared,
-        "targets": sorted(normalized_targets),
-    }
+    return {"ok": True, "cleared_at": _last_cleared_at, "cleared": cleared, "targets": sorted(normalized_targets)}
 
 
 def on_app_started(_: object, app: FastAPI) -> None:

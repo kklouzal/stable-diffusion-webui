@@ -1,4 +1,5 @@
 import os
+import threading
 from collections import namedtuple
 from contextlib import closing
 
@@ -12,7 +13,7 @@ import safetensors.torch
 import numpy as np
 from PIL import Image, PngImagePlugin
 
-from modules import shared, devices, sd_hijack, sd_models, images, sd_samplers, sd_hijack_checkpoint, errors, hashes, cache
+from modules import shared, devices, sd_hijack, sd_models, images, sd_samplers, sd_hijack_checkpoint, errors, hashes, cache, openclaw_cache_epochs
 import modules.textual_inversion.dataset
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
 
@@ -117,6 +118,7 @@ class EmbeddingDatabase:
         self.embedding_dirs = {}
         self.previously_displayed_embeddings = ()
         self.image_embedding_cache = cache.cache('image-embedding')
+        self._publication_lock = threading.RLock()
 
     def add_embedding_dir(self, path):
         self.embedding_dirs[path] = DirWithTextualInversionEmbeddings(path)
@@ -158,11 +160,13 @@ class EmbeddingDatabase:
     def read_embedding_from_image(self, path, name):
         try:
             ondisk_mtime = os.path.getmtime(path)
+            semantic_key = openclaw_cache_epochs.registry.digest((os.path.realpath(path), ondisk_mtime))
 
             if (cache_embedding := self.image_embedding_cache.get(path)) and ondisk_mtime == cache_embedding.get('mtime', 0):
-                # cache will only be used if the file has not been modified time matches
+                openclaw_cache_epochs.observe("E07", "hit", reason="cache_hit", semantic_key=semantic_key)
                 return cache_embedding.get('data', None), cache_embedding.get('name', None)
 
+            openclaw_cache_epochs.observe("E07", "miss", reason="dependency_changed" if cache_embedding else "cache_miss", semantic_key=semantic_key)
             embed_image = Image.open(path)
             if hasattr(embed_image, 'text') and 'sd-ti-embedding' in embed_image.text:
                 data = embedding_from_b64(embed_image.text['sd-ti-embedding'])
@@ -174,6 +178,7 @@ class EmbeddingDatabase:
                 # data of image embeddings only will be cached if the option textual_inversion_image_embedding_data_cache is enabled
                 # results of images that are not embeddings will allways be cached to reduce unnecessary future disk reads
                 self.image_embedding_cache[path] = {'data': data, 'name': None if data is None else name, 'mtime': ondisk_mtime}
+                openclaw_cache_epochs.observe("E07", "publish", reason="published", semantic_key=semantic_key)
 
             return data, name
         except Exception:
@@ -227,39 +232,55 @@ class EmbeddingDatabase:
                     errors.report(f"Error loading embedding {fn}", exc_info=True)
                     continue
 
+    @staticmethod
+    def _snapshot_signature(word_embeddings, skipped_embeddings):
+        def item(embedding):
+            return (
+                getattr(embedding, "hash", None),
+                getattr(embedding, "shape", None),
+                getattr(embedding, "vectors", None),
+                getattr(embedding, "step", None),
+            )
+        return (
+            tuple(sorted((name, item(embedding)) for name, embedding in word_embeddings.items())),
+            tuple(sorted((name, item(embedding)) for name, embedding in skipped_embeddings.items())),
+        )
+
     def load_textual_inversion_embeddings(self, force_reload=False):
-        if not force_reload:
-            need_reload = False
+        if not force_reload and not any(embdir.has_changed() for embdir in self.embedding_dirs.values()):
+            openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped")
+            return False
+
+        # Build a private database and publish all lookup maps together only after
+        # every non-recoverable loader operation succeeds.
+        staged = EmbeddingDatabase()
+        staged.embedding_dirs = self.embedding_dirs.copy()
+        staged.image_embedding_cache = self.image_embedding_cache
+        staged.expected_shape = self.get_expected_shape()
+        for embdir in staged.embedding_dirs.values():
+            staged.load_from_dir(embdir)
+
+        old_signature = self._snapshot_signature(self.word_embeddings, self.skipped_embeddings)
+        new_signature = self._snapshot_signature(staged.word_embeddings, staged.skipped_embeddings)
+        if new_signature == old_signature:
             for embdir in self.embedding_dirs.values():
-                if embdir.has_changed():
-                    need_reload = True
-                    break
+                embdir.update()
+            openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped", semantic_key=new_signature)
+            return False
 
-            if not need_reload:
-                return
+        with self._publication_lock:
+            self.ids_lookup, self.word_embeddings, self.skipped_embeddings = (
+                staged.ids_lookup, staged.word_embeddings, staged.skipped_embeddings
+            )
+            self.expected_shape = staged.expected_shape
+            for embdir in self.embedding_dirs.values():
+                embdir.update()
 
-        self.ids_lookup.clear()
-        self.word_embeddings.clear()
-        self.skipped_embeddings.clear()
-        self.expected_shape = self.get_expected_shape()
-
-        for embdir in self.embedding_dirs.values():
-            self.load_from_dir(embdir)
-            embdir.update()
-
-        # re-sort word_embeddings because load_from_dir may not load in alphabetic order.
-        # using a temporary copy so we don't reinitialize self.word_embeddings in case other objects have a reference to it.
-        sorted_word_embeddings = {e.name: e for e in sorted(self.word_embeddings.values(), key=lambda e: e.name.lower())}
-        self.word_embeddings.clear()
-        self.word_embeddings.update(sorted_word_embeddings)
-
-        displayed_embeddings = (tuple(self.word_embeddings.keys()), tuple(self.skipped_embeddings.keys()))
-        if shared.opts.textual_inversion_print_at_load and self.previously_displayed_embeddings != displayed_embeddings:
-            self.previously_displayed_embeddings = displayed_embeddings
-            print(f"Textual inversion embeddings loaded({len(self.word_embeddings)}): {', '.join(self.word_embeddings.keys())}")
-            if self.skipped_embeddings:
-                print(f"Textual inversion embeddings skipped({len(self.skipped_embeddings)}): {', '.join(self.skipped_embeddings.keys())}")
-
+        openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="textual_inversion_reloaded")
+        openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="textual_inversion_reloaded")
+        openclaw_cache_epochs.observe("E07", "invalidate", reason="dependency_changed", semantic_key=new_signature)
+        openclaw_cache_epochs.observe("E07", "publish", reason="published", semantic_key=new_signature)
+        return True
     def find_embedding_at_position(self, tokens, offset):
         token = tokens[offset]
         possible_matches = self.ids_lookup.get(token, None)

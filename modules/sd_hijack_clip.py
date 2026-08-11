@@ -3,7 +3,7 @@ from collections import namedtuple
 
 import torch
 
-from modules import prompt_parser, devices, sd_hijack, sd_emphasis
+from modules import prompt_parser, devices, sd_hijack, sd_emphasis, openclaw_cache_epochs
 from modules.shared import opts
 
 
@@ -182,26 +182,25 @@ class TextConditionalModel(torch.nn.Module):
         return chunks, token_count
 
     def process_texts(self, texts):
-        """
-        Accepts a list of texts and calls tokenize_line() on each, with cache. Returns the list of results and maximum
-        length, in tokens, of all texts.
-        """
-
-        token_count = 0
-
+        """Tokenize texts with an intentionally request-local memo."""
         cache = {}
+        tokenizer_epoch = openclaw_cache_epochs.epoch_snapshot()["epochs"]["tokenizer_epoch"]
         batch_chunks = []
+        token_count = 0
         for line in texts:
+            semantic_key = openclaw_cache_epochs.registry.digest((tokenizer_epoch, line))
             if line in cache:
                 chunks = cache[line]
+                openclaw_cache_epochs.observe("E06", "hit", reason="cache_hit", semantic_key=semantic_key)
             else:
+                openclaw_cache_epochs.observe("E06", "miss", reason="cache_miss", semantic_key=semantic_key)
                 chunks, current_token_count = self.tokenize_line(line)
                 token_count = max(current_token_count, token_count)
-
                 cache[line] = chunks
-
+                openclaw_cache_epochs.observe("E06", "publish", reason="published", semantic_key=semantic_key)
             batch_chunks.append(chunks)
-
+        # The local dictionary is discarded now; telemetry must not imply retention.
+        openclaw_cache_epochs.set_size("E06", current_size=0, capacity=len(cache))
         return batch_chunks, token_count
 
     def forward(self, texts):
