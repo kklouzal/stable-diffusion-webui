@@ -26,7 +26,7 @@ import modules.models.sd3.mmdit
 
 
 LORA_SOURCE_SCHEMA_REVISION = "lora-source-v2"
-LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v2"
+LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v3"
 _network_application_lock = threading.RLock()
 _applied_state_key = None
 
@@ -371,7 +371,19 @@ def _publish_applied_state(new_networks, emb_db=None):
 
 def unload_networks():
     """Restore/unhook weights and bundled TIs as one coherent empty state."""
-    return _publish_applied_state([])
+    changed = _publish_applied_state([])
+    model = getattr(shared, "sd_model", None)
+    restored = 0
+    if model is not None:
+        if getattr(devices, "mxfp8", False):
+            network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias")
+            restored += network_quant_restore_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias", "network_mxfp8_merged_lora_applied")
+            network_mxfp8_mark_model_unprepared(model)
+        if getattr(devices, "nvfp4", False):
+            network_quant_capture_managed_base(model, "network_nvfp4_base_weight", "network_nvfp4_base_bias")
+            restored += network_quant_restore_managed_base(model, "network_nvfp4_base_weight", "network_nvfp4_base_bias", "network_nvfp4_merged_lora_applied")
+            network_nvfp4_mark_model_unprepared(model)
+    return changed or restored > 0
 
 
 def load_network(name, network_on_disk):
@@ -624,6 +636,14 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
     if network_layer_name is None:
         return
 
+    # Quant-managed Linear layers are rebuilt atomically by model-level prepare
+    # from immutable BF16 masters. Generic backup/copy_ cannot cross TorchAO
+    # tensor-subclass boundaries and must not become a second application path.
+    if getattr(devices, "nvfp4", False) and getattr(self, "network_nvfp4_base_weight", None) is not None:
+        return
+    if getattr(devices, "mxfp8", False) and getattr(self, "network_mxfp8_base_weight", None) is not None:
+        return
+
     current_names = getattr(self, "network_current_names", ())
     wanted_names = network_wanted_names()
 
@@ -870,10 +890,9 @@ def network_mxfp8_is_model_prepared(model=None):
     if model is None:
         return False
     # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
-    # before sampling. Do not recompute the full signature from every managed
-    # Linear.forward(); that can turn into thousands of Python/filesystem
-    # checks per generation.
-    return bool(getattr(model, "network_mxfp8_active_config_ready", False))
+    # before sampling. Validate the cheap per-module state marker so an explicit
+    # unload/clear cannot leave a same-signature stale prepared config reusable.
+    return bool(getattr(model, "network_mxfp8_active_config_ready", False)) and network_quant_managed_modules_match_current_names(model, "network_mxfp8_base_weight", network_mxfp8_wanted_names())
 
 
 network_quant_missing = object()
@@ -911,6 +930,63 @@ def network_quant_restore_state(snapshot, merged_attr):
     network_quant_restore_attr(module, merged_attr, merged_lora)
 
 
+def network_quant_managed_modules(model, base_attr):
+    if model is None:
+        return []
+    managed_attr = "network_mxfp8_managed_modules" if base_attr == "network_mxfp8_base_weight" else "network_nvfp4_managed_modules"
+    managed_modules = getattr(model, managed_attr, None)
+    if managed_modules is None:
+        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, base_attr, None) is not None]
+        setattr(model, managed_attr, managed_modules)
+    return managed_modules
+
+
+def network_quant_managed_modules_match_current_names(model, base_attr, wanted_names):
+    managed_modules = network_quant_managed_modules(model, base_attr)
+    return all(getattr(module, "network_current_names", ()) == wanted_names for _fqn, module in managed_modules)
+
+
+def network_quant_capture_managed_base(model, base_weight_attr, base_bias_attr, force=False):
+    captured = 0
+    with torch.no_grad():
+        for _fqn, module in network_quant_managed_modules(model, base_weight_attr):
+            if getattr(module, base_weight_attr, None) is not None and not force:
+                continue
+            setattr(module, base_weight_attr, module.weight.detach().to(devices.cpu, copy=True))
+            bias = getattr(module, "bias", None)
+            setattr(module, base_bias_attr, bias.detach().to(devices.cpu, copy=True) if bias is not None else None)
+            captured += 1
+    return captured
+
+
+def network_quant_restore_managed_base(model, base_weight_attr, base_bias_attr, merged_attr):
+    """Restore quant-managed LoRA modules to their immutable BF16 canonical base.
+
+    Normal LoRA unload goes through network_apply_weights(), but TorchAO-managed
+    Linear layers bypass that mutating path and are prepared model-wide from
+    immutable base tensors. Clearing LoRA state must therefore also clear the
+    physical quantized active config; otherwise a later same-signature activation
+    can incorrectly reuse stale prepared weights, and no-LoRA generations after
+    unload can still see the previous LoRA config.
+    """
+    restored = 0
+    with torch.no_grad():
+        for _fqn, module in network_quant_managed_modules(model, base_weight_attr):
+            base_weight = getattr(module, base_weight_attr, None)
+            if base_weight is None:
+                continue
+            module._parameters["weight"] = torch.nn.Parameter(base_weight.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
+            base_bias = getattr(module, base_bias_attr, None)
+            if base_bias is not None:
+                module._parameters["bias"] = torch.nn.Parameter(base_bias.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
+            elif "bias" in module._parameters:
+                module._parameters["bias"] = None
+            module.network_current_names = ()
+            setattr(module, merged_attr, False)
+            restored += 1
+    return restored
+
+
 def network_mxfp8_snapshot_state(module):
     return network_quant_snapshot_state(module, "network_mxfp8_merged_lora_applied")
 
@@ -939,18 +1015,16 @@ def prepare_mxfp8_active_config():
         return True
 
     signature = network_mxfp8_active_config_signature()
-    if getattr(model, "network_mxfp8_active_config_signature", None) == signature and getattr(model, "network_mxfp8_active_config_ready", False):
+    if getattr(model, "network_mxfp8_active_config_signature", None) == signature and network_mxfp8_is_model_prepared(model):
         return True
 
-    managed_modules = getattr(model, "network_mxfp8_managed_modules", None)
-    if managed_modules is None:
-        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_mxfp8_base_weight", None) is not None]
-        model.network_mxfp8_managed_modules = managed_modules
+    managed_modules = network_quant_managed_modules(model, "network_mxfp8_base_weight")
     if not managed_modules:
         network_mxfp8_mark_model_unprepared(model)
         return True
 
     network_mxfp8_mark_model_unprepared(model)
+    network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias")
 
     wanted_names = network_mxfp8_wanted_names()
     from torchao.quantization import quantize_
@@ -1182,11 +1256,9 @@ def network_nvfp4_is_model_prepared(model=None):
     model = model or getattr(shared, "sd_model", None)
     if model is None:
         return False
-    # Hot-path guard: ExtraNetworkLora.activate() prepares the active config
-    # before sampling. Do not recompute the full signature from every managed
-    # Linear.forward(); that can turn into thousands of Python/filesystem
-    # checks per generation.
-    return bool(getattr(model, "network_nvfp4_active_config_ready", False))
+    # Hot-path guard mirrors MXFP8 and refuses stale same-signature reuse after
+    # explicit unload/clear reset module markers to the canonical base state.
+    return bool(getattr(model, "network_nvfp4_active_config_ready", False)) and network_quant_managed_modules_match_current_names(model, "network_nvfp4_base_weight", network_nvfp4_wanted_names())
 
 
 def network_nvfp4_snapshot_state(module):
@@ -1217,18 +1289,16 @@ def prepare_nvfp4_active_config():
         return True
 
     signature = network_nvfp4_active_config_signature()
-    if getattr(model, "network_nvfp4_active_config_signature", None) == signature and getattr(model, "network_nvfp4_active_config_ready", False):
+    if getattr(model, "network_nvfp4_active_config_signature", None) == signature and network_nvfp4_is_model_prepared(model):
         return True
 
-    managed_modules = getattr(model, "network_nvfp4_managed_modules", None)
-    if managed_modules is None:
-        managed_modules = [(fqn, module) for fqn, module in model.named_modules() if getattr(module, "network_nvfp4_base_weight", None) is not None]
-        model.network_nvfp4_managed_modules = managed_modules
+    managed_modules = network_quant_managed_modules(model, "network_nvfp4_base_weight")
     if not managed_modules:
         network_nvfp4_mark_model_unprepared(model)
         return True
 
     network_nvfp4_mark_model_unprepared(model)
+    network_quant_capture_managed_base(model, "network_nvfp4_base_weight", "network_nvfp4_base_bias")
 
     wanted_names = network_nvfp4_wanted_names()
     from torchao.quantization import quantize_

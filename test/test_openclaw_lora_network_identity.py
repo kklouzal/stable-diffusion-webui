@@ -400,6 +400,98 @@ def test_epoch_transaction_prevents_lifecycle_interleave_with_apply_publication(
     assert lifecycle_done.is_set()
 
 
+
+
+def test_quant_unload_restores_managed_base_and_invalidates_stale_active_config(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    linear = torch.nn.Linear(2, 2, bias=True, dtype=torch.bfloat16)
+    base_weight = linear.weight.detach().clone()
+    base_bias = linear.bias.detach().clone()
+    with torch.no_grad():
+        linear.weight.add_(torch.ones_like(linear.weight))
+        linear.bias.add_(torch.ones_like(linear.bias))
+    linear.network_layer_name = "layer"
+    linear.network_mxfp8_base_weight = base_weight.detach().cpu().clone()
+    linear.network_mxfp8_base_bias = base_bias.detach().cpu().clone()
+    linear.network_current_names = (("alpha",),)
+    linear.network_mxfp8_merged_lora_applied = True
+    model = SimpleNamespace(
+        network_layer_mapping={"layer": linear},
+        network_mxfp8_managed_modules=[("layer", linear)],
+        network_mxfp8_active_config_ready=True,
+        network_mxfp8_active_config_signature=("stale",),
+    )
+    monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
+    monkeypatch.setattr(networks.devices, "mxfp8", True, raising=False)
+    monkeypatch.setattr(networks.devices, "nvfp4", False, raising=False)
+    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+
+    assert networks.unload_networks()
+
+    assert torch.equal(linear.weight, base_weight)
+    assert torch.equal(linear.bias, base_bias)
+    assert linear.network_current_names == ()
+    assert linear.network_mxfp8_merged_lora_applied is False
+    assert not getattr(model, "network_mxfp8_active_config_ready", False)
+    assert not networks.network_mxfp8_is_model_prepared(model)
+
+
+def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    linear = torch.nn.Linear(2, 2, dtype=torch.bfloat16)
+    linear.network_mxfp8_base_weight = linear.weight.detach().cpu().clone()
+    linear.network_mxfp8_base_bias = linear.bias.detach().cpu().clone()
+    linear.network_current_names = ()
+    model = SimpleNamespace(
+        network_mxfp8_managed_modules=[("layer", linear)],
+        network_mxfp8_active_config_ready=True,
+    )
+    net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None)
+    networks.loaded_networks[:] = [net]
+
+    assert networks.network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias") == 0
+    networks.network_quant_restore_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias", "network_mxfp8_merged_lora_applied")
+    assert networks.network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias") == 0
+    assert torch.equal(linear.weight, linear.network_mxfp8_base_weight)
+    assert not networks.network_mxfp8_is_model_prepared(model)
+    linear.network_current_names = networks.network_mxfp8_wanted_names()
+    assert networks.network_mxfp8_is_model_prepared(model)
+
+
+def test_nvfp4_unload_restores_managed_base_and_invalidates_stale_active_config(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    linear = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
+    base_weight = linear.weight.detach().clone()
+    with torch.no_grad():
+        linear.weight.mul_(2)
+    linear.network_layer_name = "layer"
+    linear.network_nvfp4_base_weight = base_weight.detach().cpu().clone()
+    linear.network_nvfp4_base_bias = None
+    linear.network_current_names = (("alpha",),)
+    linear.network_nvfp4_merged_lora_applied = True
+    model = SimpleNamespace(
+        network_layer_mapping={"layer": linear},
+        network_nvfp4_managed_modules=[("layer", linear)],
+        network_nvfp4_active_config_ready=True,
+        network_nvfp4_active_config_signature=("stale",),
+    )
+    monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
+    monkeypatch.setattr(networks.devices, "mxfp8", False, raising=False)
+    monkeypatch.setattr(networks.devices, "nvfp4", True, raising=False)
+    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+
+    assert networks.unload_networks()
+
+    assert torch.equal(linear.weight, base_weight)
+    assert linear.bias is None
+    assert linear.network_current_names == ()
+    assert linear.network_nvfp4_merged_lora_applied is False
+    assert not getattr(model, "network_nvfp4_active_config_ready", False)
+    assert not networks.network_nvfp4_is_model_prepared(model)
+
 def test_generation_owner_rejects_cross_request_overlap_and_cleans_exception(lora_networks):
     import threading
     networks = lora_networks
@@ -664,3 +756,18 @@ def test_current_network_state_identity_changes_for_effective_inputs(lora_networ
     assert baseline != networks.network_applied_state_key([changed_te])
     assert baseline != networks.network_applied_state_key([changed_unet])
     assert baseline != networks.network_applied_state_key([changed_dyn])
+
+def test_generic_apply_skips_nvfp4_managed_layer(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    layer = torch.nn.Linear(2, 2, bias=False)
+    layer.network_layer_name = "managed"
+    layer.network_nvfp4_base_weight = layer.weight.detach().cpu().clone()
+    layer.network_current_names = ()
+    monkeypatch.setattr(networks.devices, "nvfp4", True)
+    monkeypatch.setattr(networks, "loaded_networks", [object()])
+
+    networks.network_apply_weights(layer)
+
+    assert layer.network_current_names == ()
+    assert not hasattr(layer, "network_weights_backup")
