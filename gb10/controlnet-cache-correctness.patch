@@ -1,0 +1,310 @@
+diff -urN a/scripts/controlnet.py b/scripts/controlnet.py
+--- a/scripts/controlnet.py	2026-08-12 08:21:23.457006826 -0700
++++ b/scripts/controlnet.py	2026-08-12 08:21:23.457882737 -0700
+@@ -6,6 +6,7 @@
+ from copy import copy, deepcopy
+ from typing import Dict, Optional, Tuple, List
+ import modules.scripts as scripts
++from scripts.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
+ from modules import shared, devices, script_callbacks, processing, masking, images
+ import gradio as gr
+ import time
+@@ -295,7 +296,7 @@
+ class Script(scripts.Script, metaclass=(
+     utils.TimeMeta if logger.level == logging.DEBUG else type)):
+
+-    model_cache: Dict[str, ControlModel] = OrderedDict()
++    model_load_cache = AtomicLRU(2, "controlnet-model")
+
+     def __init__(self) -> None:
+         super().__init__()
+@@ -405,60 +406,82 @@
+         return tuple(controls)
+
+     @staticmethod
+-    def clear_control_model_cache():
+-        Script.model_cache.clear()
++    def clear_control_model_cache(reason="explicit"):
++        Script.model_load_cache.clear(reason)
+         gc.collect()
+         devices.torch_gc()
+
+     @staticmethod
+-    def load_control_model(p, unet, model) -> ControlModel:
+-        if model in Script.model_cache:
+-            logger.info(f"Loading model from cache: {model}")
+-            control_model = Script.model_cache[model]
+-            if control_model.type == ControlModelType.Controlllite:
+-                # Falls through to load Controlllite model fresh.
+-                # TODO Fix context sharing issue for Controlllite.
+-                pass
+-            elif not control_model.type.allow_context_sharing:
+-                # Creates a shallow-copy of control_model so that configs/inputs
+-                # from different units can be bind correctly. While heavy objects
+-                # of the underlying nn.Module is not copied.
+-                return ControlModel(copy(control_model.model), control_model.type)
+-            else:
+-                return control_model
+-
+-        # Remove model from cache to clear space before building another model
+-        if len(Script.model_cache) > 0 and len(Script.model_cache) >= shared.opts.data.get("control_net_model_cache_size", 2):
+-            Script.model_cache.popitem(last=False)
+-            gc.collect()
+-            devices.torch_gc()
+-
+-        control_model = Script.build_control_model(p, unet, model)
++    def _resolve_model_path(model):
++        model_path = global_state.cn_models.get(model, None)
++        resolved_model = model
++        if model_path is None:
++            resolved_model = find_closest_lora_model_name(model)
++            model_path = global_state.cn_models.get(resolved_model, None)
++        if model_path is None:
++            raise RuntimeError(f"model not found: {model}")
++        model_path = model_path.strip('"')
++        if not os.path.exists(model_path):
++            raise ValueError(f"file not found: {model_path}")
++        return resolved_model, os.path.realpath(model_path)
+
+-        if shared.opts.data.get("control_net_model_cache_size", 2) > 0:
+-            Script.model_cache[model] = control_model
++    @staticmethod
++    def _model_cache_key(p, unet, model):
++        resolved_model, model_path = Script._resolve_model_path(model)
++        stat = os.stat(model_path)
++        source_revision = (
++            model_path, stat.st_dev, stat.st_ino, stat.st_size,
++            stat.st_mtime_ns, stat.st_ctime_ns,
++        )
++        sd_model = p.sd_model
++        base_revision = (
++            type(unet).__module__, type(unet).__qualname__, id(unet),
++            getattr(sd_model, "sd_checkpoint_info", None) and
++            getattr(sd_model.sd_checkpoint_info, "sha256", None),
++        )
++        loader_options = {
++            key: value for key, value in shared.opts.data.items()
++            if key.startswith("control_net") or key.startswith("controlnet")
++        }
++        return (
++            "controlnet-model", 1, resolved_model, source_revision, base_revision,
++            str(sd_model.dtype), str(getattr(devices, "dtype_unet", None)),
++            str(getattr(devices, "device", None)), runtime_identity(torch),
++            callable_identity(build_model_by_guess), freeze(loader_options),
++        )
+
++    @staticmethod
++    def _return_cached_model(control_model):
++        if control_model.type == ControlModelType.Controlllite:
++            return None
++        if not control_model.type.allow_context_sharing:
++            return ControlModel(copy(control_model.model), control_model.type)
+         return control_model
+
+     @staticmethod
++    def load_control_model(p, unet, model) -> ControlModel:
++        max_size = shared.opts.data.get("control_net_model_cache_size", 2)
++        Script.model_load_cache.set_max_size(max_size)
++        key = Script._model_cache_key(p, unet, model)
++
++        def build():
++            return Script.build_control_model(p, unet, model)
++
++        control_model = Script.model_load_cache.get_or_compute(key, build)
++        if control_model.type == ControlModelType.Controlllite:
++            # Mutable per-unit context is not equivalent across requests.
++            Script.model_load_cache.discard(key, "volatile-controlllite")
++            return control_model
++        cached = Script._return_cached_model(control_model)
++        logger.info(f"ControlNet model cache lookup: {Script.model_load_cache.info()['last_lookup']['reason']}")
++        return cached
++
++    @staticmethod
+     def build_control_model(p, unet, model) -> ControlModel:
+         if model is None or model == 'None':
+             raise RuntimeError("You have not selected any ControlNet Model.")
+
+-        model_path = global_state.cn_models.get(model, None)
+-        if model_path is None:
+-            model = find_closest_lora_model_name(model)
+-            model_path = global_state.cn_models.get(model, None)
+-
+-        if model_path is None:
+-            raise RuntimeError(f"model not found: {model}")
+-
+-        # trim '"' at start/end
+-        if model_path.startswith("\"") and model_path.endswith("\""):
+-            model_path = model_path[1:-1]
+-
+-        if not os.path.exists(model_path):
+-            raise ValueError(f"file not found: {model_path}")
++        model, model_path = Script._resolve_model_path(model)
+
+         logger.info(f"Loading model: {model}")
+         state_dict = load_state_dict(model_path)
+@@ -1431,9 +1454,7 @@
+     shared.opts.add_option("control_net_models_path", shared.OptionInfo(
+         "", "Extra path to scan for ControlNet models (e.g. training output directory)", section=section))
+     shared.opts.add_option("control_net_modules_path", shared.OptionInfo(
+-        "", "Legacy path to directory containing annotator/preprocessor model directories (overrides corresponding command line flag when no preprocessor-specific path is set)", section=section).needs_reload_ui())
+-    shared.opts.add_option("control_net_preprocessor_models_path", shared.OptionInfo(
+-        "", "Path to directory containing annotator/preprocessor model directories (overrides legacy setting and corresponding command line flag)", section=section).needs_reload_ui())
++        "", "Path to directory containing annotator model directories (overrides corresponding command line flag)", section=section).needs_reload_ui())
+     shared.opts.add_option("control_net_unit_count", shared.OptionInfo(
+         3, "Multi-ControlNet: ControlNet unit number", gr.Slider, {"minimum": 1, "maximum": 10, "step": 1}, section=section).needs_reload_ui())
+     shared.opts.add_option("control_net_model_cache_size", shared.OptionInfo(
+@@ -1469,6 +1490,11 @@
+         gr.Checkbox, {"interactive": True}, section=section).needs_reload_ui())
+
+
++def clear_controlnet_caches_for_reload():
++    Script.clear_control_model_cache("extension-reload")
++    Preprocessor.clear_all_caches("extension-reload")
++
++
+ batch_hijack.instance.do_hijack()
+ script_callbacks.on_ui_settings(on_ui_settings)
+ script_callbacks.on_infotext_pasted(Infotext.on_infotext_pasted)
+diff -urN a/scripts/preprocessor/model_free_preprocessors.py b/scripts/preprocessor/model_free_preprocessors.py
+--- a/scripts/preprocessor/model_free_preprocessors.py	2026-08-12 08:21:23.465912494 -0700
++++ b/scripts/preprocessor/model_free_preprocessors.py	2026-08-12 08:21:23.466871030 -0700
+@@ -9,6 +9,7 @@
+
+
+ class PreprocessorNone(Preprocessor):
++    cacheable = True
+     def __init__(self):
+         super().__init__(name="none")
+         self.sorting_priority = 10
+@@ -28,6 +29,7 @@
+
+
+ class PreprocessorCanny(Preprocessor):
++    cacheable = True
+     def __init__(self):
+         super().__init__(name="canny")
+         self.tags = ["Canny"]
+@@ -65,6 +67,7 @@
+
+
+ class PreprocessorInvert(Preprocessor):
++    cacheable = True
+     def __init__(self):
+         super().__init__(name="invert")
+         self._label = "invert (from white bg & black line)"
+@@ -90,6 +93,7 @@
+
+
+ class PreprocessorBlurGaussian(Preprocessor):
++    cacheable = True
+     def __init__(self):
+         super().__init__(name="blur_gaussian")
+         self.slider_1 = PreprocessorParameter(
+@@ -114,6 +118,7 @@
+
+
+ class PreprocessorScribbleXdog(Preprocessor):
++    cacheable = True
+     def __init__(self):
+         super().__init__(name="scribble_xdog")
+         self.slider_1 = PreprocessorParameter(
+diff -urN a/scripts/supported_preprocessor.py b/scripts/supported_preprocessor.py
+--- a/scripts/supported_preprocessor.py	2026-08-12 08:21:23.461534701 -0700
++++ b/scripts/supported_preprocessor.py	2026-08-12 08:21:23.462475972 -0700
+@@ -7,7 +7,7 @@
+ from modules import shared, devices
+ from scripts.enums import ControlNetUnionControlType
+ from scripts.logging import logger
+-from scripts.utils import ndarray_lru_cache
++from scripts.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
+
+
+ CACHE_SIZE = getattr(shared.cmd_opts, "controlnet_preprocessor_cache_size", 0)
+@@ -104,6 +104,8 @@
+     model: Optional[torch.nn.Module] = None
+     device = devices.get_device_for("controlnet")
+     preprocessor_deps: List[str] = field(default_factory=list)
++    cacheable: bool = False
++    _result_cache: Optional[AtomicLRU] = field(default=None, init=False, repr=False, compare=False)
+
+     all_processors: ClassVar[Dict[str, "Preprocessor"]] = {}
+     all_processors_by_name: ClassVar[Dict[str, "Preprocessor"]] = {}
+@@ -178,6 +180,11 @@
+         return set([tag] + filters_aliases.get(tag, []) + union_tags)
+
+     @classmethod
++    def clear_all_caches(cls, reason="extension-reload"):
++        for processor in cls.all_processors.values():
++            processor.clear_cache(reason)
++
++    @classmethod
+     def unload_unused(cls, active_processors: Set["Preprocessor"]):
+         logger.debug(
+             f"Unload unused preprocessors. Active: {[p.name for p in active_processors]}"
+@@ -204,11 +211,54 @@
+                 display_images=[result if self.returns_image else input_image],
+             )
+
+-    @ndarray_lru_cache(max_size=CACHE_SIZE)
++    def _cache_identity(self, args, kwargs):
++        model = self.model
++        model_parameters = []
++        if model is not None and hasattr(model, "parameters"):
++            try:
++                model_parameters = [
++                    (tuple(parameter.shape), str(parameter.dtype), str(parameter.device))
++                    for parameter in model.parameters()
++                ]
++            except Exception:
++                model_parameters = [("unavailable",)]
++        semantic_options = {
++            key: value for key, value in shared.opts.data.items()
++            if key.startswith("control_net") or key.startswith("controlnet")
++        }
++        return (
++            "controlnet-preprocessor", 1, self.name, self.label,
++            callable_identity(self.__call__),
++            None if model is None else (
++                id(model), callable_identity(type(model)), freeze(model_parameters),
++            ),
++            str(self.device), str(getattr(devices, "dtype", None)),
++            str(getattr(devices, "dtype_unet", None)), runtime_identity(torch),
++            freeze(semantic_options), freeze(args), freeze(kwargs),
++        )
++
++    def clear_cache(self, reason="explicit"):
++        if self._result_cache is not None:
++            self._result_cache.clear(reason)
++
++    def cache_info(self):
++        return self._result_cache.info() if self._result_cache is not None else {
++            "name": f"controlnet-preprocessor:{self.name}", "size": 0,
++            "max_size": CACHE_SIZE, "stats": {},
++        }
++
+     def _cached_call(self, *args, **kwargs):
+-        """The actual cached function."""
+-        logger.debug(f"Calling preprocessor {self.name} outside of cache.")
+-        return self(*args, **kwargs)
++        """Cache only deterministic calls under complete input/runtime identity."""
++        if not self.cacheable or CACHE_SIZE <= 0:
++            logger.debug(f"Calling non-cacheable preprocessor {self.name}.")
++            return self(*args, **kwargs)
++        if self._result_cache is None:
++            self._result_cache = AtomicLRU(CACHE_SIZE, f"controlnet-preprocessor:{self.name}")
++        self._result_cache.set_max_size(CACHE_SIZE)
++        key = self._cache_identity(args, kwargs)
++        return self._result_cache.get_or_compute(
++            key, lambda: self(*args, **kwargs), clone=True
++        )
+
+     def __hash__(self):
+         return hash(self.name)
+@@ -230,6 +280,7 @@
+         pass
+
+     def unload(self):
++        self.clear_cache("teardown")
+         if self.model is not None:
+             if hasattr(self.model, "unload_model"):
+                 self.model.unload_model()

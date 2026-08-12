@@ -123,6 +123,7 @@ fi
 if [[ -d "${CONTROLNET_ROOT}/annotator/teed" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
 fi
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-cache-correctness.py" "${CONTROLNET_ROOT}"
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
