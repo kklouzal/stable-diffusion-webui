@@ -530,13 +530,21 @@ class StableDiffusionProcessing:
         self.main_prompt = self.all_prompts[0]
         self.main_negative_prompt = self.all_negative_prompts[0]
 
+    def active_lora_cond_signature(self):
+        """Return the canonical atomically-published effective network state."""
+        try:
+            import networks
+            return networks.current_network_state_identity()
+        except (ImportError, AttributeError):
+            return ()
+
     def cached_params(self, cache_namespace, required_prompts, steps, extra_network_data, hires_steps=None, use_old_scheduling=False):
         """Return the complete semantic conditioning key and atomic dependency snapshot."""
         relevant_epochs = openclaw_cache_epochs.epoch_subset((
             "checkpoint_object_epoch", "conditioner_epoch", "textual_inversion_epoch",
-            "tokenizer_epoch", "conditioning_hook_epoch", "lora_applied_epoch",
-            "precision_epoch", "device_epoch",
+            "tokenizer_epoch", "conditioning_hook_epoch", "precision_epoch", "device_epoch",
         ))
+        effective_network_state = self.active_lora_cond_signature()
         openclaw_cache_epochs.observe_dependency("E05", dict(relevant_epochs))
         return (
             cache_namespace,
@@ -548,7 +556,7 @@ class StableDiffusionProcessing:
             opts.CLIP_stop_at_last_layers,
             opts.sdxl_clip_l_skip,
             shared.sd_model.sd_checkpoint_info,
-            self.active_lora_cond_signature(),
+            effective_network_state,
             extra_network_data,
             opts.sdxl_crop_left,
             opts.sdxl_crop_top,
@@ -557,30 +565,22 @@ class StableDiffusionProcessing:
             opts.fp8_storage,
             opts.cache_fp16_weight,
             opts.emphasis,
+            opts.use_old_emphasis_implementation,
+            opts.comma_padding_backtrack,
         )
 
-    def active_lora_cond_signature(self):
-        try:
-            import networks
-        except Exception:
-            return None
-
-        loras = []
-        for net in getattr(networks, "loaded_networks", []):
-            network_on_disk = getattr(net, "network_on_disk", None)
-            loras.append((
-                getattr(net, "name", None),
-                getattr(net, "mentioned_name", None),
-                getattr(net, "te_multiplier", None),
-                getattr(net, "unet_multiplier", None),
-                getattr(net, "dyn_dim", None),
-                networks.network_lora_source_signature(network_on_disk, net) if hasattr(networks, "network_lora_source_signature") else None,
-            ))
-        return (
-            getattr(opts, "sd_lora", None),
-            getattr(opts, "extra_networks_default_multiplier", None),
-            tuple(loras),
+    @staticmethod
+    def _conditioning_cache_miss_reason(previous_key, current_key):
+        if previous_key is None:
+            return "cold"
+        labels = (
+            "namespace", "dependency_epoch", "prompt", "steps", "hires_steps", "scheduling",
+            "clip_skip", "sdxl_clip_skip", "checkpoint", "network_state", "extra_network_data",
+            "sdxl_crop", "sdxl_crop", "dimensions", "dimensions", "fp8_storage",
+            "fp16_weight_cache", "emphasis", "old_emphasis", "comma_padding_backtrack",
         )
+        changed = [label for label, before, after in zip(labels, previous_key, current_key) if before != after]
+        return "changed:" + ",".join(dict.fromkeys(changed)) if changed else "evicted"
 
     def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):
         """Return conditioning from one namespace-owned, atomically published cache slot."""
@@ -606,7 +606,7 @@ class StableDiffusionProcessing:
                     openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
                     return cache[1]
 
-                reason = "dependency_changed" if cache[0] is not None else "cache_miss"
+                reason = self._conditioning_cache_miss_reason(cache[0], cached_params)
                 openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
                 started = time.perf_counter()
                 try:

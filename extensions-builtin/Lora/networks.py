@@ -230,6 +230,12 @@ def network_applied_state_key(networks_to_apply):
     return (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
 
 
+def current_network_state_identity():
+    """Return the atomically published effective LoRA state, not its transition history."""
+    with _network_application_lock:
+        return _applied_state_key or network_applied_state_key(())
+
+
 def _apply_loaded_state_to_model():
     if getattr(shared.opts, "lora_functional", False):
         return

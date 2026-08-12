@@ -375,7 +375,7 @@ def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts(
     assert publish.count('bump_epoch("lora_applied_epoch"') == 2
     assert 'observe("E12", "reject"' in publish
     assert "semantic_key=wanted_key" in publish
-    assert "lora_applied_epoch" in Path("modules/processing.py").read_text()
+    assert "current_network_state_identity" in Path("modules/processing.py").read_text()
     assert "lora_applied_epoch" in Path("modules/openclaw_cuda_graphs.py").read_text()
     assert "lora_applied_epoch" in Path("modules/mxfp8_diagnostics.py").read_text()
 
@@ -618,3 +618,49 @@ def test_rollback_failure_publishes_explicit_empty_fail_closed_state(lora_networ
     assert db.word_embeddings == {}
     assert _epochs(networks) == {name: value + 1 for name, value in before.items()}
     assert graphs == ["lora_changed"]
+
+
+def test_current_network_state_identity_reuses_semantically_identical_lifecycle(lora_networks, monkeypatch):
+    networks = lora_networks
+    base, _module, _payload = _base_network(networks)
+    base.source_key = ("opaque", ("sha256", "same"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "same"))
+    monkeypatch.setattr(networks, "network_source_key", lambda *_args: base.source_key)
+    monkeypatch.setattr(networks, "load_network", lambda *_args: base)
+
+    networks.load_networks(["alpha"], [0.75], [1.25], [4])
+    first = networks.current_network_state_identity()
+    networks.load_networks([], [], [], [])
+    unloaded = networks.current_network_state_identity()
+    networks.load_networks(["alpha"], [0.75], [1.25], [4])
+    reapplied = networks.current_network_state_identity()
+
+    assert first == reapplied
+    assert first != unloaded
+    assert networks.loaded_networks[0].te_multiplier == 0.75
+    assert networks.loaded_networks[0].unet_multiplier == 1.25
+    assert networks.loaded_networks[0].dyn_dim == 4
+
+
+def test_current_network_state_identity_changes_for_effective_inputs(lora_networks):
+    networks = lora_networks
+    first, _module, _payload = _base_network(networks)
+    first.source_key = ("opaque", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
+    baseline = networks.network_applied_state_key([first])
+
+    changed_source, _module, _payload = _base_network(networks)
+    changed_source.source_key = ("opaque", ("sha256", "b"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
+    changed_te, _module, _payload = _base_network(networks)
+    changed_te.source_key = first.source_key
+    changed_te.te_multiplier = 0.5
+    changed_unet, _module, _payload = _base_network(networks)
+    changed_unet.source_key = first.source_key
+    changed_unet.unet_multiplier = 0.5
+    changed_dyn, _module, _payload = _base_network(networks)
+    changed_dyn.source_key = first.source_key
+    changed_dyn.dyn_dim = 8
+
+    assert baseline != networks.network_applied_state_key([changed_source])
+    assert baseline != networks.network_applied_state_key([changed_te])
+    assert baseline != networks.network_applied_state_key([changed_unet])
+    assert baseline != networks.network_applied_state_key([changed_dyn])
