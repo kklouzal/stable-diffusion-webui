@@ -47,6 +47,7 @@ def create_sampler(name, model):
 def set_samplers():
     global samplers, samplers_for_img2img, samplers_hidden
 
+    get_sampler_and_scheduler.cache_clear()
     samplers_hidden = set(shared.opts.hide_samplers)
     samplers = all_samplers
     samplers_for_img2img = all_samplers

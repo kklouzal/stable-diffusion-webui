@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import dataclasses
+import hashlib
 import os
 import threading
 import re
@@ -13,6 +14,29 @@ from modules.paths_internal import extensions_dir, extensions_builtin_dir, scrip
 extensions: list[Extension] = []
 extension_paths: dict[str, Extension] = {}
 loaded_extensions: dict[str, Exception] = {}
+
+
+def git_repository_revision(path):
+    git_path = os.path.join(path, ".git")
+    if os.path.isfile(git_path):
+        text = open(git_path, encoding="utf8").read().strip()
+        if text.startswith("gitdir:"):
+            git_path = os.path.abspath(os.path.join(path, text[7:].strip()))
+    digest = hashlib.sha256()
+    for name in ("HEAD", "packed-refs", "config"):
+        filename = os.path.join(git_path, name)
+        try:
+            data = open(filename, "rb").read()
+        except FileNotFoundError:
+            data = b""
+        digest.update(name.encode() + b"\0" + data + b"\0")
+        if name == "HEAD" and data.startswith(b"ref:"):
+            ref = data[4:].strip().decode("utf8", "replace")
+            try:
+                digest.update(open(os.path.join(git_path, ref), "rb").read())
+            except FileNotFoundError:
+                pass
+    return digest.hexdigest()
 
 
 os.makedirs(extensions_dir, exist_ok=True)
@@ -143,7 +167,7 @@ class Extension:
                 return self.to_dict()
 
         try:
-            d = cache.cached_data_for_file('extensions-git', self.name, os.path.join(self.path, ".git"), read_from_repo)
+            d = cache.cached_data_for_file('extensions-git', self.name, os.path.join(self.path, ".git"), read_from_repo, source_revision=lambda: git_repository_revision(self.path))
             self.from_dict(d)
         except FileNotFoundError:
             pass

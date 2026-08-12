@@ -26,17 +26,13 @@ def sha256_from_cache(filename, title, use_addnet_hash=False):
         ondisk_stat = os.stat(filename)
     except FileNotFoundError:
         return None
-    ondisk_mtime = ondisk_stat.st_mtime
-    ondisk_size = ondisk_stat.st_size
+    ondisk_revision = modules.cache.file_revision(ondisk_stat)
 
     if title not in hashes:
         return None
 
     cached_sha256 = hashes[title].get("sha256", None)
-    cached_mtime = hashes[title].get("mtime", 0)
-    cached_size = hashes[title].get("size", None)
-
-    if ondisk_mtime != cached_mtime or (cached_size is not None and ondisk_size != cached_size) or cached_sha256 is None:
+    if hashes[title].get("source_revision") != ondisk_revision or cached_sha256 is None:
         return None
 
     return cached_sha256
@@ -45,27 +41,28 @@ def sha256_from_cache(filename, title, use_addnet_hash=False):
 def sha256(filename, title, use_addnet_hash=False):
     hashes = cache("hashes-addnet") if use_addnet_hash else cache("hashes")
 
-    sha256_value = sha256_from_cache(filename, title, use_addnet_hash)
-    if sha256_value is not None:
-        return sha256_value
+    subsection = "hashes-addnet" if use_addnet_hash else "hashes"
+    with modules.cache.entry_lock(subsection, title):
+        sha256_value = sha256_from_cache(filename, title, use_addnet_hash)
+        if sha256_value is not None:
+            return sha256_value
 
-    if shared.cmd_opts.no_hashing:
-        return None
+        if shared.cmd_opts.no_hashing:
+            return None
 
-    print(f"Calculating sha256 for {filename}: ", end='')
-    if use_addnet_hash:
-        with open(filename, "rb") as file:
-            sha256_value = addnet_hash_safetensors(file)
-    else:
-        sha256_value = calculate_sha256(filename)
-    print(f"{sha256_value}")
+        print(f"Calculating sha256 for {filename}: ", end='')
+        before = modules.cache.file_revision(os.stat(filename))
+        if use_addnet_hash:
+            with open(filename, "rb") as file:
+                sha256_value = addnet_hash_safetensors(file)
+        else:
+            sha256_value = calculate_sha256(filename)
+        after = modules.cache.file_revision(os.stat(filename))
+        if before != after:
+            return None
+        print(f"{sha256_value}")
 
-    stat = os.stat(filename)
-    hashes[title] = {
-        "mtime": stat.st_mtime,
-        "size": stat.st_size,
-        "sha256": sha256_value,
-    }
+        hashes[title] = {"source_revision": after, "sha256": sha256_value}
 
     dump_cache()
 
@@ -96,14 +93,11 @@ def partial_hash_from_cache(filename, *, ignore_cache: bool = False, digits: int
     try:
         filename = str(filename)
         stat = os.stat(filename)
-        mtime = stat.st_mtime
-        size = stat.st_size
+        revision = modules.cache.file_revision(stat)
         hashes = cache('partial-hash')
         cache_entry = hashes.get(filename, {})
-        cache_mtime = cache_entry.get("mtime", 0)
-        cache_size = cache_entry.get("size", None)
         cache_hash = cache_entry.get("hash", None)
-        if mtime == cache_mtime and (cache_size is None or size == cache_size) and cache_hash and not ignore_cache:
+        if revision == cache_entry.get("source_revision") and cache_hash and not ignore_cache:
             return cache_hash[0:digits]
 
         with open(filename, 'rb') as file:
@@ -111,7 +105,10 @@ def partial_hash_from_cache(filename, *, ignore_cache: bool = False, digits: int
             file.seek(0x100000)
             m.update(file.read(0x10000))
             partial_hash = m.hexdigest()
-            hashes[filename] = {'mtime': mtime, 'size': size, 'hash': partial_hash}
+            after_revision = modules.cache.file_revision(os.stat(filename))
+            if revision != after_revision:
+                return partial_hash_from_cache(filename, ignore_cache=True, digits=digits)
+            hashes[filename] = {'source_revision': revision, 'hash': partial_hash}
             return partial_hash[0:digits]
 
     except FileNotFoundError:

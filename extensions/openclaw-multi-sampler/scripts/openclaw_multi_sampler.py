@@ -632,6 +632,8 @@ def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerD
 
 def _register_definitions() -> None:
     with _LOCK:
+        _SAMPLER_FUNC_CACHE.clear()
+        _SIGNATURE_PARAM_CACHE.clear()
         defs = _load_custom_defs() + list(_TRANSIENT_DEFS.values())
         for name in list(_REGISTERED_NAMES):
             sd_samplers.all_samplers_map.pop(name, None)

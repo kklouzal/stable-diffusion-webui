@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from functools import wraps, cache
+from functools import wraps, lru_cache
 
 import math
 import torch.nn as nn
@@ -188,7 +188,7 @@ DEPTH_LAYERS_XL = {
 
 RNG_INSTANCE = random.Random()
 
-@cache
+@lru_cache(maxsize=256)
 def get_divisors(value: int, min_value: int, /, max_options: int = 1) -> list[int]:
     """
     Returns divisors of value that
@@ -218,7 +218,7 @@ def set_hypertile_seed(seed: int) -> None:
     RNG_INSTANCE.seed(seed)
 
 
-@cache
+@lru_cache(maxsize=256)
 def largest_tile_size_available(width: int, height: int) -> int:
     """
     Calculates the largest tile size available for a given width and height
@@ -244,7 +244,7 @@ def iterative_closest_divisors(hw:int, aspect_ratio:float) -> tuple[int, int]:
     return closest_pair
 
 
-@cache
+@lru_cache(maxsize=256)
 def find_hw_candidates(hw:int, aspect_ratio:float) -> tuple[int, int]:
     """
     Finds h and w such that h*w = hw and h/w = aspect_ratio

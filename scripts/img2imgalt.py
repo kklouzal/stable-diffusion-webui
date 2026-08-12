@@ -157,6 +157,10 @@ class Script(scripts.Script):
         ]
 
     def run(self, p, _, override_sampler, override_prompt, original_prompt, original_negative_prompt, override_steps, st, override_strength, cfg, randomness, sigma_adjustment):
+        # Noise inversion is request-owned. Retaining it on the Script singleton can
+        # cross checkpoint/precision/device lifetimes and the old approximate latent
+        # comparison could false-hit. Exact request-local reuse is safe.
+        noise_cache = None
         # Override
         if override_sampler:
             p.sampler_name = "Euler"
@@ -169,16 +173,17 @@ class Script(scripts.Script):
             p.denoising_strength = 1.0
 
         def sample_extra(conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
+            nonlocal noise_cache
             lat = (p.init_latent.detach() * 10).to(torch.int64)
 
-            same_params = self.cache is not None and self.cache.cfg_scale == cfg and self.cache.steps == st \
-                                and self.cache.original_prompt == original_prompt \
-                                and self.cache.original_negative_prompt == original_negative_prompt \
-                                and self.cache.sigma_adjustment == sigma_adjustment
-            same_everything = same_params and self.cache.latent.shape == lat.shape and torch.abs(self.cache.latent - lat).sum().item() < 100
+            same_params = noise_cache is not None and noise_cache.cfg_scale == cfg and noise_cache.steps == st \
+                                and noise_cache.original_prompt == original_prompt \
+                                and noise_cache.original_negative_prompt == original_negative_prompt \
+                                and noise_cache.sigma_adjustment == sigma_adjustment
+            same_everything = same_params and torch.equal(noise_cache.latent, lat)
 
             if same_everything:
-                rec_noise = self.cache.noise
+                rec_noise = noise_cache.noise
             else:
                 shared.state.job_count += 1
                 cond = p.sd_model.get_learned_conditioning(p.batch_size * [original_prompt])
@@ -187,7 +192,7 @@ class Script(scripts.Script):
                     rec_noise = find_noise_for_image_sigma_adjustment(p, cond, uncond, cfg, st)
                 else:
                     rec_noise = find_noise_for_image(p, cond, uncond, cfg, st)
-                self.cache = Cached(rec_noise, cfg, st, lat.clone(), original_prompt, original_negative_prompt, sigma_adjustment)
+                noise_cache = Cached(rec_noise, cfg, st, lat.clone(), original_prompt, original_negative_prompt, sigma_adjustment)
 
             rand_noise = processing.create_random_tensors(p.init_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, seed_resize_from_h=p.seed_resize_from_h, seed_resize_from_w=p.seed_resize_from_w, p=p)
 

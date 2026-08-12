@@ -1,7 +1,10 @@
 import json
+import hashlib
+import marshal
 import os
 import os.path
 import threading
+from contextlib import contextmanager
 
 import diskcache
 import tqdm
@@ -12,6 +15,28 @@ cache_filename = os.environ.get('SD_WEBUI_CACHE_FILE', os.path.join(data_path, "
 cache_dir = os.environ.get('SD_WEBUI_CACHE_DIR', os.path.join(data_path, "cache"))
 caches = {}
 cache_lock = threading.Lock()
+_entry_locks = {}
+_entry_locks_lock = threading.Lock()
+
+
+def file_revision(stat_result):
+    return {"device": stat_result.st_dev, "inode": stat_result.st_ino, "size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns, "ctime_ns": stat_result.st_ctime_ns}
+
+
+def callable_revision(func):
+    code = getattr(func, "__code__", None)
+    if code is None:
+        return f"{getattr(func, '__module__', '')}:{getattr(func, '__qualname__', repr(func))}"
+    return hashlib.sha256(marshal.dumps(code)).hexdigest()
+
+
+@contextmanager
+def entry_lock(subsection, title):
+    key = (subsection, title)
+    with _entry_locks_lock:
+        lock = _entry_locks.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
 
 def dump_cache():
@@ -65,20 +90,20 @@ def cache(subsection):
     """
 
     cache_obj = caches.get(subsection)
-    if not cache_obj:
+    if cache_obj is None:
         with cache_lock:
             if not os.path.exists(cache_dir) and os.path.isfile(cache_filename):
                 convert_old_cached_data()
 
             cache_obj = caches.get(subsection)
-            if not cache_obj:
+            if cache_obj is None:
                 cache_obj = make_cache(subsection)
                 caches[subsection] = cache_obj
 
     return cache_obj
 
 
-def cached_data_for_file(subsection, title, filename, func):
+def cached_data_for_file(subsection, title, filename, func, *, source_revision=None, schema_revision=None):
     """
     Retrieves or generates data for a specific file, using a caching mechanism.
 
@@ -102,25 +127,20 @@ def cached_data_for_file(subsection, title, filename, func):
     """
 
     existing_cache = cache(subsection)
-    ondisk_stat = os.stat(filename)
-    ondisk_mtime = ondisk_stat.st_mtime
-    ondisk_size = ondisk_stat.st_size
-
-    entry = existing_cache.get(title)
-    if entry:
-        cached_mtime = entry.get("mtime", 0)
-        cached_size = entry.get("size", None)
-        if ondisk_mtime != cached_mtime or cached_size != ondisk_size:
-            entry = None
-
-    if not entry or 'value' not in entry:
+    with entry_lock(subsection, title):
+        before = os.stat(filename)
+        revision = source_revision() if source_revision else file_revision(before)
+        schema = schema_revision if schema_revision is not None else callable_revision(func)
+        entry = existing_cache.get(title)
+        if entry and entry.get("source_revision") == revision and entry.get("schema_revision") == schema and "value" in entry:
+            return entry["value"]
         value = func()
         if value is None:
             return None
-
-        entry = {'mtime': ondisk_mtime, 'size': ondisk_size, 'value': value}
-        existing_cache[title] = entry
-
+        after = os.stat(filename)
+        after_revision = source_revision() if source_revision else file_revision(after)
+        if revision != after_revision:
+            return None
+        existing_cache[title] = {"source_revision": revision, "schema_revision": schema, "value": value}
         dump_cache()
-
-    return entry['value']
+        return value

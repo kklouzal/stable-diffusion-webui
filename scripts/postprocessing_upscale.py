@@ -1,4 +1,8 @@
 import re
+import hashlib
+import os
+import threading
+from collections import OrderedDict
 
 from PIL import Image
 import numpy as np
@@ -9,7 +13,17 @@ from modules import headless_ui as gr
 from modules.ui_components import FormRow, ToolButton, InputAccordion
 from modules.ui import switch_values_symbol
 
-upscale_cache = {}
+upscale_cache = OrderedDict()
+upscale_cache_lock = threading.RLock()
+
+
+def _upscaler_identity(upscaler):
+    scaler = upscaler.scaler
+    return (upscaler.name, os.path.realpath(upscaler.data_path) if upscaler.data_path else None, type(scaler).__module__, type(scaler).__qualname__, id(scaler))
+
+
+def _image_identity(image):
+    return (image.mode, image.size, hashlib.sha256(image.tobytes()).digest())
 
 
 def limit_size_by_one_dimention(w, h, limit):
@@ -98,17 +112,19 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 upscale_by = max(upscale_to_width/image.width, upscale_to_height/image.height)
                 info["Max side length"] = max_side_length
 
-        cache_key = (hash(np.array(image.getdata()).tobytes()), upscaler.name, upscale_mode, upscale_by,  upscale_to_width, upscale_to_height, upscale_crop)
-        cached_image = upscale_cache.pop(cache_key, None)
+        cache_key = (_image_identity(image), _upscaler_identity(upscaler), upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop)
+        with upscale_cache_lock:
+            cached_image = upscale_cache.pop(cache_key, None)
 
         if cached_image is not None:
-            image = cached_image
+            image = cached_image.copy()
         else:
             image = upscaler.scaler.upscale(image, upscale_by, upscaler.data_path)
 
-        upscale_cache[cache_key] = image
-        if len(upscale_cache) > shared.opts.upscaling_max_images_in_cache:
-            upscale_cache.pop(next(iter(upscale_cache), None), None)
+        with upscale_cache_lock:
+            upscale_cache[cache_key] = image.copy()
+            while len(upscale_cache) > max(0, shared.opts.upscaling_max_images_in_cache):
+                upscale_cache.popitem(last=False)
 
         if upscale_mode == 1 and upscale_crop:
             cropped = Image.new("RGB", (upscale_to_width, upscale_to_height))
@@ -161,7 +177,8 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         pp.image = upscaled_image
 
     def image_changed(self):
-        upscale_cache.clear()
+        with upscale_cache_lock:
+            upscale_cache.clear()
 
 
 class ScriptPostprocessingUpscaleSimple(ScriptPostprocessingUpscale):
