@@ -762,7 +762,7 @@ class Api:
 
     def set_vae_decode_graphs(self, req: dict[str, Any]):
         from modules import openclaw_vae_decode_graphs
-        enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
+        enabled = bool(req["enabled"]) if isinstance(req, dict) and "enabled" in req else None
         clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
         return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
 

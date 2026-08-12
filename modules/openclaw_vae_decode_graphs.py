@@ -98,23 +98,25 @@ def status() -> dict[str, Any]:
         }
 
 
-def set_enabled(enabled: bool, clear_cache: bool = False) -> dict[str, Any]:
+def set_enabled(enabled: bool | None = None, clear_cache: bool = False) -> dict[str, Any]:
+    """Update enablement and/or atomically reset retained graph state.
+
+    A reset preserves user enablement unless explicitly supplied, clears
+    failed-key latches and buffers, and keeps cumulative telemetry observable.
+    """
     global _ENABLED, _LAST_ERROR, _LAST_KEY
     with _EXECUTION_LOCK, _LOCK:
-        _ENABLED = bool(enabled)
+        if enabled is not None:
+            _ENABLED = bool(enabled)
         if clear_cache:
-            had_state = _clear_cache_locked()
-            for key in _COUNTERS:
-                _COUNTERS[key] = 0
-            _BYPASS_REASONS.clear()
-            _INVALIDATION_REASONS.clear()
+            _clear_cache_locked()
             _LAST_ERROR = None
             _LAST_KEY = None
-            if had_state:
-                openclaw_cache_epochs.observe("E11", "invalidate", reason="cache_cleared")
-            openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_CACHE_MAX)
-    return status()
-
+            _LIFECYCLE_STATE.clear()
+            _COUNTERS["invalidations"] += 1
+            _INVALIDATION_REASONS["manual_reset"] = _INVALIDATION_REASONS.get("manual_reset", 0) + 1
+            openclaw_cache_epochs.observe("E10", "invalidate", reason="manual_reset")
+        return status()
 
 def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
     del details  # Details may contain paths or object reprs and never enter telemetry.

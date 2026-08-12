@@ -175,13 +175,12 @@ def network_file_signature(filename):
 
 
 def _execution_identity():
+    # Immutable semantic identity, not lifecycle history: epochs may advance on
+    # a clean unload/reactivation while device and precision remain equivalent.
     return (
         str(getattr(devices, "device", None)),
         str(getattr(devices, "dtype", None)),
         str(getattr(devices, "dtype_unet", None)),
-        openclaw_cache_epochs.epoch_subset((
-            "checkpoint_object_epoch", "precision_epoch", "device_epoch",
-        )),
     )
 
 def clone_network_for_use(net):
@@ -212,10 +211,9 @@ def network_source_key(network_on_disk, source_signature=None):
     filename = os.path.realpath(os.fspath(network_on_disk.filename))
     if source_signature is None:
         source_signature = network_file_signature(filename)
-    parse_execution = openclaw_cache_epochs.epoch_subset((
-        "checkpoint_object_epoch", "precision_epoch", "device_epoch",
-    ))
-    return (filename, source_signature, LORA_SOURCE_SCHEMA_REVISION, parse_execution)
+    # Parsed source identity is bytes + parser contract. Runtime lifecycle
+    # epochs are transitions, not properties of the immutable adapter.
+    return (filename, source_signature, LORA_SOURCE_SCHEMA_REVISION)
 
 
 def network_applied_state_key(networks_to_apply):
