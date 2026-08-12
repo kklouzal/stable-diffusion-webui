@@ -583,7 +583,8 @@ def restore_weights_backup(obj, field, weight):
         setattr(obj, field, None)
         return
 
-    getattr(obj, field).copy_(weight)
+    with torch.no_grad():
+        getattr(obj, field).copy_(weight)
 
 
 def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.GroupNorm, torch.nn.LayerNorm, torch.nn.MultiheadAttention]):

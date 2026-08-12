@@ -306,6 +306,22 @@ def test_reorder_dyn_dim_checkpoint_precision_device_change_identity(lora_networ
     assert before != networks.network_applied_state_key([a])
 
 
+def test_restore_weights_backup_uses_no_grad_for_parameter_weights(lora_networks):
+    networks = lora_networks
+    module = networks.torch.nn.Linear(1, 1)
+    backup = module.weight.detach().clone()
+    module.network_weights_backup = backup
+    module.network_bias_backup = None
+
+    with networks.torch.no_grad():
+        module.weight.add_(1)
+
+    networks.network_restore_weights_from_backup(module)
+
+    assert networks.torch.equal(module.weight, backup)
+    assert module.network_weights_backup is not None
+
+
 def test_apply_loaded_state_skips_conditioner_wrappers_without_weights(lora_networks, monkeypatch):
     networks = lora_networks
     leaf = SimpleNamespace(weight=object())
