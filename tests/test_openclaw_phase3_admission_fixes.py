@@ -43,3 +43,25 @@ def test_vae_api_clear_without_enabled_is_reset_not_disable():
     source = ast.unparse(fn)
     assert "'enabled' in req" in source
     assert "else None" in source
+
+
+def test_cuda_graph_first_request_returns_captured_output_contract():
+    source = Path("modules/openclaw_cuda_graphs.py").read_text()
+    assert 'graph.replay()\n                return _clone_static(static_out)' in source
+    assert 'return capture_return' not in source
+    assert '_record_bypass("cache_warmup")' not in source
+
+
+def test_vae_graph_first_request_returns_captured_output_contract():
+    source = Path("modules/openclaw_vae_decode_graphs.py").read_text()
+    assert 'graph.replay()\n                return static_output.clone()' in source
+    assert 'return warmup_output' not in source
+
+
+def test_compile_cache_namespace_runtime_ownership_contract():
+    source = Path("gb10/run.sh").read_text()
+    for family in ("torchinductor", "triton", "cuda"):
+        assert f'"${{OPENCLAW_COMPILE_CACHE_ROOT}}/{family}/${{OPENCLAW_COMPILE_CACHE_NAMESPACE}}"' in source
+    assert 'install -d -o 2323 -g 2323 -m 0750 "${cache_namespace_path}"' in source
+    assert "sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -w" in source
+    assert 'rm -rf "${cache_namespace_path}"' not in source

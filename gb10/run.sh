@@ -167,6 +167,23 @@ A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEA
 OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE:-${A1111_COMMIT_HASH}-torch-${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}}"
 A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(git -C "${PROJECT_ROOT}" describe --tags 2>/dev/null || true)}"
 
+# Namespace creation is a host-side ownership boundary. install -d is idempotent,
+# preserves namespace contents, repairs only directory metadata, and prevents a
+# root-created first launch from leaving runtime UID/GID 2323 unable to compile.
+COMPILE_CACHE_NAMESPACE_PATHS=(
+  "${OPENCLAW_COMPILE_CACHE_ROOT}/torchinductor/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  "${OPENCLAW_COMPILE_CACHE_ROOT}/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  "${OPENCLAW_COMPILE_CACHE_ROOT}/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+)
+sudo install -d -o 2323 -g 2323 -m 0750 "${OPENCLAW_COMPILE_CACHE_ROOT}"
+for cache_namespace_path in "${COMPILE_CACHE_NAMESPACE_PATHS[@]}"; do
+  sudo install -d -o 2323 -g 2323 -m 0750 "${cache_namespace_path}"
+  if ! sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -w "${cache_namespace_path}"; then
+    echo "ERROR: compile cache namespace is not writable by runtime UID/GID 2323: ${cache_namespace_path}" >&2
+    exit 1
+  fi
+done
+
 DOCKER_ARGS=(
   -d
   --init

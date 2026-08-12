@@ -427,7 +427,11 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                     _LAST_ERROR = None
                     openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
                     openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_CACHE_MAX)
-                return warmup_output
+                # The capture execution can include one-time backend/autotune
+                # transitions. Replay once with the same static input and return that
+                # output so misses and hits have identical graph-replay semantics.
+                graph.replay()
+                return static_output.clone()
             except Exception as exc:
                 # Locals are deliberately not published; dropping all references
                 # releases partial graph/static allocations after this frame exits.

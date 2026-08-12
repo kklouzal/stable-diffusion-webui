@@ -631,8 +631,10 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                 _SEEN_KEYS.add(key)
                 _STATS["last_key"] = repr(key)
         if not seen_before:
-            _record_bypass("cache_warmup")
-            return fn(x, sigma, cond=cond)
+            # Warm the exact key, then continue into capture in this call. Returning
+            # eager output here made the first denoise transition differ from every
+            # subsequent graph replay for otherwise identical fixed-seed requests.
+            fn(x, sigma, cond=cond)
 
     # A CUDA graph entry owns mutable static input/output tensors and a graph
     # replay object. Copy/replay/capture must be serialized per key; otherwise
@@ -670,13 +672,6 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                 with torch.cuda.stream(stream):
                     warmup_out = fn(static_x, static_sigma, cond=static_cond)
                 torch.cuda.current_stream().wait_stream(stream)
-                # The capture pass invokes the UNet a second time for the same denoise
-                # step. Some active attention/guidance stacks are call-sensitive even
-                # when graph replay is exact, so return the first eager result for the
-                # current step and keep the captured output only as the graph-owned
-                # static replay buffer for subsequent steps.
-                capture_return = _clone_static(warmup_out)
-
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     static_out = fn(static_x, static_sigma, cond=static_cond)
@@ -689,7 +684,12 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                     openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_MAX_CACHE_SIZE)
                     _STATS["last_error"] = None
                     _STATS["last_key"] = repr(key)
-                return capture_return
+                # The capture execution can include one-time backend/autotune
+                # transitions. Replay once with the same static inputs and return that
+                # output so the first request has the same graph-replay semantics as
+                # every cache hit.
+                graph.replay()
+                return _clone_static(static_out)
             except Exception as exc:
                 with _LOCK:
                     _STATS["failures"] += 1
