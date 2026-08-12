@@ -241,6 +241,10 @@ def _apply_loaded_state_to_model():
         if marker in seen:
             continue
         seen.add(marker)
+        # Top-level conditioner wrappers are retained in the mapping for LoRA
+        # name resolution, but cannot have weights applied directly.
+        if getattr(layer, "weight", None) is None:
+            continue
         network_apply_weights(layer)
 
 

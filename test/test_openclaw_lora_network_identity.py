@@ -306,6 +306,22 @@ def test_reorder_dyn_dim_checkpoint_precision_device_change_identity(lora_networ
     assert before != networks.network_applied_state_key([a])
 
 
+def test_apply_loaded_state_skips_conditioner_wrappers_without_weights(lora_networks, monkeypatch):
+    networks = lora_networks
+    leaf = SimpleNamespace(weight=object())
+    wrapper = SimpleNamespace()
+    networks.shared.sd_model.network_layer_mapping = {
+        "0": wrapper,
+        "0_transformer_text_model_encoder_layers_0": leaf,
+    }
+    applied = []
+    monkeypatch.setattr(networks, "network_apply_weights", applied.append)
+
+    networks._apply_loaded_state_to_model()
+
+    assert applied == [leaf]
+
+
 def test_failed_apply_restores_without_epoch_or_stale_publish(lora_networks, monkeypatch):
     networks = lora_networks
     old, _, _ = _base_network(networks, "old")
