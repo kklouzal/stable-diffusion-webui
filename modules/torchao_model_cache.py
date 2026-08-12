@@ -3,13 +3,62 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
+import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Callable, Optional
 
 import torch
 
+from modules import persistent_artifact_cache
+
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
+ARTIFACT_SCHEMA_VERSION = 2
+
+
+def runtime_compatibility() -> dict:
+    try:
+        import torchao
+        torchao_version = getattr(torchao, "__version__", "unknown")
+    except Exception:
+        torchao_version = "unavailable"
+    cuda = getattr(torch.version, "cuda", None)
+    device = None
+    driver = None
+    if torch.cuda.is_available():
+        index = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(index)
+        device = {
+            "name": props.name,
+            "capability": list(torch.cuda.get_device_capability(index)),
+            "total_memory": props.total_memory,
+        }
+        try:
+            driver = torch._C._cuda_getDriverVersion()
+        except Exception:
+            driver = None
+    return {
+        "python": list(sys.version_info[:3]),
+        "platform": platform.platform(),
+        "torch": torch.__version__,
+        "torchao": torchao_version,
+        "cuda_runtime": cuda,
+        "cuda_driver": driver,
+        "device": device,
+    }
+
+
+def artifact_contract(config_name: str, coverage=None) -> dict:
+    return {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "quantization": {"implementation": config_name, "options": {}, "coverage": sorted(coverage) if coverage is not None else None},
+        "runtime": runtime_compatibility(),
+    }
+
+
+def contract_matches(actual: dict | None, expected: dict) -> bool:
+    return isinstance(actual, dict) and actual == expected
 
 
 def is_safetensors(filename: str) -> bool:
@@ -175,6 +224,7 @@ def expected_cache_metadata(filename: str, cache_version: int, config_name: str,
         "config": config_name,
         "source": stat_source(filename),
         "coverage": sorted(coverage) if coverage is not None else None,
+        "contract": artifact_contract(config_name, coverage),
     }
 
 
@@ -208,6 +258,7 @@ def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_n
     return (
         sidecar.get("cache_version") == cache_version
         and sidecar.get("config") == config_name
+        and contract_matches(sidecar.get("contract"), artifact_contract(config_name, coverage))
         and source_matches
         and coverage_matches
         and cache_matches
@@ -267,7 +318,10 @@ def load_into_model(
 
     print(f"Loading {label} cache for {source_path} from {cache_path}", flush=True)
     try:
-        payload = torch_load_cache(cache_path, device, register_safe_globals)
+        # Retention tooling treats the lease as an in-use barrier. Once the
+        # payload is deserialized, removal of the disk artifact is harmless.
+        with persistent_artifact_cache.active_lease(cache_path):
+            payload = torch_load_cache(cache_path, device, register_safe_globals)
     except Exception as e:
         print(f"Ignoring unreadable {label} cache {cache_path}: {e}")
         return False
@@ -281,6 +335,7 @@ def load_into_model(
     if not (
         payload.get("cache_version") == cache_version
         and payload.get("config") == config_name
+        and contract_matches(payload.get("contract"), artifact_contract(config_name, coverage))
         and file_metadata_matches(source_path, payload.get("source"))
         and payload_coverage_matches
     ):
@@ -373,6 +428,7 @@ def save_from_model(
         "config": config_name,
         "source": source_stat,
         "coverage": sorted(coverage) if coverage is not None else None,
+        "contract": artifact_contract(config_name, coverage),
         "eligible_linear": eligible,
         "skipped_linear": skipped_linear,
         "skipped_reasons": skipped_reasons,
@@ -381,20 +437,42 @@ def save_from_model(
     }
 
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    tmp_path = cache_path + ".tmp"
-    torch.save(payload, tmp_path)
-    os.replace(tmp_path, cache_path)
+    with persistent_artifact_cache.exclusive_lock(cache_path):
+        # A unique same-filesystem temporary plus fsync+replace prevents readers
+        # from observing a partially serialized artifact. The sidecar is the
+        # commit record: a crash before it is published leaves an artifact that
+        # validation rejects. Writers are serialized per destination.
+        with NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(cache_path), prefix=".partial-", suffix=".pt") as stream:
+            tmp_path = stream.name
+        try:
+            torch.save(payload, tmp_path)
+            with open(tmp_path, "rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(tmp_path, cache_path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
-    sidecar = {
-        "cache_version": cache_version,
-        "config": config_name,
-        "source": source_stat,
-        "coverage": sorted(coverage) if coverage is not None else None,
-        "cache": stat_source(cache_path),
-        "eligible_linear": eligible,
-        "skipped_linear": skipped_linear,
-        "skipped_reasons": skipped_reasons,
-    }
-    write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+        sidecar = {
+            "cache_version": cache_version,
+            "config": config_name,
+            "source": source_stat,
+            "coverage": sorted(coverage) if coverage is not None else None,
+            "contract": artifact_contract(config_name, coverage),
+            "cache": stat_source(cache_path),
+            "eligible_linear": eligible,
+            "skipped_linear": skipped_linear,
+            "skipped_reasons": skipped_reasons,
+        }
+        write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+    quota_bytes = int(os.environ.get("OPENCLAW_TORCHAO_CACHE_MAX_BYTES", str(256 * 1024 ** 3)))
+    quota_dry_run = os.environ.get("OPENCLAW_TORCHAO_CACHE_QUOTA_DRY_RUN", "0") == "1"
+    quota = persistent_artifact_cache.enforce_directory_quota(
+        os.path.dirname(cache_path), max_bytes=quota_bytes, dry_run=quota_dry_run
+    )
+    if quota["evicted"] or not quota["within_quota"]:
+        print(f"{label} cache quota: {json.dumps(quota, sort_keys=True)}", flush=True)
     print(f"Created {label} cache for {source_path} -> {cache_path}")
     return cache_path

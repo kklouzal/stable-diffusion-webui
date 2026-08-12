@@ -17,6 +17,7 @@ OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX:-8}"
 OPENCLAW_CUDA_GRAPH_ALLOW_SEG="${OPENCLAW_CUDA_GRAPH_ALLOW_SEG:-1}"
 OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS:-1}"
 OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX:-4}"
+OPENCLAW_COMPILE_CACHE_ROOT="${OPENCLAW_COMPILE_CACHE_ROOT:-${HOST_ROOT}/Caches/compile}"
 
 LOCAL_DIRS=(
   BLIP
@@ -40,6 +41,7 @@ LOCAL_DIRS=(
 for d in "${LOCAL_DIRS[@]}"; do
   sudo mkdir -p "${HOST_ROOT}/${d}"
 done
+sudo mkdir -p "${OPENCLAW_COMPILE_CACHE_ROOT}"
 
 if [[ ! -e "${HOST_ROOT}/Outputs" ]]; then
   sudo ln -s "${OUTPUTS_TARGET}" "${HOST_ROOT}/Outputs"
@@ -162,6 +164,7 @@ sudo chown -R 2323:2323 \
   "${HOST_ROOT}/config"
 
 A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
+OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE:-${A1111_COMMIT_HASH}-torch-${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}}"
 A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(git -C "${PROJECT_ROOT}" describe --tags 2>/dev/null || true)}"
 
 DOCKER_ARGS=(
@@ -183,6 +186,10 @@ DOCKER_ARGS=(
   -e OPENCLAW_CUDA_GRAPH_ALLOW_SEG="${OPENCLAW_CUDA_GRAPH_ALLOW_SEG}"
   -e OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS}"
   -e OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX}"
+  -e OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  -e TORCHINDUCTOR_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/torchinductor/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  -e TRITON_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  -e CUDA_CACHE_PATH="/opt/stable-diffusion-webui/cache/compile/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -v "${HOST_ROOT}/BLIP:/opt/stable-diffusion-webui/models/BLIP"
   -v "${HOST_ROOT}/CLIP:/opt/stable-diffusion-webui/models/CLIP"
   -v "${HOST_ROOT}/Codeformer:/opt/stable-diffusion-webui/models/Codeformer"
@@ -199,6 +206,7 @@ DOCKER_ARGS=(
   -v "${HOST_ROOT}/Extensions:/opt/stable-diffusion-webui/extensions"
   -v "${HOST_ROOT}/Models:/opt/stable-diffusion-webui/models/Stable-diffusion"
   -v "${HOST_ROOT}/Outputs:/opt/stable-diffusion-webui/outputs"
+  -v "${OPENCLAW_COMPILE_CACHE_ROOT}:/opt/stable-diffusion-webui/cache/compile"
   -v "${HOST_ROOT}/config/config.json:/opt/stable-diffusion-webui/config.json"
   -v "${HOST_ROOT}/config/ui-config.json:/opt/stable-diffusion-webui/ui-config.json"
   -v "${HOST_ROOT}/config/styles.csv:/opt/stable-diffusion-webui/styles.csv"
@@ -223,5 +231,6 @@ echo "Outputs symlink target: ${OUTPUTS_TARGET}"
 echo "OpenClaw SDPA backend: ${OPENCLAW_SDPA_BACKEND}"
 echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX} allow_seg=${OPENCLAW_CUDA_GRAPH_ALLOW_SEG}"
 echo "OpenClaw VAE decode graphs: ${OPENCLAW_VAE_DECODE_GRAPHS} cache=${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX}"
+echo "Compile/kernel cache namespace: ${OPENCLAW_COMPILE_CACHE_NAMESPACE} root=${OPENCLAW_COMPILE_CACHE_ROOT}"
 echo "API expectation: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
 echo "Browser UI has been removed; this image is API/headless only."

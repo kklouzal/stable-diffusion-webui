@@ -82,3 +82,40 @@ def test_torchao_cache_metadata_rejects_truncated_or_corrupt_changed_file(tmp_pa
     corrupt_metadata.update(current)
     corrupt_metadata["identity_trusted"] = False
     assert not torchao_model_cache.file_metadata_matches(str(source), corrupt_metadata)
+
+
+def test_torchao_contract_rejects_runtime_and_scheme_changes(monkeypatch):
+    from modules import torchao_model_cache
+
+    monkeypatch.setattr(torchao_model_cache, "runtime_compatibility", lambda: {"torch": "one", "sm": [12, 1]})
+    expected = torchao_model_cache.artifact_contract("mxfp8", ["diffusion_model"])
+    assert torchao_model_cache.contract_matches(expected, expected)
+    assert not torchao_model_cache.contract_matches({**expected, "runtime": {"torch": "two", "sm": [12, 1]}}, expected)
+    changed_scheme = {**expected, "quantization": {**expected["quantization"], "implementation": "nvfp4"}}
+    assert not torchao_model_cache.contract_matches(changed_scheme, expected)
+
+
+def test_torchao_sidecar_corruption_or_missing_contract_forces_regeneration(monkeypatch, tmp_path):
+    from modules import torchao_model_cache
+
+    source = tmp_path / "model.safetensors"
+    cache = tmp_path / "model.pt"
+    source.write_bytes(b"source")
+    cache.write_bytes(b"cache")
+    suffix = ".json"
+    sidecar = {
+        "cache_version": 9,
+        "config": "mxfp8",
+        "source": torchao_model_cache.stat_source(str(source)),
+        "cache": torchao_model_cache.stat_source(str(cache)),
+        "coverage": None,
+    }
+    Path = __import__("pathlib").Path
+    Path(str(cache) + suffix).write_text(__import__("json").dumps(sidecar))
+    monkeypatch.setattr(torchao_model_cache, "runtime_compatibility", lambda: {"torch": "test"})
+    assert not torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+    sidecar["contract"] = torchao_model_cache.artifact_contract("mxfp8")
+    Path(str(cache) + suffix).write_text(__import__("json").dumps(sidecar))
+    assert torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+    cache.write_bytes(b"broken")
+    assert not torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
