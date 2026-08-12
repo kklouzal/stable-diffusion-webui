@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / "gb10/controlnet-cache-correctness.patch"
 HELPER = ROOT / "gb10/controlnet_cache_contract.py"
-FILES = ["scripts/controlnet.py", "scripts/supported_preprocessor.py", "scripts/preprocessor/model_free_preprocessors.py"]
+FILES = ["scripts/controlnet.py", "scripts/controlnet_lllite.py", "scripts/hook.py", "scripts/ipadapter/plugable_ipadapter.py", "scripts/supported_preprocessor.py", "scripts/preprocessor/model_free_preprocessors.py"]
 
 
 def run(args, cwd):

@@ -308,3 +308,206 @@ diff -urN a/scripts/supported_preprocessor.py b/scripts/supported_preprocessor.p
          if self.model is not None:
              if hasattr(self.model, "unload_model"):
                  self.model.unload_model()
+--- a/scripts/controlnet_lllite.py
++++ b/scripts/controlnet_lllite.py
+@@ -1,6 +1,7 @@
+ # https://github.com/kohya-ss/ControlNet-LLLite-ComfyUI/blob/main/node_control_net_lllite.py
+
+ import re
++from threading import RLock
+ import torch
+
+
+@@ -101,14 +102,18 @@
+
+
+ all_hack = {}
++_all_hack_lock = RLock()
+
+
+ def clear_all_lllite():
+     global all_hack
+-    for k, v in all_hack.items():
+-        k.forward = v
+-        k.lllite_list = []
+-    all_hack = {}
++    with _all_hack_lock:
++        owned, all_hack = all_hack, {}
++        for k, v in owned.items():
++            if getattr(k, "_controlnet_lllite_owner", None) is owned:
++                k.forward = v
++                k.lllite_list = []
++                del k._controlnet_lllite_owner
+     return
+
+
+@@ -166,34 +171,37 @@
+         for module in self.modules.values():
+             module.set_cond_image(cond_image)
+
+-        for k, v in self.modules.items():
+-            k = k.replace('middle_block', 'middle_blocks_0')
+-            match = re.match("lllite_unet_(.*)_blocks_(.*)_1_transformer_blocks_(.*)_(.*)_to_(.*)", k, re.M | re.I)
+-            assert match, 'Failed to load ControlLLLite!'
+-            root = match.group(1)
+-            block = match.group(2)
+-            block_number = match.group(3)
+-            attn_name = match.group(4)
+-            proj_name = match.group(5)
+-            if root == 'input':
+-                b = model.input_blocks[int(block)][1].transformer_blocks[int(block_number)]
+-            elif root == 'output':
+-                b = model.output_blocks[int(block)][1].transformer_blocks[int(block_number)]
+-            else:
+-                b = model.middle_block[1].transformer_blocks[int(block_number)]
+-            b = getattr(b, attn_name, None)
+-            assert b is not None, 'Failed to load ControlLLLite!'
+-            b = getattr(b, 'to_' + proj_name, None)
+-            assert b is not None, 'Failed to load ControlLLLite!'
+-
+-            if not hasattr(b, 'lllite_list'):
+-                b.lllite_list = []
+-
+-            if len(b.lllite_list) == 0:
+-                all_hack[b] = b.forward
+-                b.forward = self.get_hacked_forward(original_forward=b.forward, model=model, blk=b)
+-
+-            b.lllite_list.append((weight, start, end, v))
++        with _all_hack_lock:
++            owner = all_hack
++            for k, v in self.modules.items():
++                k = k.replace('middle_block', 'middle_blocks_0')
++                match = re.match("lllite_unet_(.*)_blocks_(.*)_1_transformer_blocks_(.*)_(.*)_to_(.*)", k, re.M | re.I)
++                assert match, 'Failed to load ControlLLLite!'
++                root = match.group(1)
++                block = match.group(2)
++                block_number = match.group(3)
++                attn_name = match.group(4)
++                proj_name = match.group(5)
++                if root == 'input':
++                    b = model.input_blocks[int(block)][1].transformer_blocks[int(block_number)]
++                elif root == 'output':
++                    b = model.output_blocks[int(block)][1].transformer_blocks[int(block_number)]
++                else:
++                    b = model.middle_block[1].transformer_blocks[int(block_number)]
++                b = getattr(b, attn_name, None)
++                assert b is not None, 'Failed to load ControlLLLite!'
++                b = getattr(b, 'to_' + proj_name, None)
++                assert b is not None, 'Failed to load ControlLLLite!'
++
++                if not hasattr(b, 'lllite_list'):
++                    b.lllite_list = []
++
++                if len(b.lllite_list) == 0:
++                    all_hack[b] = b.forward
++                    b.forward = self.get_hacked_forward(original_forward=b.forward, model=model, blk=b)
++                    b._controlnet_lllite_owner = owner
++
++                b.lllite_list.append((weight, start, end, v))
+         return
+
+     def get_hacked_forward(self, original_forward, model, blk):
+--- a/scripts/hook.py
++++ b/scripts/hook.py
+@@ -6,6 +6,8 @@
+ from typing import Optional, Any, List
+
+ from scripts.logging import logger
++from scripts.controlnet_lllite import clear_all_lllite
++from scripts.ipadapter.plugable_ipadapter import clear_all_ip_adapter
+ from scripts.enums import (
+     ControlModelType,
+     AutoMachine,
+@@ -1090,6 +1092,12 @@
+
+     def restore(self):
+         scripts.script_callbacks.remove_callbacks_for_function(self.guidance_schedule_handler)
++        clear_all_lllite()
++        clear_all_ip_adapter()
++        for param in self.control_params or []:
++            release = getattr(getattr(param, "control_model", None), "release_request_state", None)
++            if callable(release):
++                release()
+
+         model = self.model
+         if model is not None and getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token:
+--- a/scripts/ipadapter/plugable_ipadapter.py
++++ b/scripts/ipadapter/plugable_ipadapter.py
+@@ -1,6 +1,7 @@
+ import itertools
+ import torch
+ import math
++from threading import RLock
+ from typing import Union, Dict, Optional, Callable
+
+ from .pulid_attn import PuLIDAttnSetting
+@@ -52,17 +53,20 @@
+
+ all_hacks = {}
+ current_model = None
++_all_hacks_lock = RLock()
+
+
+ def hack_blk(block, function, type):
+-    if not hasattr(block, "ipadapter_hacks"):
+-        block.ipadapter_hacks = []
++    with _all_hacks_lock:
++        if not hasattr(block, "ipadapter_hacks"):
++            block.ipadapter_hacks = []
++
++        if len(block.ipadapter_hacks) == 0:
++            all_hacks[block] = block.forward
++            block.forward = attn_forward_hacked.__get__(block, type)
++            block._controlnet_ipadapter_owner = all_hacks
+
+-    if len(block.ipadapter_hacks) == 0:
+-        all_hacks[block] = block.forward
+-        block.forward = attn_forward_hacked.__get__(block, type)
+-
+-    block.ipadapter_hacks.append(function)
++        block.ipadapter_hacks.append(function)
+     return
+
+
+@@ -83,11 +87,14 @@
+
+ def clear_all_ip_adapter():
+     global all_hacks, current_model
+-    for k, v in all_hacks.items():
+-        k.forward = v
+-        k.ipadapter_hacks = []
+-    all_hacks = {}
+-    current_model = None
++    with _all_hacks_lock:
++        owned, all_hacks = all_hacks, {}
++        current_model = None
++        for k, v in owned.items():
++            if getattr(k, "_controlnet_ipadapter_owner", None) is owned:
++                k.forward = v
++                k.ipadapter_hacks = []
++                del k._controlnet_ipadapter_owner
+     return
+
+
+@@ -99,6 +106,7 @@
+         self.dtype = None
+         self.weight: Union[float, Dict[int, float]] = 1.0
+         self.cache = None
++        self.image_emb = None
+         self.p_start = 0.0
+         self.p_end = 1.0
+         self.latent_width: int = 0
+@@ -109,6 +117,13 @@
+     def reset(self):
+         self.cache = {}
+
++    def release_request_state(self):
++        self.reset()
++        self.image_emb = None
++        self.effective_region_mask = None
++        self.latent_width = self.latent_height = 0
++        self.pulid_attn_setting = None
++
+     @torch.no_grad()
+     def hook(
+         self,
