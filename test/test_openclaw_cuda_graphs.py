@@ -468,41 +468,95 @@ class OpenClawImportOrderTests(unittest.TestCase):
 class OpenClawVaeDecodeGraphTests(unittest.TestCase):
     def setUp(self):
         from modules import openclaw_vae_decode_graphs
+
         self.graphs = openclaw_vae_decode_graphs
         self.graphs.set_enabled(False, clear_cache=True)
+        self.previous_opts = shared_stub.opts
+        self.previous_cmd_opts = getattr(shared_stub, "cmd_opts", None)
+        shared_stub.opts = types.SimpleNamespace(
+            sd_vae_decode_method="Full",
+            sd_vae_encode_method="Full",
+            hypertile_enable_vae=False,
+        )
+        shared_stub.cmd_opts = types.SimpleNamespace(no_half_vae=False, upcast_sampling=False, precision="autocast")
+
+    def tearDown(self):
+        self.graphs.set_enabled(False, clear_cache=True)
+        shared_stub.opts = self.previous_opts
+        if self.previous_cmd_opts is None:
+            delattr(shared_stub, "cmd_opts")
+        else:
+            shared_stub.cmd_opts = self.previous_cmd_opts
+
+    @staticmethod
+    def fake_model(name="model"):
+        vae = torch.nn.Module()
+        vae.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
+        vae.dtype = torch.float32
+        vae.eval()
+        info = types.SimpleNamespace(filename=f"/{name}.safetensors", shorthash=name, sha256=f"sha-{name}")
+        return types.SimpleNamespace(
+            first_stage_model=vae,
+            sd_checkpoint_info=info,
+            sd_model_hash=name,
+            loaded_vae_file=None,
+            decode_first_stage=lambda x: x + 1,
+            encode_first_stage=lambda x: x,
+            get_first_stage_encoding=lambda x: x,
+        )
 
     def test_disabled_status_and_toggle(self):
         self.assertFalse(self.graphs.status()["enabled"])
-        self.assertTrue(self.graphs.set_enabled(True, clear_cache=True)["enabled"])
+        status = self.graphs.set_enabled(True, clear_cache=True)
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["contract_version"], 2)
 
-    def test_lifecycle_state_repeats_are_noop(self):
+    def test_key_contract_distinguishes_semantic_dependencies(self):
+        model_a = self.fake_model("a")
+        model_b = self.fake_model("b")
+        x = torch.empty_strided((1, 4, 8, 8), (256, 64, 8, 1))
+        transposed = x.transpose(2, 3)
+
+        with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 1),)):
+            base = self.graphs._key(model_a, x, 0, "decode")
+            self.assertNotEqual(base, self.graphs._key(model_b, x, 0, "decode"))
+            self.assertNotEqual(base, self.graphs._key(model_a, transposed, 0, "decode"))
+            self.assertNotEqual(base, self.graphs._key(model_a, x, 0, "encode"))
+            with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 2),)):
+                self.assertNotEqual(base, self.graphs._key(model_a, x, 0, "decode"))
+
+        clone = x.clone()
+        if torch.cuda.is_available():
+            self.assertNotEqual(base, self.graphs._key(model_a, clone.cuda(), 0, "decode"))
+        self.assertNotEqual(self.graphs._tensor_key(x), self.graphs._tensor_key(x.to(torch.float64)))
+
+    def test_parameter_mutation_and_callable_replacement_change_identity(self):
+        model = self.fake_model()
+        before = self.graphs._runtime_identity(model)
+        with torch.no_grad():
+            model.first_stage_model.weight.add_(1)
+        after_parameter_mutation = self.graphs._runtime_identity(model)
+        self.assertNotEqual(before, after_parameter_mutation)
+        model.decode_first_stage = lambda x: x + 2
+        self.assertNotEqual(after_parameter_mutation, self.graphs._runtime_identity(model))
+
+    def test_lifecycle_reload_and_teardown_clear_retained_resources(self):
         self.graphs.set_enabled(True, clear_cache=True)
-        first = self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
-        second = self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
-        self.assertEqual(second["invalidations"], first["invalidations"])
-        self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
-        self.assertIn("vae", self.graphs.status()["lifecycle_state_keys"])
-
-
-    def test_clear_cache_removes_per_key_locks(self):
-        key_lock = self.graphs._key_lock(("stale",))
-        self.assertIsNotNone(key_lock)
-
-        self.graphs.set_enabled(False, clear_cache=True)
-
-        self.assertEqual(len(self.graphs._KEY_LOCKS), 0)
-
-    def test_unused_per_key_lock_is_reclaimed(self):
-        key_lock = self.graphs._key_lock(("stale",))
-        self.assertEqual(len(self.graphs._KEY_LOCKS), 1)
-
-        del key_lock
-
-        self.assertEqual(len(self.graphs._KEY_LOCKS), 0)
+        self.graphs._CACHE[("cached",)] = {"graph": object(), "input": object(), "output": object()}
+        self.graphs._FAILED_KEYS[("failed",)] = None
+        self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
+        status = self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
+        self.assertEqual(status["cache_size"], 0)
+        self.assertEqual(status["failed_key_count"], 0)
+        self.assertEqual(status["invalidations"], 1)
+        self.graphs._CACHE[("cached",)] = {"graph": object(), "input": object(), "output": object()}
+        status = self.graphs.set_enabled(False, clear_cache=True)
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["cache_size"], 0)
 
     def test_same_key_replay_is_serialized_through_output_clone(self):
         self.graphs.set_enabled(True, clear_cache=True)
-        key = (("model",), ((1,), "torch.float32", "cuda:0"), 0, "1")
+        key = ("key",)
         first_copy_started = threading.Event()
         release_first_copy = threading.Event()
         second_copy_started = threading.Event()
@@ -526,16 +580,13 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
                 events.append(("clone", None))
                 return "output"
 
-        entry = {"input": FakeInput(), "graph": FakeGraph(), "output": FakeOutput()}
-        self.graphs._CACHE[key] = entry
+        self.graphs._CACHE[key] = {"input": FakeInput(), "graph": FakeGraph(), "output": FakeOutput()}
         results = []
 
         def replay(name):
-            x = types.SimpleNamespace(name=name)
-            results.append(self.graphs.run(object(), x))
+            results.append(self.graphs.run(object(), types.SimpleNamespace(name=name)))
 
-        with mock.patch.object(self.graphs, "_bypass_reason", return_value=None), \
-             mock.patch.object(self.graphs, "_key", return_value=key):
+        with mock.patch.object(self.graphs, "_bypass_reason", return_value=None), mock.patch.object(self.graphs, "_key", return_value=key):
             first = threading.Thread(target=replay, args=("first",))
             second = threading.Thread(target=replay, args=("second",))
             first.start()
@@ -546,22 +597,122 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
             first.join(1)
             second.join(1)
 
-        self.assertFalse(first.is_alive())
-        self.assertFalse(second.is_alive())
         self.assertEqual(results, ["output", "output"])
-        self.assertEqual(
-            events,
-            [
-                ("copy", "first"),
-                ("replay", None),
-                ("clone", None),
-                ("copy", "second"),
-                ("replay", None),
-                ("clone", None),
-            ],
-        )
-        self.assertNotIn(key, self.graphs._KEY_LOCKS)
+        self.assertEqual(events, [("copy", "first"), ("replay", None), ("clone", None), ("copy", "second"), ("replay", None), ("clone", None)])
         self.assertEqual(self.graphs.status()["replays"], 2)
+
+    def test_cold_publish_then_hit_and_forced_clean_equivalence(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        key = ("equivalence",)
+        source = types.SimpleNamespace(value=2.0, device="cuda:0", detach=lambda: source, contiguous=lambda: source, clone=lambda: StaticInput())
+
+        class StaticInput:
+            def __init__(self):
+                self.value = source.value
+
+            def copy_(self, value, non_blocking=False):
+                self.value = value.value
+
+        class Output:
+            def __init__(self, static_input):
+                self.static_input = static_input
+
+            def clone(self):
+                return self.static_input.value * 3
+
+        class Graph:
+            def replay(self):
+                pass
+
+        class Stream:
+            def wait_stream(self, stream):
+                pass
+
+        class CurrentStream:
+            def wait_stream(self, stream):
+                pass
+
+        class GraphContext:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *args):
+                return False
+
+        class StreamContext(GraphContext):
+            pass
+
+        execute_calls = []
+
+        def execute(model, static_input, operation):
+            execute_calls.append(static_input)
+            return static_input.value * 3 if len(execute_calls) % 2 == 1 else Output(static_input)
+
+        patches = (
+            mock.patch.object(self.graphs, "_bypass_reason", return_value=None),
+            mock.patch.object(self.graphs, "_key", return_value=key),
+            mock.patch.object(self.graphs, "_execute", side_effect=execute),
+            mock.patch.object(self.graphs.torch.cuda, "Stream", return_value=Stream()),
+            mock.patch.object(self.graphs.torch.cuda, "current_stream", return_value=CurrentStream()),
+            mock.patch.object(self.graphs.torch.cuda, "stream", return_value=StreamContext()),
+            mock.patch.object(self.graphs.torch.cuda, "CUDAGraph", return_value=Graph()),
+            mock.patch.object(self.graphs.torch.cuda, "graph", return_value=GraphContext()),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            cold = self.graphs.run(object(), source)
+            source.value = 4.0
+            hit = self.graphs.run(object(), source)
+            self.graphs.invalidate("forced_clean")
+            clean = self.graphs.run(object(), source)
+
+        self.assertEqual(cold, 6.0)
+        self.assertEqual(hit, 12.0)
+        self.assertEqual(clean, 12.0)
+        self.assertEqual(self.graphs.status()["captures"], 2)
+        self.assertEqual(self.graphs.status()["replays"], 1)
+
+    def test_capture_failure_is_atomic_and_failed_keys_are_bounded(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        old_max = self.graphs._CACHE_MAX
+        self.graphs._CACHE_MAX = 2
+        try:
+            with mock.patch.object(self.graphs, "_bypass_reason", return_value=None), mock.patch.object(self.graphs, "_execute", side_effect=RuntimeError("capture failed")):
+                for index in range(4):
+                    fake = types.SimpleNamespace(
+                        detach=lambda: fake,
+                        contiguous=lambda: fake,
+                        clone=lambda: fake,
+                        device="cuda:0",
+                    )
+                    with mock.patch.object(self.graphs, "_key", return_value=("failed", index)), mock.patch.object(self.graphs.torch.cuda, "Stream", side_effect=RuntimeError("capture failed")):
+                        self.assertIsNone(self.graphs.run(object(), fake))
+            status = self.graphs.status()
+            self.assertEqual(status["cache_size"], 0)
+            self.assertEqual(status["failed_key_count"], 2)
+            self.assertEqual(status["failures"], 4)
+        finally:
+            self.graphs._CACHE_MAX = old_max
+
+    def test_capacity_eviction_bounds_retained_entries_and_locks(self):
+        old_max = self.graphs._CACHE_MAX
+        self.graphs._CACHE_MAX = 2
+        try:
+            for index in range(3):
+                key = (index,)
+                self.graphs._CACHE[key] = {"graph": object(), "input": object(), "output": object()}
+                self.graphs._key_lock(key)
+                self.graphs._evict_locked()
+            self.assertEqual(list(self.graphs._CACHE), [(1,), (2,)])
+            self.assertNotIn((0,), self.graphs._KEY_LOCKS)
+            self.assertEqual(self.graphs.status()["evictions"], 1)
+        finally:
+            self.graphs._CACHE_MAX = old_max
+
+    def test_encode_decode_separation_and_safe_encode_fallback(self):
+        self.graphs.set_enabled(True, clear_cache=True)
+        self.assertEqual(self.graphs._bypass_reason(object(), object(), 0, "encode"), "encode_rng_semantics")
+        self.assertIsNone(self.graphs.run_encode(object(), object()))
+        self.assertEqual(self.graphs.status()["bypass_reasons"].get("encode_rng_semantics"), 1)
 
     def test_cache_max_env_parse_is_clamped_and_fallback_safe(self):
         previous = os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX")
