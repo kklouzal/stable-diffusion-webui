@@ -2,6 +2,7 @@ import base64
 import json
 import io
 import os
+import sys
 import time
 import datetime
 import uvicorn
@@ -734,7 +735,14 @@ class Api:
 
     def get_openclaw_cache_telemetry(self):
         """Return a read-only, bounded and sanitized cache contract snapshot."""
-        return openclaw_cache_epochs.snapshot()
+        snapshot = openclaw_cache_epochs.snapshot()
+        try:
+            lora_networks = sys.modules.get("networks")
+            if lora_networks is not None:
+                snapshot["lora_steady_state"] = lora_networks.lora_steady_state_telemetry()
+        except Exception:
+            pass
+        return snapshot
 
     def get_sdpa_backend(self):
         return sd_hijack_optimizations.sdpa_backend_status()

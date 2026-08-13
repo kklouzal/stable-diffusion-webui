@@ -68,10 +68,10 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                 p.extra_generation_params["Lora hashes"] = ', '.join(f'{k}: {v}' for k, v in p.lora_hashes.items())
 
     def deactivate(self, p):
-        try:
-            networks.unload_networks()
-        finally:
-            if self.errors:
-                p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
+        # Retain the physically published state across requests. The next activation
+        # always calls load_networks, including for an empty desired state, so real
+        # semantic changes and clear still reconcile before sampling.
+        if self.errors:
+            p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
 
-            self.errors.clear()
+        self.errors.clear()

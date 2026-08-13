@@ -2,6 +2,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import time
 import os
 import re
 import threading
@@ -28,6 +29,30 @@ import modules.models.sd3.mmdit
 LORA_SOURCE_SCHEMA_REVISION = "lora-source-v2"
 LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v3"
 _network_application_lock = threading.RLock()
+_lora_steady_state_lock = threading.Lock()
+_lora_steady_state_telemetry = {
+    "calls": 0, "hits": 0, "misses": 0, "invalidations": {},
+    "milliseconds": {"identity": 0.0, "load_parse": 0.0, "publication": 0.0, "total": 0.0},
+    "avoided": {"file_reload": 0, "delta_recompute": 0, "physical_apply": 0, "quantization": 0, "mha_rebuild": 0},
+}
+
+def lora_steady_state_telemetry():
+    with _lora_steady_state_lock:
+        return copy.deepcopy(_lora_steady_state_telemetry)
+
+def _record_lora_steady_state(*, hit, reason, identity_ms, load_parse_ms=0.0, publication_ms=0.0, total_ms=0.0):
+    with _lora_steady_state_lock:
+        t = _lora_steady_state_telemetry
+        t["calls"] += 1
+        t["hits" if hit else "misses"] += 1
+        t["invalidations"][reason] = t["invalidations"].get(reason, 0) + 1
+        t["milliseconds"]["identity"] += identity_ms
+        t["milliseconds"]["load_parse"] += load_parse_ms
+        t["milliseconds"]["publication"] += publication_ms
+        t["milliseconds"]["total"] += total_ms
+        if hit:
+            for operation in t["avoided"]:
+                t["avoided"][operation] += 1
 _applied_state_key = None
 
 
@@ -514,6 +539,7 @@ def purge_networks_from_memory():
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):
     """Stage parsing off-lock, then atomically publish source and applied state."""
+    started = time.perf_counter()
     emb_db = sd_hijack.model_hijack.embedding_db
 
     def resolve(name):
@@ -532,6 +558,20 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     signatures = [network_file_signature(item.filename) for item in networks_on_disk]
     source_keys = [network_source_key(item, signature) for item, signature in zip(networks_on_disk, signatures)]
+    identity_done = time.perf_counter()
+    te_values = te_multipliers or [1.0] * len(names)
+    unet_values = unet_multipliers or [1.0] * len(names)
+    dyn_values = dyn_dims or [None] * len(names)
+    cached_by_key = {getattr(net, "source_key", None): net for net in loaded_networks}
+    cached_by_key.update({key: net for key, net in networks_in_memory.items() if key in source_keys})
+    ordered = tuple((source_key, float(te).hex(), float(unet).hex(), dyn, tuple(sorted(getattr(cached_by_key.get(source_key), "modules", {}).keys()))) for source_key, te, unet, dyn in zip(source_keys, te_values, unet_values, dyn_values))
+    wanted_key = (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+    with _network_application_lock:
+        if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key:
+            elapsed = (time.perf_counter() - started) * 1000.0
+            _record_lora_steady_state(hit=True, reason="semantic_signature_equal", identity_ms=(identity_done-started)*1000.0, total_ms=elapsed)
+            openclaw_cache_epochs.observe("E12", "hit", reason="exact", semantic_key=wanted_key)
+            return False
     active_by_key = {getattr(net, "source_key", network_source_key(net.network_on_disk, getattr(net, "source_signature", None))): net for net in loaded_networks}
     staged_cache = {}
     staged_publications = []
@@ -561,8 +601,10 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         use.dyn_dim = dyn_dims[index] if dyn_dims else None
         prepared.append(use)
 
+    parse_done = time.perf_counter()
     with openclaw_cache_epochs.epoch_transaction():
         with _network_application_lock:
+            publication_started = time.perf_counter()
             for source_key, net in staged_publications:
                 canonical_path = source_key[0]
                 stale_keys = [key for key in networks_in_memory if key != source_key and key[0] == canonical_path]
@@ -580,6 +622,10 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                 net.network_on_disk.read_hash()
 
     purge_networks_from_memory()
+    finished = time.perf_counter()
+    _record_lora_steady_state(hit=False, reason="semantic_signature_changed", identity_ms=(identity_done-started)*1000.0, load_parse_ms=(parse_done-identity_done)*1000.0, publication_ms=(finished-publication_started)*1000.0, total_ms=(finished-started)*1000.0)
+    openclaw_cache_epochs.observe("E12", "miss", reason="dependency_dirty", semantic_key=wanted_key)
+    return True
 
 def allowed_layer_without_weight(layer):
     if isinstance(layer, torch.nn.LayerNorm) and not layer.elementwise_affine:

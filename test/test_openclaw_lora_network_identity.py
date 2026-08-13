@@ -855,3 +855,30 @@ def test_model_level_apply_includes_mha_and_deduplicates_out_proj(lora_networks,
     monkeypatch.setattr(networks, "network_apply_weights", applied.append)
     networks._apply_loaded_state_to_model()
     assert applied == [mha, mha.out_proj]
+
+def test_identical_load_is_physical_noop_and_semantic_changes_invalidate(lora_networks, monkeypatch):
+    networks = lora_networks
+    on_disk = SimpleNamespace(filename="alpha.safetensors", shorthash="abc", read_hash=lambda: None)
+    monkeypatch.setattr(networks, "available_networks", {"alpha": on_disk}, raising=False)
+    monkeypatch.setattr(networks, "available_network_aliases", {"alpha": on_disk}, raising=False)
+    monkeypatch.setattr(networks, "forbidden_network_aliases", {}, raising=False)
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: (10, 20, "digest"))
+    parsed = SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={})
+    monkeypatch.setattr(networks, "load_network", lambda *_args: parsed)
+    physical = []
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: physical.append("apply"))
+
+    assert networks.load_networks(["alpha"], [0.5], [0.5], [None])
+    first_physical = len(physical)
+    assert not networks.load_networks(["alpha"], [0.5], [0.5], [None])
+    assert len(physical) == first_physical
+    telemetry = networks.lora_steady_state_telemetry()
+    assert telemetry["hits"] >= 1
+    assert all(count >= 1 for count in telemetry["avoided"].values())
+
+    assert networks.load_networks(["alpha"], [0.6], [0.5], [None])
+    assert len(physical) > first_physical
+    assert networks.load_networks(["alpha", "alpha"], [0.6, 0.5], [0.5, 0.5], [None, None])
+    assert networks.load_networks(["alpha"], [0.6], [0.5], [4])
+    assert networks.unload_networks()
+    assert networks.load_networks(["alpha"], [0.5], [0.5], [None])
