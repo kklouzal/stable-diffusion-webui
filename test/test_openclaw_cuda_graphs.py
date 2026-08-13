@@ -471,6 +471,13 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
 
         self.graphs = openclaw_vae_decode_graphs
         self.graphs.set_enabled(False, clear_cache=True)
+        with self.graphs._LOCK:
+            for counter in self.graphs._COUNTERS:
+                self.graphs._COUNTERS[counter] = 0
+            self.graphs._BYPASS_REASONS.clear()
+            self.graphs._INVALIDATION_REASONS.clear()
+            self.graphs._LAST_ERROR = None
+            self.graphs._LAST_KEY = None
         self.previous_opts = shared_stub.opts
         self.previous_cmd_opts = getattr(shared_stub, "cmd_opts", None)
         shared_stub.opts = types.SimpleNamespace(
@@ -542,8 +549,13 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
 
     def test_lifecycle_reload_and_teardown_clear_retained_resources(self):
         self.graphs.set_enabled(True, clear_cache=True)
+        with self.graphs._LOCK:
+            self.graphs._COUNTERS["invalidations"] = 0
+            self.graphs._INVALIDATION_REASONS.clear()
         self.graphs._CACHE[("cached",)] = {"graph": object(), "input": object(), "output": object()}
         self.graphs._FAILED_KEYS[("failed",)] = None
+        with self.graphs._LOCK:
+            self.graphs._LIFECYCLE_STATE["vae"] = ("a",)
         self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
         status = self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
         self.assertEqual(status["cache_size"], 0)

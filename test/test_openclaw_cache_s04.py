@@ -6,8 +6,10 @@ def text(path): return (ROOT / path).read_text()
 
 def test_conditioning_key_contract_and_isolation():
     src=text('modules/processing.py')
-    for epoch in ('checkpoint_object_epoch','conditioner_epoch','textual_inversion_epoch','tokenizer_epoch','conditioning_hook_epoch','lora_applied_epoch','precision_epoch','device_epoch'):
+    for epoch in ('checkpoint_object_epoch','conditioner_epoch','textual_inversion_epoch','tokenizer_epoch','conditioning_hook_epoch','precision_epoch','device_epoch'):
         assert f'"{epoch}"' in src
+    assert 'effective_network_state = self.active_lora_cond_signature()' in src
+    assert 'effective_network_state,' in src
     for namespace in ('"c"','"uc"','"hr_c"','"hr_uc"'):
         assert f'get_conds_with_caching({namespace}' in src
     assert 'seed' not in src[src.index('def cached_params'):src.index('def active_lora_cond_signature')]
