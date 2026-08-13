@@ -771,3 +771,87 @@ def test_generic_apply_skips_nvfp4_managed_layer(lora_networks, monkeypatch):
 
     assert layer.network_current_names == ()
     assert not hasattr(layer, "network_weights_backup")
+
+
+def _mha_delta_module(torch, value):
+    class Delta:
+        def calc_updown(self, weight):
+            return torch.full_like(weight, value), None
+    return Delta()
+
+
+def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_networks, monkeypatch):
+    torch = pytest.importorskip("torch")
+    networks = lora_networks
+    mha = torch.nn.MultiheadAttention(4, 1, bias=False, batch_first=True)
+    mha.network_layer_name = "1_model_transformer_resblocks_0_attn"
+    mha.out_proj.network_layer_name = mha.network_layer_name + "_out_proj"
+    base_qkv = mha.in_proj_weight.detach().clone()
+    base_out = mha.out_proj.weight.detach().clone()
+    net = SimpleNamespace(name="alpha", te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None, modules={
+        mha.network_layer_name + "_q_proj": _mha_delta_module(torch, 1.0),
+        mha.network_layer_name + "_k_proj": _mha_delta_module(torch, 2.0),
+        mha.network_layer_name + "_v_proj": _mha_delta_module(torch, 3.0),
+        mha.network_layer_name + "_out_proj": _mha_delta_module(torch, 4.0),
+    })
+    monkeypatch.setattr(networks, "loaded_networks", [net])
+    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
+
+    networks.network_apply_weights(mha)
+    networks.network_apply_weights(mha.out_proj)
+    expected_qkv = base_qkv + torch.cat([torch.ones_like(base_out), torch.full_like(base_out, 2), torch.full_like(base_out, 3)])
+    assert torch.equal(mha.in_proj_weight, expected_qkv)
+    assert torch.equal(mha.out_proj.weight, base_out + 4)
+
+    # Same signature is a no-op; unload and identical reactivation are exact.
+    networks.network_apply_weights(mha)
+    networks.network_apply_weights(mha.out_proj)
+    assert torch.equal(mha.in_proj_weight, expected_qkv)
+    assert torch.equal(mha.out_proj.weight, base_out + 4)
+    monkeypatch.setattr(networks, "loaded_networks", [])
+    monkeypatch.setattr(networks, "network_wanted_names", lambda: ())
+    networks.network_apply_weights(mha)
+    networks.network_apply_weights(mha.out_proj)
+    assert torch.equal(mha.in_proj_weight, base_qkv)
+    assert torch.equal(mha.out_proj.weight, base_out)
+    monkeypatch.setattr(networks, "loaded_networks", [net])
+    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
+    networks.network_apply_weights(mha)
+    networks.network_apply_weights(mha.out_proj)
+    assert torch.equal(mha.in_proj_weight, expected_qkv)
+    assert torch.equal(mha.out_proj.weight, base_out + 4)
+
+
+
+def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch):
+    torch = pytest.importorskip("torch")
+    networks = lora_networks
+    monkeypatch.setattr(networks, "extra_network_lora", SimpleNamespace(errors={}))
+    mha = torch.nn.MultiheadAttention(4, 1, bias=False, batch_first=True)
+    mha.network_layer_name = "1_model_transformer_resblocks_0_attn"
+    base_qkv = mha.in_proj_weight.detach().clone()
+    class Failing:
+        def calc_updown(self, weight):
+            raise RuntimeError("injected failure")
+    net = SimpleNamespace(name="broken", modules={
+        mha.network_layer_name + "_q_proj": _mha_delta_module(torch, 1.0),
+        mha.network_layer_name + "_k_proj": Failing(),
+        mha.network_layer_name + "_v_proj": _mha_delta_module(torch, 3.0),
+    })
+    monkeypatch.setattr(networks, "loaded_networks", [net])
+    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("broken", 1.0, 1.0, None),))
+    networks.network_apply_weights(mha)
+    assert torch.equal(mha.in_proj_weight, base_qkv)
+    assert mha.network_current_names == (("broken", 1.0, 1.0, None),)
+
+
+def test_model_level_apply_includes_mha_and_deduplicates_out_proj(lora_networks, monkeypatch):
+    torch = pytest.importorskip("torch")
+    networks = lora_networks
+    mha = torch.nn.MultiheadAttention(4, 1, bias=False, batch_first=True)
+    model = SimpleNamespace(network_layer_mapping={"attn": mha, "attn_out_proj": mha.out_proj})
+    monkeypatch.setattr(networks.shared, "sd_model", model)
+    applied = []
+    monkeypatch.setattr(networks, "network_apply_weights", applied.append)
+    networks._apply_loaded_state_to_model()
+    assert applied == [mha, mha.out_proj]

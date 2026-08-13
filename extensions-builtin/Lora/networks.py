@@ -246,8 +246,9 @@ def _apply_loaded_state_to_model():
             continue
         seen.add(marker)
         # Top-level conditioner wrappers are retained in the mapping for LoRA
-        # name resolution, but cannot have weights applied directly.
-        if getattr(layer, "weight", None) is None:
+        # name resolution, but cannot have weights applied directly. MHA owns
+        # the combined in-projection weight even though it has no `.weight`.
+        if getattr(layer, "weight", None) is None and not isinstance(layer, torch.nn.MultiheadAttention):
             continue
         network_apply_weights(layer)
 
@@ -612,14 +613,14 @@ def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Li
 
     if weights_backup is not None:
         if isinstance(self, torch.nn.MultiheadAttention):
-            restore_weights_backup(self, 'in_proj_weight', weights_backup[0])
-            restore_weights_backup(self.out_proj, 'weight', weights_backup[1])
+            # out_proj is a separately named Linear with its own immutable
+            # backup/application lifecycle. MHA owns only combined Q/K/V.
+            in_proj_backup = weights_backup[0] if isinstance(weights_backup, tuple) else weights_backup
+            restore_weights_backup(self, 'in_proj_weight', in_proj_backup)
         else:
             restore_weights_backup(self, 'weight', weights_backup)
 
-    if isinstance(self, torch.nn.MultiheadAttention):
-        restore_weights_backup(self.out_proj, 'bias', bias_backup)
-    else:
+    if not isinstance(self, torch.nn.MultiheadAttention):
         restore_weights_backup(self, 'bias', bias_backup)
 
 
@@ -651,7 +652,7 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
             raise RuntimeError(f"{network_layer_name} - no backup weights found and current weights are not unchanged")
 
         if isinstance(self, torch.nn.MultiheadAttention):
-            weights_backup = (store_weights_backup(self.in_proj_weight), store_weights_backup(self.out_proj.weight))
+            weights_backup = store_weights_backup(self.in_proj_weight)
         else:
             weights_backup = store_weights_backup(self.weight)
 
@@ -659,8 +660,9 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
 
     bias_backup = getattr(self, "network_bias_backup", None)
     if bias_backup is None and wanted_names != ():
-        if isinstance(self, torch.nn.MultiheadAttention) and self.out_proj.bias is not None:
-            bias_backup = store_weights_backup(self.out_proj.bias)
+        if isinstance(self, torch.nn.MultiheadAttention):
+            # out_proj bias belongs to its separately mapped Linear lifecycle.
+            bias_backup = None
         elif getattr(self, 'bias', None) is not None:
             bias_backup = store_weights_backup(self.bias)
         else:
@@ -710,27 +712,18 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
             module_q = net.modules.get(network_layer_name + "_q_proj", None)
             module_k = net.modules.get(network_layer_name + "_k_proj", None)
             module_v = net.modules.get(network_layer_name + "_v_proj", None)
-            module_out = net.modules.get(network_layer_name + "_out_proj", None)
-
-            if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v and module_out:
+            if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v:
                 try:
                     with torch.no_grad():
-                        # Send "real" orig_weight into MHA's lora module
+                        # out_proj is applied exactly once through its separately
+                        # mapped Linear module; MHA owns combined Q/K/V only.
                         qw, kw, vw = self.in_proj_weight.chunk(3, 0)
                         updown_q, _ = module_q.calc_updown(qw)
                         updown_k, _ = module_k.calc_updown(kw)
                         updown_v, _ = module_v.calc_updown(vw)
                         del qw, kw, vw
                         updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
-                        updown_out, ex_bias = module_out.calc_updown(self.out_proj.weight)
-
                         self.in_proj_weight += updown_qkv
-                        self.out_proj.weight += updown_out
-                    if ex_bias is not None:
-                        if self.out_proj.bias is None:
-                            self.out_proj.bias = torch.nn.Parameter(ex_bias)
-                        else:
-                            self.out_proj.bias += ex_bias
 
                 except RuntimeError as e:
                     logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
