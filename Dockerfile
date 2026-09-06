@@ -389,8 +389,8 @@ RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
        /usr/local/bin/gb10-a1111-render-build-manifest
 RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /opt/requirements-runtime.txt /root/.cache/pip \
     && chmod +x /usr/local/bin/gb10-a1111-entrypoint /usr/local/bin/gb10-a1111-launch \
-    && chown -R a1111:a1111 /opt/stable-diffusion-webui /home/a1111 \
-    && mkdir -p /opt/stable-diffusion-webui/tmp
+    && mkdir -p /opt/stable-diffusion-webui/tmp /opt/stable-diffusion-webui/cache \
+    && chown -R a1111:a1111 /opt/stable-diffusion-webui /home/a1111
 
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV A1111_HOME=/opt/stable-diffusion-webui
