@@ -307,7 +307,12 @@ def _capture_img2img_assets(p: Any, parameters: dict[str, Any], limitations: lis
             encoded_images.append(encoded)
         if len(encoded_images) == len(init_images):
             parameters["init_images"] = encoded_images
-    mask = _image_to_api_base64(getattr(p, "mask", None), limitations, "parameters.mask", budget)
+    # Img2img moves the API mask into image_mask during __post_init__ before
+    # processing starts; prefer it so we retain the same source mask the run used.
+    source_mask = getattr(p, "image_mask", None)
+    if source_mask is None:
+        source_mask = getattr(p, "mask", None)
+    mask = _image_to_api_base64(source_mask, limitations, "parameters.mask", budget)
     if mask is _OMIT:
         _limitation(limitations, "img2img replay requires parameters.mask, but it exceeded the retention limit or could not be encoded.")
     elif mask is not None:
