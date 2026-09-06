@@ -1,21 +1,29 @@
-# Last generation API
+# Last generation API (schema version 2)
 
-`GET /sdapi/v1/generation/last` returns one durable snapshot of the most recently completed A1111 generation. It uses the same HTTP Basic authentication as the rest of `/sdapi/v1`.
+`GET /sdapi/v1/generation/last` returns the latest successfully completed A1111 generation. It uses the existing `/sdapi/v1` HTTP Basic authentication and is read-only: it never starts a generation, changes global options, or loads a model.
 
-The endpoint is read-only. It does not run a generation, load a checkpoint, or modify A1111 options. A missing, unreadable, incomplete, or unsupported snapshot returns HTTP `404` with:
+The endpoint returns HTTP `404` when no valid snapshot exists:
 
 ```json
 {"detail":"No successfully completed generation snapshot is available"}
 ```
 
-The snapshot is atomically written to `generation-last/generation-last.json`. GB10 bind-mounts the whole directory from `${HOST_ROOT}/config/generation-last` at `/opt/stable-diffusion-webui/generation-last`; the temporary file is created and replaced in that same mounted directory. The write fsyncs both the file and its directory before returning, so it remains atomic and durable across container replacement or restart. A failed, skipped, interrupted, stopped, or image-less generation cannot replace the existing snapshot.
+## Retention and durability
 
-## Response contract
+Exactly one snapshot is retained at `${HOST_ROOT}/config/generation-last/generation-last.json`, bind-mounted at `/opt/stable-diffusion-webui/generation-last/generation-last.json`. The temporary file is created in that same mounted directory, fsynced, atomically replaced with `os.replace`, then the directory is fsynced. A completed generation is captured under one process lock, so settings and image assets cannot mix across concurrent completions. Failed, cancelled, stopped, and image-less generations do not replace the retained record.
+
+The current record survives container restarts and recreation. Version-1 txt2img records are sanitized in memory to this version-2 contract on read, so an existing retained txt2img record stays available immediately after upgrade. A version-1 img2img record is non-replayable because it could not contain its input assets; run one img2img generation to replace it.
+
+Limits are 2 MiB per encoded image, 6 MiB for all encoded input assets, and 8 MiB for the JSON snapshot. Images exceeding a limit are not retained and the snapshot names the missing asset in `limitations`.
+
+## Contract
+
+Every successful response has these fields:
 
 ```json
 {
-  "schema_version": 1,
-  "completed_at": "2026-09-06T12:00:00.000000Z",
+  "schema_version": 2,
+  "completed_at": "2026-09-06T20:00:00.000000Z",
   "generation_type": "txt2img",
   "replayable": true,
   "limitations": [],
@@ -28,45 +36,77 @@ The snapshot is atomically written to `generation-last/generation-last.json`. GB
     "vae_name": "vae.safetensors-or-null",
     "vae_hash": "vae-hash-or-null"
   },
+  "parameters": {}
+}
+```
+
+`parameters` is a request object for the endpoint selected by `generation_type`: `/sdapi/v1/txt2img` or `/sdapi/v1/img2img`. It includes effective checkpoint/VAE overrides, sampler, scheduler, steps, CFG, denoising, seed/subseed controls, refiner/high-resolution controls, resize/inpaint controls, and serializable selectable and always-on script arguments. `token_merging_ratio` and `token_merging_ratio_hr` are retained; credential-like keys remain filtered.
+
+The snapshot deliberately omits the previous positive prompt, negative prompt, root `width` and `height`, first-pass dimensions, high-resolution scale/resize dimensions, and high-resolution prompts. It also omits matching named values inside nested mapping settings. Harness supplies those values.
+
+### Redacted txt2img example
+
+```json
+{
+  "schema_version": 2,
+  "generation_type": "txt2img",
+  "replayable": true,
+  "limitations": [],
   "parameters": {
-    "prompt": "effective prompt",
-    "negative_prompt": "effective negative prompt",
-    "seed": 123456789,
     "sampler_name": "Euler",
     "scheduler": "Automatic",
     "steps": 20,
     "cfg_scale": 7.0,
-    "width": 512,
-    "height": 512,
+    "seed": 123456789,
+    "subseed": 123456789,
     "batch_size": 1,
     "n_iter": 1,
     "enable_hr": false,
-    "override_settings": {
-      "sd_model_checkpoint": "checkpoint title [hash]",
-      "sd_vae": "vae.safetensors",
-      "CLIP_stop_at_last_layers": 2
-    },
+    "override_settings": {"sd_model_checkpoint": "checkpoint title [hash]"},
+    "alwayson_scripts": {"ControlNet": {"args": [{"enabled": false, "module": "none", "model": "None"}]}}
+  }
+}
+```
+
+### Redacted img2img example
+
+```json
+{
+  "schema_version": 2,
+  "generation_type": "img2img",
+  "replayable": true,
+  "limitations": [],
+  "parameters": {
+    "init_images": ["<base64-encoded PNG>"],
+    "mask": "<base64-encoded PNG>",
+    "denoising_strength": 0.55,
+    "resize_mode": 0,
+    "inpaint_full_res": true,
+    "inpaint_full_res_padding": 32,
+    "inpainting_mask_invert": 0,
+    "sampler_name": "Euler",
+    "scheduler": "Automatic",
+    "steps": 20,
+    "cfg_scale": 7.0,
     "alwayson_scripts": {
-      "Extension title": {"args": [true, 0.25]}
+      "ControlNet": {
+        "args": [{"enabled": true, "module": "canny", "model": "control-model", "image": "<base64-encoded PNG>", "mask": "<base64-encoded PNG>"}]
+      }
     }
   }
 }
 ```
 
-`parameters` contains A1111 API field names. A `txt2img` snapshot with `replayable: true` can be posted directly to `/sdapi/v1/txt2img`. It contains the resolved seed, effective sampler and scheduler, high-resolution controls, checkpoint/VAE override settings, ControlNet settings other than images, and replayable selectable/always-on script arguments.
+Enabled ControlNet units retain supported API fields and their API-base64 `image` and `mask` inputs when within limits. Effective-region masks, IP-Adapter serialized inputs, and batch inputs that cannot be safely retained are never replaced with defaults: the snapshot is `replayable: false` and names the exact missing `alwayson_scripts.ControlNet.args[n]` field in `limitations`.
 
-ControlNet units are serialized as API dictionaries in `parameters.alwayson_scripts.ControlNet.args`. Disabled units remain present with `enabled: false`. Enabled units include supported API settings such as model, module, weight, resize mode, processor thresholds, guidance range, control mode, high-resolution option, and advanced weighting. Images, masks, effective-region masks, IP-Adapter inputs, and batch inputs are intentionally excluded; each required replacement is named in `limitations` using its exact `alwayson_scripts.ControlNet.args[n]` path.
+## Harness replay and overrides
 
-The endpoint never stores image or mask payloads. Therefore every `img2img` snapshot is marked non-replayable and names the missing `init_images` and, where relevant, mask. A txt2img snapshot with enabled ControlNet is also non-replayable until the caller supplies the input named in its limitation, for example `alwayson_scripts.ControlNet.args[0].image`. An unsupported or oversized parameter is not silently dropped: it is listed in `limitations` and makes the snapshot non-replayable.
-
-## Harness replay request
-
-The harness should first require `generation_type == "txt2img"` and `replayable == true`. Start from `snapshot.parameters`, then apply these overrides before posting to `/sdapi/v1/txt2img`:
+Harness must require `schema_version == 2`, `replayable == true`, and a supported `generation_type`. Start with `snapshot.parameters`, then supply both replacement prompts and these mandatory overrides before posting to the matching endpoint:
 
 ```json
 {
-  "prompt": "a red apple on a wooden table, studio photograph",
-  "negative_prompt": "",
+  "prompt": "Harness-provided positive prompt",
+  "negative_prompt": "Harness-provided negative prompt",
   "seed": -1,
   "subseed": -1,
   "subseed_strength": 0.0,
@@ -91,18 +131,15 @@ The harness should first require `generation_type == "txt2img"` and `replayable 
   "hr_negative_prompt": "",
   "refiner_checkpoint": null,
   "refiner_switch_at": 1.0,
-  "script_name": null,
-  "script_args": [],
-  "alwayson_scripts": {},
   "send_images": true,
   "save_images": false,
   "override_settings_restore_afterwards": true
 }
 ```
 
-The seed/subseed and seed-resize overrides prevent variation or resized-noise seeds from replacing the requested `-1` seed. The high-resolution and refiner overrides prevent a second denoise pass, alternate checkpoint, alternate sampler, or alternate scheduler from changing the 1024x1024 request. Clearing selectable and persisted always-on script arguments prevents snapshot extension arguments from rewriting prompts, seeds, dimensions, batch count, or high-resolution controls.
+Do not replace or shorten positional `script_args` or `alwayson_scripts.*.args`: their indices are extension contracts. Apply extension-specific values at their documented positions. Any extension that can alter prompts, dimensions, seeds, batches, high-resolution passes, refiner selection, or image inputs must be explicitly disabled with that extension's own API arguments, or those positional arguments must be updated in place. If the extension has no API disable/override argument, Harness must reject replay as non-comparable. For the generic 1024x1024 run, clearing an entire always-on script is only safe when that extension accepts an empty argument list; otherwise preserve positions and set its documented disabled values.
 
-Always-visible extensions that have no API disable argument still execute at their runtime default; no generic A1111 request can disable such an extension. A harness must use the extension's documented disabled arguments if it enables those extensions at startup, or reject the replay as non-comparable.
+For img2img, keep retained `init_images`, `mask`, and enabled ControlNet image/mask assets in the final request. Do not substitute filesystem paths: all retained images are API base64 PNG strings.
 
 Example shell flow:
 
@@ -111,8 +148,8 @@ curl --fail --user "$A1111_USER:$A1111_PASSWORD" \
   http://127.0.0.1:7860/sdapi/v1/generation/last > last.json
 
 jq '.parameters + {
-  prompt: "a red apple on a wooden table, studio photograph",
-  negative_prompt: "", seed: -1, subseed: -1, subseed_strength: 0,
+  prompt: "Harness-provided positive prompt", negative_prompt: "Harness-provided negative prompt",
+  seed: -1, subseed: -1, subseed_strength: 0,
   seed_resize_from_h: 0, seed_resize_from_w: 0,
   width: 1024, height: 1024, batch_size: 1, n_iter: 1,
   enable_hr: false, firstphase_width: 0, firstphase_height: 0,
@@ -120,9 +157,8 @@ jq '.parameters + {
   hr_resize_x: 0, hr_resize_y: 0, hr_checkpoint_name: null,
   hr_sampler_name: null, hr_scheduler: null, hr_prompt: "", hr_negative_prompt: "",
   refiner_checkpoint: null, refiner_switch_at: 1,
-  script_name: null, script_args: [], alwayson_scripts: {},
   send_images: true, save_images: false, override_settings_restore_afterwards: true
 }' last.json | curl --fail --user "$A1111_USER:$A1111_PASSWORD" \
   -H 'Content-Type: application/json' --data-binary @- \
-  http://127.0.0.1:7860/sdapi/v1/txt2img
+  "http://127.0.0.1:7860/sdapi/v1/$(jq -r .generation_type last.json)"
 ```

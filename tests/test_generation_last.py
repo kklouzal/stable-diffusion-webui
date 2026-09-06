@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import ast
+import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
+from PIL import Image
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "generation_last.py"
@@ -148,9 +151,13 @@ class GenerationLastTests(unittest.TestCase):
         snapshot = self.module.capture_completed_generation(p, self.processed)
 
         self.assertTrue(snapshot["replayable"])
-        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["schema_version"], 2)
         self.assertEqual(snapshot["generation_type"], "txt2img")
         self.assertEqual(snapshot["parameters"]["seed"], 123456)
+        self.assertNotIn("prompt", snapshot["parameters"])
+        self.assertNotIn("negative_prompt", snapshot["parameters"])
+        self.assertNotIn("width", snapshot["parameters"])
+        self.assertNotIn("height", snapshot["parameters"])
         self.assertTrue(snapshot["parameters"]["enable_hr"])
         self.assertEqual(snapshot["checkpoint"]["sha256"], "abc123")
         self.assertEqual(snapshot["parameters"]["override_settings"]["sd_model_checkpoint"], "example-model [abc123]")
@@ -170,7 +177,15 @@ class GenerationLastTests(unittest.TestCase):
         self.assertIsNone(self.module.capture_completed_generation(replacement, self.processed))
         self.assertEqual(self.module.get_last_snapshot(), first)
 
-    def test_img2img_and_controlnet_are_explicitly_non_replayable_without_inputs(self):
+    def test_img2img_assets_and_missing_assets_control_replayability(self):
+        img2img = StableDiffusionProcessingImg2Img()
+        img2img.init_images = [Image.new("RGB", (16, 16), "red")]
+        img2img.mask = Image.new("L", (16, 16), 255)
+        snapshot = self.module.build_snapshot(img2img, self.processed)
+        self.assertTrue(snapshot["replayable"])
+        self.assertTrue(snapshot["parameters"]["init_images"][0])
+        self.assertTrue(snapshot["parameters"]["mask"])
+
         img2img = StableDiffusionProcessingImg2Img()
         img2img.mask = object()
         snapshot = self.module.build_snapshot(img2img, self.processed)
@@ -195,7 +210,14 @@ class GenerationLastTests(unittest.TestCase):
         snapshot = self.module.build_snapshot(p, self.processed)
         self.assertEqual(snapshot["parameters"]["alwayson_scripts"], {"Example Extension": {"args": [True, 0.25]}})
 
-    def test_controlnet_units_are_serialized_without_persisting_inputs(self):
+        p.script_args = [0, {"prompt": "old prompt", "strength": 0.25}]
+        script.args_to = 2
+        redacted = self.module.build_snapshot(p, self.processed)
+        args = redacted["parameters"]["alwayson_scripts"]["Example Extension"]["args"]
+        self.assertNotIn("prompt", args[0])
+        self.assertTrue(any("Harness must supply" in item for item in redacted["limitations"]))
+
+    def test_controlnet_units_serialize_inputs_and_report_missing_assets(self):
         p = StableDiffusionProcessingTxt2Img()
         script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=2)
         p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
@@ -208,17 +230,21 @@ class GenerationLastTests(unittest.TestCase):
         self.assertEqual(unit["module"], "canny")
         self.assertNotIn("image", unit)
 
-        p.script_args[1] = ControlNetUnit(enabled=True, image=object(), mask=object())
+        p.script_args[1] = ControlNetUnit(enabled=True, image=Image.new("RGB", (16, 16), "blue"), mask=Image.new("L", (16, 16), 255))
         enabled = self.module.build_snapshot(p, self.processed)
         unit = enabled["parameters"]["alwayson_scripts"]["ControlNet"]["args"][0]
-        self.assertFalse(enabled["replayable"])
+        self.assertTrue(enabled["replayable"])
         self.assertEqual(unit["enabled"], True)
         self.assertEqual(unit["guidance_start"], 0.1)
-        self.assertNotIn("image", unit)
-        self.assertTrue(any("args[0].image" in item for item in enabled["limitations"]))
-        self.assertTrue(any("args[0].mask" in item for item in enabled["limitations"]))
+        self.assertTrue(unit["image"])
+        self.assertTrue(unit["mask"])
 
-    def test_prompt_list_uses_the_resolved_first_prompt(self):
+        p.script_args[1] = ControlNetUnit(enabled=True)
+        missing = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(missing["replayable"])
+        self.assertTrue(any("args[0].image" in item for item in missing["limitations"]))
+
+    def test_prompts_and_dimensions_are_not_retained(self):
         p = StableDiffusionProcessingTxt2Img()
         p.prompt = ["not replayable as a list"]
         p.negative_prompt = ["not replayable as a list"]
@@ -226,8 +252,64 @@ class GenerationLastTests(unittest.TestCase):
         p.all_negative_prompts = ["resolved negative"]
 
         snapshot = self.module.build_snapshot(p, self.processed)
-        self.assertEqual(snapshot["parameters"]["prompt"], "resolved prompt")
-        self.assertEqual(snapshot["parameters"]["negative_prompt"], "resolved negative")
+        self.assertNotIn("prompt", snapshot["parameters"])
+        self.assertNotIn("negative_prompt", snapshot["parameters"])
+        self.assertNotIn("width", snapshot["parameters"])
+        self.assertNotIn("height", snapshot["parameters"])
+
+    def test_concurrent_successes_publish_one_complete_snapshot(self):
+        snapshots = []
+
+        def capture(seed):
+            p = StableDiffusionProcessingTxt2Img()
+            processed = types.SimpleNamespace(images=[object()], all_seeds=[seed], all_subseeds=[seed])
+            snapshots.append(self.module.capture_completed_generation(p, processed))
+
+        threads = [threading.Thread(target=capture, args=(seed,)) for seed in (11, 22)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        persisted = self.module.get_last_snapshot()
+        self.assertIn(persisted["parameters"]["seed"], {11, 22})
+        self.assertEqual(persisted["parameters"]["batch_size"], 1)
+
+    def test_failed_generation_and_image_limits_do_not_create_replayable_snapshot(self):
+        p = StableDiffusionProcessingTxt2Img()
+        self.assertIsNone(self.module.capture_completed_generation(p, types.SimpleNamespace(images=[], all_seeds=[1], all_subseeds=[1])))
+
+        img2img = StableDiffusionProcessingImg2Img()
+        img2img.init_images = [Image.frombytes("L", (1800, 1800), os.urandom(1800 * 1800))]
+        snapshot = self.module.build_snapshot(img2img, self.processed)
+        self.assertFalse(snapshot["replayable"])
+        self.assertTrue(any("per-image retention limit" in item for item in snapshot["limitations"]))
+
+    def test_credential_filter_keeps_token_merging_settings(self):
+        p = StableDiffusionProcessingTxt2Img()
+        p.token_merging_ratio = 0.5
+        p.token_merging_ratio_hr = 0.25
+        p.override_settings = {"token_merging_ratio": 0.5, "api_token": "must-not-leak"}
+        snapshot = self.module.build_snapshot(p, self.processed)
+        settings = snapshot["parameters"]["override_settings"]
+        self.assertEqual(settings["token_merging_ratio"], 0.5)
+        self.assertEqual(settings["token_merging_ratio_hr"], 0.25)
+        self.assertNotIn("api_token", settings)
+
+    def test_version_one_snapshot_is_available_without_new_generation(self):
+        legacy = {
+            "schema_version": 1,
+            "completed_at": "2026-01-01T00:00:00Z",
+            "generation_type": "txt2img",
+            "replayable": True,
+            "limitations": [],
+            "checkpoint": {},
+            "parameters": {"prompt": "old", "negative_prompt": "old", "width": 512, "height": 512, "steps": 20},
+        }
+        self.module.persist_snapshot(legacy)
+        snapshot = self.module.get_last_snapshot()
+        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertTrue(snapshot["replayable"])
+        self.assertEqual(snapshot["parameters"], {"steps": 20})
 
     def test_missing_snapshot_returns_none(self):
         self.assertIsNone(self.module.get_last_snapshot())
