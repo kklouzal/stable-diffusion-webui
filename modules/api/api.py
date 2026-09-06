@@ -19,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs
+from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -634,6 +634,7 @@ class Api:
         self.add_api_route("/sdapi/v1/extra-batch-images", self.extras_batch_images_api, methods=["POST"], response_model=models.ExtrasBatchImagesResponse)
         self.add_api_route("/sdapi/v1/png-info", self.pnginfoapi, methods=["POST"], response_model=models.PNGInfoResponse)
         self.add_api_route("/sdapi/v1/progress", self.progressapi, methods=["GET"], response_model=models.ProgressResponse)
+        self.add_api_route("/sdapi/v1/generation/last", self.get_last_generation, methods=["GET"])
         self.add_api_route("/sdapi/v1/interrogate", self.interrogateapi, methods=["POST"])
         self.add_api_route("/sdapi/v1/interrupt", self.interruptapi, methods=["POST"])
         self.add_api_route("/sdapi/v1/skip", self.skip, methods=["POST"])
@@ -783,6 +784,12 @@ class Api:
     def get_openclaw_generation_diagnostics(self):
         from modules import openclaw_generation_diagnostics
         return openclaw_generation_diagnostics.last_generation_diagnostics() or {}
+
+    def get_last_generation(self):
+        snapshot = generation_last.get_last_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No successfully completed generation snapshot is available")
+        return snapshot
 
     def _call_with_queue_lock(self, func, *args, **kwargs):
         with self.queue_lock:
@@ -1085,6 +1092,10 @@ class Api:
                             shared.state.begin(job="scripts_txt2img")
                             start_task(task_id)
                             processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
+                            try:
+                                generation_last.capture_completed_generation(p, processed)
+                            except Exception:
+                                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
                         finally:
                             self._finish_generation_task(task_id)
                             task_finished = True
@@ -1141,6 +1152,10 @@ class Api:
                             shared.state.begin(job="scripts_img2img")
                             start_task(task_id)
                             processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
+                            try:
+                                generation_last.capture_completed_generation(p, processed)
+                            except Exception:
+                                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
                         finally:
                             self._finish_generation_task(task_id)
                             task_finished = True

@@ -172,3 +172,20 @@ def test_forced_clean_equivalence_for_deterministic_array_result():
     assert np.array_equal(cached, forced_clean)
     cache.clear("forced-clean")
     assert np.array_equal(cache.get_or_compute(key, preprocess, clone=True), forced_clean)
+
+
+def test_cache_helper_is_installed_outside_scanned_scripts_root():
+    patcher = (Path(__file__).parents[1] / "gb10/patch-controlnet-cache-correctness.py").read_text()
+    patch = (Path(__file__).parents[1] / "gb10/controlnet-cache-correctness.patch").read_text()
+    assert 'internal_controlnet/cache_contract.py' in patcher
+    assert 'scripts/cache_contract.py' not in patcher
+    assert 'from internal_controlnet.cache_contract import' in patch
+    assert 'from scripts.cache_contract import' not in patch
+
+
+def test_controlnet_correctness_patch_assigns_inpaint_conversion_and_openpose_average():
+    patch = (Path(__file__).parents[1] / "gb10/controlnet-cache-correctness.patch").read_text()
+    assert "param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(" in patch
+    assert "device=x.device, dtype=x.dtype" in patch
+    assert "heatmap_avg += heatmap / len(multiplier)" in patch
+    assert "+            heatmap_avg += heatmap_avg +" not in patch

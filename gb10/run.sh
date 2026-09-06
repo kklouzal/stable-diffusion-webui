@@ -58,7 +58,8 @@ fi
 
 sudo touch "${HOST_ROOT}/config/config.json" \
            "${HOST_ROOT}/config/ui-config.json" \
-           "${HOST_ROOT}/config/styles.csv"
+           "${HOST_ROOT}/config/styles.csv" \
+           "${HOST_ROOT}/config/generation-last.json"
 
 OWNED_EXTENSIONS=()
 if [[ -d "${PROJECT_ROOT}/extensions" ]]; then
@@ -119,6 +120,9 @@ fi
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" --check "${CONTROLNET_HOOK}"
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
+CONTROLNET_ARGS="${CONTROLNET_ROOT}/internal_controlnet/args.py"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" "${CONTROLNET_ARGS}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" --check "${CONTROLNET_ARGS}"
 if [[ -d "${CONTROLNET_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
 fi
@@ -227,6 +231,7 @@ DOCKER_ARGS=(
   -v "${HOST_ROOT}/config/config.json:/opt/stable-diffusion-webui/config.json"
   -v "${HOST_ROOT}/config/ui-config.json:/opt/stable-diffusion-webui/ui-config.json"
   -v "${HOST_ROOT}/config/styles.csv:/opt/stable-diffusion-webui/styles.csv"
+  -v "${HOST_ROOT}/config/generation-last.json:/opt/stable-diffusion-webui/generation-last.json"
 )
 
 TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"

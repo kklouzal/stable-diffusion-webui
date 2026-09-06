@@ -568,23 +568,13 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
 
         seg_params = _seg_params(denoiser)
         if bool(getattr(seg_params, "seg_active", False)):
-            # SEG mutates Python attention hooks and module fields during sampling.
-            # Graph only when the effective hook state and affected module set are
-            # static for the entire sampling window and match A1111's paired CFG
-            # attention batch behavior. Otherwise keep SEG eager.
-            if not _allow_seg_graphs():
-                return "seg_disabled"
-            if not _seg_active_for_all_graph_steps(denoiser, seg_params):
-                return "seg_active"
-            try:
-                import modules.shared as shared
-
-                if not bool(getattr(shared.opts, "batch_cond_uncond", False)):
-                    return "seg_unpaired_cfg"
-            except Exception:
-                return "seg_unpaired_cfg"
-            if _seg_module_signature(seg_params) is None:
-                return "seg_hooks_unready"
+            # SEG owns mutable Python attention-hook state. Even when its effective
+            # parameters span the full sampling window, replay bypasses the Python
+            # hook lifecycle and has produced process-dependent repeated-SEG output.
+            # Keep SEG eager until the hook state is represented as explicit graph
+            # input/state; OPENCLAW_CUDA_GRAPH_ALLOW_SEG is retained as diagnostics
+            # only and must not trade fixed-seed quality for graph speed.
+            return "seg_attention_hooks"
 
     return None
 

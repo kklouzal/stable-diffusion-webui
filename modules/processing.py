@@ -1363,6 +1363,15 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     if p.scripts is not None:
         p.scripts.postprocess(p, res)
 
+    # This is the common successful-completion path for UI and API generations.
+    # The snapshot helper ignores interrupted/cancelled and empty results, so those
+    # cannot replace the last completed generation.
+    from modules import generation_last
+    try:
+        generation_last.capture_completed_generation(p, res)
+    except Exception:
+        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+
     return res
 
 

@@ -1,6 +1,11 @@
 import inspect
 
 from pydantic import BaseModel, Field, create_model
+
+try:
+    from pydantic import ConfigDict
+except ImportError:  # Pydantic 1.x development/test environments
+    ConfigDict = None
 from typing import Any, Optional, Literal
 from inflection import underscore
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
@@ -145,9 +150,16 @@ class PydanticModelGenerator:
                 Field(default=d.field_value, alias=d.field_alias, exclude=d.field_exclude, title=d.field_title, description=d.field_description),
             ) for d in self._model_def
         }
-        DynamicModel = create_model(self._model_name, **fields)
-        DynamicModel.__config__.allow_population_by_field_name = True
-        DynamicModel.__config__.allow_mutation = True
+        if ConfigDict is not None and hasattr(BaseModel, "model_fields"):
+            DynamicModel = create_model(
+                self._model_name,
+                __config__=ConfigDict(populate_by_name=True, frozen=False),
+                **fields,
+            )
+        else:
+            DynamicModel = create_model(self._model_name, **fields)
+            DynamicModel.__config__.allow_population_by_field_name = True
+            DynamicModel.__config__.allow_mutation = True
         return DynamicModel
 
 StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
@@ -187,7 +199,7 @@ StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
 ).generate_model()
 
 class _ImageGenerationResponse(BaseModel):
-    images: list[str] = Field(default=None, title="Image", description="The generated image in base64 format.")
+    images: Optional[list[str]] = Field(default=None, title="Image", description="The generated image in base64 format.")
     parameters: dict
     info: str
 
@@ -250,15 +262,15 @@ class ProgressResponse(BaseModel):
     progress: float = Field(title="Progress", description="The progress with a range of 0 to 1")
     eta_relative: float = Field(title="ETA in secs")
     state: dict = Field(title="State", description="The current state snapshot")
-    current_image: str = Field(default=None, title="Current image", description="The current image in base64 format. opts.show_progress_every_n_steps is required for this to work.")
-    textinfo: str = Field(default=None, title="Info text", description="Info text used by WebUI.")
+    current_image: Optional[str] = Field(default=None, title="Current image", description="The current image in base64 format. opts.show_progress_every_n_steps is required for this to work.")
+    textinfo: Optional[str] = Field(default=None, title="Info text", description="Info text used by WebUI.")
     current_task: Optional[str] = Field(default=None, title="Current Task", description="The active API task id, when one is running.")
 
 class InterrogateRequest(_Base64ImageRequest):
     model: str = Field(default="clip", title="Model", description="The interrogate model used.")
 
 class InterrogateResponse(BaseModel):
-    caption: str = Field(default=None, title="Caption", description="The generated caption for the image.")
+    caption: Optional[str] = Field(default=None, title="Caption", description="The generated caption for the image.")
 
 class TrainResponse(BaseModel):
     info: str = Field(title="Train info", description="Response string from train embedding or hypernetwork task.")
@@ -355,12 +367,12 @@ class MemoryResponse(BaseModel):
 
 
 class ScriptsList(BaseModel):
-    txt2img: list = Field(default=None, title="Txt2img", description="Titles of scripts (txt2img)")
-    img2img: list = Field(default=None, title="Img2img", description="Titles of scripts (img2img)")
+    txt2img: Optional[list] = Field(default=None, title="Txt2img", description="Titles of scripts (txt2img)")
+    img2img: Optional[list] = Field(default=None, title="Img2img", description="Titles of scripts (img2img)")
 
 
 class ScriptArg(BaseModel):
-    label: str = Field(default=None, title="Label", description="Name of the argument in UI")
+    label: Optional[str] = Field(default=None, title="Label", description="Name of the argument in UI")
     value: Optional[Any] = Field(default=None, title="Value", description="Default value of the argument")
     minimum: Optional[Any] = Field(default=None, title="Minimum", description="Minimum allowed value for the argumentin UI")
     maximum: Optional[Any] = Field(default=None, title="Minimum", description="Maximum allowed value for the argumentin UI")
@@ -369,9 +381,9 @@ class ScriptArg(BaseModel):
 
 
 class ScriptInfo(BaseModel):
-    name: str = Field(default=None, title="Name", description="Script name")
-    is_alwayson: bool = Field(default=None, title="IsAlwayson", description="Flag specifying whether this script is an alwayson script")
-    is_img2img: bool = Field(default=None, title="IsImg2img", description="Flag specifying whether this script is an img2img script")
+    name: Optional[str] = Field(default=None, title="Name", description="Script name")
+    is_alwayson: Optional[bool] = Field(default=None, title="IsAlwayson", description="Flag specifying whether this script is an alwayson script")
+    is_img2img: Optional[bool] = Field(default=None, title="IsImg2img", description="Flag specifying whether this script is an img2img script")
     args: list[ScriptArg] = Field(title="Arguments", description="List of script's arguments")
 
 class ExtensionItem(BaseModel):

@@ -1,7 +1,8 @@
 # sd-webui-controlnet runtime packages that are not otherwise pulled into the
 # GB10 image dependency closure. Keep broad extension pins that conflict with
 # A1111's app closure (for example timm/pydantic) out of this image supplement.
-# controlnet_aux 0.0.10 still expects the classic mediapipe solutions API;
-# mediapipe 1.0.0 removed that surface and breaks ControlNet startup.
-mediapipe<1.0.0
+# MediaPipe is intentionally omitted. Its available Python 3.12/aarch64 wheels
+# require older NumPy or protobuf versions than NVIDIA 26.08 provides. The
+# repo-owned controlnet_aux patch makes only its MediaPipe face detector
+# unavailable while preserving the rest of controlnet_aux.
 controlnet_aux>=0.0.9

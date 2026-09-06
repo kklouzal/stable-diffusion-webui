@@ -3,8 +3,8 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="${DOCKERFILE:-${PROJECT_ROOT}/Dockerfile}"
-BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.07-py3}"
-PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu133}"
+BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.08-py3}"
+PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu134}"
 MSLK_REPO="${MSLK_REPO:-https://github.com/meta-pytorch/MSLK.git}"
 MSLK_COMMIT="${MSLK_COMMIT:-88d06bc2784f3b550d7ec851d4ca67a16a844fe2}"
 IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"

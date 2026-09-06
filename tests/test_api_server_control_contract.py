@@ -19,6 +19,8 @@ def load_api_control_class():
         "get_vae_decode_graphs",
         "set_vae_decode_graphs",
         "get_openclaw_generation_diagnostics",
+        "get_openclaw_cache_telemetry",
+        "get_last_generation",
         "get_memory",
         "_memory_counter_pair",
         "refresh_embeddings",
@@ -121,6 +123,8 @@ def _patch_minimal_init_globals(monkeypatch, api_class, *, api_server_stop=False
         "set_config",
         "get_sdpa_backend",
         "set_sdpa_backend",
+        "get_openclaw_cache_telemetry",
+        "get_last_generation",
         "get_precision_map",
         "get_cmd_flags",
         "get_samplers",
@@ -204,6 +208,7 @@ def test_server_control_routes_are_gated_by_api_server_stop(monkeypatch):
     _patch_minimal_init_globals(monkeypatch, api_class, api_server_stop=False)
     api_class(disabled_app, DummyLock([]))
     disabled_paths = {path for path, _, _ in disabled_app.routes}
+    assert "/sdapi/v1/generation/last" in disabled_paths
     assert "/sdapi/v1/server-kill" not in disabled_paths
     assert "/sdapi/v1/server-restart" not in disabled_paths
     assert "/sdapi/v1/server-stop" not in disabled_paths

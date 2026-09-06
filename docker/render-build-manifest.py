@@ -12,7 +12,7 @@ A1111_DIR = Path(os.environ.get('A1111_DIR', '/opt/stable-diffusion-webui'))
 OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST.txt')))
 OUTPUT_JSON = Path(os.environ.get('OUTPUT_JSON', str(A1111_DIR / 'BUILD_MANIFEST.json')))
 OUTPUT_LATEST_AUDIT = Path(os.environ.get('OUTPUT_LATEST_AUDIT', str(A1111_DIR / 'BUILD_MANIFEST_LATEST_AUDIT.json')))
-PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu132')
+PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu134')
 PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
 PYTORCH_NIGHTLY_OPTIONAL_ABSENT = {'torchaudio'}
 TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
@@ -260,7 +260,7 @@ lines.append('[classification summary]')
 lines.append('base-layer-provided = CUDA/PyTorch/base packages protected before A1111 app dependency installation')
 lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt; base matches stay protected')
 lines.append('a1111-indirect = transitive dependencies pulled in under the direct set')
-lines.append('torchaudio = optional for the NGC CUDA 13.3 lane; absence is accepted unless a runtime import requirement is proven')
+lines.append('torchaudio = optional for the NGC CUDA 13.4 lane; absence is accepted unless a runtime import requirement is proven')
 lines.append(f"base_layer_provided: {len(sections['base'])}")
 lines.append(f"a1111_direct: {len(sections['direct'])}")
 lines.append(f"a1111_indirect: {len(sections['indirect'])}")

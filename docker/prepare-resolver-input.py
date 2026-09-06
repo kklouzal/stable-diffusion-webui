@@ -32,6 +32,10 @@ def main() -> int:
         help="Additional requirements files to append to the resolver input.",
     )
     ap.add_argument("--audit", default="/opt/build/requirements-resolver-audit.json")
+    ap.add_argument(
+        "--protected-names-file",
+        help="Newline-delimited package names inherited from and owned by the base image.",
+    )
     ap.add_argument("--protected-name", action="append", default=list(DEFAULT_PROTECTED_NAMES))
     ap.add_argument("--protected-prefix", action="append", default=list(DEFAULT_PROTECTED_PREFIXES))
     args = ap.parse_args()
@@ -41,6 +45,12 @@ def main() -> int:
     Path(args.wheel_dir).mkdir(parents=True, exist_ok=True)
 
     protected_names = {normalize(name) for name in args.protected_name}
+    if args.protected_names_file:
+        protected_names.update(
+            normalize(name)
+            for name in Path(args.protected_names_file).read_text().splitlines()
+            if name.strip() and not name.lstrip().startswith("#")
+        )
     protected_prefixes = tuple(normalize(prefix) for prefix in args.protected_prefix)
 
     emitted = []
@@ -69,6 +79,7 @@ def main() -> int:
         "source": str(source),
         "included": included,
         "target": str(target),
+        "protected_names_file": args.protected_names_file,
         "protected_names": sorted(protected_names),
         "protected_prefixes": list(protected_prefixes),
         "removed": removed,

@@ -790,6 +790,15 @@ class ScriptRunner:
         script_args = args[script.args_from:script.args_to]
         processed = script.run(p, *script_args)
 
+        # Selectable scripts may return a Processed object without calling
+        # process_images(). Capture that successful UI/API result as well.
+        if processed is not None:
+            from modules import generation_last
+            try:
+                generation_last.capture_completed_generation(p, processed)
+            except Exception:
+                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+
         shared.total_tqdm.clear()
 
         return processed

@@ -45,3 +45,19 @@ def test_controlnet_owner_marker_bypasses_cuda_graph_capture():
 
     assert openclaw_cuda_graphs._graph_denoiser_bypass_reason(_denoiser_with_unet(unet)) == "external_unet_forward_hook"
     assert unet._controlnet_forward_hook_owner is owner
+
+
+def test_cuda_graphs_bypass_seg_attention_hooks_even_when_opted_in(monkeypatch):
+    monkeypatch.setattr(openclaw_cuda_graphs, "_allow_seg_graphs", lambda: True)
+    seg_params = SimpleNamespace(
+        seg_active=True,
+        seg_blur_sigma=3.0,
+        seg_blur_threshold=10.0,
+        seg_start_step=0,
+        seg_end_step=7,
+    )
+    denoiser = _denoiser_with_unet(SimpleNamespace())
+    denoiser.total_steps = 8
+    denoiser.p.incant_cfg_params = {"seg_params": seg_params}
+
+    assert openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser) == "seg_attention_hooks"

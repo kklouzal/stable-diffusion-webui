@@ -12,15 +12,26 @@ EXACT_PROTECTED = {"torch", "torchvision", "torchaudio", "triton"}
 PREFIX_PROTECTED = ("nvidia-", "cuda-")
 REQUIRED_PRESENT = {"torch", "torchvision", "triton"}
 OPTIONAL_ABSENT_OK = {"torchaudio"}
+DEFAULT_PROTECTED_NAMES_FILE = Path("/opt/base-python-protected-names.txt")
 
 
 def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
-def is_protected(name: str) -> bool:
+def load_protected_names(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {
+        normalize(line)
+        for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+
+def is_protected(name: str, base_protected_names: set[str]) -> bool:
     norm = normalize(name)
-    return norm in EXACT_PROTECTED or norm.startswith(PREFIX_PROTECTED)
+    return norm in EXACT_PROTECTED or norm in base_protected_names or norm.startswith(PREFIX_PROTECTED)
 
 
 def dist_fingerprint(dist: md.Distribution) -> str:
@@ -35,14 +46,14 @@ def dist_fingerprint(dist: md.Distribution) -> str:
     return h.hexdigest()
 
 
-def snapshot() -> dict:
+def snapshot(base_protected_names: set[str], protected_names_file: Path) -> dict:
     packages: dict[str, dict] = {}
     for dist in md.distributions():
         name = dist.metadata.get("Name")
         if not name:
             continue
         norm = normalize(name)
-        if not is_protected(norm):
+        if not is_protected(norm, base_protected_names):
             continue
         packages[norm] = {
             "name": name,
@@ -63,7 +74,10 @@ def snapshot() -> dict:
         if name in OPTIONAL_ABSENT_OK and not exact[name]["present"]:
             exact[name]["optional_absent"] = True
     return {
-        "schema": "gb10-a1111-protected-stack-v1",
+        "schema": "gb10-a1111-protected-stack-v2",
+        "base_protected_names_file": str(protected_names_file),
+        "base_protected_names_count": len(base_protected_names),
+        "base_protected_names": sorted(base_protected_names),
         "protected_exact": sorted(EXACT_PROTECTED),
         "protected_prefixes": list(PREFIX_PROTECTED),
         "required_present": sorted(REQUIRED_PRESENT),
@@ -79,6 +93,10 @@ def validate_baseline(data: dict) -> list[str]:
     for name in sorted(REQUIRED_PRESENT):
         if not exact.get(name, {}).get("present"):
             problems.append(f"required protected package is absent: {name}")
+    packages = data.get("packages", {})
+    for name in data.get("base_protected_names", []):
+        if name not in packages:
+            problems.append(f"NVIDIA base package is absent: {name}")
     return problems
 
 
@@ -107,9 +125,18 @@ def main() -> int:
     ap.add_argument("--snapshot", help="write a baseline snapshot JSON")
     ap.add_argument("--compare", help="compare the current environment to a previous snapshot JSON")
     ap.add_argument("--out", help="write current snapshot/compare result JSON here")
+    ap.add_argument(
+        "--protected-names-file",
+        default=str(DEFAULT_PROTECTED_NAMES_FILE),
+        help="newline-delimited package names inherited from the NVIDIA base image",
+    )
     args = ap.parse_args()
 
-    current = snapshot()
+    protected_names_file = Path(args.protected_names_file)
+    base_protected_names = load_protected_names(protected_names_file)
+    if not base_protected_names:
+        raise SystemExit(f"NVIDIA base protected names file is absent or empty: {protected_names_file}")
+    current = snapshot(base_protected_names, protected_names_file)
     problems = validate_baseline(current)
     result = {"current": current, "problems": problems}
 
@@ -137,7 +164,7 @@ def main() -> int:
     absent = [n for n, item in current["exact"].items() if item.get("optional_absent")]
     if absent:
         print("optional protected package absent by policy: " + ", ".join(sorted(absent)))
-    print("protected CUDA/PyTorch package boundary: ok")
+    print(f"protected NVIDIA base package boundary: ok ({len(base_protected_names)} packages)")
     return 0
 
 
