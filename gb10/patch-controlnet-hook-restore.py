@@ -144,6 +144,18 @@ RESTORE_PATCHED = '''    def restore(self):
 '''
 
 
+def restore_is_patched(source: str) -> bool:
+    """Accept the owner-aware restore block with extension-specific cleanup."""
+    return all(fragment in source for fragment in (
+        "    def restore(self):",
+        'getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token',
+        "model._controlnet_forward_hook_baseline",
+        "model._controlnet_forward_hook_wrapper",
+        "self._forward_hook_wrapper = None",
+        "self.control_params = None",
+    ))
+
+
 def replace_one(source: str, old_options: tuple[str, ...], new: str, label: str) -> tuple[str, bool]:
     if new in source:
         return source, False
@@ -154,8 +166,8 @@ def replace_one(source: str, old_options: tuple[str, ...], new: str, label: str)
 
 
 def verify(source: str, path: Path) -> None:
-    required = (INIT_PATCHED, FORWARD_PATCHED, INSTALL_PATCHED, RESTORE_PATCHED)
-    if not all(block in source for block in required):
+    required = (INIT_PATCHED, FORWARD_PATCHED, INSTALL_PATCHED)
+    if not all(block in source for block in required) or not restore_is_patched(source):
         raise SystemExit(f"ControlNet lifecycle verification failed (partial markers): {path}")
     forbidden = ("model._original_forward = model.forward", "self._forward_hook_installed")
     if any(text in source for text in forbidden):
@@ -187,6 +199,8 @@ def main() -> int:
             ((INSTALL_ORIGINAL, INSTALL_OLD_PATCH), INSTALL_PATCHED, "install"),
             ((RESTORE_ORIGINAL, RESTORE_OLD_PATCH, RESTORE_LIVE_PARTIAL), RESTORE_PATCHED, "restore"),
         ):
+            if label == "restore" and restore_is_patched(source):
+                continue
             source, changed = replace_one(source, old, new, label)
             if changed:
                 changes.append(label)
