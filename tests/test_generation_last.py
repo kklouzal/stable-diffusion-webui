@@ -103,6 +103,36 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessingTxt2Img):
     pass
 
 
+class ControlNetUnit:
+    def __init__(self, *, enabled=False, image=None, mask=None):
+        self.enabled = enabled
+        self.input_mode = "simple"
+        self.module = "canny"
+        self.model = "control_v11p_sd15_canny"
+        self.weight = 0.75
+        self.resize_mode = "Crop and Resize"
+        self.low_vram = False
+        self.processor_res = 512
+        self.threshold_a = 64.0
+        self.threshold_b = 128.0
+        self.guidance_start = 0.1
+        self.guidance_end = 0.9
+        self.pixel_perfect = True
+        self.control_mode = "Balanced"
+        self.inpaint_crop_input_image = True
+        self.hr_option = "Both"
+        self.save_detected_map = True
+        self.advanced_weighting = None
+        self.pulid_mode = "Fidelity"
+        self.union_control_type = "Unknown"
+        self.image = image
+        self.mask = mask
+        self.effective_region_mask = None
+        self.ipadapter_input = None
+        self.batch_images = []
+        self.batch_image_files = []
+
+
 class GenerationLastTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -164,6 +194,29 @@ class GenerationLastTests(unittest.TestCase):
 
         snapshot = self.module.build_snapshot(p, self.processed)
         self.assertEqual(snapshot["parameters"]["alwayson_scripts"], {"Example Extension": {"args": [True, 0.25]}})
+
+    def test_controlnet_units_are_serialized_without_persisting_inputs(self):
+        p = StableDiffusionProcessingTxt2Img()
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=2)
+        p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
+        p.script_args = [0, ControlNetUnit(enabled=False, image=object())]
+
+        disabled = self.module.build_snapshot(p, self.processed)
+        unit = disabled["parameters"]["alwayson_scripts"]["ControlNet"]["args"][0]
+        self.assertTrue(disabled["replayable"])
+        self.assertEqual(unit["enabled"], False)
+        self.assertEqual(unit["module"], "canny")
+        self.assertNotIn("image", unit)
+
+        p.script_args[1] = ControlNetUnit(enabled=True, image=object(), mask=object())
+        enabled = self.module.build_snapshot(p, self.processed)
+        unit = enabled["parameters"]["alwayson_scripts"]["ControlNet"]["args"][0]
+        self.assertFalse(enabled["replayable"])
+        self.assertEqual(unit["enabled"], True)
+        self.assertEqual(unit["guidance_start"], 0.1)
+        self.assertNotIn("image", unit)
+        self.assertTrue(any("args[0].image" in item for item in enabled["limitations"]))
+        self.assertTrue(any("args[0].mask" in item for item in enabled["limitations"]))
 
     def test_prompt_list_uses_the_resolved_first_prompt(self):
         p = StableDiffusionProcessingTxt2Img()

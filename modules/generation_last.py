@@ -6,8 +6,8 @@ import datetime as dt
 import json
 import math
 import os
-import os
 import threading
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,57 @@ def _first_prompt_value(p, name: str, all_name: str):
     return value
 
 
+_CONTROLNET_API_FIELDS = (
+    "enabled", "input_mode", "module", "model", "weight", "resize_mode", "low_vram",
+    "processor_res", "threshold_a", "threshold_b", "guidance_start", "guidance_end",
+    "pixel_perfect", "control_mode", "inpaint_crop_input_image", "hr_option",
+    "save_detected_map", "advanced_weighting", "pulid_mode", "union_control_type",
+)
+
+
+def _enum_values(value: Any):
+    if isinstance(value, Enum):
+        return _enum_values(value.value)
+    if isinstance(value, (list, tuple)):
+        return [_enum_values(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _enum_values(item) for key, item in value.items()}
+    return value
+
+
+def _is_controlnet_unit(value: Any) -> bool:
+    return type(value).__name__ == "ControlNetUnit"
+
+
+def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[str]) -> dict[str, Any]:
+    """Serialize the API-supported portion of an effective ControlNet unit."""
+    result: dict[str, Any] = {}
+    for field in _CONTROLNET_API_FIELDS:
+        value = _safe_json(_enum_values(getattr(unit, field, None)), limitations, f"alwayson_scripts.ControlNet.args[{unit_index}].{field}")
+        if value is not _OMIT:
+            result[field] = value
+
+    enabled = bool(result.get("enabled", False))
+    if not enabled:
+        return result
+
+    unit_path = f"alwayson_scripts.ControlNet.args[{unit_index}]"
+    image = getattr(unit, "image", None)
+    if image is None:
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} is enabled but has no persisted input image; supply {unit_path}.image before replay.")
+    else:
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} input image is not persisted; supply {unit_path}.image before replay.")
+    if getattr(unit, "mask", None) is not None:
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} mask is not persisted; supply {unit_path}.mask before replay.")
+    if getattr(unit, "effective_region_mask", None) is not None:
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} effective region mask is not persisted; supply {unit_path}.effective_region_mask before replay.")
+    if getattr(unit, "ipadapter_input", None) is not None:
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} IP-Adapter input is not persisted; supply {unit_path}.ipadapter_input before replay.")
+    if getattr(unit, "batch_images", None) or getattr(unit, "batch_image_files", None):
+        _limitation(limitations, f"ControlNet unit {unit_index + 1} batch inputs are not persisted; supply its image inputs before replay.")
+    return result
+
+
 def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[str]) -> None:
     runner = getattr(p, "scripts", None)
     script_args = getattr(p, "script_args", None)
@@ -116,7 +167,17 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
     for script in getattr(runner, "alwayson_scripts", []) or []:
         title = script.title()
         args_to = getattr(p, "openclaw_script_args_to_overrides", {}).get(id(script), script.args_to)
-        values = _safe_json(list(script_args[script.args_from:args_to]), limitations, f"alwayson_scripts.{title}.args")
+        raw_values = list(script_args[script.args_from:args_to])
+        if title.casefold() == "controlnet":
+            values = [
+                _controlnet_unit_to_api_json(value, index, limitations) if _is_controlnet_unit(value)
+                else _safe_json(value, limitations, f"alwayson_scripts.{title}.args[{index}]")
+                for index, value in enumerate(raw_values)
+            ]
+            if any(value is _OMIT for value in values):
+                continue
+        else:
+            values = _safe_json(raw_values, limitations, f"alwayson_scripts.{title}.args")
         if values is _OMIT:
             continue
         alwayson[title] = {"args": values}

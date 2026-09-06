@@ -55,7 +55,9 @@ The snapshot is atomically written to `generation-last/generation-last.json`. GB
 
 `parameters` contains A1111 API field names. A `txt2img` snapshot with `replayable: true` can be posted directly to `/sdapi/v1/txt2img`. It contains the resolved seed, effective sampler and scheduler, high-resolution controls, checkpoint/VAE override settings, ControlNet settings other than images, and replayable selectable/always-on script arguments.
 
-The endpoint never stores image or mask payloads. Therefore every `img2img` snapshot is marked non-replayable and names the missing `init_images` and, where relevant, mask. A txt2img snapshot with enabled ControlNet is also non-replayable until the caller supplies each omitted `control_net_image`, `control_net_image2`, or `control_net_image3`. An unsupported or oversized parameter is not silently dropped: it is listed in `limitations` and makes the snapshot non-replayable.
+ControlNet units are serialized as API dictionaries in `parameters.alwayson_scripts.ControlNet.args`. Disabled units remain present with `enabled: false`. Enabled units include supported API settings such as model, module, weight, resize mode, processor thresholds, guidance range, control mode, high-resolution option, and advanced weighting. Images, masks, effective-region masks, IP-Adapter inputs, and batch inputs are intentionally excluded; each required replacement is named in `limitations` using its exact `alwayson_scripts.ControlNet.args[n]` path.
+
+The endpoint never stores image or mask payloads. Therefore every `img2img` snapshot is marked non-replayable and names the missing `init_images` and, where relevant, mask. A txt2img snapshot with enabled ControlNet is also non-replayable until the caller supplies the input named in its limitation, for example `alwayson_scripts.ControlNet.args[0].image`. An unsupported or oversized parameter is not silently dropped: it is listed in `limitations` and makes the snapshot non-replayable.
 
 ## Harness replay request
 
