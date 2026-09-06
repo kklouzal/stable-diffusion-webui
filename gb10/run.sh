@@ -56,10 +56,10 @@ else
   exit 1
 fi
 
+sudo mkdir -p "${HOST_ROOT}/config/generation-last"
 sudo touch "${HOST_ROOT}/config/config.json" \
            "${HOST_ROOT}/config/ui-config.json" \
-           "${HOST_ROOT}/config/styles.csv" \
-           "${HOST_ROOT}/config/generation-last.json"
+           "${HOST_ROOT}/config/styles.csv"
 
 OWNED_EXTENSIONS=()
 if [[ -d "${PROJECT_ROOT}/extensions" ]]; then
@@ -211,6 +211,7 @@ DOCKER_ARGS=(
   -e TORCHINDUCTOR_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/torchinductor/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e TRITON_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e CUDA_CACHE_PATH="/opt/stable-diffusion-webui/cache/compile/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
+  -e GENERATION_LAST_DIR="/opt/stable-diffusion-webui/generation-last"
   -v "${HOST_ROOT}/BLIP:/opt/stable-diffusion-webui/models/BLIP"
   -v "${HOST_ROOT}/CLIP:/opt/stable-diffusion-webui/models/CLIP"
   -v "${HOST_ROOT}/Codeformer:/opt/stable-diffusion-webui/models/Codeformer"
@@ -231,7 +232,7 @@ DOCKER_ARGS=(
   -v "${HOST_ROOT}/config/config.json:/opt/stable-diffusion-webui/config.json"
   -v "${HOST_ROOT}/config/ui-config.json:/opt/stable-diffusion-webui/ui-config.json"
   -v "${HOST_ROOT}/config/styles.csv:/opt/stable-diffusion-webui/styles.csv"
-  -v "${HOST_ROOT}/config/generation-last.json:/opt/stable-diffusion-webui/generation-last.json"
+  -v "${HOST_ROOT}/config/generation-last:/opt/stable-diffusion-webui/generation-last"
 )
 
 TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"

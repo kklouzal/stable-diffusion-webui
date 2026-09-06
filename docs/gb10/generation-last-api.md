@@ -8,7 +8,7 @@ The endpoint is read-only. It does not run a generation, load a checkpoint, or m
 {"detail":"No successfully completed generation snapshot is available"}
 ```
 
-The snapshot is atomically written to A1111's `generation-last.json`. GB10 mounts that file from `${HOST_ROOT}/config/generation-last.json`, so it survives a container replacement. A failed, skipped, interrupted, stopped, or image-less generation cannot replace the existing snapshot.
+The snapshot is atomically written to `generation-last/generation-last.json`. GB10 bind-mounts the whole directory from `${HOST_ROOT}/config/generation-last` at `/opt/stable-diffusion-webui/generation-last`; the temporary file is created and replaced in that same mounted directory. The write fsyncs both the file and its directory before returning, so it remains atomic and durable across container replacement or restart. A failed, skipped, interrupted, stopped, or image-less generation cannot replace the existing snapshot.
 
 ## Response contract
 

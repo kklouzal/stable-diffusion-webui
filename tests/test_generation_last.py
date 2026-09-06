@@ -125,6 +125,10 @@ class GenerationLastTests(unittest.TestCase):
         self.assertEqual(snapshot["checkpoint"]["sha256"], "abc123")
         self.assertEqual(snapshot["parameters"]["override_settings"]["sd_model_checkpoint"], "example-model [abc123]")
         self.assertEqual(self.module.get_last_snapshot(), snapshot)
+        path = self.module.snapshot_path()
+        self.assertEqual(path, Path(self.temp.name) / "generation-last" / "generation-last.json")
+        self.assertTrue(path.is_file())
+        self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
     def test_cancelled_generation_does_not_replace_previous_snapshot(self):
         p = StableDiffusionProcessingTxt2Img()

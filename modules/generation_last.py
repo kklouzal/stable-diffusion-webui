@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import math
 import os
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,8 @@ _SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "authorizat
 
 
 def snapshot_path() -> Path:
-    return Path(paths.data_path) / "generation-last.json"
+    directory = os.environ.get("GENERATION_LAST_DIR")
+    return Path(directory) / "generation-last.json" if directory else Path(paths.data_path) / "generation-last" / "generation-last.json"
 
 
 def _limitation(limitations: list[str], message: str) -> None:
@@ -249,6 +251,11 @@ def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None
         file.flush()
         os.fsync(file.fileno())
     os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:
