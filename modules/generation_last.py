@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import threading
 from enum import Enum
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 from modules import paths, shared
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _LOCK = threading.RLock()
 _OMIT = object()
 _MAX_DEPTH = 8
@@ -203,7 +204,7 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     return encoded
 
 
-def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[str], budget: dict[str, int]) -> dict[str, Any]:
+def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[str], budget: dict[str, int], *, retain_assets: bool = True) -> dict[str, Any]:
     """Serialize the API-supported portion of an effective ControlNet unit."""
     # UI runs retain ControlNetUnit objects; API script_args retain dictionaries.
     get = unit.get if isinstance(unit, dict) else lambda name, default=None: getattr(unit, name, default)
@@ -215,6 +216,12 @@ def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[s
 
     enabled = bool(result.get("enabled", False))
     if not enabled:
+        return result
+    if not retain_assets:
+        if result.get("input_mode") not in (None, "simple"):
+            _limitation(limitations, f"ControlNet unit {unit_index + 1} requires an unsupported batch/merge input mode.")
+        if get("ipadapter_input") is not None:
+            _limitation(limitations, f"ControlNet unit {unit_index + 1} requires serialized IP-Adapter input, not a single replacement image.")
         return result
 
     unit_path = f"alwayson_scripts.ControlNet.args[{unit_index}]"
@@ -243,7 +250,7 @@ def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[s
     return result
 
 
-def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[str], budget: dict[str, int]) -> None:
+def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[str], budget: dict[str, int], *, retain_assets: bool = True) -> None:
     runner = getattr(p, "scripts", None)
     script_args = getattr(p, "script_args", None)
     if runner is None or not isinstance(script_args, (list, tuple)):
@@ -258,7 +265,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
         raw_values = list(script_args[start:end])
         if title.casefold() == "controlnet":
             values = [
-                _controlnet_unit_to_api_json(value, index, limitations, budget) if _is_controlnet_unit(value) or isinstance(value, dict)
+                _controlnet_unit_to_api_json(value, index, limitations, budget, retain_assets=retain_assets) if _is_controlnet_unit(value) or isinstance(value, dict)
                 else _safe_json(value, limitations, f"alwayson_scripts.{title}.args[{index}]")
                 for index, value in enumerate(raw_values)
             ]
@@ -335,8 +342,8 @@ def _capture_img2img_assets(p: Any, parameters: dict[str, Any], limitations: lis
         parameters["mask"] = mask
 
 
-def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str, Any]:
-    """Build a JSON-safe snapshot from the effective processing object."""
+def _build_parameters(p, processed, *, retain_assets: bool):
+    """Capture tuning independently of optional previous-task assets."""
     limitations: list[str] = []
     generation_type = "img2img" if p.__class__.__name__.endswith("Img2Img") else "txt2img"
     parameters: dict[str, Any] = {}
@@ -366,20 +373,21 @@ def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str
             "hr_checkpoint_name", "hr_sampler_name", "hr_scheduler",
         ):
             _copy_parameter(parameters, p, field, limitations)
-    else:
+    elif retain_assets:
         _capture_img2img_assets(p, parameters, limitations, budget)
 
     for suffix in ("", "2", "3"):
         for name in ("enabled", "module", "model", "weight", "resize_mode", "lowvram", "pres", "pthr_a", "pthr_b", "guidance_start", "guidance_end", "control_mode", "pixel_perfect"):
             _copy_parameter(parameters, p, f"control_net_{name}{suffix}", limitations)
         image_name = f"control_net_image{suffix}"
-        if parameters.get(f"control_net_enabled{suffix}"):
+        if retain_assets and parameters.get(f"control_net_enabled{suffix}"):
             image = _image_to_api_base64(getattr(p, image_name, None), limitations, f"parameters.{image_name}", budget)
             if image is _OMIT or image is None:
                 _limitation(limitations, f"ControlNet unit {suffix or '1'} requires parameters.{image_name} before replay.")
             else:
                 parameters[image_name] = image
-    _controlnet_limitations(parameters, limitations)
+    if retain_assets:
+        _controlnet_limitations(parameters, limitations)
 
     override_settings = _safe_json(dict(getattr(p, "override_settings", {}) or {}), limitations, "parameters.override_settings")
     if override_settings is _OMIT:
@@ -391,15 +399,83 @@ def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str
         override_settings["sd_vae"] = checkpoint["vae_name"]
     # These are A1111 options rather than txt2img request fields, so replay them
     # through the documented override_settings channel.
-    override_settings["token_merging_ratio"] = _value(p, "token_merging_ratio", 0)
-    override_settings["token_merging_ratio_hr"] = _value(p, "token_merging_ratio_hr", 0)
+    for field in ("token_merging_ratio", "token_merging_ratio_hr"):
+        value = _safe_json(_value(p, field, 0), limitations, f"parameters.override_settings.{field}")
+        if value is not _OMIT:
+            override_settings[field] = value
     clip_skip = getattr(p, "clip_skip", getattr(shared.opts, "CLIP_stop_at_last_layers", None))
     if clip_skip is not None:
-        override_settings["CLIP_stop_at_last_layers"] = clip_skip
+        value = _safe_json(clip_skip, limitations, "parameters.override_settings.CLIP_stop_at_last_layers")
+        if value is not _OMIT:
+            override_settings["CLIP_stop_at_last_layers"] = value
     parameters["override_settings"] = override_settings
     parameters["override_settings_restore_afterwards"] = bool(getattr(p, "override_settings_restore_afterwards", True))
 
-    _capture_script_parameters(p, parameters, limitations, budget)
+    _capture_script_parameters(p, parameters, limitations, budget, retain_assets=retain_assets)
+    return parameters, limitations, checkpoint, generation_type
+
+
+_LORA_TAG = re.compile(r"<lora:([^<>:\x00-\x1f\x7f]{1,256}):([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)>")
+_MAX_LORA_TAGS = 32
+_MAX_PROMPT_CAPTURE_LENGTH = 262_144
+
+
+def _capture_lora_tags(p, processed, limitations: list[str]) -> list[str]:
+    """Retain network selections, never the surrounding descriptive prompt."""
+    negative_prompts = getattr(processed, "all_negative_prompts", None) or getattr(p, "all_negative_prompts", None)
+    if not negative_prompts:
+        negative = getattr(p, "negative_prompt", "")
+        negative_prompts = negative if isinstance(negative, list) else [negative]
+    if not isinstance(negative_prompts, (list, tuple)) or len(negative_prompts) > _MAX_ITEMS:
+        _limitation(limitations, "Effective negative prompt batch exceeds the LoRA capture bound.")
+        return []
+    for negative in negative_prompts:
+        if not isinstance(negative, str) or len(negative) > _MAX_PROMPT_CAPTURE_LENGTH:
+            _limitation(limitations, "Effective negative prompt exceeds the LoRA capture bound.")
+            return []
+        if re.search(r"<lora:", negative, flags=re.IGNORECASE):
+            _limitation(limitations, "Negative-prompt LoRA selections cannot be transferred to a replacement positive prompt.")
+            return []
+    prompts = getattr(processed, "all_prompts", None) or getattr(p, "all_prompts", None)
+    if not prompts:
+        # setup_prompts normally supplies the style-expanded all_prompts. Without
+        # it, configured styles cannot be reconstructed reliably after the run.
+        if getattr(p, "styles", None):
+            _limitation(limitations, "Effective style-expanded prompts are unavailable for LoRA selection capture.")
+            return []
+        prompt = getattr(p, "prompt", "")
+        prompts = prompt if isinstance(prompt, list) else [prompt]
+    if not isinstance(prompts, (list, tuple)) or len(prompts) > _MAX_ITEMS:
+        _limitation(limitations, "Effective prompt batch exceeds the LoRA capture bound.")
+        return []
+    selections = None
+    for prompt in prompts:
+        if not isinstance(prompt, str) or len(prompt) > _MAX_PROMPT_CAPTURE_LENGTH:
+            _limitation(limitations, "Effective prompt exceeds the LoRA capture bound.")
+            return []
+        tags = []
+        for match in re.finditer(r"<lora:[^>]*(?:>|$)", prompt, flags=re.IGNORECASE):
+            tag = match.group()
+            parsed = _LORA_TAG.fullmatch(tag)
+            if len(tag) > 256 or parsed is None or not math.isfinite(float(parsed[2])):
+                _limitation(limitations, "A LoRA selection is not a supported finite numeric weighted tag.")
+                return []
+            if len(tags) >= _MAX_LORA_TAGS:
+                _limitation(limitations, "LoRA selections exceed the retained-tag bound.")
+                return []
+            tags.append(tag)
+        if selections is not None and tags != selections:
+            _limitation(limitations, "Effective batch prompts have different LoRA selections; one reusable selection cannot represent the batch.")
+            return []
+        selections = tags
+    return selections or []
+
+
+def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str, Any]:
+    """Keep prior-task replay and independently reusable tuning distinct."""
+    parameters, limitations, checkpoint, generation_type = _build_parameters(p, processed, retain_assets=True)
+    settings, settings_limitations, _, _ = _build_parameters(p, processed, retain_assets=False)
+    lora_tags = _capture_lora_tags(p, processed, settings_limitations)
     replayable = generation_type in ("txt2img", "img2img") and not limitations
     return {
         "schema_version": SCHEMA_VERSION,
@@ -409,6 +485,10 @@ def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str
         "limitations": limitations,
         "checkpoint": checkpoint,
         "parameters": parameters,
+        "settings_parameters": settings,
+        "settings_replayable": not settings_limitations,
+        "settings_limitations": settings_limitations,
+        "lora_tags": lora_tags,
     }
 
 
@@ -473,7 +553,7 @@ def get_last_snapshot() -> dict[str, Any] | None:
         if generation_type == "img2img":
             _limitation(limitations, "This version-1 img2img snapshot has no retained init_images; run one img2img generation after upgrading.")
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": 2,
             "completed_at": snapshot.get("completed_at"),
             "generation_type": generation_type,
             "replayable": bool(snapshot.get("replayable")) and generation_type == "txt2img" and not limitations,
@@ -481,6 +561,6 @@ def get_last_snapshot() -> dict[str, Any] | None:
             "checkpoint": snapshot.get("checkpoint") or {},
             "parameters": parameters,
         }
-    if snapshot.get("schema_version") != SCHEMA_VERSION:
+    if snapshot.get("schema_version") not in (2, SCHEMA_VERSION):
         return None
     return snapshot

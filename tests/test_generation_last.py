@@ -151,7 +151,7 @@ class GenerationLastTests(unittest.TestCase):
         snapshot = self.module.capture_completed_generation(p, self.processed)
 
         self.assertTrue(snapshot["replayable"])
-        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual(snapshot["generation_type"], "txt2img")
         self.assertEqual(snapshot["parameters"]["seed"], 123456)
         self.assertNotIn("prompt", snapshot["parameters"])
@@ -381,6 +381,96 @@ class GenerationLastTests(unittest.TestCase):
     def test_missing_snapshot_returns_none(self):
         self.assertIsNone(self.module.get_last_snapshot())
 
+    def test_settings_do_not_depend_on_previous_img2img_or_controlnet_assets(self):
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [object()]
+        p.mask = object()
+        p.control_net_enabled = True
+        p.control_net_image = object()
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=2)
+        p.scripts.alwayson_scripts = [script]
+        p.script_args = [0, ControlNetUnit(enabled=True, image=object(), mask=object())]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(snapshot["replayable"])
+        self.assertTrue(snapshot["settings_replayable"], snapshot["settings_limitations"])
+        settings = snapshot["settings_parameters"]
+        for field in ("init_images", "mask", "control_net_image"):
+            self.assertNotIn(field, settings)
+        unit = settings["alwayson_scripts"]["ControlNet"]["args"][0]
+        self.assertTrue(unit["enabled"])
+        self.assertEqual(unit["weight"], 0.75)
+        self.assertNotIn("image", unit)
+        self.assertNotIn("mask", unit)
+        self.assertEqual(settings["steps"], 20)
+
+    def test_invalid_settings_remain_blocking_independently_of_assets(self):
+        p = StableDiffusionProcessingImg2Img()
+        p.cfg_scale = float("nan")
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(snapshot["settings_replayable"])
+        self.assertTrue(any("cfg_scale" in item for item in snapshot["settings_limitations"]))
+        self.assertFalse(any("init_images" in item for item in snapshot["settings_limitations"]))
+        p.cfg_scale = 7.0
+        p.token_merging_ratio = float("nan")
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(snapshot["settings_replayable"])
+        self.assertTrue(any("token_merging_ratio" in item for item in snapshot["settings_limitations"]))
+        self.module.persist_snapshot(snapshot)
+
+    def test_lora_capture_uses_effective_prompts_and_never_retains_prose(self):
+        import json
+        p = StableDiffusionProcessingTxt2Img()
+        p.prompt = "private original text <lora:old:0.1>"
+        p.styles = ["configured-style"]
+        self.processed.all_prompts = ["private expanded description <lora:style-adapter:0.75>",
+                                      "different description <lora:style-adapter:0.75>"]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertTrue(snapshot["settings_replayable"])
+        self.assertEqual(snapshot["lora_tags"], ["<lora:style-adapter:0.75>"])
+        encoded = json.dumps(snapshot)
+        self.assertNotIn("private", encoded)
+        self.assertNotIn("different description", encoded)
+        self.assertNotIn("<lora:old", encoded)
+
+    def test_lora_capture_rejects_ambiguous_invalid_and_unbounded_selections(self):
+        p = StableDiffusionProcessingTxt2Img()
+        for prompts in (["<lora:a:1>", "<lora:b:1>"], ["<lora:a:NaN>"],
+                        ["<lora:a:1e999>"], ["<lora:a:1"], ["<lora:a\x00:1>"],
+                        ["<lora:" + "a" * 250 + ":1>"],
+                        ["<lora:a:1>" * 33], ["x" * (self.module._MAX_PROMPT_CAPTURE_LENGTH + 1)],
+                        ["<lora:a:1>"] * 257):
+            self.processed.all_prompts = prompts
+            snapshot = self.module.build_snapshot(p, self.processed)
+            self.assertFalse(snapshot["settings_replayable"], prompts[:1])
+            self.assertEqual(snapshot["lora_tags"], [])
+        self.processed.all_prompts = ["<lora:a:-.25>"]
+        self.processed.all_negative_prompts = ["private negative <lora:b:1>"]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(snapshot["settings_replayable"])
+        self.assertEqual(snapshot["lora_tags"], [])
+
+    def test_settings_reject_non_image_controlnet_sources(self):
+        for mode, adapter in (("batch", None), ("merge", None), ("simple", {"embedding": "opaque"})):
+            unit = ControlNetUnit(enabled=True)
+            unit.input_mode = mode
+            unit.ipadapter_input = adapter
+            limitations = []
+            result = self.module._controlnet_unit_to_api_json(unit, 0, limitations, {"images": 0}, retain_assets=False)
+            self.assertTrue(limitations)
+            self.assertNotIn("image", result)
+
+    def test_lora_names_and_finite_scientific_weights_are_preserved(self):
+        p = StableDiffusionProcessingTxt2Img()
+        self.processed.all_prompts = ["description <lora:style adapter:5e-1>"]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertTrue(snapshot["settings_replayable"], snapshot["settings_limitations"])
+        self.assertEqual(snapshot["lora_tags"], ["<lora:style adapter:5e-1>"])
+
+    def test_schema_two_is_not_falsely_upgraded_to_settings_capable(self):
+        legacy = {"schema_version": 2, "generation_type": "img2img", "parameters": {"steps": 20}}
+        self.module.persist_snapshot(legacy)
+        self.assertEqual(self.module.get_last_snapshot(), legacy)
+
     def test_api_getter_returns_snapshot_or_explicit_404(self):
         source = (MODULE_PATH.parents[0] / "api" / "api.py").read_text(encoding="utf8")
         tree = ast.parse(source)
@@ -398,6 +488,14 @@ class GenerationLastTests(unittest.TestCase):
         exec(compile(subset, "<generation-last-api>", "exec"), namespace)
         api = namespace["Api"]()
         self.assertEqual(api.get_last_generation(), {"schema_version": 1})
+        snapshot = {"schema_version": 3, "completed_at": "synthetic", "parameters": {"init_images": ["do-not-transfer"]},
+                    "settings_parameters": {"steps": 20}, "settings_replayable": True, "settings_limitations": [], "lora_tags": []}
+        namespace["Api"].get_last_generation.__globals__["generation_last"] = types.SimpleNamespace(get_last_snapshot=lambda: snapshot)
+        self.assertEqual(api.get_last_generation(), snapshot)
+        compact = api.get_last_generation(settings_only=True)
+        self.assertNotIn("parameters", compact)
+        self.assertEqual(compact["settings_parameters"], {"steps": 20})
+        self.assertNotIn("do-not-transfer", str(compact))
 
         namespace["Api"].get_last_generation.__globals__["generation_last"] = types.SimpleNamespace(get_last_snapshot=lambda: None)
         with self.assertRaises(HTTPException) as raised:

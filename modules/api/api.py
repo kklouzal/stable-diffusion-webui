@@ -796,10 +796,16 @@ class Api:
         from modules import openclaw_generation_diagnostics
         return openclaw_generation_diagnostics.last_generation_diagnostics() or {}
 
-    def get_last_generation(self):
+    def get_last_generation(self, settings_only: bool = False):
         snapshot = generation_last.get_last_snapshot()
         if snapshot is None:
             raise HTTPException(status_code=404, detail="No successfully completed generation snapshot is available")
+        if settings_only:
+            # Do not transfer the previous task's potentially large image assets
+            # to a caller that only needs tuning for a new operation.
+            fields = ("schema_version", "completed_at", "settings_parameters",
+                      "settings_replayable", "settings_limitations", "lora_tags")
+            return {key: snapshot[key] for key in fields if key in snapshot}
         return snapshot
 
     def _call_with_queue_lock(self, func, *args, **kwargs):
