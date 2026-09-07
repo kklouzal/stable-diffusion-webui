@@ -288,12 +288,31 @@ class GenerationLastTests(unittest.TestCase):
         p = StableDiffusionProcessingTxt2Img()
         p.token_merging_ratio = 0.5
         p.token_merging_ratio_hr = 0.25
-        p.override_settings = {"token_merging_ratio": 0.5, "api_token": "must-not-leak"}
+        p.override_settings = {"token_merging_ratio": 0.5, "token_merging_ratio_img2img": 0.35, "api_token": "must-not-leak"}
         snapshot = self.module.build_snapshot(p, self.processed)
         settings = snapshot["parameters"]["override_settings"]
         self.assertEqual(settings["token_merging_ratio"], 0.5)
         self.assertEqual(settings["token_merging_ratio_hr"], 0.25)
+        self.assertEqual(settings["token_merging_ratio_img2img"], 0.35)
         self.assertNotIn("api_token", settings)
+
+    def test_inline_api_images_are_retained_without_network_or_path_reads(self):
+        import base64
+        import io
+        encoded = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(encoded, format="PNG")
+        data = base64.b64encode(encoded.getvalue()).decode("ascii")
+        for source in (data, "data:image/png;base64," + data):
+            limitations = []
+            result = self.module._image_to_api_base64(source, limitations, "ControlNet.image", {"images": 0})
+            self.assertFalse(limitations)
+            with Image.open(io.BytesIO(base64.b64decode(result))) as image:
+                self.assertEqual(image.size, (8, 8))
+                self.assertEqual(image.convert("RGB").getpixel((0, 0)), (255, 0, 0))
+        for source in ("/tmp/private.png", "https://example.invalid/image.png", "data:image/png;base64,invalid!", "A" * (self.module._MAX_IMAGE_BYTES + 1)):
+            limitations = []
+            self.assertIs(self.module._image_to_api_base64(source, limitations, "ControlNet.image", {"images": 0}), self.module._OMIT)
+            self.assertTrue(limitations)
 
     def test_version_one_snapshot_is_available_without_new_generation(self):
         legacy = {

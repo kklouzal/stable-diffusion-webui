@@ -24,7 +24,7 @@ _MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _MAX_IMAGE_TOTAL_BYTES = 6 * 1024 * 1024
 _SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "authorization", "api_key", "cookie")
-_CREDENTIAL_FILTER_EXEMPTIONS = {"token_merging_ratio", "token_merging_ratio_hr"}
+_CREDENTIAL_FILTER_EXEMPTIONS = {"token_merging_ratio", "token_merging_ratio_hr", "token_merging_ratio_img2img"}
 
 
 def snapshot_path() -> Path:
@@ -162,14 +162,25 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
             _limitation(limitations, f"{path} has multiple image inputs beyond the retained-image limit.")
             return _OMIT
         value = value[0]
-    if isinstance(value, str):
-        _limitation(limitations, f"{path} is a path or encoded image string that cannot be safely retained; supply API base64 data before replay.")
-        return _OMIT
     try:
         from PIL import Image
         import base64
         import io
 
+        if isinstance(value, str):
+            # API/ControlNet inputs can already be encoded. Decode inline data
+            # only: never resolve paths or fetch URLs while capturing a snapshot.
+            if value.startswith("data:"):
+                prefix, separator, value = value.partition(",")
+                if not separator or prefix not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"):
+                    raise ValueError("Unsupported inline image encoding")
+            if len(value) > _MAX_IMAGE_BYTES:
+                raise ValueError("Encoded input exceeds image budget")
+            raw = base64.b64decode(value, validate=True)
+            with Image.open(io.BytesIO(raw)) as decoded:
+                if decoded.width > 16384 or decoded.height > 16384 or decoded.width * decoded.height > 64 * 1024 * 1024:
+                    raise ValueError("Image dimensions exceed budget")
+                value = decoded.convert("RGBA")
         if not isinstance(value, Image.Image):
             value = Image.fromarray(value)
         image = value.convert("RGBA")

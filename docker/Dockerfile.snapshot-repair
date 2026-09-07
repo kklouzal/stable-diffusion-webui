@@ -1,0 +1,6 @@
+# Rebuild the first-party snapshot module on the exact deployed appliance image.
+# BASE_IMAGE must be an immutable locally retained image tag/digest.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY modules/generation_last.py /opt/stable-diffusion-webui/modules/generation_last.py
+COPY tests/test_generation_last.py /opt/stable-diffusion-webui/tests/test_generation_last.py
