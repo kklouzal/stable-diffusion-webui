@@ -387,6 +387,17 @@ def _set_script_arg(script_args, index, value):
     script_args[index] = value
 
 
+def _assign_script_args(script_args, script, values, *, exact=False):
+    """Keep fixed extension slots intact; isolate variable-length API arguments."""
+    capacity = script.args_to - script.args_from
+    for index, value in enumerate(values[:capacity]):
+        _set_script_arg(script_args, script.args_from + index, value)
+    if len(values) > capacity or (exact and len(values) != capacity):
+        start = len(script_args)
+        script_args.extend(values)
+        script_args.openclaw_script_arg_ranges[id(script)] = (start, len(script_args))
+
+
 def script_default_ui_values(script):
     script_helpers = globals().get("scripts")
     if script_helpers is not None:
@@ -915,12 +926,12 @@ class Api:
         if script.title() != "OpenClaw Denoise Ramp":
             return
 
-        for idx, value in enumerate(requested_args):
+        for idx, value in enumerate(requested_args[:script.args_to - script.args_from]):
             _set_script_arg(default_script_args, script.args_from + idx, value)
 
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
         script_args = ScriptArgsList(default_script_args.copy())
-        script_args.openclaw_script_args_to_overrides = {}
+        script_args.openclaw_script_arg_ranges = {}
 
         if input_script_args is not None:
             for index, value in input_script_args.items():
@@ -928,7 +939,7 @@ class Api:
 
         # position 0 in script_arg is the idx+1 of the selectable script that is going to be run when using scripts.scripts_*2img.run()
         if selectable_scripts:
-            script_args[selectable_scripts.args_from:selectable_scripts.args_to] = request.script_args
+            _assign_script_args(script_args, selectable_scripts, request.script_args, exact=True)
             script_args[0] = selectable_idx + 1
 
         # Now check for always on scripts
@@ -946,17 +957,7 @@ class Api:
                     if not isinstance(requested_args, list):
                         raise HTTPException(status_code=422, detail=f"always on script {alwayson_script_name} args must be a list")
 
-                    # Some composite extensions build additional controls after
-                    # args_to is captured by the API default-args bootstrap. Do
-                    # not silently truncate a valid caller payload; extend the
-                    # backing script_args vector when the requested always-on
-                    # payload legitimately reaches past the current default
-                    # length.
-                    request_args_to = alwayson_script.args_from + len(requested_args)
-                    if request_args_to > alwayson_script.args_to:
-                        script_args.openclaw_script_args_to_overrides[id(alwayson_script)] = request_args_to
-                    for idx, value in enumerate(requested_args):
-                        _set_script_arg(script_args, alwayson_script.args_from + idx, value)
+                    _assign_script_args(script_args, alwayson_script, requested_args)
                     self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
         return script_args
 
@@ -1044,12 +1045,12 @@ class Api:
         _normalize_controlnet_remote_aliases(args)
 
         script_args = self.init_script_args(request, default_script_args, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
-        script_args_to_overrides = getattr(script_args, "openclaw_script_args_to_overrides", {})
+        script_arg_ranges = getattr(script_args, "openclaw_script_arg_ranges", {})
 
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
 
-        return args, send_images, selectable_scripts, script_args, script_args_to_overrides
+        return args, send_images, selectable_scripts, script_args, script_arg_ranges
 
     @staticmethod
     def _run_generation_with_scripts(p, script_runner, selectable_scripts, script_args):
@@ -1065,7 +1066,7 @@ class Api:
 
         script_runner = scripts.scripts_txt2img
 
-        args, send_images, selectable_scripts, script_args, script_args_to_overrides = self._prepare_generation_api_request(
+        args, send_images, selectable_scripts, script_args, script_arg_ranges = self._prepare_generation_api_request(
             txt2imgreq,
             "txt2img",
             script_runner,
@@ -1084,7 +1085,7 @@ class Api:
                         _attach_controlnet_remote_args(p, controlnet_remote_args)
                         p.is_api = True
                         p.scripts = script_runner
-                        p.openclaw_script_args_to_overrides = script_args_to_overrides
+                        p.openclaw_script_arg_ranges = script_arg_ranges
                         p.outpath_grids = opts.outdir_txt2img_grids
                         p.outpath_samples = opts.outdir_txt2img_samples
 
@@ -1119,7 +1120,7 @@ class Api:
 
         script_runner = scripts.scripts_img2img
 
-        args, send_images, selectable_scripts, script_args, script_args_to_overrides = self._prepare_generation_api_request(
+        args, send_images, selectable_scripts, script_args, script_arg_ranges = self._prepare_generation_api_request(
             img2imgreq,
             "img2img",
             script_runner,
@@ -1144,7 +1145,7 @@ class Api:
                         p.init_images = decoded_init_images
                         p.is_api = True
                         p.scripts = script_runner
-                        p.openclaw_script_args_to_overrides = script_args_to_overrides
+                        p.openclaw_script_arg_ranges = script_arg_ranges
                         p.outpath_grids = opts.outdir_img2img_grids
                         p.outpath_samples = opts.outdir_img2img_samples
 

@@ -787,7 +787,8 @@ class ScriptRunner:
         if script is None:
             return None
 
-        script_args = args[script.args_from:script.args_to]
+        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        script_args = args[start:end]
         processed = script.run(p, *script_args)
 
         # Selectable scripts may return a Processed object without calling
@@ -844,8 +845,8 @@ class ScriptRunner:
 
     @staticmethod
     def _script_args_for(p, script):
-        args_to = getattr(p, "openclaw_script_args_to_overrides", {}).get(id(script), script.args_to)
-        return p.script_args[script.args_from:args_to]
+        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        return p.script_args[start:end]
 
     @staticmethod
     def _record_script_timing(p, hook_name, script, elapsed):

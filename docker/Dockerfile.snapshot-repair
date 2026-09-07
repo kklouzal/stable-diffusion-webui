@@ -3,4 +3,7 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 COPY modules/generation_last.py /opt/stable-diffusion-webui/modules/generation_last.py
+COPY modules/api/api.py /opt/stable-diffusion-webui/modules/api/api.py
+COPY modules/scripts.py /opt/stable-diffusion-webui/modules/scripts.py
 COPY tests/test_generation_last.py /opt/stable-diffusion-webui/tests/test_generation_last.py
+COPY tests/test_script_argument_ranges.py /opt/stable-diffusion-webui/tests/test_script_argument_ranges.py

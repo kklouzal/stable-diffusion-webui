@@ -252,8 +252,8 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
     alwayson = {}
     for script in getattr(runner, "alwayson_scripts", []) or []:
         title = script.title()
-        args_to = getattr(p, "openclaw_script_args_to_overrides", {}).get(id(script), script.args_to)
-        raw_values = list(script_args[script.args_from:args_to])
+        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        raw_values = list(script_args[start:end])
         if title.casefold() == "controlnet":
             values = [
                 _controlnet_unit_to_api_json(value, index, limitations, budget) if _is_controlnet_unit(value) or isinstance(value, dict)
@@ -277,7 +277,8 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
             _limitation(limitations, "The selected script index is no longer available for replay.")
             return
         script = selectable[selected - 1]
-        values = _safe_json(list(script_args[script.args_from:script.args_to]), limitations, f"script.{script.title()}.args")
+        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        values = _safe_json(list(script_args[start:end]), limitations, f"script.{script.title()}.args")
         if values is _OMIT:
             return
         parameters["script_name"] = script.title()

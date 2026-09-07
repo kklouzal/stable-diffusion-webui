@@ -10,6 +10,8 @@ The endpoint returns HTTP `404` when no valid snapshot exists:
 
 ## Retention and durability
 
+API extension arguments that exceed an extension's fixed UI slot use request-local isolated ranges. Execution and snapshot capture read the same range, preventing an oversized extension from overwriting neighboring settings. Fixed-slot prefixes remain available to extensions that read their original positions directly.
+
 Exactly one snapshot is retained at `${HOST_ROOT}/config/generation-last/generation-last.json`, bind-mounted at `/opt/stable-diffusion-webui/generation-last/generation-last.json`. The temporary file is created in that same mounted directory, fsynced, atomically replaced with `os.replace`, then the directory is fsynced. A completed generation is captured under one process lock, so settings and image assets cannot mix across concurrent completions. Failed, cancelled, stopped, and image-less generations do not replace the retained record.
 
 The current record survives container restarts and recreation. Version-1 txt2img records are sanitized in memory to this version-2 contract on read, so an existing retained txt2img record stays available immediately after upgrade. A version-1 img2img record is non-replayable because it could not contain its input assets; run one img2img generation to replace it.
