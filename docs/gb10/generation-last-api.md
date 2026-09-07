@@ -16,7 +16,7 @@ Exactly one snapshot is retained at `${HOST_ROOT}/config/generation-last/generat
 
 The current record survives container restarts and recreation. Version-1 txt2img records are sanitized in memory to this version-2 contract on read, so an existing retained txt2img record stays available immediately after upgrade. A version-1 img2img record is non-replayable because it could not contain its input assets; run one img2img generation to replace it.
 
-Limits are 2 MiB per encoded image, 6 MiB for all encoded input assets, and 8 MiB for the JSON snapshot. Images exceeding a limit are not retained and the snapshot names the missing asset in `limitations`.
+Limits are 8 MiB per encoded image, 32 MiB for all encoded input assets, and 40 MiB for the JSON snapshot, matching Harness. Base64 expansion of lossless 1024-square images can exceed the former 2 MiB cap. Images are never resized or lossily recompressed to fit; images exceeding a limit are not retained and the snapshot names the missing asset in `limitations`.
 
 ## Contract
 

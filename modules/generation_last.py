@@ -20,9 +20,11 @@ _OMIT = object()
 _MAX_DEPTH = 8
 _MAX_ITEMS = 256
 _MAX_STRING_LENGTH = 16_384
-_MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
-_MAX_IMAGE_BYTES = 2 * 1024 * 1024
-_MAX_IMAGE_TOTAL_BYTES = 6 * 1024 * 1024
+_MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
+# Base64 expands already-compressed PNG data; ordinary 1024-square RGBA inputs
+# can exceed 5 MiB. Keep lossless assets and bound aggregate retention separately.
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_MAX_IMAGE_TOTAL_BYTES = 32 * 1024 * 1024
 _SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "authorization", "api_key", "cookie")
 _CREDENTIAL_FILTER_EXEMPTIONS = {"token_merging_ratio", "token_merging_ratio_hr", "token_merging_ratio_img2img"}
 

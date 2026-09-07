@@ -303,10 +303,34 @@ class GenerationLastTests(unittest.TestCase):
         self.assertIsNone(self.module.capture_completed_generation(p, types.SimpleNamespace(images=[], all_seeds=[1], all_subseeds=[1])))
 
         img2img = StableDiffusionProcessingImg2Img()
-        img2img.init_images = [Image.frombytes("L", (1800, 1800), os.urandom(1800 * 1800))]
+        img2img.init_images = [Image.frombytes("RGB", (1800, 1800), os.urandom(1800 * 1800 * 3))]
         snapshot = self.module.build_snapshot(img2img, self.processed)
         self.assertFalse(snapshot["replayable"])
         self.assertTrue(any("per-image retention limit" in item for item in snapshot["limitations"]))
+
+    def test_lossless_1024_inputs_above_old_limit_survive_snapshot(self):
+        import base64
+        import io
+        import random
+        pixels = random.Random(42).randbytes(1024 * 1024 * 4)
+        source = Image.frombytes("RGBA", (1024, 1024), pixels)
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [source]
+        p.control_net_enabled = True
+        p.control_net_image = source
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=2)
+        p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
+        p.script_args = [0, ControlNetUnit(enabled=True, image=source)]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertTrue(snapshot["replayable"], snapshot["limitations"])
+        parameters = snapshot["parameters"]
+        encoded = parameters["init_images"][0]
+        self.assertGreater(len(encoded), 2 * 1024 * 1024)
+        self.assertLessEqual(len(encoded), self.module._MAX_IMAGE_BYTES)
+        self.assertEqual(encoded, parameters["control_net_image"])
+        self.assertEqual(encoded, parameters["alwayson_scripts"]["ControlNet"]["args"][0]["image"])
+        with Image.open(io.BytesIO(base64.b64decode(encoded))) as decoded:
+            self.assertEqual(decoded.tobytes(), pixels)
 
     def test_credential_filter_keeps_token_merging_settings(self):
         p = StableDiffusionProcessingTxt2Img()
