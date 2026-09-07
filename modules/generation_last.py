@@ -415,9 +415,44 @@ def _build_parameters(p, processed, *, retain_assets: bool):
     return parameters, limitations, checkpoint, generation_type
 
 
-_LORA_TAG = re.compile(r"<lora:([^<>:\x00-\x1f\x7f]{1,256}):([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)>")
 _MAX_LORA_TAGS = 32
 _MAX_PROMPT_CAPTURE_LENGTH = 262_144
+
+
+def _supported_lora_tag(tag: str) -> bool:
+    """Match the native loader's default, TE/UNet and dynamic-rank parameters."""
+    if not 8 <= len(tag) <= 256 or not tag.lower().startswith("<lora:") or not tag.endswith(">"):
+        return False
+    fields = tag[6:-1].split(":")
+    if not fields[0].strip() or "=" in fields[0]:
+        return False
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in "<>" for field in fields for c in field):
+        return False
+    positional = 0
+    named = set()
+    for field in fields[1:]:
+        if "=" in field:
+            key, value = field.split("=", 1)
+            if key not in ("te", "unet", "dyn") or key in named:
+                return False
+            named.add(key)
+            dimension = key == "dyn"
+        else:
+            positional += 1
+            if positional > 3:
+                return False
+            dimension = positional == 3
+            value = field
+        try:
+            if dimension:
+                if re.fullmatch(r"[+-]?[0-9]+", value.strip()) is None:
+                    return False
+                int(value)
+            elif "_" in value or not math.isfinite(float(value)):
+                return False
+        except (ValueError, OverflowError):
+            return False
+    return True
 
 
 def _capture_lora_tags(p, processed, limitations: list[str]) -> list[str]:
@@ -456,9 +491,8 @@ def _capture_lora_tags(p, processed, limitations: list[str]) -> list[str]:
         tags = []
         for match in re.finditer(r"<lora:[^>]*(?:>|$)", prompt, flags=re.IGNORECASE):
             tag = match.group()
-            parsed = _LORA_TAG.fullmatch(tag)
-            if len(tag) > 256 or parsed is None or not math.isfinite(float(parsed[2])):
-                _limitation(limitations, "A LoRA selection is not a supported finite numeric weighted tag.")
+            if not _supported_lora_tag(tag):
+                _limitation(limitations, "A LoRA selection is malformed or has unsupported/non-finite parameters; supported parameters are optional TE/UNet weights and integer dyn rank.")
                 return []
             if len(tags) >= _MAX_LORA_TAGS:
                 _limitation(limitations, "LoRA selections exceed the retained-tag bound.")

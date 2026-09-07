@@ -459,6 +459,20 @@ class GenerationLastTests(unittest.TestCase):
             self.assertTrue(limitations)
             self.assertNotIn("image", result)
 
+    def test_native_lora_parameter_forms_are_reusable(self):
+        for tag in ("<lora:model>", "<lora:model:1:2>", "<lora:model:0.5:0.75:16>",
+                    "<lora:model:te=.5:unet=1e-1:dyn=8>", "<lora:model:0.7:unet=0.4>",
+                    "<lora:style adapter:te=0:unet=-.5>"):
+            with self.subTest(tag=tag):
+                self.processed.all_prompts = ["synthetic description " + tag]
+                snapshot = self.module.build_snapshot(StableDiffusionProcessingTxt2Img(), self.processed)
+                self.assertTrue(snapshot["settings_replayable"], snapshot["settings_limitations"])
+                self.assertEqual(snapshot["lora_tags"], [tag])
+        for tag in ("<lora:model:1:2:3:4>", "<lora:model:te=NaN>",
+                    "<lora:model:dyn=1.5>", "<lora:model:unknown=1>"):
+            with self.subTest(tag=tag):
+                self.assertFalse(self.module._supported_lora_tag(tag))
+
     def test_lora_names_and_finite_scientific_weights_are_preserved(self):
         p = StableDiffusionProcessingTxt2Img()
         self.processed.all_prompts = ["description <lora:style adapter:5e-1>"]

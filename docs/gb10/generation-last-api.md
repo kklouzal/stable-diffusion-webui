@@ -11,13 +11,13 @@ Schema 3 adds four fields alongside the existing `parameters`, `replayable`, `li
 - `settings_parameters`: independently captured tuning, without previous img2img source images, masks, or ControlNet image/mask assets.
 - `settings_replayable`: whether tuning was captured without unsupported settings.
 - `settings_limitations`: explicit reasons tuning is incomplete, independently of previous-task asset failures.
-- `lora_tags`: strict weighted LoRA tags, not descriptive prompt text.
+- `lora_tags`: validated native LoRA selection tags, not descriptive prompt text.
 
 The existing replay fields retain their prior-task meanings. Missing or oversized previous input assets can make `replayable: false` while `settings_replayable: true`. Settings capture does not classify or filter English limitation messages. The previous `generation_type` never dictates the next operation.
 
 Settings retain sampler, scheduler, model/VAE overrides, steps, CFG, denoising, refiner/high-resolution tuning, serializable extension arguments, and other tuning. Enabled ControlNet knobs remain enabled: consumers must supply an explicit reference or report that one is required, never silently reuse an old image. Settings replayability does not mean this object is a ready-to-submit request. Unsupported settings still block it.
 
-LoRA capture uses effective positive prompts, including expanded styles. Only strict `<lora:name:numeric-weight>` tags are stored, at most 32 tags of at most 256 characters each, with finite weights. Prompt batches are bounded to 256 prompts of 262144 characters each. Different LoRA selections across batch prompts, unsupported weighted syntax, unavailable style-expanded prompts, and negative-prompt LoRA selections are explicitly non-reusable instead of guessed. Surrounding prose never enters the snapshot.
+LoRA capture uses effective positive prompts, including expanded styles. Native `<lora:name>` default weights, `<lora:name:te-weight:unet-weight:dyn-rank>` positional parameters, and named `te`, `unet`, `dyn` parameters are supported; optional parameters may be omitted. Tags are preserved verbatim, at most 32 tags of at most 256 characters each, with finite weights and integer dynamic ranks. Unknown or duplicate named parameters fail explicitly. Prompt batches are bounded to 256 prompts of 262144 characters each. Different LoRA selections across batch prompts, unsupported syntax, unavailable style-expanded prompts, and negative-prompt LoRA selections are explicitly non-reusable instead of guessed. Surrounding prose never enters the snapshot. An older schema-3 snapshot whose capture rejected and discarded its tags requires one fresh successful generation after upgrading; a read cannot recover discarded selections.
 
 ## Consumer requirements
 
