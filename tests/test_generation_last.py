@@ -8,6 +8,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from PIL import Image
 
@@ -139,6 +140,13 @@ class ControlNetUnit:
 class GenerationLastTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        # Appliance environment overrides must never redirect fixtures into the
+        # live snapshot store, even when tests run inside the appliance image.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GENERATION_LAST_DIR", None)
         self.module, self.shared, self.previous = load_generation_last(Path(self.temp.name))
         self.processed = types.SimpleNamespace(images=[object()], all_seeds=[123456], all_subseeds=[654321])
 
