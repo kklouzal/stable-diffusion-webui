@@ -97,7 +97,7 @@ The snapshot deliberately omits the previous positive prompt, negative prompt, r
 }
 ```
 
-Enabled ControlNet units retain supported API fields and their API-base64 `image` and `mask` inputs when within limits. Effective-region masks, IP-Adapter serialized inputs, and batch inputs that cannot be safely retained are never replaced with defaults: the snapshot is `replayable: false` and names the exact missing `alwayson_scripts.ControlNet.args[n]` field in `limitations`.
+Enabled ControlNet units retain supported API fields and their API-base64 `image` and `mask` inputs when within limits. Both UI unit objects and API argument dictionaries use the same bounded image serializer, so replaying an API snapshot does not discard its encoded inputs. Inline base64 and PNG/JPEG/WebP image data URIs are decoded locally; paths and URLs are never opened. Disabled units do not retain unused images. Effective-region masks, IP-Adapter serialized inputs, and batch inputs that cannot be safely retained are never replaced with defaults: the snapshot is `replayable: false` and names the exact missing `alwayson_scripts.ControlNet.args[n]` field in `limitations`.
 
 ## Harness replay and overrides
 

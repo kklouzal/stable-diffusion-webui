@@ -203,9 +203,11 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
 
 def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[str], budget: dict[str, int]) -> dict[str, Any]:
     """Serialize the API-supported portion of an effective ControlNet unit."""
+    # UI runs retain ControlNetUnit objects; API script_args retain dictionaries.
+    get = unit.get if isinstance(unit, dict) else lambda name, default=None: getattr(unit, name, default)
     result: dict[str, Any] = {}
     for field in _CONTROLNET_API_FIELDS:
-        value = _safe_json(_enum_values(getattr(unit, field, None)), limitations, f"alwayson_scripts.ControlNet.args[{unit_index}].{field}")
+        value = _safe_json(_enum_values(get(field)), limitations, f"alwayson_scripts.ControlNet.args[{unit_index}].{field}")
         if value is not _OMIT:
             result[field] = value
 
@@ -214,8 +216,8 @@ def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[s
         return result
 
     unit_path = f"alwayson_scripts.ControlNet.args[{unit_index}]"
-    raw_image = getattr(unit, "image", None)
-    raw_mask = getattr(unit, "mask", None)
+    raw_image = get("image")
+    raw_mask = get("mask")
     if isinstance(raw_image, dict):
         raw_mask = raw_mask if raw_mask is not None else raw_image.get("mask")
     elif isinstance(raw_image, (list, tuple)) and len(raw_image) == 2:
@@ -230,9 +232,9 @@ def _controlnet_unit_to_api_json(unit: Any, unit_index: int, limitations: list[s
         _limitation(limitations, f"ControlNet unit {unit_index + 1} requires {unit_path}.mask before replay.")
     elif mask is not None:
         result["mask"] = mask
-    if getattr(unit, "effective_region_mask", None) is not None:
+    if get("effective_region_mask") is not None:
         _limitation(limitations, f"ControlNet unit {unit_index + 1} effective region mask is not persisted; supply {unit_path}.effective_region_mask before replay.")
-    if getattr(unit, "ipadapter_input", None) is not None:
+    if get("ipadapter_input") is not None:
         _limitation(limitations, f"ControlNet unit {unit_index + 1} IP-Adapter input is not persisted; supply {unit_path}.ipadapter_input before replay.")
     if getattr(unit, "batch_images", None) or getattr(unit, "batch_image_files", None):
         _limitation(limitations, f"ControlNet unit {unit_index + 1} batch inputs are not persisted; supply its image inputs before replay.")
@@ -254,7 +256,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
         raw_values = list(script_args[script.args_from:args_to])
         if title.casefold() == "controlnet":
             values = [
-                _controlnet_unit_to_api_json(value, index, limitations, budget) if _is_controlnet_unit(value)
+                _controlnet_unit_to_api_json(value, index, limitations, budget) if _is_controlnet_unit(value) or isinstance(value, dict)
                 else _safe_json(value, limitations, f"alwayson_scripts.{title}.args[{index}]")
                 for index, value in enumerate(raw_values)
             ]

@@ -244,6 +244,30 @@ class GenerationLastTests(unittest.TestCase):
         self.assertFalse(missing["replayable"])
         self.assertTrue(any("args[0].image" in item for item in missing["limitations"]))
 
+    def test_api_controlnet_snapshot_roundtrips_without_losing_images(self):
+        import base64
+        import io
+        output = io.BytesIO()
+        Image.new("RGB", (32, 32), "blue").save(output, format="PNG")
+        encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [Image.new("RGB", (32, 32), "red")]
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=3)
+        p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
+        p.script_args = [0, {"enabled": True, "module": "depth_zoe", "model": "depth", "image": encoded},
+                         {"enabled": False, "image": "unused-invalid-image"}]
+        for _ in range(3):
+            snapshot = self.module.build_snapshot(p, self.processed)
+            self.assertTrue(snapshot["replayable"], snapshot["limitations"])
+            units = snapshot["parameters"]["alwayson_scripts"]["ControlNet"]["args"]
+            self.assertTrue(units[0]["image"])
+            self.assertNotIn("image", units[1])
+            p.script_args = [0, *units]
+        p.script_args[1].pop("image")
+        missing = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(missing["replayable"])
+        self.assertTrue(any("requires" in item and ".image" in item for item in missing["limitations"]))
+
     def test_prompts_and_dimensions_are_not_retained(self):
         p = StableDiffusionProcessingTxt2Img()
         p.prompt = ["not replayable as a list"]
