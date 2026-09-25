@@ -415,6 +415,10 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     static_output = _execute(model, static_input, operation)
+                # CUDA graph capture completes asynchronously. Synchronize before
+                # publishing or replaying a first-use entry so capture work cannot
+                # race the request stream and seed a process-local output basin.
+                torch.cuda.synchronize()
                 entry = {"graph": graph, "input": static_input, "output": static_output, "operation": operation}
                 with _LOCK:
                     # Publish only the fully captured entry. Invalidation cannot
@@ -431,6 +435,9 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                 # transitions. Replay once with the same static input and return that
                 # output so misses and hits have identical graph-replay semantics.
                 graph.replay()
+                # Replay and clone are enqueued on the caller's current stream; the
+                # returned tensor carries the normal CUDA stream dependency without
+                # a device-wide barrier that can perturb later request scheduling.
                 return static_output.clone()
             except Exception as exc:
                 # Locals are deliberately not published; dropping all references

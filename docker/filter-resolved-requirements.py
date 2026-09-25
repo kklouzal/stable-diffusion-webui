@@ -26,6 +26,12 @@ def normalize_name(name: str) -> str:
 
 
 protected = set(ALWAYS_PROTECTED_NAMES)
+if BASE_PROTECTED_NAMES_FILE.exists():
+    protected.update(
+        normalize_name(name)
+        for name in BASE_PROTECTED_NAMES_FILE.read_text().splitlines()
+        if name.strip() and not name.lstrip().startswith('#')
+    )
 
 lines = []
 removed = []
@@ -49,7 +55,7 @@ AUDIT.write_text(json.dumps({
     'source': str(SOURCE),
     'target': str(TARGET),
     'base_protected_names_file': str(BASE_PROTECTED_NAMES_FILE),
-    'base_protected_names_note': 'not used as an application filter; only CUDA/PyTorch protected names and prefixes are blocked',
+    'base_protected_names_note': 'all NVIDIA base-image packages are protected from application replacement',
     'protected_names_count': len(protected),
     'always_protected_names': sorted(ALWAYS_PROTECTED_NAMES),
     'always_protected_prefixes': list(ALWAYS_PROTECTED_PREFIXES),

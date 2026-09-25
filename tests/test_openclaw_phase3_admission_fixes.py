@@ -54,8 +54,9 @@ def test_cuda_graph_first_request_returns_captured_output_contract():
 
 def test_vae_graph_first_request_returns_captured_output_contract():
     source = Path("modules/openclaw_vae_decode_graphs.py").read_text()
-    assert 'graph.replay()\n                return static_output.clone()' in source
-    assert 'return warmup_output' not in source
+    replay_contract = ["graph.replay()", "return static_output.clone()"]
+    assert all(part in source for part in replay_contract)
+    assert "return warmup_output" not in source
 
 
 def test_compile_cache_namespace_runtime_ownership_contract():
@@ -65,3 +66,17 @@ def test_compile_cache_namespace_runtime_ownership_contract():
     assert 'install -d -o 2323 -g 2323 -m 0750 "${cache_namespace_path}"' in source
     assert "sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -w" in source
     assert 'rm -rf "${cache_namespace_path}"' not in source
+
+
+def test_vae_graph_capture_synchronizes_before_publish_without_replay_barrier():
+    source = (ROOT / "modules/openclaw_vae_decode_graphs.py").read_text()
+    run_source = ast.get_source_segment(source, _function("modules/openclaw_vae_decode_graphs.py", "run"))
+    assert run_source is not None
+    publish = run_source.index('entry = {"graph": graph')
+    capture = run_source.index("with torch.cuda.graph(graph):")
+    replay = run_source.rindex("graph.replay()")
+    returned = run_source.rindex("return static_output.clone()")
+    synchronizes = [node for node in ast.walk(ast.parse(run_source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "cuda" and node.func.attr == "synchronize"]
+    assert len(synchronizes) == 1
+    assert capture < run_source.index("torch.cuda.synchronize()", capture) < publish
+    assert "torch.cuda.synchronize()" not in run_source[replay:returned]

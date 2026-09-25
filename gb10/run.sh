@@ -119,6 +119,9 @@ fi
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" --check "${CONTROLNET_HOOK}"
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
+CONTROLNET_ARGS="${CONTROLNET_ROOT}/internal_controlnet/args.py"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" "${CONTROLNET_ARGS}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" --check "${CONTROLNET_ARGS}"
 if [[ -d "${CONTROLNET_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
 fi

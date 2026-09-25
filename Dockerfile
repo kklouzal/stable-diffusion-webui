@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3
 ARG PYTHON_VERSION=3.12
-ARG PYTORCH_NIGHTLY_CUDA_TAG=cu133
+ARG PYTORCH_NIGHTLY_CUDA_TAG=cu134
 ARG TORCHAO_PACKAGE=torchao
 ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
 ARG MSLK_COMMIT=88d06bc2784f3b550d7ec851d4ca67a16a844fe2
@@ -82,7 +82,7 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 #   Python package set as the protected CUDA/PyTorch/base boundary
 # - do not replace torch, torchvision, CUDA, cuDNN, TensorRT, Triton, or other
 #   inherited NGC packages from A1111 application requirements
-# - build MSLK from source against the inherited CUDA 13.3 / NGC PyTorch stack so
+# - build MSLK from source against the inherited CUDA 13.4 / NGC PyTorch stack so
 #   the native mslk.so baseline stays aligned with GB10 bf16/NVFP4 work
 # - freeze the resulting system-Python package set so later app deps cannot overwrite it
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
@@ -227,11 +227,16 @@ COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-s
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
+COPY docker/create-protected-package-stubs.py /opt/build/create-protected-package-stubs.py
+COPY docker/patch-facexlib-wheel.py /opt/build/patch-facexlib-wheel.py
 COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 # Builder-stage wheel doctrine:
-# - resolve the full dependency closure once against the CUDA-base + explicit torch lane
+# - resolve the full dependency closure once against the inherited NVIDIA package set
+# - exclude every NVIDIA-provided direct package from the app resolver input and
+#   represent the exact NVIDIA versions with dependency-free resolver stubs; this
+#   avoids rejecting internally tested NGC combinations because of stale metadata
 # - prebuild wheels for the full resolved closure in this throwaway stage
 # - tokenizers follows the current Transformers-compatible range, but must not fall
 #   below the known-good GB10 floor or fall back to an sdist/Rust build
@@ -240,12 +245,17 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     rustc --version \
     && cargo --version \
-    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt \
-    && python -m pip install --break-system-packages --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
+    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-names-file /opt/build/base-python-protected-names.txt \
+    && python /opt/build/patch-facexlib-wheel.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
+    && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt \
+    && python -m venv /opt/build/resolver-venv \
+    && python -m pip --python /opt/build/resolver-venv install --force-reinstall -c /opt/build/base-python-protected-constraints.txt pip \
+    && /opt/build/resolver-venv/bin/python -m pip install --no-deps --no-index -r /opt/build/protected-resolver-stubs.txt \
+    && /opt/build/resolver-venv/bin/python -m pip install --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
-    && python /opt/build/assert-resolved-package.py --package mediapipe --max-version 0.10.99 \
+    && python /opt/build/assert-resolved-package.py --package mediapipe --absent \
     && python /opt/build/assert-resolved-package.py --package controlnet_aux --min-version 0.0.9 \
     && python /opt/build/assert-resolved-package.py --package gradio --absent \
     && python /opt/build/assert-resolved-package.py --package gradio-client --absent \
@@ -263,7 +273,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && test "$(command -v gcc)" = /usr/lib/ccache/gcc \
     && test "$(command -v g++)" = /usr/lib/ccache/g++ \
     && printf '[ccache] compiler wrappers: CC=%s CXX=%s CUDAHOSTCXX=%s CMAKE_ARGS=%s\n' "$CC" "$CXX" "$CUDAHOSTCXX" "$CMAKE_ARGS" \
-    && python -m pip wheel --no-deps --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
+    && python -m pip wheel --no-deps --prefer-binary --find-links=/opt/build/resolve-wheel-overrides --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
     && test -n "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels "dctorch==${DCTORCH_VERSION}" \
@@ -310,8 +320,8 @@ COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 # Container-owned environment doctrine:
 # - do not let upstream webui.sh create/manage its own venv here
 # - do not let upstream launch bootstrap replace the CUDA-base + PyTorch package set
-# - protect the CUDA/PyTorch/NGC package boundary from application deps while
-#   allowing ordinary Python application packages to satisfy A1111 requirements
+# - protect every package inherited from the NVIDIA base image from application deps
+#   and fail the build if A1111 requires an incompatible replacement
 # - do install the repo-owned A1111 dependency closure from requirements_versions.txt
 #   as normal application dependencies, filtered only against the protected base set
 RUN python - <<'PY'
@@ -343,7 +353,6 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat \
     && /usr/local/bin/gb10-a1111-check-protected-stack --snapshot /opt/protected-packages-before.json \
     && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
-    && python -m pip install --break-system-packages --upgrade -c /opt/base-python-protected-constraints.txt setuptools \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -r /opt/requirements-runtime.txt \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels /opt/wheels/clip-*.whl dctorch \
     && /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \

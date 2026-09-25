@@ -7,15 +7,15 @@
 setuptools==69.5.1
 GitPython
 Pillow
-pytz==2026.2
+pytz==2026.3.post1
 accelerate
 blendmodes==2025
 clean-fid
 diskcache
 einops
 facexlib
-fastapi==0.94.0
-uvicorn==0.46.0
+fastapi==0.141.1
+uvicorn==0.52.4
 httpcore
 httpx
 requests
@@ -55,4 +55,4 @@ openai
 boto3
 aliyun-python-sdk-core
 aliyun-python-sdk-alimt
-pydantic==1.10.26
+# pydantic is intentionally omitted: the NVIDIA base image owns and protects it.

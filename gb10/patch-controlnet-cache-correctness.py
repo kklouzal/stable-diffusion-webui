@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / "gb10/controlnet-cache-correctness.patch"
 HELPER = ROOT / "gb10/controlnet_cache_contract.py"
-FILES = ["scripts/controlnet.py", "scripts/controlnet_lllite.py", "scripts/hook.py", "scripts/ipadapter/plugable_ipadapter.py", "scripts/supported_preprocessor.py", "scripts/preprocessor/model_free_preprocessors.py"]
+FILES = ["scripts/controlnet.py", "scripts/controlnet_lllite.py", "scripts/hook.py", "scripts/ipadapter/plugable_ipadapter.py", "scripts/supported_preprocessor.py", "scripts/preprocessor/model_free_preprocessors.py", "annotator/openpose/body.py"]
 
 
 def run(args, cwd):
@@ -28,13 +28,13 @@ def main():
     for rel in FILES:
         if not (target / rel).is_file():
             raise SystemExit(f"missing ControlNet source: {target / rel}")
-    helper_target = target / "scripts/cache_contract.py"
+    helper_target = target / "internal_controlnet/cache_contract.py"
     with tempfile.TemporaryDirectory(prefix="controlnet-cache-patch-") as tmp:
         stage = Path(tmp)
         for rel in FILES:
             (stage / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target / rel, stage / rel)
-        helper_stage = stage / "scripts/cache_contract.py"
+        helper_stage = stage / "internal_controlnet/cache_contract.py"
         helper_stage.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(HELPER, helper_stage)
         applied = run(["patch", "-p1", "--forward", "--batch", "-i", str(PATCH)], stage)

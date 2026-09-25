@@ -5,7 +5,7 @@ diff -urN a/scripts/controlnet.py b/scripts/controlnet.py
  from copy import copy, deepcopy
  from typing import Dict, Optional, Tuple, List
  import modules.scripts as scripts
-+from scripts.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
++from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
  from modules import shared, devices, script_callbacks, processing, masking, images
  import gradio as gr
  import time
@@ -216,7 +216,7 @@ diff -urN a/scripts/supported_preprocessor.py b/scripts/supported_preprocessor.p
  from scripts.enums import ControlNetUnionControlType
  from scripts.logging import logger
 -from scripts.utils import ndarray_lru_cache
-+from scripts.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
++from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
 
 
  CACHE_SIZE = getattr(shared.cmd_opts, "controlnet_preprocessor_cache_size", 0)
@@ -511,3 +511,15 @@ diff -urN a/scripts/supported_preprocessor.py b/scripts/supported_preprocessor.p
      @torch.no_grad()
      def hook(
          self,
+--- a/scripts/hook.py
++++ b/scripts/hook.py
+@@ -711 +711,3 @@
+-                    param.used_hint_inpaint_hijack.to(x.dtype).to(x.device)
++                param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(
++                    device=x.device, dtype=x.dtype
++                )
+--- a/annotator/openpose/body.py
++++ b/annotator/openpose/body.py
+@@ -65 +65 @@
+-            heatmap_avg += heatmap_avg + heatmap / len(multiplier)
++            heatmap_avg += heatmap / len(multiplier)

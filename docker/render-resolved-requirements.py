@@ -8,15 +8,23 @@ TARGET = Path('/opt/build/requirements-resolved.txt')
 AUDIT = Path('/opt/build/requirements-resolved-protected-audit.json')
 PROTECTED_NAMES = {'torch', 'torchvision', 'torchaudio', 'triton'}
 PROTECTED_PREFIXES = ('nvidia-', 'cuda-')
+PROTECTED_NAMES_FILE = Path('/opt/build/base-python-protected-names.txt')
 
 
 def normalize(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name.strip().lower())
 
 
+base_protected_names = {
+    normalize(line)
+    for line in PROTECTED_NAMES_FILE.read_text().splitlines()
+    if line.strip() and not line.lstrip().startswith('#')
+} if PROTECTED_NAMES_FILE.exists() else set()
+
+
 def protected(name: str) -> bool:
     norm = normalize(name)
-    return norm in PROTECTED_NAMES or norm.startswith(PROTECTED_PREFIXES)
+    return norm in PROTECTED_NAMES or norm in base_protected_names or norm.startswith(PROTECTED_PREFIXES)
 
 
 report = json.loads(REPORT.read_text())
@@ -35,13 +43,15 @@ for item in report.get('install', []):
 
 AUDIT.write_text(json.dumps({
     'protected_names': sorted(PROTECTED_NAMES),
+    'base_protected_names_file': str(PROTECTED_NAMES_FILE),
+    'base_protected_names_count': len(base_protected_names),
     'protected_prefixes': list(PROTECTED_PREFIXES),
     'blocked_from_app_resolved_set': blocked,
     'resolved_application_count': len(reqs),
 }, indent=2, sort_keys=True) + '\n')
 if blocked:
     names = ', '.join(f"{item['normalized']}=={item['version']}" for item in blocked)
-    raise SystemExit(f'protected CUDA/PyTorch packages resolved as app deps: {names}; audit={AUDIT}')
+    raise SystemExit(f'protected NVIDIA base packages resolved as app deps: {names}; audit={AUDIT}')
 
 TARGET.write_text('\n'.join(reqs) + '\n')
 print(f'resolved {len(reqs)} application packages into {TARGET}; protected audit={AUDIT}')
