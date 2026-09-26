@@ -39,6 +39,13 @@ notification.mp3
 !/extensions/sd-webui-teacache/**
 !/extensions/openclaw-conditioning-probe/
 !/extensions/openclaw-conditioning-probe/**
+!/extensions/openclaw-denoise-ramp/
+!/extensions/openclaw-denoise-ramp/**
+!/extensions/openclaw-multi-sampler/
+!/extensions/openclaw-multi-sampler/**
+/extensions/openclaw-multi-sampler/data/
+!/extensions/sd-webui-model-converter/
+!/extensions/sd-webui-model-converter/**
 !/extensions/sd-webui-controlnet/
 !/extensions/sd-webui-controlnet/**
 /extensions/sd-webui-controlnet/models/*.safetensors

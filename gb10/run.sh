@@ -98,9 +98,13 @@ sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do
   owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
   owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
-  sudo rm -rf "${owned_extension_target}"
   sudo mkdir -p "${owned_extension_target}"
-  sudo rsync -a --delete --delete-excluded \
+  # Mirror the repo source, but keep runtime data that extensions write inside their own
+  # directory: openclaw-multi-sampler's saved chains (data/) and ControlNet's downloaded
+  # annotator weights (annotator/downloads/). P rules protect them from --delete.
+  sudo rsync -a --checksum --delete --delete-excluded \
+    --filter 'P /data/' \
+    --filter 'P /annotator/downloads/' \
     --exclude '.git/' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
