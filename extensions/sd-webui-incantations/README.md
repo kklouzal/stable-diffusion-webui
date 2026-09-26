@@ -23,7 +23,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 
 ## Source map
 
-- `scripts/dynamic_thresholding.py`, `dynthres_core.py`, and `dynthres_unipc.py`: A1111 Dynamic Thresholding / CFG-Fix source. ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
+- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (DDIM, PLMS and UniPC are rejected with an error). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
 - `scripts/pag.py` and `scripts/smoothed_energy_guidance.py`: Incantations guidance source with GB10 lifecycle fixes.
 - `scripts/cfg_combiner.py`: GB10-owned CFG composition glue for PAG, CFG interval scheduling, and CFG-Fix coexistence.
 - Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.

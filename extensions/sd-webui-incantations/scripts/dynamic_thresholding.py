@@ -15,17 +15,13 @@ import logging
 from modules import headless_ui as gr
 import torch
 import dynthres_core
-from modules import scripts, script_callbacks, sd_samplers, sd_samplers_compvis, sd_samplers_common
+from modules import scripts, script_callbacks, sd_samplers, sd_samplers_common
 from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
 
 logger = logging.getLogger(__name__)
 
-try:
-    import dynthres_unipc
-except Exception:
-    logger.exception("UniPC sampler support failed to load; Dynamic Thresholding will run without UniPC support")
-
 IS_AUTO_16 = True
+UNSUPPORTED_SAMPLERS = ("DDIM", "PLMS", "UniPC")
 
 DISABLE_VISIBILITY = True
 
@@ -115,12 +111,11 @@ class Script(scripts.Script):
             return
         orig_sampler_name = p.sampler_name
         orig_latent_sampler_name = getattr(p, 'latent_sampler', None)
-        if orig_sampler_name in ["DDIM", "PLMS"]:
+        # Timestep samplers (DDIM, PLMS, UniPC) have no k-diffusion CFG denoiser to wrap.
+        if orig_sampler_name in UNSUPPORTED_SAMPLERS:
             raise RuntimeError(f"Cannot use sampler {orig_sampler_name} with Dynamic Thresholding")
-        if orig_latent_sampler_name in ["DDIM", "PLMS"]:
+        if orig_latent_sampler_name in UNSUPPORTED_SAMPLERS:
             raise RuntimeError(f"Cannot use secondary sampler {orig_latent_sampler_name} with Dynamic Thresholding")
-        if 'UniPC' in (orig_sampler_name, orig_latent_sampler_name) and p.enable_hr:
-            raise RuntimeError("UniPC does not support Hires Fix. Auto WebUI silently swaps to DDIM for this, which DynThresh does not support. Please swap to a sampler capable of img2img processing for HR Fix to work.")
         mimic_scale = getattr(p, 'dynthres_mimic_scale', mimic_scale)
         separate_feature_channels = getattr(p, 'dynthres_separate_feature_channels', separate_feature_channels)
         scaling_startpoint = getattr(p, 'dynthres_scaling_startpoint', scaling_startpoint)
@@ -160,17 +155,12 @@ class Script(scripts.Script):
             # Make a placeholder sampler
             sampler = sd_samplers.all_samplers_map[orig_sampler_name]
             dt_data = dynthres_core.DynThresh(mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, experiment_mode, p.steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi)
-            if orig_sampler_name == "UniPC":
-                def unipc_constructor(model):
-                    return CustomVanillaSDSampler(dynthres_unipc.CustomUniPCSampler, model, dt_data)
-                new_sampler = sd_samplers_common.SamplerData(fixed_sampler_name, unipc_constructor, sampler.aliases, sampler.options)
-            else:
-                def new_constructor(model):
-                    result = sampler.constructor(model)
-                    cfg = CustomCFGDenoiser(result if IS_AUTO_16 else result.model_wrap_cfg.inner_model, dt_data)
-                    result.model_wrap_cfg = cfg
-                    return result
-                new_sampler = sd_samplers_common.SamplerData(fixed_sampler_name, new_constructor, sampler.aliases, sampler.options)
+            def new_constructor(model):
+                result = sampler.constructor(model)
+                cfg = CustomCFGDenoiser(result if IS_AUTO_16 else result.model_wrap_cfg.inner_model, dt_data)
+                result.model_wrap_cfg = cfg
+                return result
+            new_sampler = sd_samplers_common.SamplerData(fixed_sampler_name, new_constructor, sampler.aliases, sampler.options)
             return fixed_sampler_name, new_sampler
 
         # Apply for usage
@@ -196,13 +186,6 @@ class Script(scripts.Script):
 
     def postprocess_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, images):
         self._restore_original_sampler(p)
-
-######################### CompVis Implementation logic #########################
-
-class CustomVanillaSDSampler(sd_samplers_compvis.VanillaStableDiffusionSampler):
-    def __init__(self, constructor, sd_model, dt_data):
-        super().__init__(constructor, sd_model)
-        self.sampler.main_class = dt_data
 
 ######################### K-Diffusion Implementation logic #########################
 
