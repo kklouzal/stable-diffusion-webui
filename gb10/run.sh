@@ -86,10 +86,12 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
   sudo mkdir -p "${owned_extension_target}"
   # Mirror the repo source, but keep runtime data that extensions write inside their own
   # directory: openclaw-multi-sampler's saved chains (data/) and ControlNet's downloaded
-  # annotator weights (annotator/downloads/). P rules protect them from --delete.
+  # annotator weights (annotator/downloads/). The /*** form protects the directory AND its
+  # contents: 'P /data/' alone protects only the directory entry, so when the checkout has its
+  # own (git-ignored, empty) data/ directory rsync descends into it and deletes the saved files.
   sudo rsync -a --checksum --delete --delete-excluded \
-    --filter 'P /data/' \
-    --filter 'P /annotator/downloads/' \
+    --filter 'P /data/***' \
+    --filter 'P /annotator/downloads/***' \
     --exclude '.git/' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
