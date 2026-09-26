@@ -37,6 +37,8 @@ notification.mp3
 !/extensions/openclaw-clear-cond-cache/**
 !/extensions/sd-webui-teacache/
 !/extensions/sd-webui-teacache/**
+!/extensions/openclaw-conditioning-probe/
+!/extensions/openclaw-conditioning-probe/**
 !/extensions/sd-webui-controlnet/
 !/extensions/sd-webui-controlnet/**
 /extensions/sd-webui-controlnet/models/*.safetensors

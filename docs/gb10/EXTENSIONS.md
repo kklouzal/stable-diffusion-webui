@@ -10,10 +10,14 @@ Live host path:
 
 - `/opt/gb10/stable-diffusion/Extensions`
 
-Expected retained directories after the 2026-05-03 cleanup pass:
+Live directories as of 2026-09-25:
 
 - `multidiffusion-upscaler-for-automatic1111`
 - `openclaw-clear-cond-cache`
+- `openclaw-conditioning-probe`
+- `openclaw-denoise-ramp`
+- `openclaw-multi-sampler`
+- `sd-webui-controlnet`
 - `sd-webui-detail-daemon`
 - `sd-webui-incantations`
 - `sd-webui-model-converter`
@@ -46,6 +50,16 @@ Currently first-class:
 - `sd-webui-teacache`
   - owns SDXL TeaCache acceleration as a disabled-by-default experimental script
   - adopted from `feffy380/sd-webui-teacache` under MIT license with attribution preserved
+- `sd-webui-controlnet`
+  - upstream `Mikubill/sd-webui-controlnet` v1.1.455 (`56cec5b`, GPL-3.0), committed byte-identical first, followed by a separate commit that holds the GB10 edits (legacy remote API field normalization used by A1111-Controller, headless submit-button guard, hook and ZoeDepth fixes)
+  - `gb10/run.sh` additionally applies the tracked `gb10/patch-controlnet-*.py` patchers on deploy
+  - model weights (`models/*.safetensors`, identity pinned by the committed `.sha256` sidecars) and `annotator/downloads/` stay out of git. Each deploy's resync removes `annotator/downloads/`, so annotators such as ZoeDepth re-download on first use.
+- `openclaw-conditioning-probe`
+  - diagnostic API endpoints (`/sdapi/v1/openclaw/conditioning-probe/*`) that hash conditioning, embedding, and quantization state for cache-coherency audits
+- `openclaw-denoise-ramp`, `openclaw-multi-sampler`, `sd-webui-model-converter`
+  - GB10-owned sampler, denoise-ramp, and model conversion extensions
+
+Tiled upscaling stays external (`multidiffusion-upscaler-for-automatic1111`, `ultimate-upscale-for-automatic1111`). Their GB10 changes are tracked as `gb10/patch-*.py` patchers and `patches/mounted-extensions/`.
 
 ### External mounted extensions
 
