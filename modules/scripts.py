@@ -45,11 +45,6 @@ class PostprocessBatchListArgs:
         self.images = images
 
 
-@dataclass
-class OnComponent:
-    component: gr.blocks.Block
-
-
 class Script:
     name = None
     """script's internal name derived from title"""
@@ -84,12 +79,6 @@ class Script:
 
     api_info = None
     """Generated value of type modules.api.models.ScriptInfo with information about the script for API"""
-
-    on_before_component_elem_id = None
-    """list of callbacks to be called before a component with an elem_id is created"""
-
-    on_after_component_elem_id = None
-    """list of callbacks to be called after a component with an elem_id is created"""
 
     setup_for_ui_only = False
     """If true, the script setup will only be run in browser UI setup, not in API"""
@@ -306,29 +295,10 @@ class Script:
         pass
 
     def on_before_component(self, callback, *, elem_id):
-        """
-        Calls callback before a component is created. The callback function is called with a single argument of type OnComponent.
-
-        May be called in show() or ui() - but it may be too late in latter as some components may already be created.
-
-        This function is an alternative to before_component in that it also cllows to run before a component is created, but
-        it doesn't require to be called for every created component - just for the one you need.
-        """
-        self._add_component_callback("on_before_component_elem_id", elem_id, callback)
+        """Accepted for extension compatibility; headless components are never created through a UI, so it is never called."""
 
     def on_after_component(self, callback, *, elem_id):
-        """
-        Calls callback after a component is created. The callback function is called with a single argument of type OnComponent.
-        """
-        self._add_component_callback("on_after_component_elem_id", elem_id, callback)
-
-    def _add_component_callback(self, field_name, elem_id, callback):
-        callbacks = getattr(self, field_name)
-        if callbacks is None:
-            callbacks = []
-            setattr(self, field_name, callbacks)
-
-        callbacks.append((elem_id, callback))
+        """Accepted for extension compatibility; never called. See on_before_component."""
 
     def describe(self):
         """unused"""
@@ -480,22 +450,6 @@ def list_scripts(scriptdirname, extension, *, include_extensions=True):
     return scripts_list
 
 
-def list_files_with_name(filename):
-    res = []
-
-    dirs = [paths.script_path] + [ext.path for ext in extensions.active()]
-
-    for dirpath in dirs:
-        if not os.path.isdir(dirpath):
-            continue
-
-        path = os.path.join(dirpath, filename)
-        if os.path.isfile(path):
-            res.append(path)
-
-    return res
-
-
 def load_scripts():
     global current_basedir
     scripts_data.clear()
@@ -609,12 +563,6 @@ class ScriptRunner:
             'after_component',
         ]
 
-        self.on_before_component_elem_id = {}
-        """dict of callbacks to be called before an element is created; key=elem_id, value=list of callbacks"""
-
-        self.on_after_component_elem_id = {}
-        """dict of callbacks to be called after an element is created; key=elem_id, value=list of callbacks"""
-
     def initialize_scripts(self, is_img2img):
         from modules import scripts_auto_postprocessing
 
@@ -648,23 +596,6 @@ class ScriptRunner:
                 self.selectable_scripts.append(script)
 
         self.callback_map.clear()
-
-        self.apply_on_before_component_callbacks()
-
-    def apply_on_before_component_callbacks(self):
-        def register_callbacks(target, entries, script):
-            for elem_id, callback in entries:
-                target.setdefault(elem_id, []).append((callback, script))
-
-        for script in self.scripts:
-            on_before = script.on_before_component_elem_id or []
-            on_after = script.on_after_component_elem_id or []
-
-            register_callbacks(self.on_before_component_elem_id, on_before, script)
-            register_callbacks(self.on_after_component_elem_id, on_after, script)
-
-            on_before.clear()
-            on_after.clear()
 
     def create_script_ui(self, script):
 
@@ -780,8 +711,6 @@ class ScriptRunner:
 
         self.infotext_fields.append((dropdown, lambda x: gr.update(value=x.get('Script', 'None'))))
         self.infotext_fields.extend([(script.group, onload_script_visibility) for script in self.selectable_scripts])
-
-        self.apply_on_before_component_callbacks()
 
         return self.inputs
 
@@ -945,52 +874,8 @@ class ScriptRunner:
     def postprocess_image_after_composite(self, p, pp: PostprocessImageArgs):
         self._run_postprocess_arg_hook(p, 'postprocess_image_after_composite', pp)
 
-    def before_component(self, component, **kwargs):
-        for callback, script in self.on_before_component_elem_id.get(kwargs.get("elem_id"), []):
-            try:
-                callback(OnComponent(component=component))
-            except Exception:
-                errors.report(f"Error running on_before_component: {script.filename}", exc_info=True)
-
-        for script in self.ordered_scripts('before_component'):
-            try:
-                script.before_component(component, **kwargs)
-            except Exception:
-                errors.report(f"Error running before_component: {script.filename}", exc_info=True)
-
-    def after_component(self, component, **kwargs):
-        for callback, script in self.on_after_component_elem_id.get(component.elem_id, []):
-            try:
-                callback(OnComponent(component=component))
-            except Exception:
-                errors.report(f"Error running on_after_component: {script.filename}", exc_info=True)
-
-        for script in self.ordered_scripts('after_component'):
-            try:
-                script.after_component(component, **kwargs)
-            except Exception:
-                errors.report(f"Error running after_component: {script.filename}", exc_info=True)
-
     def script(self, title):
         return self.title_map.get(title.lower())
-
-    def reload_sources(self, cache):
-        for si, script in list(enumerate(self.scripts)):
-            args_from = script.args_from
-            args_to = script.args_to
-            filename = script.filename
-
-            module = cache.get(filename, None)
-            if module is None:
-                module = script_loading.load_module(script.filename)
-                cache[filename] = module
-
-            for script_class in module.__dict__.values():
-                if type(script_class) == type and issubclass(script_class, Script):
-                    self.scripts[si] = script_class()
-                    self.scripts[si].filename = filename
-                    self.scripts[si].args_from = args_from
-                    self.scripts[si].args_to = args_to
 
     def before_hr(self, p):
         for script in self.ordered_scripts('before_hr'):
@@ -1037,12 +922,3 @@ scripts_txt2img: ScriptRunner = None
 scripts_img2img: ScriptRunner = None
 scripts_postproc: scripts_postprocessing.ScriptPostprocessingRunner = None
 scripts_current: ScriptRunner = None
-
-
-def reload_script_body_only():
-    cache = {}
-    scripts_txt2img.reload_sources(cache)
-    scripts_img2img.reload_sources(cache)
-
-
-reload_scripts = load_scripts  # compatibility alias

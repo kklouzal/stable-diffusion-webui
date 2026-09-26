@@ -2,11 +2,7 @@ from modules import headless_ui as gr
 
 
 class FormComponent:
-    def get_expected_parent(self):
-        return gr.components.Form
-
-
-gr.Dropdown.get_expected_parent = FormComponent.get_expected_parent
+    """Marker mixin for components that sat inside A1111 UI forms."""
 
 
 class ToolButton(FormComponent, gr.Button):
@@ -15,9 +11,6 @@ class ToolButton(FormComponent, gr.Button):
     def __init__(self, *args, **kwargs):
         classes = kwargs.pop("elem_classes", [])
         super().__init__(*args, elem_classes=["tool", *classes], **kwargs)
-
-    def get_block_name(self):
-        return "button"
 
 
 class ResizeHandleRow(gr.Row):
@@ -28,43 +21,25 @@ class ResizeHandleRow(gr.Row):
 
         self.elem_classes.append("resize-handle-row")
 
-    def get_block_name(self):
-        return "row"
-
 
 class FormRow(FormComponent, gr.Row):
     """Same as gr.Row but fits inside UI forms"""
-
-    def get_block_name(self):
-        return "row"
 
 
 class FormColumn(FormComponent, gr.Column):
     """Same as gr.Column but fits inside UI forms"""
 
-    def get_block_name(self):
-        return "column"
-
 
 class FormGroup(FormComponent, gr.Group):
     """Same as gr.Group but fits inside UI forms"""
-
-    def get_block_name(self):
-        return "group"
 
 
 class FormHTML(FormComponent, gr.HTML):
     """Same as gr.HTML but fits inside UI forms"""
 
-    def get_block_name(self):
-        return "html"
-
 
 class FormColorPicker(FormComponent, gr.ColorPicker):
     """Same as gr.ColorPicker but fits inside UI forms"""
-
-    def get_block_name(self):
-        return "colorpicker"
 
 
 class DropdownMulti(FormComponent, gr.Dropdown):
@@ -72,17 +47,11 @@ class DropdownMulti(FormComponent, gr.Dropdown):
     def __init__(self, **kwargs):
         super().__init__(multiselect=True, **kwargs)
 
-    def get_block_name(self):
-        return "dropdown"
-
 
 class DropdownEditable(FormComponent, gr.Dropdown):
     """Same as gr.Dropdown but allows editing value"""
     def __init__(self, **kwargs):
         super().__init__(allow_custom_value=True, **kwargs)
-
-    def get_block_name(self):
-        return "dropdown"
 
 
 class InputAccordion(gr.Checkbox):
@@ -152,9 +121,6 @@ class InputAccordion(gr.Checkbox):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.accordion.__exit__(exc_type, exc_val, exc_tb)
-
-    def get_block_name(self):
-        return "checkbox"
 
     @classmethod
     def reset(cls):

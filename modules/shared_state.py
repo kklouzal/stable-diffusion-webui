@@ -1,10 +1,8 @@
 import datetime
 import logging
-import threading
 import time
 
 from modules import errors, shared, devices
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -26,25 +24,6 @@ class State:
     id_live_preview = 0
     textinfo = None
     time_start = None
-    _server_command_signal = threading.Event()
-    _server_command: Optional[str] = None
-
-    @property
-    def server_command(self):
-        return self._server_command
-
-    @server_command.setter
-    def server_command(self, value: Optional[str]) -> None:
-        """
-        Set the server command to `value` and signal that it's been set.
-        """
-        self._server_command = value
-        self._server_command_signal.set()
-
-    def request_restart(self) -> None:
-        self.interrupt()
-        self.server_command = "restart"
-        log.info("Received restart request")
 
     def skip(self):
         self.skipped = True

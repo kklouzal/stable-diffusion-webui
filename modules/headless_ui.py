@@ -9,16 +9,8 @@ pulling in a browser-UI framework.
 from __future__ import annotations
 
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any
-
-
-def is_available() -> bool:
-    return True
-
-
-def version() -> str | None:
-    return None
 
 
 class _FallbackUpdate(dict):
@@ -53,9 +45,7 @@ class _FallbackComponent:
     def __exit__(self, exc_type=None, exc=None, tb=None):
         return False
 
-    def style(self, *args: Any, **kwargs: Any): return self
     def then(self, *args: Any, **kwargs: Any): return self
-    def success(self, *args: Any, **kwargs: Any): return self
     def click(self, *args: Any, **kwargs: Any): return self
     def change(self, *args: Any, **kwargs: Any): return self
     def submit(self, *args: Any, **kwargs: Any): return self
@@ -63,60 +53,20 @@ class _FallbackComponent:
     def release(self, *args: Any, **kwargs: Any): return self
     def select(self, *args: Any, **kwargs: Any): return self
     def upload(self, *args: Any, **kwargs: Any): return self
-    def clear(self, *args: Any, **kwargs: Any): return self
     def load(self, *args: Any, **kwargs: Any): return self
     def render(self, *args: Any, **kwargs: Any): return self
     def preprocess(self, value: Any): return value
-    def postprocess(self, value: Any): return value
-
-    def get_block_name(self):
-        return self.__class__.__name__.lower()
-
-    def get_config(self):
-        return {}
 
     @staticmethod
     def update(**kwargs: Any):
         return update(**kwargs)
 
 
-class IOComponent(_FallbackComponent):
-    pass
-
-
-class Block(_FallbackComponent):
-    pass
-
-
-class BlockContext(_FallbackComponent):
-    pass
-
-
 class Interface(_FallbackComponent):
-    """Minimal stand-in for gradio.Interface during API/headless startup."""
-
-    def launch(self, *args: Any, **kwargs: Any):
-        raise RuntimeError("Browser UI launch requested in headless-only build")
-
-    def close(self):
-        pass
+    """Base class for ControlNet's ModalInterface."""
 
 
 class Blocks(_FallbackComponent):
-    def queue(self, *args: Any, **kwargs: Any):
-        return self
-
-    def launch(self, *args: Any, **kwargs: Any):
-        raise RuntimeError("Browser UI launch requested in headless-only build")
-
-    def close(self):
-        pass
-
-    def get_config_file(self, *args: Any, **kwargs: Any):
-        return {"components": []}
-
-
-class Request:
     pass
 
 
@@ -130,8 +80,8 @@ def Warning(message: str):
 
 _COMPONENT_NAMES = {
     "Accordion", "Audio", "Box", "Button", "Checkbox", "CheckboxGroup", "Code",
-    "ColorPicker", "Column", "Dataframe", "Dataset", "Dropdown", "File",
-    "Files", "Gallery", "Group", "HTML", "HighlightedText", "Image", "Info", "JSON", "Label",
+    "ColorPicker", "Column", "Dropdown", "File",
+    "Files", "Gallery", "Group", "HTML", "HighlightedText", "Image", "Info", "Label",
     "Markdown", "Number", "Plot", "Radio", "Row", "SelectData", "Slider", "State", "Tab", "TabItem", "Tabs",
     "Text", "TextArea", "Textbox", "UploadButton", "Video",
 }
@@ -141,60 +91,14 @@ for _component_name in _COMPONENT_NAMES:
     globals()[_component_name] = type(_component_name, (_FallbackComponent,), {})
 
 
-def __getattr__(name: str) -> Any:
-    if name == "__version__":
-        return None
-    if name in _COMPONENT_NAMES:
-        return globals()[name]
-    if name == "themes":
-        class ThemeClass(_FallbackComponent):
-            @classmethod
-            def load(cls, *args: Any, **kwargs: Any):
-                return cls(*args, **kwargs)
-
-            @classmethod
-            def from_hub(cls, *args: Any, **kwargs: Any):
-                return cls(*args, **kwargs)
-
-            def dump(self, *args: Any, **kwargs: Any):
-                pass
-
-        return SimpleNamespace(
-            Base=lambda *args, **kwargs: ThemeClass(*args, **kwargs),
-            Default=lambda *args, **kwargs: ThemeClass(*args, **kwargs),
-            ThemeClass=ThemeClass,
-        )
-    if name == "deprecation":
-        return SimpleNamespace(UIDeprecationWarning=DeprecationWarning)
-    if name == "utils":
-        return SimpleNamespace(version_check=lambda: None, get_local_ip_address=lambda: "127.0.0.1")
-    if name == "components":
-        return components
-    if name == "blocks":
-        return blocks
-    if name == "routes":
-        return SimpleNamespace(templates=SimpleNamespace(TemplateResponse=lambda *args, **kwargs: None))
-    raise AttributeError(name)
-
-
 # Third-party extensions may still import the historical UI package name while
 # declaring API script controls. Route those imports to this inert headless
 # surface instead of requiring the real browser UI dependency.
 components = ModuleType("gradio.components")
-components.IOComponent = IOComponent
 components.Component = _FallbackComponent
+components.IOComponent = _FallbackComponent  # named in vendored ControlNet annotations
 for _component_name in _COMPONENT_NAMES:
     setattr(components, _component_name, globals()[_component_name])
 
-blocks = ModuleType("gradio.blocks")
-blocks.Block = Block
-blocks.BlockContext = BlockContext
-blocks.Blocks = Blocks
-
-routes = ModuleType("gradio.routes")
-routes.templates = SimpleNamespace(TemplateResponse=lambda *args, **kwargs: None)
-
 sys.modules.setdefault("gradio", sys.modules[__name__])
 sys.modules.setdefault("gradio.components", components)
-sys.modules.setdefault("gradio.blocks", blocks)
-sys.modules.setdefault("gradio.routes", routes)

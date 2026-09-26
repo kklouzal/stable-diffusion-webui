@@ -96,11 +96,6 @@ class AfterCFGCallbackParams:
         """Total number of sampling steps planned"""
 
 
-class UiTrainTabParams:
-    def __init__(self, txt2img_preview_params):
-        self.txt2img_preview_params = txt2img_preview_params
-
-
 class ImageGridLoopParams:
     def __init__(self, imgs, cols, rows):
         self.imgs = imgs
@@ -271,26 +266,6 @@ def model_loaded_callback(sd_model):
             report_exception(c, 'model_loaded_callback')
 
 
-def ui_tabs_callback():
-    res = []
-
-    for c in ordered_callbacks('ui_tabs'):
-        try:
-            res += c.callback() or []
-        except Exception:
-            report_exception(c, 'ui_tabs_callback')
-
-    return res
-
-
-def ui_train_tabs_callback(params: UiTrainTabParams):
-    for c in ordered_callbacks('ui_train_tabs'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'callbacks_ui_train_tabs')
-
-
 def ui_settings_callback():
     for c in ordered_callbacks('ui_settings'):
         try:
@@ -347,22 +322,6 @@ def cfg_after_cfg_callback(params: AfterCFGCallbackParams):
             report_exception(c, 'cfg_after_cfg_callback')
 
 
-def before_component_callback(component, **kwargs):
-    for c in ordered_callbacks('before_component'):
-        try:
-            c.callback(component, **kwargs)
-        except Exception:
-            report_exception(c, 'before_component_callback')
-
-
-def after_component_callback(component, **kwargs):
-    for c in ordered_callbacks('after_component'):
-        try:
-            c.callback(component, **kwargs)
-        except Exception:
-            report_exception(c, 'after_component_callback')
-
-
 def image_grid_callback(params: ImageGridLoopParams):
     for c in ordered_callbacks('image_grid'):
         try:
@@ -411,14 +370,6 @@ def list_unets_callback():
     return res
 
 
-def before_token_counter_callback(params: BeforeTokenCounterParams):
-    for c in ordered_callbacks('before_token_counter'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'before_token_counter')
-
-
 def remove_callbacks_for_function(callback_func):
     for callback_list in callback_map.values():
         for callback_to_remove in [cb for cb in callback_list if cb.callback == callback_func]:
@@ -446,22 +397,13 @@ def on_model_loaded(callback, *, name=None):
 
 
 def on_ui_tabs(callback, *, name=None):
-    """register a function to be called when the UI is creating new tabs.
-    The function must either return a None, which means no new tabs to be added, or a list, where
-    each element is a tuple:
-        (ui_component, title, elem_id)
-
-    ui_component is a UI component to be used for contents of the tab (usually gr.Blocks)
-    title is tab text displayed to user in the UI
-    elem_id is HTML id for the tab
-    """
+    """Accepted so extensions that add browser-UI tabs still load; this headless fork never builds tabs, so the
+    callback is never called."""
     add_callback_for_category('ui_tabs', callback, name=name)
 
 
 def on_ui_train_tabs(callback, *, name=None):
-    """register a function to be called when the UI is creating new tabs for the train tab.
-    Create your new tabs with gr.Tab.
-    """
+    """Accepted for extension compatibility; never called (no browser UI)."""
     add_callback_for_category('ui_train_tabs', callback, name=name)
 
 
@@ -520,19 +462,13 @@ def on_cfg_after_cfg(callback, *, name=None):
 
 
 def on_before_component(callback, *, name=None):
-    """register a function to be called before a component is created.
-    The callback is called with arguments:
-        - component - UI component that is about to be created.
-        - **kwargs - args to the component IO initializer
-
-    Use elem_id/label fields of kwargs to figure out which component it is.
-    This can be useful to inject your own components somewhere in the middle of vanilla UI.
-    """
+    """Accepted for extension compatibility (headless components never dispatch it). Registrations still
+    appear in the prioritized_callbacks_* options."""
     add_callback_for_category('before_component', callback, name=name)
 
 
 def on_after_component(callback, *, name=None):
-    """register a function to be called after a component is created. See on_before_component for more."""
+    """Accepted for extension compatibility (ControlNet registers one); never called. See on_before_component."""
     add_callback_for_category('after_component', callback, name=name)
 
 
@@ -582,7 +518,7 @@ def on_list_unets(callback, *, name=None):
 
 
 def on_before_token_counter(callback, *, name=None):
-    """register a function to be called when UI is counting tokens for a prompt.
-    The function will be called with one argument of type BeforeTokenCounterParams, and should modify its fields if necessary."""
+    """Accepted for extension compatibility; the browser-UI token counter that called it is gone. Registrations
+    still appear in the prioritized_callbacks_* options."""
 
     add_callback_for_category('before_token_counter', callback, name=name)
