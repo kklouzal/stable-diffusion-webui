@@ -10,8 +10,6 @@ logger = logging.getLogger(__name__)
 class DynThresh:
 
     Modes = ("Constant", "Linear Down", "Cosine Down", "Half Cosine Down", "Linear Up", "Cosine Up", "Half Cosine Up", "Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth")
-    Startpoints = ("MEAN", "ZERO")
-    Variabilities = ("AD", "STD")
     _EXPERIMENT_MODE3_COEFS = (
         (0.298, 0.207, 0.208, 0.0),
         (0.187, 0.286, 0.173, 0.0),

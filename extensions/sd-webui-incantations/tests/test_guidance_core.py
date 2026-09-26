@@ -325,7 +325,6 @@ class DynamicThresholdingLifecycleTests(unittest.TestCase):
         script = self.dynamic_thresholding.Script()
         p = types.SimpleNamespace(
             sampler_name="Euler",
-            latent_sampler=None,
             sampler=types.SimpleNamespace(name="Euler"),
             sd_model=object(),
             steps=4,

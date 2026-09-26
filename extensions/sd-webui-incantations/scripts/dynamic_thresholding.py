@@ -20,10 +20,7 @@ from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekd
 
 logger = logging.getLogger(__name__)
 
-IS_AUTO_16 = True
 UNSUPPORTED_SAMPLERS = ("DDIM", "PLMS", "UniPC")
-
-DISABLE_VISIBILITY = True
 
 ######################### Data values #########################
 MODES_WITH_VALUE = ["Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth"]
@@ -38,11 +35,6 @@ class Script(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        def vis_change(is_vis):
-            return {"visible": is_vis, "__type__": "update"}
-        # "Dynamic Thresholding (CFG Scale Fix)"
-        dtrue = gr.Checkbox(value=True, visible=False)
-        dfalse = gr.Checkbox(value=False, visible=False)
         with gr.Accordion("Dynamic Thresholding (CFG Scale Fix)", open=False, elem_id="dynthres_" + ("img2img" if is_img2img else "txt2img")):
             with gr.Row():
                 enabled = gr.Checkbox(value=False, label="Enable Dynamic Thresholding (CFG Scale Fix)", elem_classes=["dynthres-enabled"], elem_id='dynthres_enabled')
@@ -56,23 +48,13 @@ class Script(scripts.Script):
                     with gr.Row():
                         mimic_mode = gr.Dropdown(dynthres_core.DynThresh.Modes, value="Constant", label="Mimic Scale Scheduler", elem_id='dynthres_mimic_mode')
                         cfg_mode = gr.Dropdown(dynthres_core.DynThresh.Modes, value="Constant", label="CFG Scale Scheduler", elem_id='dynthres_cfg_mode')
-                    mimic_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, visible=DISABLE_VISIBILITY, label="Minimum value of the Mimic Scale Scheduler", elem_id='dynthres_mimic_scale_min')
-                    cfg_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, visible=DISABLE_VISIBILITY, label="Minimum value of the CFG Scale Scheduler", elem_id='dynthres_cfg_scale_min')
-                    sched_val = gr.Slider(minimum=0.0, maximum=40.0, step=0.5, value=4.0, visible=DISABLE_VISIBILITY, label="Scheduler Value", info="Value unique to the scheduler mode - for Power Up/Down, this is the power. For Linear/Cosine Repeating, this is the number of repeats per image.", elem_id='dynthres_sched_val')
+                    mimic_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label="Minimum value of the Mimic Scale Scheduler", elem_id='dynthres_mimic_scale_min')
+                    cfg_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label="Minimum value of the CFG Scale Scheduler", elem_id='dynthres_cfg_scale_min')
+                    sched_val = gr.Slider(minimum=0.0, maximum=40.0, step=0.5, value=4.0, label="Scheduler Value", info="Value unique to the scheduler mode - for Power Up/Down, this is the power. For Linear/Cosine Repeating, this is the number of repeats per image.", elem_id='dynthres_sched_val')
                     with gr.Row():
                         separate_feature_channels = gr.Checkbox(value=True, label="Separate Feature Channels", elem_id='dynthres_separate_feature_channels')
                         scaling_startpoint = gr.Radio(["ZERO", "MEAN"], value="MEAN", label="Scaling Startpoint")
                         variability_measure = gr.Radio(["STD", "AD"], value="AD", label="Variability Measure")
-        def should_show_scheduler_value(cfg_mode, mimic_mode):
-            sched_vis = cfg_mode in MODES_WITH_VALUE or mimic_mode in MODES_WITH_VALUE or DISABLE_VISIBILITY
-            return vis_change(sched_vis), vis_change(mimic_mode != "Constant" or DISABLE_VISIBILITY), vis_change(cfg_mode != "Constant" or DISABLE_VISIBILITY)
-        cfg_mode.change(should_show_scheduler_value, inputs=[cfg_mode, mimic_mode], outputs=[sched_val, mimic_scale_min, cfg_scale_min])
-        mimic_mode.change(should_show_scheduler_value, inputs=[cfg_mode, mimic_mode], outputs=[sched_val, mimic_scale_min, cfg_scale_min])
-        enabled.change(
-            _js="dynthres_update_enabled",
-            fn=None,
-            inputs=[enabled, dtrue if is_img2img else dfalse],
-            show_progress = False)
         self.infotext_fields = (
             (enabled, lambda d: gr.Checkbox.update(value="Dynamic thresholding enabled" in d)),
             (mimic_scale, "Mimic scale"),
@@ -94,15 +76,12 @@ class Script(scripts.Script):
         if not hasattr(p, 'orig_sampler_name'):
             return
         p.sampler_name = p.orig_sampler_name
-        if p.orig_latent_sampler_name:
-            p.latent_sampler = p.orig_latent_sampler_name
         for added_sampler in p.fixed_samplers:
             sd_samplers.all_samplers_map.pop(added_sampler, None)
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
         del p.fixed_samplers
         del p.orig_sampler_name
-        del p.orig_latent_sampler_name
 
     def process_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, prompts, seeds, subseeds):
         self._restore_original_sampler(p)
@@ -110,12 +89,9 @@ class Script(scripts.Script):
         if not enabled:
             return
         orig_sampler_name = p.sampler_name
-        orig_latent_sampler_name = getattr(p, 'latent_sampler', None)
         # Timestep samplers (DDIM, PLMS, UniPC) have no k-diffusion CFG denoiser to wrap.
         if orig_sampler_name in UNSUPPORTED_SAMPLERS:
             raise RuntimeError(f"Cannot use sampler {orig_sampler_name} with Dynamic Thresholding")
-        if orig_latent_sampler_name in UNSUPPORTED_SAMPLERS:
-            raise RuntimeError(f"Cannot use secondary sampler {orig_latent_sampler_name} with Dynamic Thresholding")
         mimic_scale = getattr(p, 'dynthres_mimic_scale', mimic_scale)
         separate_feature_channels = getattr(p, 'dynthres_separate_feature_channels', separate_feature_channels)
         scaling_startpoint = getattr(p, 'dynthres_scaling_startpoint', scaling_startpoint)
@@ -157,7 +133,7 @@ class Script(scripts.Script):
             dt_data = dynthres_core.DynThresh(mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, experiment_mode, p.steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi)
             def new_constructor(model):
                 result = sampler.constructor(model)
-                cfg = CustomCFGDenoiser(result if IS_AUTO_16 else result.model_wrap_cfg.inner_model, dt_data)
+                cfg = CustomCFGDenoiser(result, dt_data)
                 result.model_wrap_cfg = cfg
                 return result
             new_sampler = sd_samplers_common.SamplerData(fixed_sampler_name, new_constructor, sampler.aliases, sampler.options)
@@ -165,21 +141,9 @@ class Script(scripts.Script):
 
         # Apply for usage
         p.orig_sampler_name = orig_sampler_name
-        p.orig_latent_sampler_name = orig_latent_sampler_name
-        p.fixed_samplers = []
-
-        if orig_latent_sampler_name:
-            latent_sampler_name, latent_sampler = make_sampler(orig_latent_sampler_name)
-            sd_samplers.all_samplers_map[latent_sampler_name] = latent_sampler
-            p.fixed_samplers.append(latent_sampler_name)
-            p.latent_sampler = latent_sampler_name
-
-        if orig_sampler_name != orig_latent_sampler_name:
-            p.sampler_name, new_sampler = make_sampler(orig_sampler_name)
-            sd_samplers.all_samplers_map[p.sampler_name] = new_sampler
-            p.fixed_samplers.append(p.sampler_name)
-        else:
-            p.sampler_name = p.latent_sampler
+        p.sampler_name, new_sampler = make_sampler(orig_sampler_name)
+        sd_samplers.all_samplers_map[p.sampler_name] = new_sampler
+        p.fixed_samplers = [p.sampler_name]
 
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
@@ -199,8 +163,7 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
             uncond = uncond['crossattn']
         denoised_uncond = x_out[-uncond.shape[0]:]
         self.main_class.step = self.step
-        if hasattr(self, 'total_steps'):
-            self.main_class.max_steps = self.total_steps
+        self.main_class.max_steps = self.total_steps
 
         if self.main_class.experiment_mode >= 4 and self.main_class.experiment_mode <= 5:
             # https://arxiv.org/pdf/2305.08891.pdf "Rescale CFG". It's not good, but if you want to test it, just set experiment_mode = 4 + phi.
