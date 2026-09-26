@@ -237,3 +237,26 @@ def test_apply_infotext_uses_pydantic_v2_field_metadata():
     source = Path("modules/api/api.py").read_text()
     assert ".type_" not in source
     assert "request.__fields__" not in source
+
+
+def test_apply_infotext_keeps_componentless_builtin_fields_off_script_arg_zero(monkeypatch):
+    # Built-in paste fields carry no UI component, and script_runner.inputs[0] is None (the selectable-script index).
+    from types import SimpleNamespace
+
+    from modules import shared, shared_init
+    if getattr(shared, "opts", None) is None:
+        shared_init.initialize()
+    from modules import infotext_utils
+    from modules.api import api as api_module, models
+    from modules.infotext_utils import PasteField
+
+    script_component = type("Control", (), {"value": 0.5})()  # hashable, like UI components
+    fields = [PasteField(None, "Steps", api="steps"), PasteField(script_component, "Script value")]
+    monkeypatch.setitem(infotext_utils.paste_fields, "txt2img", {"init_img": None, "fields": fields, "override_settings_component": None})
+    request = models.StableDiffusionTxt2ImgProcessingAPI(infotext="a cat\nSteps: 7, Script value: 0.25, Seed: 1")
+    mentioned = {}
+
+    api_module.Api.apply_infotext(object(), request, "txt2img", script_runner=SimpleNamespace(inputs=[None, script_component]), mentioned_script_args=mentioned)
+
+    assert request.steps == 7
+    assert mentioned == {1: 0.25}

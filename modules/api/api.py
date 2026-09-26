@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant
+from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, headless_setup, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -690,7 +690,7 @@ class Api:
         img2img_script_runner = scripts.scripts_img2img
 
         if not txt2img_script_runner.scripts or not img2img_script_runner.scripts:
-            ui.create_ui()
+            headless_setup.initialize_script_ui_state()
 
         if not txt2img_script_runner.scripts:
             txt2img_script_runner.initialize_scripts(False)
@@ -993,7 +993,8 @@ class Api:
 
         if script_runner is not None and mentioned_script_args is not None:
             indexes = {v: i for i, v in enumerate(script_runner.inputs)}
-            script_fields = ((field, indexes[field.component]) for field in possible_fields if field.component in indexes)
+            # Built-in fields carry no component; script_runner.inputs[0] is None, so they must not match it.
+            script_fields = ((field, indexes[field.component]) for field in possible_fields if field.component is not None and field.component in indexes)
 
             for field, index in script_fields:
                 value = get_field_value(field, params)
