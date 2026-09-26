@@ -1,7 +1,7 @@
 import os
 from modules import headless_ui as gr
 
-from modules import localization, ui_components, shared_items, shared, interrogate, shared_ui_themes, util, sd_emphasis
+from modules import localization, ui_components, shared_items, shared, interrogate, shared_ui_themes, util, sd_emphasis, torchao_weight_quant
 from modules.paths_internal import models_path, script_path, data_path, sd_configs_path, sd_default_config, sd_model_file, default_sd_model_file, extensions_dir, extensions_builtin_dir, default_output_dir  # noqa: F401
 from modules.shared_cmd_options import cmd_opts
 from modules.options import options_section, OptionInfo, OptionHTML, categories
@@ -244,9 +244,9 @@ options_templates.update(options_section(('optimizations', "Optimizations", "sd"
     "batch_cond_uncond": OptionInfo(True, "Batch cond/uncond").info("do both conditional and unconditional denoising in one batch; uses a bit more VRAM during sampling, but improves speed; previously this was controlled by --always-batch-cond-uncond commandline argument"),
     "fp8_storage": OptionInfo("Disable", "FP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Use native PyTorch FP8 to store Linear/Conv layers' weight. Require pytorch>=2.1.0."),
     "mxfp8_storage": OptionInfo("Disable", "MXFP8 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Experimental TorchAO MXFP8 Linear weight quantization for Blackwell. Requires --dtype bfloat16 and CUDA."),
-    "mxfp8_linear_coverage": OptionInfo(["unet_other"], "MXFP8 Linear coverage", gr.CheckboxGroup, {"choices": ["unet_other", "self_attention", "cross_attention", "conditioner"]}).info("Select which Linear layer regions TorchAO MXFP8 quantizes. Changing this reloads/requantizes model weights. Conv2d and VAE MXFP8 are not available in the current TorchAO Linear path."),
+    "mxfp8_linear_coverage": OptionInfo(list(torchao_weight_quant.LINEAR_COVERAGE_DEFAULT), "MXFP8 Linear coverage", gr.CheckboxGroup, {"choices": list(torchao_weight_quant.LINEAR_COVERAGE_CHOICES)}).info("Select which Linear layer regions TorchAO MXFP8 quantizes. Changing this reloads/requantizes model weights. Conv2d and VAE MXFP8 are not available in the current TorchAO Linear path."),
     "nvfp4_storage": OptionInfo("Disable", "NVFP4 weight", gr.Radio, {"choices": ["Disable", "Enable for SDXL", "Enable"]}).info("Experimental TorchAO NVFP4 Linear weight quantization for Blackwell. Requires --dtype bfloat16, CUDA, TorchAO, and MSLK."),
-    "nvfp4_linear_coverage": OptionInfo(["unet_other"], "NVFP4 Linear coverage", gr.CheckboxGroup, {"choices": ["unet_other", "self_attention", "cross_attention", "conditioner"]}).info("Select which Linear layer regions TorchAO NVFP4 quantizes. Changing this reloads/requantizes model weights. Conv2d and VAE NVFP4 are not available in the current TorchAO Linear path."),
+    "nvfp4_linear_coverage": OptionInfo(list(torchao_weight_quant.LINEAR_COVERAGE_DEFAULT), "NVFP4 Linear coverage", gr.CheckboxGroup, {"choices": list(torchao_weight_quant.LINEAR_COVERAGE_CHOICES)}).info("Select which Linear layer regions TorchAO NVFP4 quantizes. Changing this reloads/requantizes model weights. Conv2d and VAE NVFP4 are not available in the current TorchAO Linear path."),
     "cache_fp16_weight": OptionInfo(False, "Cache FP16 weight for LoRA").info("Cache fp16 weight when enabling FP8, will increase the quality of LoRA. Use more system ram."),
 }))
 

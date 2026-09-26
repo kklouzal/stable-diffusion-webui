@@ -288,20 +288,17 @@ def iter_eligible_linear_modules(model, filter_fn: Callable):
 
 
 def load_into_model(
-    *,
+    backend,
     model,
     source_path: Optional[str],
     filter_fn: Callable,
     device: torch.device | str,
     coverage=None,
-    cache_dir_name: str,
-    cache_version: int,
-    config_name: str,
-    sidecar_suffix: str,
-    label: str,
-    is_quant_tensor: Callable,
-    register_safe_globals: Callable[[], None],
 ) -> bool:
+    """Assign a cached quantized state for `backend` (a torchao_weight_quant.Backend) if one matches."""
+    cache_dir_name, cache_version, config_name = backend.cache_dir_name, backend.cache_version, backend.config_name
+    sidecar_suffix, label, is_quant_tensor = backend.sidecar_suffix, backend.label, backend.is_quant_tensor
+    register_safe_globals = backend.register_safe_globals
     cache_path = cache_path_for(source_path, cache_dir_name)
     if cache_path is None or source_path is None or not sidecar_matches(source_path, cache_path, cache_version, config_name, sidecar_suffix, coverage):
         return False
@@ -379,7 +376,7 @@ def load_into_model(
 
 
 def save_from_model(
-    *,
+    backend,
     model,
     source_path: Optional[str],
     filter_fn: Callable,
@@ -387,13 +384,10 @@ def save_from_model(
     skipped_linear: int,
     skipped_reasons: dict,
     coverage=None,
-    cache_dir_name: str,
-    cache_version: int,
-    config_name: str,
-    sidecar_suffix: str,
-    label: str,
-    is_quant_tensor: Callable,
 ) -> Optional[str]:
+    """Persist `model`'s quantized Linear state for `backend` (a torchao_weight_quant.Backend)."""
+    cache_dir_name, cache_version, config_name = backend.cache_dir_name, backend.cache_version, backend.config_name
+    sidecar_suffix, label, is_quant_tensor = backend.sidecar_suffix, backend.label, backend.is_quant_tensor
     cache_path = cache_path_for(source_path, cache_dir_name)
     if cache_path is None or source_path is None or eligible == 0:
         return None

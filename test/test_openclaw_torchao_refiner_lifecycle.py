@@ -1,3 +1,4 @@
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from modules import shared, shared_init
 if getattr(shared, "opts", None) is None:
     shared_init.initialize()
 
-from modules import sd_models, sd_vae
+from modules import sd_models, sd_vae, torchao_weight_quant
 
 
 class NoGenericToModel(torch.nn.Module):
@@ -55,12 +56,10 @@ def _patch_torchao_reload_path(monkeypatch, model, *, target_device=torch.device
     monkeypatch.setattr(sd_models.shared, "device", target_device, raising=False)
     monkeypatch.setattr(sd_models.lowvram, "apply", lambda _model: None)
     monkeypatch.setattr(sd_models, "check_fp8", lambda _model: False)
-    monkeypatch.setattr(sd_models, "check_mxfp8", lambda _model: fresh_checkpoint_reload)
-    monkeypatch.setattr(sd_models, "check_nvfp4", lambda _model: False)
+    monkeypatch.setattr(sd_models, "weight_quant_storage_enabled", lambda backend, _model: fresh_checkpoint_reload and backend is torchao_weight_quant.MXFP8)
     if not fresh_checkpoint_reload:
         monkeypatch.setattr(sd_models, "model_has_torchao_quantization", lambda _model: True)
-    monkeypatch.setattr(sd_models, "mxfp8_selected_linear_coverage", lambda: [])
-    monkeypatch.setattr(sd_models, "nvfp4_selected_linear_coverage", lambda: [])
+    monkeypatch.setattr(sd_models, "selected_linear_coverage", lambda _backend: [])
     monkeypatch.setattr(sd_models, "reuse_model_from_already_loaded", lambda sd_model, _info, _timer: sd_model)
     monkeypatch.setattr(sd_models, "get_checkpoint_state_dict", lambda _info, _timer: {"state_dict": "alternate"})
     monkeypatch.setattr(sd_models.sd_models_config, "find_checkpoint_config", lambda _state_dict, _info: checkpoint_config)
@@ -196,17 +195,16 @@ def test_mxfp8_cache_miss_pre_moves_model_and_does_not_pass_device_to_quantize(m
     monkeypatch.setattr(sd_models.devices, "device", torch.device("cpu"), raising=False)
     monkeypatch.setattr(sd_models.devices, "cpu", torch.device("cpu"), raising=False)
     monkeypatch.setattr(sd_models.shared, "device", torch.device("cpu"), raising=False)
-    monkeypatch.setattr(sd_models, "mxfp8_selected_linear_coverage", lambda: [])
-    monkeypatch.setattr(sd_models, "mxfp8_linear_policy_skip_reason", lambda _module, _fqn: None)
-    monkeypatch.setattr(sd_models.mxfp8_config, "technical_linear_skip_reason", lambda _module: None)
-    monkeypatch.setattr(sd_models.mxfp8_config, "get_mxfp8_config", lambda: "mxfp8-config")
-    monkeypatch.setattr(sd_models.mxfp8_config, "validate_kernel_preference", lambda _config: None)
-    monkeypatch.setattr(sd_models.mxfp8_model_cache, "load_into_model", lambda *args, **kwargs: False)
+    monkeypatch.setattr(sd_models, "selected_linear_coverage", lambda _backend: [])
+    monkeypatch.setattr(sd_models, "linear_policy_skip_reason", lambda _backend, _fqn: None)
+    monkeypatch.setattr(torchao_weight_quant.Backend, "technical_linear_skip_reason", lambda _self, _module: None)
+    backend = dataclasses.replace(torchao_weight_quant.MXFP8, make_config=lambda: "mxfp8-config", validate_config=lambda _config: None)
+    monkeypatch.setattr(sd_models.torchao_model_cache, "load_into_model", lambda *args, **kwargs: False)
     save_calls = []
-    monkeypatch.setattr(sd_models.mxfp8_model_cache, "save_from_model", lambda *args, **kwargs: save_calls.append((args, kwargs)))
+    monkeypatch.setattr(sd_models.torchao_model_cache, "save_from_model", lambda *args, **kwargs: save_calls.append((args, kwargs)))
 
     timer = Timer()
-    sd_models.apply_mxfp8_weight_quantization(model, timer, source_path="cache-miss.safetensors")
+    sd_models.apply_weight_quantization(backend, model, timer, source_path="cache-miss.safetensors")
 
     assert model.to_calls == [((torch.device("cpu"),), {})]
     assert quantize_calls == [(model, "mxfp8-config", {"filter_fn": quantize_calls[0][2]["filter_fn"]})]
@@ -295,8 +293,7 @@ def test_torchao_fresh_load_bypasses_meta_state_dict_loader(monkeypatch):
     monkeypatch.setattr(sd_models.OmegaConf, "load", lambda _config: SimpleNamespace(model="model-config"))
     monkeypatch.setattr(sd_models, "set_model_type", lambda _model, _state_dict: setattr(_model, "is_sdxl", True))
     monkeypatch.setattr(sd_models, "set_model_fields", lambda _model: None)
-    monkeypatch.setattr(sd_models, "check_mxfp8", lambda _model: True)
-    monkeypatch.setattr(sd_models, "check_nvfp4", lambda _model: False)
+    monkeypatch.setattr(sd_models, "weight_quant_storage_enabled", lambda backend, _model: backend is torchao_weight_quant.MXFP8)
     monkeypatch.setattr(sd_models, "load_model_weights", lambda *_args, **_kwargs: calls.append("load"))
     monkeypatch.setattr(sd_models, "get_empty_cond", lambda _model: "empty-cond")
     monkeypatch.setattr(sd_models, "send_model_to_device", lambda _model: calls.append("device"))

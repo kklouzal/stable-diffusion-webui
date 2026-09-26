@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last
+from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, torchao_weight_quant
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -107,28 +107,15 @@ def _precision_lora_signature(lora_networks):
 
 
 def _precision_selected_coverage(name: str):
-    fn = getattr(sd_models, f"{name}_selected_linear_coverage", None)
-    if fn is None:
-        return ()
-    try:
-        return tuple(sorted(fn()))
-    except Exception:
-        return ()
-
-
-def _precision_storage_active(mode, sd_model):
-    if mode == "Enable":
-        return True
-    if mode == "Enable for SDXL":
-        return bool(getattr(sd_model, "is_sdxl", False))
-    return False
+    return tuple(sorted(sd_models.selected_linear_coverage(torchao_weight_quant.BACKENDS[name])))
 
 
 def _precision_option_mismatch_warnings(sd_model, layers):
     warnings = []
-    for prefix, label in (("mxfp8", "MXFP8"), ("nvfp4", "NVFP4")):
+    for backend in torchao_weight_quant.BACKENDS.values():
+        prefix, label = backend.name, backend.label
         storage = getattr(shared.opts, f"{prefix}_storage", None)
-        requested = _precision_storage_active(storage, sd_model)
+        requested = bool(sd_models.weight_quant_storage_enabled(backend, sd_model))
         quantized = sum(1 for layer in layers if layer.get("weight", {}).get("kind") == prefix)
         if requested and quantized == 0:
             warnings.append({
@@ -216,11 +203,8 @@ def _precision_layer_kind(name: str, module) -> str:
 
 
 def _precision_skip_reason(backend: str, module, fqn: str):
-    fn = getattr(sd_models, f"{backend}_linear_skip_reason", None)
-    if fn is None:
-        return None
     try:
-        return fn(module, fqn)
+        return sd_models.linear_skip_reason(torchao_weight_quant.BACKENDS[backend], module, fqn)
     except Exception as exc:
         return f"error:{type(exc).__name__}"
 

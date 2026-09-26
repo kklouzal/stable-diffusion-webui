@@ -276,7 +276,7 @@ def sdpa_coverage_check() -> dict[str, Any]:
 
 def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
     try:
-        from modules import shared, sd_models
+        from modules import shared, sd_models, torchao_weight_quant
         from torchao.prototype.mx_formats.mx_tensor import MXTensor
     except Exception as e:
         return {"ok": False, "error": repr(e)}
@@ -293,7 +293,7 @@ def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
         if not isinstance(module, torch.nn.Linear):
             continue
         linear_total += 1
-        reason = sd_models.mxfp8_linear_skip_reason(module, fqn) if hasattr(sd_models, "mxfp8_linear_skip_reason") else None
+        reason = sd_models.linear_skip_reason(torchao_weight_quant.MXFP8, module, fqn)
         weight = getattr(module, "weight", None)
         shape = tuple(weight.shape) if weight is not None else None
         is_mx = isinstance(weight, MXTensor) or (

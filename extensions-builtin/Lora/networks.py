@@ -21,7 +21,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, mxfp8_config, nvfp4_config, openclaw_cuda_graphs, openclaw_cache_epochs
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -890,7 +890,7 @@ def network_mxfp8_active_config_signature():
         getattr(checkpoint_info, "sha256", None),
     )
     coverage = tuple(sorted(getattr(shared.opts, "mxfp8_linear_coverage", ()) or ()))
-    config_name = mxfp8_config.CONFIG_NAME
+    config_name = torchao_weight_quant.MXFP8.config_name
 
     loras = []
     for net in loaded_networks:
@@ -1065,8 +1065,8 @@ def prepare_mxfp8_active_config():
 
     wanted_names = network_mxfp8_wanted_names()
     from torchao.quantization import quantize_
-    quantize_config = mxfp8_config.get_mxfp8_config()
-    mxfp8_config.validate_kernel_preference(quantize_config)
+    quantize_config = torchao_weight_quant.MXFP8.make_config()
+    torchao_weight_quant.MXFP8.validate_config(quantize_config)
     quantize_fn = quantize_
 
     prepared = 0
@@ -1214,8 +1214,8 @@ def network_apply_mxfp8_merged_lora(self, quantize_config=None, quantize_fn=None
 
             if quantize_config is None or quantize_fn is None:
                 from torchao.quantization import quantize_
-                quantize_config = mxfp8_config.get_mxfp8_config()
-                mxfp8_config.validate_kernel_preference(quantize_config)
+                quantize_config = torchao_weight_quant.MXFP8.make_config()
+                torchao_weight_quant.MXFP8.validate_config(quantize_config)
                 quantize_fn = quantize_
             quantize_fn(self, quantize_config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
@@ -1257,7 +1257,7 @@ def network_nvfp4_active_config_signature():
         getattr(checkpoint_info, "sha256", None),
     )
     coverage = tuple(sorted(getattr(shared.opts, "nvfp4_linear_coverage", ()) or ()))
-    config_name = nvfp4_config.CONFIG_NAME
+    config_name = torchao_weight_quant.NVFP4.config_name
 
     loras = []
     for net in loaded_networks:
@@ -1339,8 +1339,8 @@ def prepare_nvfp4_active_config():
 
     wanted_names = network_nvfp4_wanted_names()
     from torchao.quantization import quantize_
-    quantize_config = nvfp4_config.get_nvfp4_config()
-    nvfp4_config.validate_config(quantize_config)
+    quantize_config = torchao_weight_quant.NVFP4.make_config()
+    torchao_weight_quant.NVFP4.validate_config(quantize_config)
     quantize_fn = quantize_
 
     prepared = 0
@@ -1458,8 +1458,8 @@ def network_apply_nvfp4_merged_lora(self, quantize_config=None, quantize_fn=None
 
             if quantize_config is None or quantize_fn is None:
                 from torchao.quantization import quantize_
-                quantize_config = nvfp4_config.get_nvfp4_config()
-                nvfp4_config.validate_config(quantize_config)
+                quantize_config = torchao_weight_quant.NVFP4.make_config()
+                torchao_weight_quant.NVFP4.validate_config(quantize_config)
                 quantize_fn = quantize_
             quantize_fn(self, quantize_config, filter_fn=lambda module, fqn: module is self, device=devices.device)
             self.network_current_names = wanted_names
@@ -1575,8 +1575,7 @@ def network_MultiheadAttention_load_state_dict(self, *args, **kwargs):
 def process_network_files(names: list[str] | None = None):
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
-    candidates = [x for x in candidates if not sd_models.mxfp8_model_cache.is_mxfp8_cache_path(x)]
-    candidates = [x for x in candidates if not sd_models.nvfp4_model_cache.is_nvfp4_cache_path(x)]
+    candidates = [x for x in candidates if not any(torchao_model_cache.is_cache_path(x, backend.cache_dir_name) for backend in torchao_weight_quant.BACKENDS.values())]
     for filename in candidates:
         if os.path.isdir(filename):
             continue

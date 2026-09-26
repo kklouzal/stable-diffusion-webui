@@ -13,7 +13,7 @@ from omegaconf import OmegaConf, ListConfig
 from urllib import request
 import ldm.modules.midas as midas
 
-from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, mxfp8_model_cache, mxfp8_config, nvfp4_model_cache, nvfp4_config, util, openclaw_cuda_graphs, openclaw_vae_decode_graphs, openclaw_lifecycle_epochs
+from modules import paths, shared, modelloader, devices, script_callbacks, sd_vae, sd_disable_initialization, errors, hashes, sd_models_config, sd_unet, sd_models_xl, cache, extra_networks, processing, lowvram, sd_hijack, patches, torchao_model_cache, torchao_weight_quant, util, openclaw_cuda_graphs, openclaw_vae_decode_graphs, openclaw_lifecycle_epochs
 from modules.hashes import partial_hash_from_cache as model_hash  # noqa: F401 for backwards compatibility
 from modules.timer import Timer
 from modules.shared import opts
@@ -392,37 +392,24 @@ def check_fp8(model):
     return enable_fp8
 
 
-def check_mxfp8(model):
+def weight_quant_storage_enabled(backend, model):
+    """Whether the `<backend>_storage` option requests TorchAO weight quantization for `model`; None without a model."""
     if model is None:
         return None
     if devices.get_optimal_device_name() == "mps":
-        enable_mxfp8 = False
-    elif shared.opts.mxfp8_storage == "Enable":
-        enable_mxfp8 = True
-    elif getattr(model, "is_sdxl", False) and shared.opts.mxfp8_storage == "Enable for SDXL":
-        enable_mxfp8 = True
-    else:
-        enable_mxfp8 = False
-    return enable_mxfp8
+        return False
+    storage = getattr(shared.opts, f"{backend.name}_storage")
+    return storage == "Enable" or (storage == "Enable for SDXL" and bool(getattr(model, "is_sdxl", False)))
 
-def check_nvfp4(model):
-    if model is None:
-        return None
-    if devices.get_optimal_device_name() == "mps":
-        enable_nvfp4 = False
-    elif shared.opts.nvfp4_storage == "Enable":
-        enable_nvfp4 = True
-    elif getattr(model, "is_sdxl", False) and shared.opts.nvfp4_storage == "Enable for SDXL":
-        enable_nvfp4 = True
-    else:
-        enable_nvfp4 = False
-    return enable_nvfp4
+
+def torchao_weight_quant_requested(model):
+    return any(weight_quant_storage_enabled(backend, model) for backend in torchao_weight_quant.BACKENDS.values())
 
 
 class DisableFastModelLoadingForTorchAOQuant:
     def __enter__(self):
         self.previous = None
-        if getattr(shared.opts, "mxfp8_storage", "Disable") != "Disable" or getattr(shared.opts, "nvfp4_storage", "Disable") != "Disable":
+        if any(getattr(shared.opts, f"{backend.name}_storage", "Disable") != "Disable" for backend in torchao_weight_quant.BACKENDS.values()):
             self.previous = shared.cmd_opts.disable_model_loading_ram_optimization
             shared.cmd_opts.disable_model_loading_ram_optimization = True
 
@@ -432,7 +419,8 @@ class DisableFastModelLoadingForTorchAOQuant:
 
 
 def check_weight_quantization_mutual_exclusion(model):
-    enabled = [name for name, active in (("FP8 weight", check_fp8(model)), ("MXFP8 weight", check_mxfp8(model)), ("NVFP4 weight", check_nvfp4(model))) if active]
+    modes = [("FP8 weight", check_fp8(model))] + [(f"{backend.label} weight", weight_quant_storage_enabled(backend, model)) for backend in torchao_weight_quant.BACKENDS.values()]
+    enabled = [name for name, active in modes if active]
     if len(enabled) > 1:
         raise RuntimeError(f"Weight quantization modes are mutually exclusive; disable all but one: {', '.join(enabled)}")
 
@@ -441,79 +429,76 @@ def torchao_quant_policy_signature(model):
     """Return the active TorchAO quantization policy that affects loaded weights."""
     if model is None:
         return None
-    return (
-        bool(check_mxfp8(model)),
-        tuple(sorted(mxfp8_selected_linear_coverage())) if check_mxfp8(model) else (),
-        mxfp8_config.CONFIG_NAME if check_mxfp8(model) else None,
-        bool(check_nvfp4(model)),
-        tuple(sorted(nvfp4_selected_linear_coverage())) if check_nvfp4(model) else (),
-        nvfp4_config.CONFIG_NAME if check_nvfp4(model) else None,
-        devices.dtype,
-    )
+    signature = []
+    for backend in torchao_weight_quant.BACKENDS.values():
+        enabled = bool(weight_quant_storage_enabled(backend, model))
+        signature += [enabled, tuple(sorted(selected_linear_coverage(backend))) if enabled else (), backend.config_name if enabled else None]
+    return (*signature, devices.dtype)
 
 
 def model_matches_torchao_quant_policy(model):
     return getattr(model, "openclaw_torchao_quant_policy_signature", None) == torchao_quant_policy_signature(model)
 
 
-def mxfp8_selected_linear_coverage():
-    selected = getattr(shared.opts, "mxfp8_linear_coverage", None)
+def selected_linear_coverage(backend):
+    selected = getattr(shared.opts, f"{backend.name}_linear_coverage", None)
     if selected is None:
-        selected = mxfp8_config.LINEAR_COVERAGE_DEFAULT
+        selected = torchao_weight_quant.LINEAR_COVERAGE_DEFAULT
     if isinstance(selected, str):
         selected = [selected]
 
-    valid = set(mxfp8_config.LINEAR_COVERAGE_CHOICES)
+    valid = set(torchao_weight_quant.LINEAR_COVERAGE_CHOICES)
     return {item for item in selected if item in valid}
 
 
-def mxfp8_linear_region(fqn):
+def linear_region(fqn):
     if fqn.startswith("first_stage_model."):
         return "vae"
     if fqn.startswith("conditioner.") or fqn.startswith("cond_stage_model."):
-        return mxfp8_config.LINEAR_COVERAGE_CONDITIONER
+        return torchao_weight_quant.LINEAR_COVERAGE_CONDITIONER
     if ".attn1." in fqn:
-        return mxfp8_config.LINEAR_COVERAGE_SELF_ATTENTION
+        return torchao_weight_quant.LINEAR_COVERAGE_SELF_ATTENTION
     if ".attn2." in fqn:
-        return mxfp8_config.LINEAR_COVERAGE_CROSS_ATTENTION
+        return torchao_weight_quant.LINEAR_COVERAGE_CROSS_ATTENTION
     if fqn.startswith("model.diffusion_model."):
-        return mxfp8_config.LINEAR_COVERAGE_UNET_OTHER
+        return torchao_weight_quant.LINEAR_COVERAGE_UNET_OTHER
     return "other"
 
 
-def mxfp8_linear_policy_skip_reason(module, fqn):
-    region = mxfp8_linear_region(fqn)
+def linear_policy_skip_reason(backend, fqn):
+    region = linear_region(fqn)
     if region in ("vae", "other"):
         return region
-    if region not in mxfp8_selected_linear_coverage():
+    if region not in selected_linear_coverage(backend):
         return region
     return None
 
 
-def mxfp8_linear_skip_reason(module, fqn):
+def linear_skip_reason(backend, module, fqn):
     if not isinstance(module, torch.nn.Linear):
         return "not_linear"
-    policy_reason = mxfp8_linear_policy_skip_reason(module, fqn)
+    policy_reason = linear_policy_skip_reason(backend, fqn)
     if policy_reason is not None:
         return policy_reason
 
     # The A1111 LoRA hook for torch.nn.MultiheadAttention mutates the parent
     # module in_proj_weight/out_proj.weight directly instead of flowing through
-    # Linear.forward. When out_proj.weight is an MXTensor, the backup path
-    # attempts weight.to(cpu, copy=True), which TorchAO MXTensor rejects. Leave
-    # those out_proj linears BF16 so active LoRAs remain safe; ordinary Linear
-    # layers still use the MXFP8 merge-then-quantize path.
+    # Linear.forward. When out_proj.weight is a TorchAO tensor subclass, the backup
+    # path attempts weight.to(cpu, copy=True), which MXTensor/NVFP4Tensor reject.
+    # Leave those out_proj linears BF16 so active LoRAs remain safe; ordinary
+    # Linear layers still use the merge-then-quantize path.
     if fqn.endswith((".attn.out_proj", ".self_attn.out_proj")):
         return "multihead_attention_out_proj_lora_backup"
 
-    return mxfp8_config.technical_linear_skip_reason(module)
+    return backend.technical_linear_skip_reason(module)
 
 
-def apply_mxfp8_weight_quantization(model, timer, source_path=None):
+def apply_weight_quantization(backend, model, timer, source_path=None):
+    name, label = backend.name, backend.label
     if devices.dtype != torch.bfloat16:
-        raise RuntimeError("MXFP8 weight requires --dtype bfloat16; TorchAO MXFP8 kernels do not support float16 activations")
+        raise RuntimeError(f"{label} weight requires --dtype bfloat16; TorchAO {label} kernels do not support float16 activations")
     if not torch.cuda.is_available():
-        raise RuntimeError("MXFP8 weight requires CUDA")
+        raise RuntimeError(f"{label} weight requires CUDA")
 
     first_stage = model.first_stage_model
     model.first_stage_model = None
@@ -530,8 +515,8 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
     managed_ids = set()
     for fqn, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
-            technical_reason = mxfp8_config.technical_linear_skip_reason(module)
-            policy_reason = mxfp8_linear_policy_skip_reason(module, fqn)
+            technical_reason = backend.technical_linear_skip_reason(module)
+            policy_reason = linear_policy_skip_reason(backend, fqn)
             if technical_reason is None:
                 technical_compatible_linear += 1
             if policy_reason is not None:
@@ -543,7 +528,7 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
                 incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
                 reason = technical_reason
             else:
-                reason = mxfp8_linear_skip_reason(module, fqn)
+                reason = linear_skip_reason(backend, module, fqn)
 
             if reason is None:
                 eligible += 1
@@ -553,183 +538,42 @@ def apply_mxfp8_weight_quantization(model, timer, source_path=None):
                 skipped_linear += 1
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
-    mxfp8_filter = lambda module, fqn: id(module) in managed_ids
+    quant_filter = lambda module, fqn: id(module) in managed_ids
     cache_loaded = False
     try:
         try:
-            delattr(model, "network_mxfp8_managed_modules")
+            delattr(model, f"network_{name}_managed_modules")
         except Exception:
             pass
         for _fqn, module in managed_modules:
-            module.network_mxfp8_base_weight = module.weight.detach().to(devices.cpu, copy=True)
-            if module.bias is not None:
-                module.network_mxfp8_base_bias = module.bias.detach().to(devices.cpu, copy=True)
-            else:
-                module.network_mxfp8_base_bias = None
+            setattr(module, f"network_{name}_base_weight", module.weight.detach().to(devices.cpu, copy=True))
+            setattr(module, f"network_{name}_base_bias", module.bias.detach().to(devices.cpu, copy=True) if module.bias is not None else None)
 
-        for attr in ("network_mxfp8_active_config_signature", "network_mxfp8_prepare_stats", "network_mxfp8_prepare_error", "network_mxfp8_active_config_ready"):
+        for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
             try:
-                delattr(model, attr)
+                delattr(model, f"network_{name}_{suffix}")
             except Exception:
                 pass
 
-        selected_coverage = sorted(mxfp8_selected_linear_coverage())
-        cache_loaded = mxfp8_model_cache.load_into_model(model, source_path, mxfp8_filter, shared.device, selected_coverage)
+        selected_coverage = sorted(selected_linear_coverage(backend))
+        cache_loaded = torchao_model_cache.load_into_model(backend, model, source_path, quant_filter, shared.device, selected_coverage)
         if not cache_loaded:
             from torchao.quantization import quantize_
-            config = mxfp8_config.get_mxfp8_config()
-            mxfp8_config.validate_kernel_preference(config)
+            config = backend.make_config()
+            backend.validate_config(config)
             # Move the BF16 model to CUDA before inserting TorchAO tensor
             # subclasses. Passing device= to quantize_ makes TorchAO call
             # Module.to() on parent modules after earlier children may already
-            # be MXTensor-backed, which hits unsupported shallow-copy dispatch.
+            # be tensor-subclass-backed, which hits unsupported shallow-copy dispatch.
             model.to(devices.device)
-            quantize_(model, config, filter_fn=mxfp8_filter)
-            mxfp8_model_cache.save_from_model(model, source_path, mxfp8_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
-        model.mxfp8_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": mxfp8_config.CONFIG_NAME, "cache_loaded": cache_loaded}
+            quantize_(model, config, filter_fn=quant_filter)
+            torchao_model_cache.save_from_model(backend, model, source_path, quant_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
+        setattr(model, f"{name}_quantization_stats", {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": backend.config_name, "cache_loaded": cache_loaded})
     finally:
         model.first_stage_model = first_stage
     action = "Loaded cached" if cache_loaded else "Applied"
-    print(f"{action} MXFP8 weight quantization for {eligible} policy-allowed Linear modules with coverage {selected_coverage}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
-    timer.record("load mxfp8 cache" if cache_loaded else "apply mxfp8")
-
-
-
-def nvfp4_selected_linear_coverage():
-    selected = getattr(shared.opts, "nvfp4_linear_coverage", None)
-    if selected is None:
-        selected = nvfp4_config.LINEAR_COVERAGE_DEFAULT
-    if isinstance(selected, str):
-        selected = [selected]
-
-    valid = set(nvfp4_config.LINEAR_COVERAGE_CHOICES)
-    return {item for item in selected if item in valid}
-
-
-def nvfp4_linear_region(fqn):
-    if fqn.startswith("first_stage_model."):
-        return "vae"
-    if fqn.startswith("conditioner.") or fqn.startswith("cond_stage_model."):
-        return nvfp4_config.LINEAR_COVERAGE_CONDITIONER
-    if ".attn1." in fqn:
-        return nvfp4_config.LINEAR_COVERAGE_SELF_ATTENTION
-    if ".attn2." in fqn:
-        return nvfp4_config.LINEAR_COVERAGE_CROSS_ATTENTION
-    if fqn.startswith("model.diffusion_model."):
-        return nvfp4_config.LINEAR_COVERAGE_UNET_OTHER
-    return "other"
-
-
-def nvfp4_linear_policy_skip_reason(module, fqn):
-    region = nvfp4_linear_region(fqn)
-    if region in ("vae", "other"):
-        return region
-    if region not in nvfp4_selected_linear_coverage():
-        return region
-    return None
-
-
-def nvfp4_linear_skip_reason(module, fqn):
-    if not isinstance(module, torch.nn.Linear):
-        return "not_linear"
-    policy_reason = nvfp4_linear_policy_skip_reason(module, fqn)
-    if policy_reason is not None:
-        return policy_reason
-
-    # The A1111 LoRA hook for torch.nn.MultiheadAttention mutates the parent
-    # module in_proj_weight/out_proj.weight directly instead of flowing through
-    # Linear.forward. When out_proj.weight is an NVFP4Tensor, the backup path
-    # attempts weight.to(cpu, copy=True), which TorchAO NVFP4Tensor rejects. Leave
-    # those out_proj linears BF16 so active LoRAs remain safe; ordinary Linear
-    # layers still use the NVFP4 merge-then-quantize path.
-    if fqn.endswith((".attn.out_proj", ".self_attn.out_proj")):
-        return "multihead_attention_out_proj_lora_backup"
-
-    return nvfp4_config.technical_linear_skip_reason(module)
-
-
-def apply_nvfp4_weight_quantization(model, timer, source_path=None):
-    if devices.dtype != torch.bfloat16:
-        raise RuntimeError("NVFP4 weight requires --dtype bfloat16; TorchAO NVFP4 kernels do not support float16 activations")
-    if not torch.cuda.is_available():
-        raise RuntimeError("NVFP4 weight requires CUDA")
-
-    first_stage = model.first_stage_model
-    model.first_stage_model = None
-    eligible = 0
-    technical_compatible_linear = 0
-    policy_skipped_linear = 0
-    incompatible_linear = 0
-    skipped_linear = 0
-    skipped_reasons = {}
-    policy_skipped_reasons = {}
-    incompatible_reasons = {}
-    skipped_names = []
-    managed_modules = []
-    managed_ids = set()
-    for fqn, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            technical_reason = nvfp4_config.technical_linear_skip_reason(module)
-            policy_reason = nvfp4_linear_policy_skip_reason(module, fqn)
-            if technical_reason is None:
-                technical_compatible_linear += 1
-            if policy_reason is not None:
-                policy_skipped_linear += 1
-                policy_skipped_reasons[policy_reason] = policy_skipped_reasons.get(policy_reason, 0) + 1
-                reason = policy_reason
-            elif technical_reason is not None:
-                incompatible_linear += 1
-                incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
-                reason = technical_reason
-            else:
-                reason = nvfp4_linear_skip_reason(module, fqn)
-
-            if reason is None:
-                eligible += 1
-                managed_modules.append((fqn, module))
-                managed_ids.add(id(module))
-            else:
-                skipped_linear += 1
-                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
-                skipped_names.append({"name": fqn, "reason": reason, "shape": tuple(module.weight.shape) if module.weight is not None else None})
-    nvfp4_filter = lambda module, fqn: id(module) in managed_ids
-    cache_loaded = False
-    try:
-        try:
-            delattr(model, "network_nvfp4_managed_modules")
-        except Exception:
-            pass
-        for _fqn, module in managed_modules:
-            module.network_nvfp4_base_weight = module.weight.detach().to(devices.cpu, copy=True)
-            if module.bias is not None:
-                module.network_nvfp4_base_bias = module.bias.detach().to(devices.cpu, copy=True)
-            else:
-                module.network_nvfp4_base_bias = None
-
-        for attr in ("network_nvfp4_active_config_signature", "network_nvfp4_prepare_stats", "network_nvfp4_prepare_error", "network_nvfp4_active_config_ready"):
-            try:
-                delattr(model, attr)
-            except Exception:
-                pass
-
-        selected_coverage = sorted(nvfp4_selected_linear_coverage())
-        cache_loaded = nvfp4_model_cache.load_into_model(model, source_path, nvfp4_filter, shared.device, selected_coverage)
-        if not cache_loaded:
-            from torchao.quantization import quantize_
-            config = nvfp4_config.get_nvfp4_config()
-            nvfp4_config.validate_config(config)
-            # Move the BF16 model to CUDA before inserting TorchAO tensor
-            # subclasses; avoid quantize_(device=...) parent Module.to() calls
-            # after NVFP4Tensor children have been installed.
-            model.to(devices.device)
-            quantize_(model, config, filter_fn=nvfp4_filter)
-            nvfp4_model_cache.save_from_model(model, source_path, nvfp4_filter, eligible, skipped_linear, skipped_reasons, selected_coverage)
-        model.nvfp4_quantization_stats = {"eligible_linear": eligible, "technical_compatible_linear": technical_compatible_linear, "policy_allowed_linear": eligible, "selected_linear_coverage": selected_coverage, "policy_skipped_linear": policy_skipped_linear, "incompatible_linear": incompatible_linear, "skipped_linear": skipped_linear, "skipped_reasons": skipped_reasons, "policy_skipped_reasons": policy_skipped_reasons, "incompatible_reasons": incompatible_reasons, "skipped_names": skipped_names, "config": nvfp4_config.CONFIG_NAME, "cache_loaded": cache_loaded}
-    finally:
-        model.first_stage_model = first_stage
-    action = "Loaded cached" if cache_loaded else "Applied"
-    print(f"{action} NVFP4 weight quantization for {eligible} policy-allowed Linear modules with coverage {selected_coverage}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
-    timer.record("load nvfp4 cache" if cache_loaded else "apply nvfp4")
+    print(f"{action} {label} weight quantization for {eligible} policy-allowed Linear modules with coverage {selected_coverage}; policy-skipped {policy_skipped_linear}, technically incompatible {incompatible_linear} ({skipped_reasons})", flush=True)
+    timer.record(f"load {name} cache" if cache_loaded else f"apply {name}")
 
 
 def set_model_type(model, state_dict):
@@ -812,9 +656,8 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
 
     remap_sdxl_clip_text_model_state_dict_if_needed(model, state_dict)
 
-    mxfp8_enabled = check_mxfp8(model)
-    nvfp4_enabled = check_nvfp4(model)
-    if shared.opts.sd_checkpoint_cache > 0 and not mxfp8_enabled and not nvfp4_enabled:
+    torchao_quant_enabled = torchao_weight_quant_requested(model)
+    if shared.opts.sd_checkpoint_cache > 0 and not torchao_quant_enabled:
         # cache newly loaded non-TorchAO-quantized model. MXFP8/NVFP4 reloads
         # need a pristine state_dict because LoadStateDictOnMeta intentionally
         # mutates its input and stale/meta cache entries can later fail with
@@ -822,7 +665,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         cache_key = _state_dict_cache_key(checkpoint_info)
         _drop_stale_state_dict_cache_entries(checkpoint_info, cache_key)
         checkpoints_loaded[cache_key] = state_dict.copy()
-    elif mxfp8_enabled or nvfp4_enabled:
+    elif torchao_quant_enabled:
         # TorchAO quantized paths must never retain checkpoint state-dict cache
         # entries: the optimized/meta loading path can mutate cached tensors
         # into meta placeholders, and later reloads need pristine disk reads.
@@ -911,21 +754,14 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     else:
         devices.fp8 = False
 
-    if check_mxfp8(model):
-        if lowvram.is_needed(model):
-            raise RuntimeError("MXFP8 weight is not supported with --lowvram/--medvram; TorchAO tensor subclasses cannot use lowvram's generic module.to() shuttling safely")
-        devices.mxfp8 = True
-        apply_mxfp8_weight_quantization(model, timer, checkpoint_info.filename)
-    else:
-        devices.mxfp8 = False
-
-    if check_nvfp4(model):
-        if lowvram.is_needed(model):
-            raise RuntimeError("NVFP4 weight is not supported with --lowvram/--medvram; TorchAO tensor subclasses cannot use lowvram's generic module.to() shuttling safely")
-        devices.nvfp4 = True
-        apply_nvfp4_weight_quantization(model, timer, checkpoint_info.filename)
-    else:
-        devices.nvfp4 = False
+    for backend in torchao_weight_quant.BACKENDS.values():
+        enabled = bool(weight_quant_storage_enabled(backend, model))
+        if enabled and lowvram.is_needed(model):
+            raise RuntimeError(f"{backend.label} weight is not supported with --lowvram/--medvram; TorchAO tensor subclasses cannot use lowvram's generic module.to() shuttling safely")
+        # devices.<backend name> records which backend the loaded model uses.
+        setattr(devices, backend.name, enabled)
+        if enabled:
+            apply_weight_quantization(backend, model, timer, checkpoint_info.filename)
 
     model.openclaw_torchao_quant_policy_signature = torchao_quant_policy_signature(model)
 
@@ -1150,18 +986,16 @@ def get_empty_cond(sd_model):
     return d
 
 
-def model_has_torchao_quantization(m):
-    return bool(
-        m is not None
-        and (
-            devices.mxfp8
-            or devices.nvfp4
-            or bool(getattr(m, "mxfp8_quantization_stats", None))
-            or bool(getattr(m, "nvfp4_quantization_stats", None))
-            or check_mxfp8(m)
-            or check_nvfp4(m)
-        )
+def torchao_quantization_active_or_requested(m):
+    """True while a TorchAO backend is active (devices flag), applied to `m`, or requested for `m`; `m` may be None."""
+    return any(
+        getattr(devices, backend.name) or bool(getattr(m, f"{backend.name}_quantization_stats", None)) or bool(weight_quant_storage_enabled(backend, m))
+        for backend in torchao_weight_quant.BACKENDS.values()
     )
+
+
+def model_has_torchao_quantization(m):
+    return m is not None and torchao_quantization_active_or_requested(m)
 
 
 @contextlib.contextmanager
@@ -1198,23 +1032,11 @@ def model_target_device(m):
 
 
 def torchao_quant_tensor_types():
-    types = []
-    try:
-        from torchao.prototype.mx_formats.mx_tensor import MXTensor
-        types.append(MXTensor)
-    except Exception:
-        pass
-    try:
-        from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
-        types.append(NVFP4Tensor)
-    except Exception:
-        pass
-    return tuple(types)
+    return tuple(backend.tensor_type() for backend in torchao_weight_quant.BACKENDS.values())
 
 
 def is_torchao_quant_tensor(tensor):
-    tensor_types = torchao_quant_tensor_types()
-    return bool(tensor_types) and isinstance(tensor, tensor_types)
+    return isinstance(tensor, torchao_quant_tensor_types())
 
 
 def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, target_dtype=None):
@@ -1231,11 +1053,12 @@ def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, t
             if not isinstance(module, torch.nn.Linear) or not is_torchao_quant_tensor(getattr(module, "weight", None)):
                 continue
 
-            base_weight = getattr(module, "network_mxfp8_base_weight", None)
-            base_bias = getattr(module, "network_mxfp8_base_bias", None)
-            if base_weight is None:
-                base_weight = getattr(module, "network_nvfp4_base_weight", None)
-                base_bias = getattr(module, "network_nvfp4_base_bias", None)
+            base_weight = base_bias = None
+            for backend in torchao_weight_quant.BACKENDS.values():
+                base_weight = getattr(module, f"network_{backend.name}_base_weight", None)
+                if base_weight is not None:
+                    base_bias = getattr(module, f"network_{backend.name}_base_bias", None)
+                    break
 
             if base_weight is None:
                 missing_backup.append(fqn)
@@ -1388,7 +1211,7 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
     # meta-device RAM optimization: the optimized path can strand meta placeholders when
     # custom SDXL/OpenCLIP/VAE loaders bypass the patched Module path, producing
     # "Cannot copy out of meta tensor; no data!" on later reloads.
-    if check_mxfp8(sd_model) or check_nvfp4(sd_model):
+    if torchao_weight_quant_requested(sd_model):
         # Load TorchAO-targeted trees eagerly. LoadStateDictOnMeta intentionally
         # pops used tensors from the checkpoint dict and swaps meta placeholders
         # in-place; when MXFP8/NVFP4 later needs to fall back through refiner
@@ -1519,35 +1342,19 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         if check_fp8(sd_model) != devices.fp8:
             # load from state dict again to prevent extra numerical errors
             forced_reload = True
-        elif check_mxfp8(sd_model) != devices.mxfp8:
-            # MXTensor parameters cannot safely be overwritten by the normal
-            # state_dict reload path. Switching MXFP8 on/off needs a fresh
-            # model instance rather than copying checkpoint tensors into the
-            # existing MXFP8-mutated module tree.
+        elif any(
+            bool(weight_quant_storage_enabled(backend, sd_model)) != getattr(devices, backend.name)
+            or (getattr(devices, backend.name) and sorted(getattr(sd_model, f"{backend.name}_quantization_stats", {}).get("selected_linear_coverage", [])) != sorted(selected_linear_coverage(backend)))
+            for backend in torchao_weight_quant.BACKENDS.values()
+        ):
+            # MXTensor/NVFP4Tensor parameters cannot safely be overwritten by the
+            # normal state_dict reload path. Switching a backend on/off, or changing
+            # its Linear coverage (which can move already-quantized parameters back
+            # out of the active policy), needs a fresh model instance rather than
+            # copying BF16 checkpoint tensors into the quantized module tree.
             forced_reload = True
             torchao_quant_mode_changed = True
-        elif check_nvfp4(sd_model) != devices.nvfp4:
-            # NVFP4Tensor parameters cannot safely be overwritten by the normal
-            # state_dict reload path. Switching NVFP4 on/off needs a fresh
-            # model instance rather than copying checkpoint tensors into the
-            # existing NVFP4-mutated module tree.
-            forced_reload = True
-            torchao_quant_mode_changed = True
-        elif devices.mxfp8 and sorted(getattr(sd_model, "mxfp8_quantization_stats", {}).get("selected_linear_coverage", [])) != sorted(mxfp8_selected_linear_coverage()):
-            # Changing Linear coverage can move already-quantized MXTensor
-            # parameters back out of the active policy. Reuse/reload would try
-            # to copy BF16 checkpoint tensors into the existing MXTensor
-            # module tree and can fail, so build a fresh model instance.
-            forced_reload = True
-            torchao_quant_mode_changed = True
-        elif devices.nvfp4 and sorted(getattr(sd_model, "nvfp4_quantization_stats", {}).get("selected_linear_coverage", [])) != sorted(nvfp4_selected_linear_coverage()):
-            # Changing Linear coverage can move already-quantized NVFP4Tensor
-            # parameters back out of the active policy. Reuse/reload would try
-            # to copy BF16 checkpoint tensors into the existing NVFP4Tensor
-            # module tree and can fail, so build a fresh model instance.
-            forced_reload = True
-            torchao_quant_mode_changed = True
-        elif checkpoint_info.filename != sd_model.sd_checkpoint_info.filename and (devices.mxfp8 or devices.nvfp4 or bool(getattr(sd_model, "mxfp8_quantization_stats", None)) or bool(getattr(sd_model, "nvfp4_quantization_stats", None)) or check_mxfp8(sd_model) or check_nvfp4(sd_model)):
+        elif checkpoint_info.filename != sd_model.sd_checkpoint_info.filename and torchao_quantization_active_or_requested(sd_model):
             # Switching checkpoints while the current tree is TorchAO-mutated is
             # just as unsafe as changing quantization mode/coverage: the normal
             # reload path can copy BF16 checkpoint tensors into MXTensor/NVFP4Tensor
@@ -1555,7 +1362,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
             # that still contains tensor subclasses. Build a fresh model instance.
             forced_reload = True
             torchao_quant_mode_changed = True
-        elif forced_reload and ((devices.mxfp8 and check_mxfp8(sd_model)) or (devices.nvfp4 and check_nvfp4(sd_model))):
+        elif forced_reload and any(getattr(devices, backend.name) and weight_quant_storage_enabled(backend, sd_model) for backend in torchao_weight_quant.BACKENDS.values()):
             # Option onchange hooks pass forced_reload=True even when the selected
             # coverage value resolves to the same effective policy. The normal
             # forced reload path is still unsafe for a TorchAO-mutated tree because
@@ -1566,7 +1373,7 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         elif sd_model.sd_model_checkpoint == checkpoint_info.filename and not forced_reload:
             return sd_model
 
-    if forced_reload and (devices.mxfp8 or devices.nvfp4 or bool(getattr(sd_model, "mxfp8_quantization_stats", None)) or bool(getattr(sd_model, "nvfp4_quantization_stats", None)) or check_mxfp8(sd_model) or check_nvfp4(sd_model)):
+    if forced_reload and torchao_quantization_active_or_requested(sd_model):
         # forced_reload can be set before the TorchAO-quant-specific branches above
         # get a chance to classify the reload, including early option-onchange calls
         # while model_data.sd_model is temporarily unset. Once MXFP8/NVFP4 is active

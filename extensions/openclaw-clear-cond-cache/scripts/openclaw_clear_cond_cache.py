@@ -224,20 +224,11 @@ def _install_backend_status_hooks() -> None:
                     _pop_backend_activity(token)
             return wrapped
 
-        def _wrap_mxfp8_quantization(original):
-            def wrapped(model, timer, source_path=None):
-                token = _push_backend_activity("quantize_base", "Preparing MXFP8 base weights", detail=os.path.basename(str(source_path)) if source_path else None)
+        def _wrap_weight_quantization(original):
+            def wrapped(backend, model, timer, source_path=None):
+                token = _push_backend_activity("quantize_base", f"Preparing {backend.label} base weights", detail=os.path.basename(str(source_path)) if source_path else None)
                 try:
-                    return original(model, timer, source_path=source_path)
-                finally:
-                    _pop_backend_activity(token)
-            return wrapped
-
-        def _wrap_nvfp4_quantization(original):
-            def wrapped(model, timer, source_path=None):
-                token = _push_backend_activity("quantize_base", "Preparing NVFP4 base weights", detail=os.path.basename(str(source_path)) if source_path else None)
-                try:
-                    return original(model, timer, source_path=source_path)
+                    return original(backend, model, timer, source_path=source_path)
                 finally:
                     _pop_backend_activity(token)
             return wrapped
@@ -249,8 +240,7 @@ def _install_backend_status_hooks() -> None:
         _wrap_backend_function(_sd_models, "instantiate_from_config", _wrap_instantiate_from_config)
         _wrap_backend_function(_sd_models, "send_model_to_device", _wrap_send_model_to_device)
         _wrap_backend_function(_sd_models, "get_empty_cond", _wrap_get_empty_cond)
-        _wrap_backend_function(_sd_models, "apply_mxfp8_weight_quantization", _wrap_mxfp8_quantization)
-        _wrap_backend_function(_sd_models, "apply_nvfp4_weight_quantization", _wrap_nvfp4_quantization)
+        _wrap_backend_function(_sd_models, "apply_weight_quantization", _wrap_weight_quantization)
         _wrap_backend_function(_sd_vae, "load_vae", _wrap_load_vae)
 
     if _backend_lora_hooks_installed:
