@@ -384,19 +384,6 @@ def _assign_script_args(script_args, script, values, *, exact=False):
         script_args.openclaw_script_arg_ranges[id(script)] = (start, len(script_args))
 
 
-def script_default_ui_values(script):
-    script_helpers = globals().get("scripts")
-    if script_helpers is not None:
-        return script_helpers.script_controls_default_values(script)
-
-    controls = getattr(script, "controls", None)
-    if controls is None:
-        controls = script.ui(script.is_img2img)
-    if controls is None:
-        return []
-    return [elem.value for elem in controls]
-
-
 def api_field_value_type(annotation):
     """Scalar type an infotext value is coerced to for a pydantic field annotation.
 
@@ -916,7 +903,7 @@ class Api:
         # get default values
         with gr.Blocks(): # will throw errors calling ui function without this
             for script in script_runner.scripts:
-                ui_default_values = script_default_ui_values(script)
+                ui_default_values = scripts.script_controls_default_values(script)
                 if ui_default_values:
                     script_args[script.args_from:script.args_to] = ui_default_values
         return script_args

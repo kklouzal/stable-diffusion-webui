@@ -3,22 +3,17 @@ from pathlib import Path
 import types
 
 
-def load_api_script_default_helpers():
-    source = Path("modules/api/api.py").read_text()
-    tree = ast.parse(source)
-    wanted = {"script_default_ui_values", "_set_script_arg"}
-    module = ast.Module(
-        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
-        type_ignores=[],
-    )
+def load_function(path, name):
+    tree = ast.parse(Path(path).read_text())
+    module = ast.Module(body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name], type_ignores=[])
     ast.fix_missing_locations(module)
     namespace = {}
-    exec(compile(module, "modules/api/api.py", "exec"), namespace)
-    return namespace
+    exec(compile(module, path, "exec"), namespace)
+    return namespace[name]
 
 
-def test_script_default_ui_values_prefers_finalized_controls_without_rebuilding_ui():
-    helper = load_api_script_default_helpers()["script_default_ui_values"]
+def test_script_controls_default_values_prefers_finalized_controls_without_rebuilding_ui():
+    helper = load_function("modules/scripts.py", "script_controls_default_values")
     script = types.SimpleNamespace(
         controls=[types.SimpleNamespace(value="ui-default")],
         is_img2img=False,
@@ -28,8 +23,8 @@ def test_script_default_ui_values_prefers_finalized_controls_without_rebuilding_
     assert helper(script) == ["ui-default"]
 
 
-def test_script_default_ui_values_falls_back_for_scripts_without_controls():
-    helper = load_api_script_default_helpers()["script_default_ui_values"]
+def test_script_controls_default_values_falls_back_for_scripts_without_controls():
+    helper = load_function("modules/scripts.py", "script_controls_default_values")
     script = types.SimpleNamespace(
         controls=None,
         is_img2img=True,
@@ -40,7 +35,7 @@ def test_script_default_ui_values_falls_back_for_scripts_without_controls():
 
 
 def test_set_script_arg_updates_existing_index():
-    helper = load_api_script_default_helpers()["_set_script_arg"]
+    helper = load_function("modules/api/api.py", "_set_script_arg")
     script_args = [0, "old", "keep"]
 
     helper(script_args, 1, "new")
@@ -49,7 +44,7 @@ def test_set_script_arg_updates_existing_index():
 
 
 def test_set_script_arg_extends_sparse_api_vectors():
-    helper = load_api_script_default_helpers()["_set_script_arg"]
+    helper = load_function("modules/api/api.py", "_set_script_arg")
     script_args = [0]
 
     helper(script_args, 3, "value")
