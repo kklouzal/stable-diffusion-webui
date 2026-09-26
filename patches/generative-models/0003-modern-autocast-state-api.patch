@@ -1,18 +1,3 @@
-diff --git a/main.py b/main.py
-index 384c6fe..f38f3b4 100644
---- a/main.py
-+++ b/main.py
-@@ -408,8 +408,8 @@ class ImageLogger(Callback):
-                 pl_module.eval()
- 
-             gpu_autocast_kwargs = {
--                "enabled": self.enable_autocast,  # torch.is_autocast_enabled(),
--                "dtype": torch.get_autocast_gpu_dtype(),
-+                "enabled": self.enable_autocast,  # torch.is_autocast_enabled("cuda"),
-+                "dtype": torch.get_autocast_dtype("cuda"),
-                 "cache_enabled": torch.is_autocast_cache_enabled(),
-             }
-             with torch.no_grad(), torch.amp.autocast("cuda", **gpu_autocast_kwargs):
 diff --git a/sgm/modules/diffusionmodules/util.py b/sgm/modules/diffusionmodules/util.py
 index 55141ec..cb2ae7b 100644
 --- a/sgm/modules/diffusionmodules/util.py
