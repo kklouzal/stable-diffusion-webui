@@ -10,3 +10,8 @@ def test_create_hypernetwork_returns_created_filename_for_ui_message():
     return_names = [node.value.id for node in ast.walk(function) if isinstance(node, ast.Return) and isinstance(node.value, ast.Name)]
 
     assert "fn" in return_names
+
+
+def test_attention_projection_boundary_normalizes_strided_context():
+    source = Path("modules/hypernetworks/hypernetwork.py").read_text(encoding="utf8")
+    assert "return context_k.contiguous(), context_v.contiguous()" in source

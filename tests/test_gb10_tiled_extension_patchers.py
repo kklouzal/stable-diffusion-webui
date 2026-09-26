@@ -277,6 +277,36 @@ def test_ultimate_upscale_patcher_rejects_source_drift(tmp_path: Path):
     assert "unsupported Ultimate Upscale process lifecycle implementation" in result.stderr
 
 
+def test_ultimate_upscale_patcher_check_mode_and_failure_injection(tmp_path: Path):
+    original = '''class Fixture:\n    def process(self):\n        state.begin()\n        if self.redraw.enabled:\n            self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)\n        state.end()\n'''
+    target = tmp_path / "ultimate-upscale.py"
+    target.write_text(original)
+    run_patcher(UU_PATCHER, target)
+    first = target.read_bytes()
+    run_patcher(UU_PATCHER, target)
+    assert target.read_bytes() == first
+    subprocess.run([sys.executable, str(UU_PATCHER), str(target), "--check"], check=True, capture_output=True, text=True)
+
+    source = target.read_text()
+    events = []
+    namespace = {
+        "state": types.SimpleNamespace(begin=lambda: events.append("begin"), end=lambda: events.append("end")),
+        "USDURedrawMode": types.SimpleNamespace(LINEAR=1, CHESS=2, NONE=3),
+        "USDUSFMode": types.SimpleNamespace(NONE=0),
+    }
+    exec(compile(source, "<fixture>", "exec"), namespace)
+    redraw = types.SimpleNamespace(enabled=True, mode=1, start=lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    obj = types.SimpleNamespace(redraw=redraw, seams_fix=types.SimpleNamespace(enabled=False), p=None, image=None, rows=1, cols=1)
+    with pytest.raises(RuntimeError, match="boom"):
+        namespace["Fixture"].process(obj)
+    assert events == ["begin", "end"]
+
+    partial = tmp_path / "partial.py"
+    partial.write_text(source.replace("finally:\n            state.end()", "state.end()"))
+    result = subprocess.run([sys.executable, str(UU_PATCHER), str(partial), "--check"], capture_output=True, text=True)
+    assert result.returncode != 0
+
+
 def test_run_sh_patches_optional_tiled_extensions_after_extension_sync_before_container_start():
     run_sh = (ROOT / "gb10" / "run.sh").read_text(encoding="utf-8")
 

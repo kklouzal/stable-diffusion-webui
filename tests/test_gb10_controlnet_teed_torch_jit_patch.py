@@ -13,5 +13,4 @@ def test_run_sh_applies_controlnet_teed_patch_to_mounted_production_extension():
     run_sh = Path('gb10/run.sh').read_text(encoding='utf8')
 
     assert 'CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"' in run_sh
-    assert 'patch-controlnet-teed.py' in run_sh
-    assert 'annotator/teed' in run_sh
+    assert 'patch-controlnet-teed.py" "${CONTROLNET_ROOT}"' in run_sh

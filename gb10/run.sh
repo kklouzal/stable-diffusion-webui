@@ -5,7 +5,6 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
 CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest}"
-LEGACY_CONTAINER_NAMES="${LEGACY_CONTAINER_NAMES:-gb10-a1111-latest-mxfp8}"
 HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
 PORT="${PORT:-7860}"
 OUTPUTS_TARGET="${OUTPUTS_TARGET:-/mnt/nas-warehouse/StableDiffusion/Outputs}"
@@ -79,20 +78,7 @@ printf "\n"
 
 SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
 
-for extension_name in "${OWNED_EXTENSIONS[@]}"; do
-  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
-  if [[ ! -d "${owned_extension_source}" ]]; then
-    echo "ERROR: owned extension source missing: ${owned_extension_source}" >&2
-    exit 1
-  fi
-done
-
 # Stop the bind-mounted live container before mutating Extensions underneath it.
-for legacy_container_name in ${LEGACY_CONTAINER_NAMES}; do
-  if [[ -n "${legacy_container_name}" && "${legacy_container_name}" != "${CONTAINER_NAME}" ]]; then
-    sudo "${DOCKER_BIN}" rm -f "${legacy_container_name}" >/dev/null 2>&1 || true
-  fi
-done
 sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do
@@ -112,27 +98,14 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
     "${owned_extension_source}/" "${owned_extension_target}/"
 done
 
-CONTROLNET_ZOE="${HOST_ROOT}/Extensions/sd-webui-controlnet/annotator/zoe/__init__.py"
-if [[ -f "${CONTROLNET_ZOE}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-zoedepth.py" "${CONTROLNET_ZOE}"
-fi
-CONTROLNET_HOOK="${HOST_ROOT}/Extensions/sd-webui-controlnet/scripts/hook.py"
-if [[ ! -f "${CONTROLNET_HOOK}" ]]; then
-  echo "ERROR: required ControlNet hook missing: ${CONTROLNET_HOOK}" >&2
-  exit 1
-fi
-sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" "${CONTROLNET_HOOK}"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-hook-restore.py" --check "${CONTROLNET_HOOK}"
+# sd-webui-controlnet is repo-owned and was mirrored above, so every patch target exists.
+# Its ZoeDepth and UNet hook-lifecycle fixes live in the tracked source.
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
 CONTROLNET_ARGS="${CONTROLNET_ROOT}/internal_controlnet/args.py"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" "${CONTROLNET_ARGS}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-pydantic2.py" --check "${CONTROLNET_ARGS}"
-if [[ -d "${CONTROLNET_ROOT}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
-fi
-if [[ -d "${CONTROLNET_ROOT}/annotator/teed" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
-fi
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-teed.py" "${CONTROLNET_ROOT}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-cache-correctness.py" "${CONTROLNET_ROOT}"
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
