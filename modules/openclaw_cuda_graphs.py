@@ -206,13 +206,39 @@ def _copy_into_static(static: Any, current: Any) -> None:
             _copy_into_static(dst, src)
 
 
-def note_model_loaded(model: Any | None = None, reason: str = "model_changed") -> dict[str, Any]:
+def _checkpoint_signature(model: Any | None) -> tuple[Any, ...]:
     checkpoint_info = getattr(model, "sd_checkpoint_info", None)
-    state = (
-        id(model) if model is not None else None,
+    return (
         getattr(checkpoint_info, "filename", None),
         getattr(checkpoint_info, "hash", None),
         getattr(checkpoint_info, "sha256", None),
+    )
+
+
+def _lora_signature() -> tuple[Any, ...] | None:
+    """Identity of the loaded LoRA set; None when the Lora extension is not importable."""
+    try:
+        import networks
+
+        return tuple(
+            (
+                getattr(net, "name", None),
+                getattr(net, "mentioned_name", None),
+                getattr(net, "te_multiplier", None),
+                getattr(net, "unet_multiplier", None),
+                getattr(net, "dyn_dim", None),
+                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net),
+            )
+            for net in getattr(networks, "loaded_networks", [])
+        )
+    except Exception:
+        return None
+
+
+def note_model_loaded(model: Any | None = None, reason: str = "model_changed") -> dict[str, Any]:
+    state = (
+        id(model) if model is not None else None,
+        *_checkpoint_signature(model),
         repr(getattr(model, "used_config", None)),
     )
     return invalidate_if_changed("model", state, reason)
@@ -228,25 +254,7 @@ def note_vae_loaded(model: Any | None = None, reason: str = "vae_changed") -> di
 
 
 def note_lora_loaded(reason: str = "lora_changed") -> dict[str, Any]:
-    try:
-        import networks
-
-        state = tuple(
-            (
-                getattr(net, "name", None),
-                getattr(net, "mentioned_name", None),
-                getattr(net, "te_multiplier", None),
-                getattr(net, "unet_multiplier", None),
-                getattr(net, "dyn_dim", None),
-                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net)
-                if hasattr(networks, "network_lora_source_signature")
-                else None,
-            )
-            for net in getattr(networks, "loaded_networks", [])
-        )
-    except Exception:
-        state = None
-    return invalidate_if_changed("lora", state, reason)
+    return invalidate_if_changed("lora", _lora_signature(), reason)
 
 
 def _evict_if_needed_locked() -> None:
@@ -265,35 +273,11 @@ def _model_signature(fn: Any) -> tuple[Any, ...]:
     try:
         from modules import shared
 
-        checkpoint_info = getattr(getattr(shared, "sd_model", None), "sd_checkpoint_info", None)
-        checkpoint_key = (
-            getattr(checkpoint_info, "filename", None),
-            getattr(checkpoint_info, "hash", None),
-            getattr(checkpoint_info, "sha256", None),
-        )
+        checkpoint_key = _checkpoint_signature(getattr(shared, "sd_model", None))
     except Exception:
         checkpoint_key = None
 
-    try:
-        import networks
-
-        lora_key = tuple(
-            (
-                getattr(net, "name", None),
-                getattr(net, "mentioned_name", None),
-                getattr(net, "te_multiplier", None),
-                getattr(net, "unet_multiplier", None),
-                getattr(net, "dyn_dim", None),
-                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net)
-                if hasattr(networks, "network_lora_source_signature")
-                else None,
-            )
-            for net in getattr(networks, "loaded_networks", [])
-        )
-    except Exception:
-        lora_key = None
-
-    return (type(fn).__module__, type(fn).__qualname__, checkpoint_key, lora_key)
+    return (type(fn).__module__, type(fn).__qualname__, checkpoint_key, _lora_signature())
 
 
 def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, denoiser: Any | None = None) -> tuple[Any, ...]:
