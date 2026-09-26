@@ -3,7 +3,7 @@ import collections
 import sys
 from dataclasses import dataclass
 
-from modules import paths, shared, devices, script_callbacks, sd_models, extra_networks, lowvram, sd_hijack, hashes, openclaw_cuda_graphs, openclaw_lifecycle_epochs
+from modules import paths, shared, devices, script_callbacks, sd_models, extra_networks, lowvram, sd_hijack, hashes, openclaw_cuda_graphs, openclaw_lifecycle_epochs, cache
 
 import glob
 from copy import deepcopy
@@ -19,30 +19,6 @@ loaded_vae_file = None
 checkpoint_info = None
 
 checkpoints_loaded = collections.OrderedDict()
-
-
-def _vae_cache_key(vae_file):
-    filename = os.path.abspath(vae_file)
-    try:
-        stat = os.stat(filename)
-        file_identity = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        file_identity = (None, None)
-
-    return (filename, file_identity)
-
-
-def _vae_cache_key_filename(cache_key):
-    if isinstance(cache_key, tuple) and cache_key:
-        return cache_key[0]
-    return os.path.abspath(cache_key) if isinstance(cache_key, str) else None
-
-
-def _drop_stale_vae_cache_entries(vae_file, current_cache_key):
-    filename = os.path.abspath(vae_file)
-    for cache_key in list(checkpoints_loaded.keys()):
-        if cache_key != current_cache_key and _vae_cache_key_filename(cache_key) == filename:
-            del checkpoints_loaded[cache_key]
 
 
 def get_loaded_vae_name():
@@ -221,8 +197,8 @@ def load_vae(model, vae_file=None, vae_source="from unknown source"):
     cache_enabled = shared.opts.sd_vae_checkpoint_cache > 0
 
     if vae_file:
-        vae_cache_key = _vae_cache_key(vae_file)
-        _drop_stale_vae_cache_entries(vae_file, vae_cache_key)
+        vae_cache_key = cache.file_cache_key(vae_file)
+        cache.drop_stale_file_entries(checkpoints_loaded, vae_cache_key)
         if cache_enabled and vae_cache_key in checkpoints_loaded:
             # use vae checkpoint cache
             print(f"Loading VAE weights {vae_source}: cached {get_filename(vae_file)}")

@@ -29,28 +29,7 @@ checkpoints_loaded = collections.OrderedDict()
 
 
 def _state_dict_cache_key(checkpoint_info):
-    """Return an in-memory cache key that changes when the checkpoint file changes."""
-    filename = os.path.abspath(checkpoint_info.filename)
-    try:
-        stat = os.stat(filename)
-        file_identity = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        file_identity = (None, None)
-
-    return (filename, file_identity, getattr(checkpoint_info, "sha256", None))
-
-
-def _cache_key_filename(cache_key):
-    if isinstance(cache_key, tuple) and cache_key:
-        return cache_key[0]
-    return os.path.abspath(getattr(cache_key, "filename", "")) if getattr(cache_key, "filename", None) else None
-
-
-def _drop_stale_state_dict_cache_entries(checkpoint_info, current_cache_key):
-    filename = os.path.abspath(checkpoint_info.filename)
-    for cache_key in list(checkpoints_loaded.keys()):
-        if cache_key != current_cache_key and _cache_key_filename(cache_key) == filename:
-            del checkpoints_loaded[cache_key]
+    return cache.file_cache_key(checkpoint_info.filename, getattr(checkpoint_info, "sha256", None))
 
 
 class ModelType(enum.Enum):
@@ -347,7 +326,7 @@ def get_checkpoint_state_dict(checkpoint_info: CheckpointInfo, timer):
     sd_model_hash = checkpoint_info.calculate_shorthash()
     timer.record("calculate hash")
     cache_key = _state_dict_cache_key(checkpoint_info)
-    _drop_stale_state_dict_cache_entries(checkpoint_info, cache_key)
+    cache.drop_stale_file_entries(checkpoints_loaded, cache_key)
 
     if cache_key in checkpoints_loaded:
         # use checkpoint cache
@@ -663,7 +642,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         # mutates its input and stale/meta cache entries can later fail with
         # "Cannot copy out of meta tensor; no data!".
         cache_key = _state_dict_cache_key(checkpoint_info)
-        _drop_stale_state_dict_cache_entries(checkpoint_info, cache_key)
+        cache.drop_stale_file_entries(checkpoints_loaded, cache_key)
         checkpoints_loaded[cache_key] = state_dict.copy()
     elif torchao_quant_enabled:
         # TorchAO quantized paths must never retain checkpoint state-dict cache

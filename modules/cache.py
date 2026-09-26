@@ -23,6 +23,27 @@ def file_revision(stat_result):
     return {"device": stat_result.st_dev, "inode": stat_result.st_ino, "size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns, "ctime_ns": stat_result.st_ctime_ns}
 
 
+def file_cache_key(path, *extra):
+    """In-memory cache key that changes with the file's content: (abspath, (mtime_ns, size), *extra).
+
+    An unreadable file gets (None, None) as its identity instead of raising.
+    """
+    filename = os.path.abspath(path)
+    try:
+        stat = os.stat(filename)
+        file_identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        file_identity = (None, None)
+    return (filename, file_identity, *extra)
+
+
+def drop_stale_file_entries(entries, current_key):
+    """Delete entries keyed by file_cache_key() for the same file as `current_key` but a different key."""
+    for key in list(entries):
+        if key != current_key and key[0] == current_key[0]:
+            del entries[key]
+
+
 def callable_revision(func):
     code = getattr(func, "__code__", None)
     if code is None:
