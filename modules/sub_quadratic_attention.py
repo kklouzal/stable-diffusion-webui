@@ -133,11 +133,6 @@ def _get_attention_scores_no_kv_chunking(
     return hidden_states_slice
 
 
-class ScannedChunk(NamedTuple):
-    chunk_idx: int
-    attn_chunk: AttnChunk
-
-
 def efficient_dot_product_attention(
     query: Tensor,
     key: Tensor,

@@ -110,13 +110,6 @@ def undo_optimizations():
     sgm.modules.diffusionmodules.model.AttnBlock.forward = diffusionmodules_model_AttnBlock_forward
 
 
-def fix_checkpoint():
-    """checkpoints are now added and removed in embedding/hypernet code, since torch doesn't want
-    checkpoints to be added when not training (there's a warning)"""
-
-    pass
-
-
 def weighted_loss(sd_model, pred, target, mean=True):
     #Calculate the weight normally, but ignore the mean
     loss = sd_model._old_get_loss(pred, target, mean=False)

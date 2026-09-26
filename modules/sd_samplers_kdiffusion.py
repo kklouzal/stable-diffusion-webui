@@ -46,7 +46,6 @@ sampler_extra_params = {
 }
 
 k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
-k_diffusion_scheduler = {x.name: x.function for x in sd_schedulers.schedulers}
 
 
 def _checkpoint_cache_key(checkpoint_info):

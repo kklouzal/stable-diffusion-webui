@@ -116,15 +116,11 @@ class EmbeddingDatabase:
         self.skipped_embeddings = {}
         self.expected_shape = -1
         self.embedding_dirs = {}
-        self.previously_displayed_embeddings = ()
         self.image_embedding_cache = cache.cache('image-embedding')
         self._publication_lock = threading.RLock()
 
     def add_embedding_dir(self, path):
         self.embedding_dirs[path] = DirWithTextualInversionEmbeddings(path)
-
-    def clear_embedding_dirs(self):
-        self.embedding_dirs.clear()
 
     def register_embedding(self, embedding, model):
         return self.register_embedding_by_name(embedding, model, embedding.name)

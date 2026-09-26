@@ -55,19 +55,6 @@ class MemUsageMonitor(threading.Thread):
 
                 time.sleep(1 / self.opts.memmon_poll_rate)
 
-    def dump_debug(self):
-        print(self, 'recorded data:')
-        for k, v in self.read().items():
-            print(k, -(v // -(1024 ** 2)))
-
-        print(self, 'raw torch memory stats:')
-        tm = torch.cuda.memory_stats(self.device)
-        for k, v in tm.items():
-            if 'bytes' not in k:
-                continue
-            print('\t' if 'peak' in k else '', k, -(v // -(1024 ** 2)))
-
-        print(torch.cuda.memory_summary())
 
     def monitor(self):
         self.run_flag.set()

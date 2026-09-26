@@ -1,7 +1,4 @@
-import importlib
 import logging
-import os
-import sys
 import warnings
 from threading import Thread
 
@@ -17,9 +14,6 @@ def imports():
     startup_timer.record("import torch")
     warnings.filterwarnings(action="ignore", category=DeprecationWarning, module="pytorch_lightning")
     warnings.filterwarnings(action="ignore", category=UserWarning, module="torchvision")
-
-    os.environ.setdefault('GRADIO_ANALYTICS_ENABLED', 'False')
-    startup_timer.record("configure UI analytics")
 
     from modules import paths, timer, import_hook, errors  # noqa: F401
     startup_timer.record("setup paths")
@@ -62,7 +56,6 @@ def initialize():
     from modules.shared_cmd_options import cmd_opts
 
     from modules import codeformer_model
-    warnings.filterwarnings(action="ignore", category=UserWarning, module="torchvision.transforms.functional_tensor")
     codeformer_model.setup_model(cmd_opts.codeformer_models_path)
     startup_timer.record("setup codeformer")
 
@@ -70,13 +63,10 @@ def initialize():
     gfpgan_model.setup_model(cmd_opts.gfpgan_models_path)
     startup_timer.record("setup gfpgan")
 
-    initialize_rest(reload_script_modules=False)
+    initialize_rest()
 
 
-def initialize_rest(*, reload_script_modules=False):
-    """
-    Called both from initialize() and when reloading the webui.
-    """
+def initialize_rest():
     from modules.shared_cmd_options import cmd_opts
 
     from modules import sd_samplers
@@ -107,11 +97,6 @@ def initialize_rest(*, reload_script_modules=False):
 
     with startup_timer.subcategory("load scripts"):
         scripts.load_scripts()
-
-    if reload_script_modules and shared.opts.enable_reloading_ui_scripts:
-        for module in [module for name, module in sys.modules.items() if name.startswith("modules.ui")]:
-            importlib.reload(module)
-        startup_timer.record("reload script modules")
 
     from modules import modelloader
     modelloader.load_upscalers()

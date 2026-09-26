@@ -10,7 +10,7 @@ import torch
 import tqdm
 from einops import rearrange, repeat
 from ldm.util import default
-from modules import devices, sd_models, shared, sd_samplers, hashes, sd_hijack_checkpoint, errors
+from modules import devices, sd_models, shared, hashes, sd_hijack_checkpoint, errors
 from modules.textual_inversion import textual_inversion, saving_settings
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
 from torch import einsum
@@ -116,13 +116,6 @@ class HypernetworkModule(torch.nn.Module):
 
     def forward(self, x):
         return x + self.linear(x) * (self.multiplier if not self.training else 1)
-
-    def trainables(self):
-        layer_structure = []
-        for layer in self.linear:
-            if type(layer) == torch.nn.Linear or type(layer) == torch.nn.LayerNorm:
-                layer_structure += [layer.weight, layer.bias]
-        return layer_structure
 
 
 #param layer_structure : sequence used for length, use_dropout : controlling boolean, last_layer_dropout : for compatibility check.
@@ -579,14 +572,7 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
     loss_step = 0
     _loss_step = 0 #internal
     # size = len(ds.indexes)
-    # loss_dict = defaultdict(lambda : deque(maxlen = 1024))
     loss_logging = deque(maxlen=len(ds) * 3)  # this should be configurable parameter, this is 3 * epoch(dataset size)
-    # losses = torch.zeros((size,))
-    # previous_mean_losses = [0]
-    # previous_mean_loss = 0
-    # print("Mean loss of {} elements".format(size))
-
-    steps_without_grad = 0
 
     last_saved_file = "<none>"
     last_saved_image = "<none>"

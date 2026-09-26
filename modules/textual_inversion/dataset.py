@@ -229,8 +229,6 @@ class BatchLoader:
             self.weight = torch.stack([entry.weight for entry in data]).squeeze(1)
         else:
             self.weight = None
-        #self.emb_index = [entry.emb_index for entry in data]
-        #print(self.latent_sample.device)
 
     def pin_memory(self):
         self.latent_sample = self.latent_sample.pin_memory()

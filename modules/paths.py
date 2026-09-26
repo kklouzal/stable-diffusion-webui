@@ -20,7 +20,6 @@ def mute_sdxl_imports():
     sys.modules['sgm.data'] = module
 
 
-# data_path = cmd_opts_pre.data
 sys.path.insert(0, script_path)
 
 # search for directory of stable diffusion in following places

@@ -370,14 +370,6 @@ def weighted_histogram_filter(img, kernel, kernel_center, percentile_min=0.0, pe
     return img_out
 
 
-def smoothstep(x):
-    """
-    The smoothstep function, input should be clamped to 0-1 range.
-    Turns a diagonal line (f(x) = x) into a sigmoid-like curve.
-    """
-    return x * x * (3 - 2 * x)
-
-
 def smootherstep(x):
     """
     The smootherstep function, input should be clamped to 0-1 range.
@@ -666,7 +658,6 @@ class Script(scripts.Script):
 
         settings = SoftInpaintingSettings(power, scale, detail_preservation, mask_inf, dif_thresh, dif_contr)
 
-        # p.extra_generation_params["Mask rounding"] = False
         settings.add_generation_params(p.extra_generation_params)
 
     def on_mask_blend(self, p, mba: scripts.MaskBlendArgs, enabled, power, scale, detail_preservation, mask_inf,

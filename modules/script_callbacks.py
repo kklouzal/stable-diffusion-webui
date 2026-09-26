@@ -263,14 +263,6 @@ def app_started_callback(demo: Optional[Blocks], app: FastAPI):
             report_exception(c, 'app_started_callback')
 
 
-def app_reload_callback():
-    for c in ordered_callbacks('on_reload'):
-        try:
-            c.callback()
-        except Exception:
-            report_exception(c, 'callbacks_on_reload')
-
-
 def model_loaded_callback(sd_model):
     for c in ordered_callbacks('model_loaded'):
         try:
@@ -387,14 +379,6 @@ def infotext_pasted_callback(infotext: str, params: dict[str, Any]):
             report_exception(c, 'infotext_pasted')
 
 
-def script_unloaded_callback():
-    for c in reversed(ordered_callbacks('script_unloaded')):
-        try:
-            c.callback()
-        except Exception:
-            report_exception(c, 'script_unloaded')
-
-
 def before_ui_callback():
     for c in reversed(ordered_callbacks('before_ui')):
         try:
@@ -433,19 +417,6 @@ def before_token_counter_callback(params: BeforeTokenCounterParams):
             c.callback(params)
         except Exception:
             report_exception(c, 'before_token_counter')
-
-
-def remove_current_script_callbacks():
-    stack = [x for x in inspect.stack() if x.filename != __file__]
-    filename = stack[0].filename if stack else 'unknown file'
-    if filename == 'unknown file':
-        return
-    for callback_list in callback_map.values():
-        for callback_to_remove in [cb for cb in callback_list if cb.script == filename]:
-            callback_list.remove(callback_to_remove)
-    for ordered_callbacks_list in ordered_callbacks_map.values():
-        for callback_to_remove in [cb for cb in ordered_callbacks_list if cb.script == filename]:
-            ordered_callbacks_list.remove(callback_to_remove)
 
 
 def remove_callbacks_for_function(callback_func):

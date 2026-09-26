@@ -26,23 +26,8 @@ class State:
     id_live_preview = 0
     textinfo = None
     time_start = None
-    server_start = None
     _server_command_signal = threading.Event()
     _server_command: Optional[str] = None
-
-    def __init__(self):
-        self.server_start = time.time()
-
-    @property
-    def need_restart(self) -> bool:
-        # Compatibility getter for need_restart.
-        return self.server_command == "restart"
-
-    @need_restart.setter
-    def need_restart(self, value: bool) -> None:
-        # Compatibility setter for need_restart.
-        if value:
-            self.server_command = "restart"
 
     @property
     def server_command(self):
@@ -55,17 +40,6 @@ class State:
         """
         self._server_command = value
         self._server_command_signal.set()
-
-    def wait_for_server_command(self, timeout: Optional[float] = None) -> Optional[str]:
-        """
-        Wait for server command to get set; return and clear the value and signal.
-        """
-        if self._server_command_signal.wait(timeout):
-            self._server_command_signal.clear()
-            req = self._server_command
-            self._server_command = None
-            return req
-        return None
 
     def request_restart(self) -> None:
         self.interrupt()

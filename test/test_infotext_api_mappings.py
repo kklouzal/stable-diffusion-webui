@@ -194,8 +194,8 @@ def test_get_infotext_names_uses_option_and_legacy_setting_mappings():
     )
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and set(fromlist) == {"infotext_utils", "shared"}:
-            return types.SimpleNamespace(infotext_utils=infotext_utils, shared=types.SimpleNamespace())
+        if name == "modules" and set(fromlist) == {"infotext_utils"}:
+            return types.SimpleNamespace(infotext_utils=infotext_utils)
         return __import__(name, globals, locals, fromlist, level)
 
     namespace = {"__builtins__": {**vars(__import__("builtins")), "__import__": fake_import}}

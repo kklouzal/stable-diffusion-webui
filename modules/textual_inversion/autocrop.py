@@ -259,7 +259,6 @@ def image_entropy_points(im, settings):
 
 def image_entropy(im):
     # greyscale image entropy
-    # band = np.asarray(im.convert("L"))
     band = np.asarray(im.convert("1"), dtype=np.uint8)
     hist, _ = np.histogram(band, bins=range(0, 256))
     hist = hist[hist > 0]

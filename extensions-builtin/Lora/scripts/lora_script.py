@@ -5,15 +5,10 @@ from fastapi import FastAPI
 
 import network
 import networks
-import lora  # noqa:F401
 import lora_patches
 import extra_networks_lora
 import ui_extra_networks_lora
 from modules import script_callbacks, ui_extra_networks, extra_networks, shared
-
-
-def unload():
-    networks.originals.undo()
 
 
 def before_ui():
@@ -27,7 +22,6 @@ def before_ui():
 networks.originals = lora_patches.LoraPatches()
 
 script_callbacks.on_model_loaded(networks.assign_network_names_to_compvis_modules)
-script_callbacks.on_script_unloaded(unload)
 script_callbacks.on_before_ui(before_ui)
 script_callbacks.on_infotext_pasted(networks.infotext_pasted)
 

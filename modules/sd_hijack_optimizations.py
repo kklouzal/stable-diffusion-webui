@@ -541,11 +541,11 @@ def _selected_sdpa_backends() -> list[SDPBackend] | None:
     return backends
 
 
-def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, backend_override: list[SDPBackend] | None = None, sdpa_backend_override: str | None = None):
+def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, sdpa_backend_override: str | None = None):
     if sdpa_backend_override is not None:
         backends, _ = _normalize_sdpa_backend_choice(sdpa_backend_override)
     else:
-        backends = backend_override if backend_override is not None else _selected_sdpa_backends()
+        backends = _selected_sdpa_backends()
     if backends is None:
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
     with sdpa_kernel(backends):

@@ -87,7 +87,7 @@ def reload_hypernetworks():
 
 
 def get_infotext_names():
-    from modules import infotext_utils, shared
+    from modules import infotext_utils
     res = {}
 
     for infotext_name, _setting_name in infotext_utils.infotext_setting_name_mapping():

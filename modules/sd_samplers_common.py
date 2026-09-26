@@ -263,7 +263,6 @@ class Sampler:
         self.funcname = funcname
         self.func = funcname
         self.extra_params = []
-        self.sampler_noises = None
         self.stop_at = None
         self.eta = None
         self.config: SamplerData = None  # set by the function calling the constructor
@@ -311,9 +310,6 @@ class Sampler:
             return self.last_latent
         except InterruptedException:
             return self.last_latent
-
-    def number_of_needed_noises(self, p):
-        return p.steps
 
     def initialize(self, p) -> dict:
         self.p = p

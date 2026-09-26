@@ -76,11 +76,6 @@ class DisableInitialization(ReplaceHelper):
             res.name_or_path = pretrained_model_name_or_path
             return res
 
-        def transformers_modeling_utils_load_pretrained_model(*args, **kwargs):
-            if len(args) > 3 and isinstance(args[3], str):
-                args = args[0:3] + ('/', ) + args[4:]  # resolved_archive_file; must set it to something to prevent what seems to be a bug
-            return self.transformers_modeling_utils_load_pretrained_model(*args, **kwargs)
-
         def transformers_utils_hub_get_file_from_cache(original, url, *args, local_files_only=False, **kwargs):
 
             # this file is always 404, prevent making request
@@ -97,9 +92,6 @@ class DisableInitialization(ReplaceHelper):
                     raise
                 return original(url, *args, local_files_only=False, **kwargs)
 
-        def transformers_utils_hub_get_from_cache(url, *args, local_files_only=False, **kwargs):
-            return transformers_utils_hub_get_file_from_cache(self.transformers_utils_hub_get_from_cache, url, *args, **kwargs)
-
         def transformers_tokenization_utils_base_cached_file(url, *args, local_files_only=False, **kwargs):
             return transformers_utils_hub_get_file_from_cache(self.transformers_tokenization_utils_base_cached_file, url, *args, **kwargs)
 
@@ -113,10 +105,8 @@ class DisableInitialization(ReplaceHelper):
         if self.disable_clip:
             self.create_model_and_transforms = self.replace(open_clip, 'create_model_and_transforms', create_model_and_transforms_without_pretrained)
             self.CLIPTextModel_from_pretrained = self.replace(ldm.modules.encoders.modules.CLIPTextModel, 'from_pretrained', CLIPTextModel_from_pretrained)
-            self.transformers_modeling_utils_load_pretrained_model = self.replace(transformers.modeling_utils.PreTrainedModel, '_load_pretrained_model', transformers_modeling_utils_load_pretrained_model)
             self.transformers_tokenization_utils_base_cached_file = self.replace(transformers.tokenization_utils_base, 'cached_file', transformers_tokenization_utils_base_cached_file)
             self.transformers_configuration_utils_cached_file = self.replace(transformers.configuration_utils, 'cached_file', transformers_configuration_utils_cached_file)
-            self.transformers_utils_hub_get_from_cache = self.replace(transformers.utils.hub, 'get_from_cache', transformers_utils_hub_get_from_cache)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.restore()

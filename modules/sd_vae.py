@@ -61,12 +61,6 @@ def get_loaded_vae_hash():
     return sha256[0:10] if sha256 else None
 
 
-def get_base_vae(model):
-    if base_vae is not None and checkpoint_info == model.sd_checkpoint_info and model:
-        return base_vae
-    return None
-
-
 def store_base_vae(model):
     global base_vae, checkpoint_info
     if checkpoint_info != model.sd_checkpoint_info:
@@ -223,7 +217,6 @@ def load_vae_dict(filename, map_location):
 
 def load_vae(model, vae_file=None, vae_source="from unknown source"):
     global vae_dict, base_vae, loaded_vae_file
-    # save_settings = False
 
     cache_enabled = shared.opts.sd_vae_checkpoint_cache > 0
 
