@@ -2,14 +2,9 @@ import logging
 
 import torch
 from modules import shared
+from modules.models.diffusion import uni_pc
 
 logger = logging.getLogger(__name__)
-
-try:
-    from modules.models.diffusion import uni_pc
-except Exception:
-    logger.debug("Falling back to legacy UniPC import path", exc_info=True)
-    from modules import unipc as uni_pc
 
 ######################### UniPC Implementation logic #########################
 

@@ -16,6 +16,7 @@ from modules import headless_ui as gr
 import torch
 import dynthres_core
 from modules import scripts, script_callbacks, sd_samplers, sd_samplers_compvis, sd_samplers_common
+from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,8 @@ try:
     import dynthres_unipc
 except Exception:
     logger.exception("UniPC sampler support failed to load; Dynamic Thresholding will run without UniPC support")
-try:
-    from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
-    IS_AUTO_16 = True
-except Exception:
-    logger.warning("Using legacy KDiff CFGDenoiser fallback", exc_info=True)
-    from modules.sd_samplers_kdiffusion import CFGDenoiser as cfgdenoisekdiff
-    IS_AUTO_16 = False
+
+IS_AUTO_16 = True
 
 DISABLE_VISIBILITY = True
 
