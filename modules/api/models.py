@@ -290,9 +290,8 @@ _options = vars(parser)['_option_string_actions']
 for key in _options:
     if(_options[key].dest != 'help'):
         flag = _options[key]
-        _type = str
-        if _options[key].default is not None:
-            _type = type(_options[key].default)
+        # A None default says nothing about the parsed type (for example --port), so accept any value.
+        _type = Optional[type(flag.default)] if flag.default is not None else Any
         flags.update({flag.dest: (_type, Field(default=flag.default, description=flag.help))})
 
 FlagsModel = create_model("Flags", **flags)
@@ -300,7 +299,7 @@ FlagsModel = create_model("Flags", **flags)
 class SamplerItem(BaseModel):
     name: str = Field(title="Name")
     aliases: list[str] = Field(title="Aliases")
-    options: dict[str, str] = Field(title="Options")
+    options: dict[str, Any] = Field(title="Options")
 
 class SchedulerItem(BaseModel):
     name: str = Field(title="Name")
