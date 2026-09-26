@@ -30,7 +30,6 @@ def test_vae_reset_preserves_enablement_and_telemetry_contract():
     source = ast.unparse(fn)
     assert "enabled is not None" in source
     assert "_clear_cache_locked()" in source
-    assert "_LIFECYCLE_STATE.clear()" in source
     assert "manual_reset" in source
     assert "bump_epoch" not in source
     assert "_COUNTERS['invalidations'] += 1" in source

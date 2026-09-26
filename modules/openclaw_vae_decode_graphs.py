@@ -47,7 +47,6 @@ _BYPASS_REASONS: dict[str, int] = {}
 _INVALIDATION_REASONS: dict[str, int] = {}
 _LAST_ERROR: str | None = None
 _LAST_KEY: tuple[Any, ...] | None = None
-_LIFECYCLE_STATE: dict[str, str] = {}
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -91,7 +90,6 @@ def status() -> dict[str, Any]:
             "invalidation_reasons": dict(_INVALIDATION_REASONS),
             "last_error": _LAST_ERROR,
             "last_key": repr(_LAST_KEY) if _LAST_KEY is not None else None,
-            "lifecycle_state_keys": sorted(_LIFECYCLE_STATE),
             "contract_version": _GRAPH_CONTRACT_VERSION,
         }
 
@@ -110,7 +108,6 @@ def set_enabled(enabled: bool | None = None, clear_cache: bool = False) -> dict[
             _clear_cache_locked()
             _LAST_ERROR = None
             _LAST_KEY = None
-            _LIFECYCLE_STATE.clear()
             _COUNTERS["invalidations"] += 1
             _INVALIDATION_REASONS["manual_reset"] = _INVALIDATION_REASONS.get("manual_reset", 0) + 1
             openclaw_cache_epochs.observe("E10", "invalidate", reason="manual_reset")
@@ -122,22 +119,6 @@ def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
         if _clear_cache_locked():
             _COUNTERS["invalidations"] += 1
             _INVALIDATION_REASONS[reason] = _INVALIDATION_REASONS.get(reason, 0) + 1
-            openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
-            openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_CACHE_MAX)
-    return status()
-
-
-def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) -> dict[str, Any]:
-    marker = repr(state)
-    with _EXECUTION_LOCK, _LOCK:
-        old = _LIFECYCLE_STATE.get(boundary)
-        _LIFECYCLE_STATE[boundary] = marker
-        if old is None or old == marker:
-            return status()
-        if _clear_cache_locked():
-            why = reason or f"{boundary}_changed"
-            _COUNTERS["invalidations"] += 1
-            _INVALIDATION_REASONS[why] = _INVALIDATION_REASONS.get(why, 0) + 1
             openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
             openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_CACHE_MAX)
     return status()

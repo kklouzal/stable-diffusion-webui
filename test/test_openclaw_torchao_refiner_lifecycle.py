@@ -339,13 +339,13 @@ def test_model_move_mutation_is_serialized_with_unet_graph_runtime(monkeypatch):
     monkeypatch.setattr(sd_models.shared, "device", torch.device("cpu"), raising=False)
     monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "mutable_runtime_boundary", boundary)
     monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "invalidate", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("direct invalidate should be inside mutable_runtime_boundary")))
-    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate_if_changed", lambda boundary, state, reason: invalidations.append(("vae", boundary, reason)))
+    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate", lambda reason: invalidations.append(("vae", reason)))
 
     sd_models.send_model_to_device(model)
 
     assert invalidations == [
         ("unet-boundary", "model_to_device", "base.safetensors"),
-        ("vae", "model_acceleration", "model_to_device"),
+        ("vae", "model_to_device"),
     ]
     assert entered[0] == "enter"
     assert entered[-1] == "exit"
@@ -362,15 +362,15 @@ def test_model_moves_invalidate_unet_and_vae_graph_caches(monkeypatch):
     monkeypatch.setattr(sd_models.devices, "torch_gc", lambda: None)
     monkeypatch.setattr(sd_models.shared, "device", torch.device("cpu"), raising=False)
     monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "invalidate", lambda reason, details=None: invalidations.append(("unet", reason, details)))
-    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate_if_changed", lambda boundary, state, reason: invalidations.append(("vae", boundary, reason)))
+    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate", lambda reason: invalidations.append(("vae", reason)))
 
     sd_models.send_model_to_device(model)
     sd_models.send_model_to_cpu(model)
 
     assert ("unet", "model_to_device", "base.safetensors") in invalidations
-    assert ("vae", "model_acceleration", "model_to_device") in invalidations
+    assert ("vae", "model_to_device") in invalidations
     assert ("unet", "model_to_cpu", "base.safetensors") in invalidations
-    assert ("vae", "model_acceleration", "model_to_cpu") in invalidations
+    assert ("vae", "model_to_cpu") in invalidations
 
 
 def test_vae_reload_finalization_failure_discards_pending_and_next_success_is_fresh(monkeypatch):

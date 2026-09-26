@@ -480,13 +480,12 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
             self.graphs._INVALIDATION_REASONS.clear()
         self.graphs._CACHE[("cached",)] = {"graph": object(), "input": object(), "output": object()}
         self.graphs._FAILED_KEYS[("failed",)] = None
-        with self.graphs._LOCK:
-            self.graphs._LIFECYCLE_STATE["vae"] = ("a",)
-        self.graphs.invalidate_if_changed("vae", ("a",), "vae_changed")
-        status = self.graphs.invalidate_if_changed("vae", ("b",), "vae_changed")
+        status = self.graphs.invalidate("model_to_device")
         self.assertEqual(status["cache_size"], 0)
         self.assertEqual(status["failed_key_count"], 0)
         self.assertEqual(status["invalidations"], 1)
+        self.assertEqual(status["invalidation_reasons"], {"model_to_device": 1})
+        self.assertEqual(self.graphs.invalidate("model_to_device")["invalidations"], 1)  # nothing retained: no-op
         self.graphs._CACHE[("cached",)] = {"graph": object(), "input": object(), "output": object()}
         status = self.graphs.set_enabled(False, clear_cache=True)
         self.assertFalse(status["enabled"])

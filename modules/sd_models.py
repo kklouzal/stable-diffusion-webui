@@ -1,4 +1,5 @@
 import collections
+import contextlib
 import importlib
 import os
 import sys
@@ -1163,12 +1164,19 @@ def model_has_torchao_quantization(m):
     )
 
 
+@contextlib.contextmanager
+def _model_acceleration_boundary(reason, model):
+    """Drop captured UNet and VAE CUDA graphs, and keep graph replay/capture out, while `model` moves or is torn down."""
+    details = getattr(getattr(model, "sd_checkpoint_info", None), "filename", None)
+    with openclaw_cuda_graphs.mutable_runtime_boundary(reason, details):
+        openclaw_vae_decode_graphs.invalidate(reason)
+        yield
+
+
 def send_model_to_cpu(m):
     if m is not None:
         movement_before = openclaw_lifecycle_epochs.model_location_marker(m)
-        details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
-        with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_cpu", details):
-            openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_cpu")
+        with _model_acceleration_boundary("model_to_cpu", m):
             if m.lowvram:
                 lowvram.send_everything_to_cpu()
             else:
@@ -1268,9 +1276,7 @@ def send_model_to_device(m):
     if m is None:
         return
     movement_before = openclaw_lifecycle_epochs.model_location_marker(m)
-    details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
-    with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_device", details):
-        openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_device")
+    with _model_acceleration_boundary("model_to_device", m):
         lowvram.apply(m)
 
         if not m.lowvram:
@@ -1287,9 +1293,7 @@ def send_model_to_device(m):
 
 
 def send_model_to_trash(m):
-    details = getattr(getattr(m, "sd_checkpoint_info", None), "filename", None)
-    with openclaw_cuda_graphs.mutable_runtime_boundary("model_to_trash", details):
-        openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), "model_to_trash")
+    with _model_acceleration_boundary("model_to_trash", m):
         if model_has_torchao_quantization(m):
             # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
             # trash path. The caller is discarding the tree, so just drop references
