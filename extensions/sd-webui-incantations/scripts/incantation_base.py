@@ -131,7 +131,7 @@ class IncantBaseExtensionScript(scripts.Script):
 # XYZ Plot
 # Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
 def make_axis_options(extra_axis_options):
-        xyz_grid = next(x for x in scripts.scripts_data if x.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid")).module
+        xyz_grid = scripts.loaded_script_module("xyz_grid.py")
         current_opts = {x.label for x in xyz_grid.axis_options}
         for opt in extra_axis_options:
                 if opt.label not in current_opts:

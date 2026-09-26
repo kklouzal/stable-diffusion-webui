@@ -384,6 +384,15 @@ postprocessing_scripts_data = []
 ScriptClassData = namedtuple("ScriptClassData", ["script_class", "path", "basedir", "module"])
 
 
+def loaded_script_module(filename):
+    """Module of the loaded script whose file is named `filename` (for example "xyz_grid.py"), or None.
+
+    Script modules are registered under synthetic names (see script_loading.module_name_for_path),
+    so match on the script file rather than on `script_class.__module__`.
+    """
+    return next((data.module for data in scripts_data if os.path.basename(data.path) == filename), None)
+
+
 @dataclass
 class ScriptWithDependencies:
     script_canonical_name: str

@@ -104,7 +104,7 @@ def on_ui_settings():
 
 
 def add_axis_options():
-    xyz_grid = [x for x in scripts.scripts_data if x.script_class.__module__ == "xyz_grid.py"][0].module
+    xyz_grid = scripts.loaded_script_module("xyz_grid.py")
     xyz_grid.axis_options.extend([
         xyz_grid.AxisOption("[Hypertile] Unet First pass Enabled", str, xyz_grid.apply_override('hypertile_enable_unet', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
         xyz_grid.AxisOption("[Hypertile] Unet Second pass Enabled", str, xyz_grid.apply_override('hypertile_enable_unet_secondpass', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
