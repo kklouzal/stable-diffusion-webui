@@ -19,7 +19,6 @@ uvicorn==0.54.0
 httpcore
 httpx
 requests
-send2trash
 inflection
 jsonmerge
 kornia
@@ -34,7 +33,6 @@ psutil
 pytorch_lightning
 torchmetrics
 lightning-utilities
-resize-right
 safetensors
 scikit-image
 spandrel
@@ -46,14 +44,5 @@ transformers
 huggingface-hub>=1.13.0
 tokenizers
 pillow-avif-plugin
-chardet
-PyExecJS
-lxml
-pathos
-cryptography
-openai
-boto3
-aliyun-python-sdk-core
-aliyun-python-sdk-alimt
-# pydantic is intentionally omitted: fastapi and openai pull it in, and it resolves as a released
+# pydantic is intentionally omitted: fastapi pulls it in, and it resolves as a released
 # NGC package (docker/base-released-packages.txt) with the NGC version as its floor.

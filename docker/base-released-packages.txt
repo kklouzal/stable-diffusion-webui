@@ -17,12 +17,10 @@ antlr4-python3-runtime
 anyio
 attrs
 certifi
-cffi
 charset-normalizer
 click
 contourpy
 cycler
-dill
 einops
 fonttools
 h11
@@ -40,14 +38,12 @@ llvmlite
 markdown-it-py
 matplotlib
 mdurl
-multiprocess
 ninja
 numba
 omegaconf
 packaging
 protobuf
 psutil
-pycparser
 pydantic
 pydantic-core
 pyparsing
@@ -59,7 +55,6 @@ rich
 rpds-py
 safetensors
 scipy
-send2trash
 six
 tokenizers
 tqdm
