@@ -159,7 +159,6 @@ Pinned repos baked into the image:
 - `repositories/generative-models`
 - `repositories/k-diffusion`
 - `repositories/BLIP`
-- `repositories/stable-diffusion-webui-assets`
 
 The image also provides sibling-path compatibility for:
 

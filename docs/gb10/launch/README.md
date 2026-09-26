@@ -156,7 +156,6 @@ The runtime image includes these pinned repos because upstream A1111 expects the
 - `repositories/generative-models`
 - `repositories/k-diffusion`
 - `repositories/BLIP`
-- `repositories/stable-diffusion-webui-assets`
 
 Sibling compatibility links are also provided for:
 

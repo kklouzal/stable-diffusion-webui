@@ -69,7 +69,6 @@ Host-owned persistent surfaces:
 - `generative-models`
 - `k-diffusion`
 - `BLIP`
-- `stable-diffusion-webui-assets`
 
 ## Current explicit compatibility handling
 

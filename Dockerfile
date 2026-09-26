@@ -14,8 +14,6 @@ ARG K_DIFFUSION_REPO=https://github.com/crowsonkb/k-diffusion.git
 ARG K_DIFFUSION_COMMIT=4601bf085320592473f681a62808ed873d17fad5
 ARG BLIP_REPO=https://github.com/salesforce/BLIP.git
 ARG BLIP_COMMIT=056a169437371659074aa2732649d5de3bffb4a8
-ARG ASSETS_REPO=https://github.com/AUTOMATIC1111/stable-diffusion-webui-assets.git
-ARG ASSETS_COMMIT=6f7db241d2f8ba7457bac5ca9753331f0c266917
 ARG DCTORCH_VERSION=0.1.2
 ARG CLIP_PACKAGE_URL=https://github.com/openai/CLIP/archive/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6.zip
 
@@ -135,8 +133,6 @@ ARG K_DIFFUSION_REPO
 ARG K_DIFFUSION_COMMIT
 ARG BLIP_REPO
 ARG BLIP_COMMIT
-ARG ASSETS_REPO
-ARG ASSETS_COMMIT
 
 COPY patches /opt/build/patches
 COPY docker/apply-local-patches.py /opt/build/apply-local-patches.py
@@ -156,8 +152,6 @@ RUN cd stable-diffusion-webui \
     && git -c advice.detachedHead=false -C repositories/k-diffusion checkout --quiet "${K_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${BLIP_REPO}" repositories/BLIP \
     && git -c advice.detachedHead=false -C repositories/BLIP checkout --quiet "${BLIP_COMMIT}" \
-    && git clone --filter=blob:none "${ASSETS_REPO}" repositories/stable-diffusion-webui-assets \
-    && git -c advice.detachedHead=false -C repositories/stable-diffusion-webui-assets checkout --quiet "${ASSETS_COMMIT}" \
     && ln -sfn repositories/generative-models ../generative-models \
     && ln -sfn repositories/k-diffusion ../k-diffusion \
     && ln -sfn repositories/BLIP ../BLIP \

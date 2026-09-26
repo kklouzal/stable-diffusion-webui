@@ -188,7 +188,6 @@ Pinned upstream companion repositories remain baked into the image:
 - `repositories/generative-models`
 - `repositories/k-diffusion`
 - `repositories/BLIP`
-- `repositories/stable-diffusion-webui-assets`
 
 Sibling-path compatibility links remain intentional:
 
