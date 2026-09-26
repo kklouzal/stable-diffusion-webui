@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import inspect
-import json
 import os
 import platform
 import threading
@@ -12,8 +11,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import numpy as np
-
-CACHE_SCHEMA = 1
 
 
 def _file_digest(path: str) -> tuple:

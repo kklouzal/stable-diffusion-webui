@@ -33,7 +33,6 @@ class Script(scripts.Script):
         p.batch_size = 1
         p.n_iter = 1
 
-        info = None
         initial_seed = None
         initial_info = None
         initial_denoising_strength = p.denoising_strength

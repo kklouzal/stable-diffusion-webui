@@ -390,9 +390,8 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
         if draw_legend:
             z_grid = images.draw_grid_annotations(z_grid, z_sub_grid_max_w, z_sub_grid_max_h, title_texts, [[images.GridAnnotation()]])
         processed_result.images.insert(0, z_grid)
-        # TODO: Deeper aspects of the program rely on grid info being misaligned between metadata arrays, which is not ideal.
-        # processed_result.all_prompts.insert(0, processed_result.all_prompts[0])
-        # processed_result.all_seeds.insert(0, processed_result.all_seeds[0])
+        # TODO: Deeper aspects of the program rely on grid info being misaligned between metadata arrays, which is not ideal:
+        # only infotexts gets an entry for the Z grid; all_prompts/all_seeds deliberately do not.
         processed_result.infotexts.insert(0, processed_result.infotexts[0])
 
     return processed_result

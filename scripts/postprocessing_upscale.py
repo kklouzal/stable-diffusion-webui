@@ -5,7 +5,6 @@ import threading
 from collections import OrderedDict
 
 from PIL import Image
-import numpy as np
 
 from modules import scripts_postprocessing, shared
 from modules import headless_ui as gr

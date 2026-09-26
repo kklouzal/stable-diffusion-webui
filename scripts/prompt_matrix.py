@@ -5,36 +5,8 @@ from modules import headless_ui as gr
 
 from modules import images
 from modules.processing import process_images
-from modules.shared import opts, state
+from modules.shared import opts
 import modules.sd_samplers
-
-
-def draw_xy_grid(xs, ys, x_label, y_label, cell):
-    res = []
-
-    ver_texts = [[images.GridAnnotation(y_label(y))] for y in ys]
-    hor_texts = [[images.GridAnnotation(x_label(x))] for x in xs]
-
-    first_processed = None
-
-    state.job_count = len(xs) * len(ys)
-
-    for iy, y in enumerate(ys):
-        for ix, x in enumerate(xs):
-            state.job = f"{ix + iy * len(xs) + 1} out of {len(xs) * len(ys)}"
-
-            processed = cell(x, y)
-            if first_processed is None:
-                first_processed = processed
-
-            res.append(processed.images[0])
-
-    grid = images.image_grid(res, rows=len(ys))
-    grid = images.draw_grid_annotations(grid, res[0].width, res[0].height, hor_texts, ver_texts)
-
-    first_processed.images = [grid]
-
-    return first_processed
 
 
 class Script(scripts.Script):
