@@ -294,14 +294,14 @@ class SEGExtensionScript(UIWrapper):
                         if hasattr(module.to_q, 'seg_enable'):
                                 module.to_q.seg_enable = should_enable
 
-        def get_xyz_axis_options(self) -> dict:
+        def get_xyz_axis_options(self) -> list:
                 xyz_grid = scripts.loaded_script_module("xyz_grid.py")
-                extra_axis_options = {
+                extra_axis_options = [
                         xyz_grid.AxisOption("[SEG] Active", str, xyz_field_setter('seg_active', 'seg_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[SEG] SEG Blur Sigma", float, xyz_field_setter("seg_blur_sigma", 'seg_active')),
                         xyz_grid.AxisOption("[SEG] SEG Start Step", int, xyz_field_setter("seg_start_step", 'seg_active')),
                         xyz_grid.AxisOption("[SEG] SEG End Step", int, xyz_field_setter("seg_end_step", 'seg_active')),
-                }
+                ]
                 return extra_axis_options
 
 

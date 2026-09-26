@@ -116,8 +116,8 @@ class CFGCombinerScript(UIWrapper):
                     script_callbacks.remove_callbacks_for_function(self._cfg_denoiser_callback)
                     self._cfg_denoiser_callback = None
 
-        def get_xyz_axis_options(self) -> dict:
-            return {}
+        def get_xyz_axis_options(self) -> list:
+            return []
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict):
             """Callback for when the CFG denoiser is available.

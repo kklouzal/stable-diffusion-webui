@@ -682,9 +682,9 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.image_cond = None
                         pag_params.sigma = None
 
-        def get_xyz_axis_options(self) -> dict:
+        def get_xyz_axis_options(self) -> list:
                 xyz_grid = scripts.loaded_script_module("xyz_grid.py")
-                extra_axis_options = {
+                extra_axis_options = [
                         xyz_grid.AxisOption("[PAG] Active", str, xyz_field_setter('pag_active', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[PAG] SANF", str, xyz_field_setter('pag_sanf', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[PAG] PAG Scale", float, xyz_field_setter("pag_scale", 'pag_active')),
@@ -694,7 +694,7 @@ class PAGExtensionScript(UIWrapper):
                         xyz_grid.AxisOption("[PAG] CFG Noise Interval Low", float, xyz_field_setter("cfg_interval_low", 'pag_active')),
                         xyz_grid.AxisOption("[PAG] CFG Noise Interval High", float, xyz_field_setter("cfg_interval_high", 'pag_active')),
                         xyz_grid.AxisOption("[PAG] CFG Schedule Type", str, xyz_field_setter('cfg_interval_schedule', 'pag_active', also_enable='cfg_interval_enable'), choices=lambda: SCHEDULES),
-                }
+                ]
                 return extra_axis_options
 
 
