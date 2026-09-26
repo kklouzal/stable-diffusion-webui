@@ -2,7 +2,7 @@ import logging
 import time
 import torch
 import torch.nn.functional as F
-from modules import scripts, script_callbacks
+from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper
@@ -88,14 +88,6 @@ class CFGCombinerScript(UIWrapper):
         def __init__(self):
                 self._cfg_denoiser_callback = None
 
-        # Extension title in menu UI
-        def title(self):
-                return "CFG Combiner"
-
-        # Decide to show menu in txt2img or img2img
-        def show(self, is_img2img):
-                return scripts.AlwaysVisible
-
         # Setup menu ui detail
         def setup_ui(self, is_img2img):
             self.infotext_fields = []
@@ -137,10 +129,6 @@ class CFGCombinerScript(UIWrapper):
             logger.debug("CFGCombinerScript postprocess_batch")
             cfg_dict = getattr(p, 'incant_cfg_params', None)
             _merge_cfg_timings(p, cfg_dict)
-            self.restore_cfg_denoiser(cfg_dict)
-            self.remove_callbacks()
-
-        def unhook_callbacks(self, cfg_dict = None):
             self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
 
@@ -191,8 +179,6 @@ class CFGCombinerScript(UIWrapper):
 
             gb10_combine_denoised.__name__ = 'gb10_incantations_combine_denoised'
             denoiser.combine_denoised = gb10_combine_denoised
-            denoiser._gb10_incantations_original_combine_denoised = original_func
-            denoiser._gb10_incantations_wrapped_combine_denoised = gb10_combine_denoised
             cfg_dict['denoiser'] = denoiser
             cfg_dict['original_combine_denoised'] = original_func
             cfg_dict['wrapped_combine_denoised'] = gb10_combine_denoised
@@ -214,12 +200,6 @@ class CFGCombinerScript(UIWrapper):
 
             if getattr(denoiser, 'combine_denoised', None) is wrapped:
                     denoiser.combine_denoised = original
-                    for attr in (
-                            '_gb10_incantations_original_combine_denoised',
-                            '_gb10_incantations_wrapped_combine_denoised',
-                    ):
-                            if hasattr(denoiser, attr):
-                                    delattr(denoiser, attr)
             else:
                     logger.warning("Not restoring combine_denoised because another wrapper replaced the GB10 wrapper")
 
@@ -258,8 +238,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                 cfg_scale = cond_scale
 
                 # 1. CFG Interval
-                # Overrides cfg_scale if pag_params is not None
-                if pag_params is not None and pag_params.cfg_interval_enable:
+                if pag_params.cfg_interval_enable:
                         cfg_scale = pag_params.cfg_interval_scheduled_value
 
                 # Build the base CFG result by delegating to the captured original combiner.
@@ -274,36 +253,31 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                         _record_cfg_timing(cfg_dict, "combine_original", time.perf_counter() - original_started)
 
                 # 2. PAG
-                pag_x_out = None
-                pag_scale = None
                 run_pag = False
-                if pag_params is not None:
-                        pag_active = pag_params.pag_active
-                        pag_x_out = pag_params.pag_x_out
-                        pag_scale = pag_params.pag_scale
+                pag_active = pag_params.pag_active
+                pag_x_out = pag_params.pag_x_out
+                pag_scale = pag_params.pag_scale
 
-                        if not pag_active or not (pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step) or pag_scale <= 0:
-                                run_pag = False
-                        elif pag_x_out is None:
-                                logger.warning("PAG was requested but no PAG denoised output is available; using base CFG only")
-                        else:
-                                run_pag = pag_active
+                if not pag_active or not (pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step) or pag_scale <= 0:
+                        run_pag = False
+                elif pag_x_out is None:
+                        logger.warning("PAG was requested but no PAG denoised output is available; using base CFG only")
+                else:
+                        run_pag = pag_active
 
                 # Dynamic Thresholding can be composed cleanly with the base CFG path above.
                 # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
                 # blend, so it cannot faithfully preserve a dynamically-thresholded base.
                 # In that case keep the previous SANF behavior rather than pretending both
                 # rescalers are fully applied.
-                use_saliency_map = False
-                if pag_params is not None:
-                        use_saliency_map = pag_params.pag_sanf
+                use_saliency_map = pag_params.pag_sanf
                 if use_saliency_map and run_pag:
                         denoised = denoised_uncond.clone()
 
                 ### Add PAG guidance on top of the base CFG result
                 for i, conds in enumerate(conds_list):
                         for cond_index, weight in conds:
-                                if pag_params is None or not run_pag:
+                                if not run_pag:
                                         continue
                                 try:
                                         pag_index = cond_index if cond_index < pag_x_out.shape[0] else i

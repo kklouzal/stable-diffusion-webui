@@ -21,9 +21,8 @@ GitHub URL: https://github.com/v0xie/sd-webui-incantations
 
 """
 class SubmoduleInfo:
-        def __init__(self, module: UIWrapper, module_idx = 0, num_args = -1, arg_idx = -1):
+        def __init__(self, module: UIWrapper, num_args = -1, arg_idx = -1):
                 self.module: UIWrapper = module
-                self.module_idx: int = module_idx
                 self.num_args: int = num_args
                 self.arg_idx: int = arg_idx
 
@@ -74,8 +73,7 @@ class IncantBaseExtensionScript(scripts.Script):
                 # setup UI
                 out = []
                 with gr.Accordion('Incantations', open=False):
-                        for idx, module_info in enumerate(submodules):
-                                module_info.module_idx = idx
+                        for module_info in submodules:
                                 module = module_info.module
                                 module_param_list = module.setup_ui(is_img2img)
                                 module_info.num_args = len(module_param_list)
@@ -119,10 +117,6 @@ class IncantBaseExtensionScript(scripts.Script):
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                 for m in submodules:
                         _timed_module_call(p, m.module, "postprocess_batch", m.module.postprocess_batch, p, *self.m_args(m, *args), **kwargs)
-
-        def unhook_callbacks(self):
-                for m in submodules:
-                        m.module.unhook_callbacks()
 
         def m_args(self, module: SubmoduleInfo, *args):
                 return args[module.arg_idx:module.arg_idx + module.num_args]

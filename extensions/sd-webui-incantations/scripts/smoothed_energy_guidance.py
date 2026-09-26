@@ -99,14 +99,6 @@ class SEGExtensionScript(UIWrapper):
                 self._seg_hook_handles = []
                 self._seg_hooked_modules = []
 
-        # Extension title in menu UI
-        def title(self) -> str:
-                return "Smoothed Energy Guidance"
-
-        # Decide to show menu in txt2img or img2img
-        def show(self, is_img2img):
-                return scripts.AlwaysVisible
-
         # Setup menu ui detail
         def setup_ui(self, is_img2img) -> list:
                 with gr.Accordion('Smoothed Energy Guidance', open=False):
@@ -191,18 +183,12 @@ class SEGExtensionScript(UIWrapper):
                 script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
 
         def postprocess_batch(self, p, *args, **kwargs):
-                self.seg_postprocess_batch(p, *args, **kwargs)
-
-        def seg_postprocess_batch(self, p, active, seg_blur_sigma, start_step, end_step, *args, **kwargs):
                 seg_params = getattr(p, "incant_cfg_params", {}).get("seg_params") if getattr(p, "incant_cfg_params", None) else None
                 if seg_params is not None:
                         _merge_seg_timings(p, seg_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed SEG hooks and callbacks')
-                active = getattr(p, "seg_active", active)
-                if active is False:
-                        return
 
         def remove_callbacks(self):
                 if self._cfg_denoiser_callback is not None:
@@ -220,10 +206,6 @@ class SEGExtensionScript(UIWrapper):
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
                 self._seg_hooked_modules = []
-
-        def unhook_callbacks(self, seg_params: SEGStateParams = None):
-                self.remove_all_hooks()
-                self.remove_callbacks()
 
         def ready_hijack_forward(self, selfattn_modules, seg_blur_sigma, seg_blur_threshold, height, width):
                 self._seg_hooked_modules = list(selfattn_modules)
@@ -359,8 +341,6 @@ def seg_apply_override(field, boolean: bool = False):
         setattr(p, field, x)
         if not hasattr(p, "seg_active"):
                 p.seg_active = True
-        if 'cfg_interval_' in field and not hasattr(p, "cfg_interval_enable"):
-            p.cfg_interval_enable = True
     return fun
 
 

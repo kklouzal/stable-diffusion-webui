@@ -323,14 +323,6 @@ class PAGExtensionScript(UIWrapper):
                 self._pag_hook_handles = []
                 self._pag_hooked_modules = []
 
-        # Extension title in menu UI
-        def title(self) -> str:
-                return "Perturbed Attention Guidance"
-
-        # Decide to show menu in txt2img or img2img
-        def show(self, is_img2img):
-                return scripts.AlwaysVisible
-
         # Setup menu ui detail
         def setup_ui(self, is_img2img) -> list:
                 with gr.Accordion('Perturbed Attention Guidance', open=False):
@@ -447,7 +439,6 @@ class PAGExtensionScript(UIWrapper):
                 pag_params.max_sampling_step = p.steps
                 pag_params.guidance_scale = p.cfg_scale
                 pag_params.batch_size = p.batch_size
-                pag_params.denoiser = None
                 pag_params.cfg_interval_scheduled_value = p.cfg_scale
 
                 pag_params.noise_levels = [calculate_noise_level(i, pag_params.max_sampling_step) for i in range(pag_params.max_sampling_step + 1)]
@@ -508,18 +499,12 @@ class PAGExtensionScript(UIWrapper):
 
 
         def postprocess_batch(self, p, *args, **kwargs):
-                self.pag_postprocess_batch(p, *args, **kwargs)
-
-        def pag_postprocess_batch(self, p, active, *args, **kwargs):
                 pag_params = getattr(p, "incant_cfg_params", {}).get("pag_params") if getattr(p, "incant_cfg_params", None) else None
                 if pag_params is not None:
                         _merge_pag_timings(p, pag_params)
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed PAG hooks and callbacks')
-                active = getattr(p, "pag_active", active)
-                if active is False:
-                        return
 
         def remove_callbacks(self):
                 if self._cfg_denoiser_callback is not None:
@@ -543,11 +528,6 @@ class PAGExtensionScript(UIWrapper):
                         if to_v is not None:
                                 module_hooks.modules_remove_field(to_v, 'pag_parent_module')
                 self._pag_hooked_modules = []
-
-        def unhook_callbacks(self, pag_params: PAGStateParams = None):
-                self.remove_all_hooks()
-                self.remove_callbacks()
-
 
         def ready_hijack_forward(self, crossattn_modules, pag_scale):
                 """ Create hooks in the forward pass of the cross attention modules
@@ -677,7 +657,6 @@ class PAGExtensionScript(UIWrapper):
                 pag_params.x_in = params.x.detach()
                 pag_params.sigma = params.sigma.detach()
                 pag_params.image_cond = params.image_cond.detach() if params.image_cond is not None else None
-                pag_params.denoiser = params.denoiser
                 pag_params.make_condition_dict = get_make_condition_dict_fn(params.text_uncond)
 
 
@@ -758,7 +737,6 @@ class PAGExtensionScript(UIWrapper):
                         xyz_grid.AxisOption("[PAG] CFG Noise Interval Low", float, pag_apply_field("cfg_interval_low")),
                         xyz_grid.AxisOption("[PAG] CFG Noise Interval High", float, pag_apply_field("cfg_interval_high")),
                         xyz_grid.AxisOption("[PAG] CFG Schedule Type", str, pag_apply_override('cfg_interval_schedule', boolean=False), choices=lambda: SCHEDULES),
-                        #xyz_grid.AxisOption("[PAG] ctnms_alpha", float, pag_apply_field("pag_ctnms_alpha")),
                 }
                 return extra_axis_options
 
@@ -828,7 +806,6 @@ def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80
         return N
     if noise_level >= sigma_max:
         return 0
-        #return N - 1
 
     low, high = 0, N - 1
     while low <= high:
@@ -957,15 +934,6 @@ def a_shape_schedule(step: int, max_steps: int, w0: float):
         if step < max_steps / 2:
                 return linear_schedule(step, max_steps, w0)
         return invlinear_schedule(step, max_steps, w0)
-
-
-def interval_schedule(step: int, max_steps: int, w0: float, low: float, high: float):
-        """
-        Normalized interval scheduler for CFG guidance weight.
-        """
-        if low <= step <= high:
-                return w0
-        return 1.0
 
 
 _CFG_SCHEDULE_DISPATCH = {

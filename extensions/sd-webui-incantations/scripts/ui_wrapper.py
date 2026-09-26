@@ -3,9 +3,6 @@ class UIWrapper:
         self.infotext_fields: list = []
         self.paste_field_names: list = []
 
-    def title(self) -> str:
-        raise NotImplementedError
-
     def setup_ui(self, is_img2img) -> list:
         raise NotImplementedError
 
@@ -28,9 +25,6 @@ class UIWrapper:
         pass
 
     def postprocess_batch(self, p, *args, **kwargs):
-        pass
-
-    def unhook_callbacks(self) -> None:
         pass
 
     def get_xyz_axis_options(self) -> list:
