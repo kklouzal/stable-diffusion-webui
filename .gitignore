@@ -37,6 +37,10 @@ notification.mp3
 !/extensions/openclaw-clear-cond-cache/**
 !/extensions/sd-webui-teacache/
 !/extensions/sd-webui-teacache/**
+!/extensions/sd-webui-controlnet/
+!/extensions/sd-webui-controlnet/**
+/extensions/sd-webui-controlnet/models/*.safetensors
+/extensions/sd-webui-controlnet/annotator/downloads/
 /extensions/**/__pycache__/
 /extensions/**/*.pyc
 /extensions/**/.DS_Store
