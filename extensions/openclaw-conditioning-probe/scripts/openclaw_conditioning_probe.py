@@ -1,9 +1,9 @@
 from __future__ import annotations
-import hashlib, json, os, threading, time
+import hashlib, os, threading, time
 from typing import Any
 import torch
 from fastapi import FastAPI
-from modules import script_callbacks, shared, openclaw_cache_epochs, sd_hijack, prompt_parser
+from modules import script_callbacks, shared, openclaw_cache_epochs, sd_hijack
 
 _LOCK=threading.RLock()
 

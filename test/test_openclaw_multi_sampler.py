@@ -67,7 +67,7 @@ def load_multi_sampler(monkeypatch):
     ))
     monkeypatch.setitem(sys.modules, "modules.sd_samplers_kdiffusion", _module(
         "modules.sd_samplers_kdiffusion",
-        KDiffusionSampler=type("KDiffusionSampler", (), {}),
+        KDiffusionSampler=type("KDiffusionSampler", (), {"initialize": lambda self, p: {}}),
         samplers_k_diffusion=[("Euler", "sample_euler"), ("Heun", "sample_heun"), ("DPM++ 2M SDE", "sample_dpmpp_2m_sde"), ("DPM2", "sample_dpm_2")],
         k_diffusion_samplers_map={
             "Euler": types.SimpleNamespace(options={}, total_steps=lambda steps: steps),
@@ -185,10 +185,10 @@ def test_terminal_one_step_dpmpp_2m_sde_uses_direct_denoise(monkeypatch):
     )
     sampler = object.__new__(module.MultiKDiffusionSampler)
     sampler.definition = {"name": "Multi: test", "samplers": ["Euler", "DPM++ 2M SDE"], "switch_ats": [1]}
-    sampler.eta_option_field = "eta_ancestral"
     sampler.last_latent = None
     sampler.model_wrap_cfg = FakeModelWrapCfg()
     sampler.stop_at = None
+    sampler.s_min_uncond = 0.0
 
     result = sampler._run_chain(
         p,
@@ -197,7 +197,6 @@ def test_terminal_one_step_dpmpp_2m_sde_uses_direct_denoise(monkeypatch):
         unconditional_conditioning=None,
         sigmas=[2, 1, 0],
         steps=2,
-        is_img2img=True,
     )
 
     assert result == "denoised"

@@ -34,6 +34,8 @@ def install_a1111_stubs() -> None:
     sd_models_mod.model_data = types.SimpleNamespace(was_loaded_at_least_once=True, sd_model=None)
     sd_vae_mod = types.ModuleType("modules.sd_vae")
     sd_vae_mod.load_vae = lambda model, vae_file=None, vae_source="from unknown source": None
+    sd_hijack_mod = types.ModuleType("modules.sd_hijack")
+    sd_hijack_mod.model_hijack = types.SimpleNamespace(get_prompt_lengths=lambda prompt: (len(prompt), 75))
     processing_mod = types.ModuleType("modules.processing")
 
     class StableDiffusionProcessing:
@@ -73,6 +75,7 @@ def install_a1111_stubs() -> None:
             "modules.prompt_parser": prompt_parser_mod,
             "modules.processing": processing_mod,
             "modules.script_callbacks": script_callbacks_mod,
+            "modules.sd_hijack": sd_hijack_mod,
             "modules.sd_models": sd_models_mod,
             "modules.sd_vae": sd_vae_mod,
             "modules.textual_inversion": textual_inversion_pkg,

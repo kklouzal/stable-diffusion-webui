@@ -212,7 +212,6 @@ class MultiSamplerCoreTests(unittest.TestCase):
     def test_brownian_noise_sampler_uses_stage_sigmas_not_full_chain(self):
         sampler = object.__new__(self.multi.MultiKDiffusionSampler)
         stage_sigmas = torch.tensor([3.0, 2.0, 0.0])
-        full_sigmas = torch.tensor([9.0, 8.0, 7.0, 0.0])
         seen = []
         sampler.create_noise_sampler = lambda _x, sigmas, _p: seen.append(sigmas) or "noise"
 
@@ -223,9 +222,7 @@ class MultiSamplerCoreTests(unittest.TestCase):
             config=types.SimpleNamespace(options={"brownian_noise": True}),
             x=torch.zeros(1),
             sigmas=stage_sigmas,
-            full_sigmas=full_sigmas,
             stage_steps=2,
-            is_img2img=False,
         )
 
         self.assertEqual(kwargs["noise_sampler"], "noise")

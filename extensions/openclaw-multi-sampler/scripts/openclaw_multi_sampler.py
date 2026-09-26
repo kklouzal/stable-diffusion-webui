@@ -192,18 +192,6 @@ def _sigma_transition_count(sigmas: torch.Tensor) -> int:
     return max(0, len(sigmas) - 1)
 
 
-def _definition_stages(definition: dict[str, Any], sigmas: torch.Tensor, steps: int) -> list[tuple[str, torch.Tensor, int, int]]:
-    samplers, boundaries = _chain_boundaries(definition, steps)
-    return [
-        (sampler_name, sigmas[boundaries[index] : boundaries[index + 1] + 1], boundaries[index], boundaries[index + 1])
-        for index, sampler_name in enumerate(samplers)
-    ]
-
-
-def _format_chain_metadata(stages: list[tuple[str, torch.Tensor, int, int]]) -> str:
-    return " -> ".join(f"{sampler_name}@{start}-{end}" for sampler_name, _stage_sigmas, start, end in stages)
-
-
 def _format_stage_scheduler_metadata(stages: list[tuple[str, str | None, torch.Tensor, int, int]]) -> str:
     parts = []
     for sampler_name, scheduler_name, _stage_sigmas, start, end in stages:
@@ -365,18 +353,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             stages.append((sampler_name, scheduler_name, stage_sigmas, start, end))
         return stages
 
-    def _initialize_chain(self, p) -> None:
-        self.p = p
-        self.model_wrap_cfg.p = p
-        self.model_wrap_cfg.mask = p.mask if hasattr(p, "mask") else None
-        self.model_wrap_cfg.nmask = p.nmask if hasattr(p, "nmask") else None
-        self.model_wrap_cfg.step = 0
-        self.model_wrap_cfg.image_cfg_scale = getattr(p, "image_cfg_scale", None)
-        self.eta = p.eta if p.eta is not None else getattr(opts, self.eta_option_field, 0.0)
-        self.s_min_uncond = getattr(p, "s_min_uncond", 0.0)
-        k_diffusion.sampling.torch = sd_samplers_common.TorchHijack(p)
-
-    def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, full_sigmas: torch.Tensor, stage_steps: int, is_img2img: bool) -> dict[str, Any]:
+    def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, stage_steps: int) -> dict[str, Any]:
         params = _signature_param_names(func)
         kwargs: dict[str, Any] = {}
         for param_name in _stage_extra_params(funcname):
@@ -480,14 +457,16 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         sigmas: torch.Tensor,
         steps: int,
         *,
-        is_img2img: bool,
         launch_steps: int | None = None,
         image_conditioning=None,
         scheduler_steps: int | None = None,
         scheduler_slice_start: int = 0,
         sigma_transform=None,
     ):
-        self._initialize_chain(p)
+        # extra_params is empty and the base func is sample_euler, so this only binds p to
+        # the sampler/denoiser state and returns no kwargs; per-stage kwargs come from
+        # _build_stage_kwargs.
+        self.initialize(p)
         stages = self._build_stages(
             p,
             sigmas,
@@ -524,7 +503,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                     continue
                 config = _k_sampler_config(sampler_name)
                 func, stage_funcname = _sampler_func_for(sampler_name)
-                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, full_sigmas=sigmas, stage_steps=stage_steps, is_img2img=is_img2img)
+                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, stage_steps=stage_steps)
                 # k-diffusion's sample_dpmpp_2m_sde has an h_last bookkeeping bug when
                 # it is asked to do only the final denoise transition [sigma, 0].
                 # A mid-chain split can naturally create that one-step stage, so handle
@@ -554,7 +533,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             x = x * torch.sqrt(1.0 + sigmas[0] ** 2.0)
         else:
             x = x * sigmas[0]
-        samples = self._run_chain(p, x, conditioning, unconditional_conditioning, sigmas, steps, is_img2img=False, image_conditioning=image_conditioning)
+        samples = self._run_chain(p, x, conditioning, unconditional_conditioning, sigmas, steps, image_conditioning=image_conditioning)
         self.add_infotext(p)
         return samples
 
@@ -592,7 +571,6 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             unconditional_conditioning,
             sigma_sched,
             sampling_steps,
-            is_img2img=True,
             launch_steps=t_enc + 1,
             image_conditioning=image_conditioning,
             scheduler_steps=steps,

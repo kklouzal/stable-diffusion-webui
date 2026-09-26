@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import threading
 import time
@@ -10,6 +9,7 @@ from fastapi import FastAPI, Request
 
 from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, openclaw_cache_epochs
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
+from modules.sd_hijack import model_hijack
 from modules.textual_inversion import textual_inversion
 
 _last_cleared_at = 0.0
@@ -24,11 +24,6 @@ _backend_lora_hooks_installed = False
 _backend_lora_batch: dict[str, Any] = {"total": 0, "index": 0}
 _startup_model_load_token: int | None = None
 
-try:
-    from modules.sd_hijack import model_hijack
-except (ImportError, ModuleNotFoundError):
-    model_hijack = None
-
 
 def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
     """Estimate A1111 prompt token length using the active model tokenizer."""
@@ -40,28 +35,16 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
         except Exception:
             prompt_schedules = [[[steps, text or ""]]]
 
-        forge = importlib.util.find_spec("modules_forge") is not None
-
         prompts = [
             prompt_text
             for prompt_schedule in prompt_schedules
             for _step, prompt_text in prompt_schedule
         ] or [text or ""]
 
-        if model_hijack is None:
-            return {"ok": False, "error": "A1111 model_hijack tokenizer is unavailable", "token_count": None, "max_length": None}
-
-        if forge:
-            cond_stage_model = sd_models.model_data.sd_model.cond_stage_model
-            token_count, max_length = max(
-                [model_hijack.get_prompt_lengths(prompt, cond_stage_model) for prompt in prompts],
-                key=lambda args: args[0],
-            )
-        else:
-            token_count, max_length = max(
-                [model_hijack.get_prompt_lengths(prompt) for prompt in prompts],
-                key=lambda args: args[0],
-            )
+        token_count, max_length = max(
+            [model_hijack.get_prompt_lengths(prompt) for prompt in prompts],
+            key=lambda args: args[0],
+        )
 
         return {"ok": True, "token_count": token_count, "max_length": max_length}
     except Exception as exc:
@@ -112,25 +95,6 @@ def _push_backend_activity(phase: str, label: str, *, detail: Any = None, progre
         return token
 
 
-def _update_backend_activity(token: int, *, label: Any = None, detail: Any = None, progress: Any = None, current: Any = None, total: Any = None) -> None:
-    now = time.time()
-    with _backend_activity_lock:
-        for item in reversed(_backend_activity_stack):
-            if item.get("token") == token:
-                if label is not None:
-                    item["label"] = str(label)
-                if detail is not None:
-                    item["detail"] = None if detail in (None, "") else str(detail)
-                if progress is not None:
-                    item["progress"] = progress
-                if current is not None:
-                    item["current"] = current
-                if total is not None:
-                    item["total"] = total
-                item["updated_at"] = now
-                break
-
-
 def _pop_backend_activity(token: int) -> None:
     with _backend_activity_lock:
         for idx in range(len(_backend_activity_stack) - 1, -1, -1):
@@ -165,11 +129,8 @@ def _install_backend_status_hooks() -> None:
     global _backend_hooks_installed, _backend_lora_hooks_installed
 
     if not _backend_hooks_installed:
-        try:
-            from modules import sd_models as _sd_models
-            from modules import sd_vae as _sd_vae
-        except Exception:
-            return
+        from modules import sd_models as _sd_models
+        from modules import sd_vae as _sd_vae
 
         _backend_hooks_installed = True
 
@@ -372,10 +333,6 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
     unwrapped = _unwrap_compiled_module(module)
 
     if enabled:
-        if not hasattr(torch, "compile"):
-            _compile_status[name] = False
-            return {"name": name, "enabled": False, "changed": False, "error": "torch.compile is unavailable"}
-
         if slot and id(module) == slot.get("compiled_id") and id(unwrapped) == slot.get("original_id"):
             _compile_status[name] = True
             return {"name": name, "enabled": True, "changed": False, "already_compiled": True}
