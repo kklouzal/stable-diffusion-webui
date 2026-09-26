@@ -713,31 +713,6 @@ def resolve_model_info(model: str) -> MockModelInfo | None:
     return None
 
 
-def convert_warp(path_mode, model_name, model_path, directory, *args):
-    if path_mode == 0:
-        if model_info := resolve_model_info(model_name):
-            return do_convert(model_info, *args)
-        return "Error: model not found"
-    if path_mode == 1:
-        if os.path.exists(model_path):
-            return do_convert(MockModelInfo(model_path), *args)
-        return f'Error: model path "{model_path}" does not exist'
-    if path_mode == 2:
-        if not os.path.isdir(directory):
-            return f'Error: path "{directory}" does not exist or is not a directory'
-        files = [
-            f for f in os.listdir(directory) if f.endswith((".ckpt", ".safetensors"))
-        ]
-        if not files:
-            return "Error: no checkpoints found in directory"
-        _args = list(args)
-        _args[3] = ""
-        for filename in files:
-            do_convert(MockModelInfo(os.path.join(directory, filename)), *_args)
-        return "Batch processing done"
-    return f"Error: unknown mode {path_mode}"
-
-
 def conversion_metadata(
     model_info: MockModelInfo,
     *,
