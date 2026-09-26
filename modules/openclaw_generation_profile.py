@@ -166,11 +166,6 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
     return tensor
 
 
-def cache_tensor(kind: str, sampler: str | None, scheduler: str | None, steps: int, tensor: torch.Tensor, params: tuple[Any, ...] = ()) -> torch.Tensor:
-    key = make_key(kind, sampler, scheduler, steps, tensor.device, tensor.dtype, params)
-    return tensor_for_key(key, lambda: tensor)
-
-
 def cached_tensor(
     kind: str,
     sampler: str | None,

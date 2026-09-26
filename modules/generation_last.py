@@ -104,13 +104,6 @@ def _copy_parameter(parameters: dict[str, Any], p, name: str, limitations: list[
         parameters[name] = value
 
 
-def _first_prompt_value(p, name: str, all_name: str):
-    value = _value(p, name)
-    if isinstance(value, list):
-        value = (_value(p, all_name, []) or [""])[0]
-    return value
-
-
 _HARNESS_OWNED_MAPPING_FIELDS = {
     "prompt", "negative_prompt", "hr_prompt", "hr_negative_prompt", "width", "height",
     "firstphase_width", "firstphase_height", "hr_scale", "hr_resize_x", "hr_resize_y",

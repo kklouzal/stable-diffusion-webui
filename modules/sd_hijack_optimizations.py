@@ -514,11 +514,6 @@ _SDPA_BACKEND_CHOICES = [
 ]
 
 
-def _sdpa_backend_available(name: str) -> bool:
-    attr = _SDPA_BACKEND_ALIASES.get(name)
-    return bool(attr and hasattr(SDPBackend, attr))
-
-
 def _sdpa_backend_availability() -> dict[str, bool]:
     return {choice: True if choice == "auto" else _normalize_sdpa_backend_choice(choice)[0] is not None for choice in _SDPA_BACKEND_CHOICES}
 
@@ -576,17 +571,6 @@ def set_sdpa_backend(sdpa_backend: str | None = None):
     _active_sdpa_backend = normalized_sdpa_backend
     SdOptimizationSdp().apply()
     return sdpa_backend_status()
-
-
-def attention_backend_status():
-    return sdpa_backend_status()
-
-
-def set_attention_backend(backend: str | None = None, sdpa_backend: str | None = None):
-    backend = (backend or "sdpa").strip().lower()
-    if backend != "sdpa":
-        raise ValueError(f"Unsupported attention backend: {backend}")
-    return set_sdpa_backend(sdpa_backend)
 
 
 def cross_attention_attnblock_forward(self, x):

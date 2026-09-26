@@ -509,10 +509,6 @@ def mxfp8_linear_skip_reason(module, fqn):
     return mxfp8_config.technical_linear_skip_reason(module)
 
 
-def mxfp8_linear_filter(module, fqn):
-    return mxfp8_linear_skip_reason(module, fqn) is None
-
-
 def apply_mxfp8_weight_quantization(model, timer, source_path=None):
     if devices.dtype != torch.bfloat16:
         raise RuntimeError("MXFP8 weight requires --dtype bfloat16; TorchAO MXFP8 kernels do not support float16 activations")
@@ -650,10 +646,6 @@ def nvfp4_linear_skip_reason(module, fqn):
         return "multihead_attention_out_proj_lora_backup"
 
     return nvfp4_config.technical_linear_skip_reason(module)
-
-
-def nvfp4_linear_filter(module, fqn):
-    return nvfp4_linear_skip_reason(module, fqn) is None
 
 
 def apply_nvfp4_weight_quantization(model, timer, source_path=None):
@@ -1170,11 +1162,6 @@ def model_has_torchao_quantization(m):
             or check_nvfp4(m)
         )
     )
-
-
-def _invalidate_model_acceleration_caches(reason, details=None):
-    openclaw_cuda_graphs.invalidate(reason, details)
-    openclaw_vae_decode_graphs.invalidate_if_changed("model_acceleration", object(), reason)
 
 
 def send_model_to_cpu(m):

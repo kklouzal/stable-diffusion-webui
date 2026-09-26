@@ -58,7 +58,6 @@ def _summarize_graph_key(raw_key: Any) -> dict[str, Any] | None:
     return {
         "sha256_16": hashlib.sha256(text.encode("utf8", errors="replace")).hexdigest()[:16],
         "length": len(text),
-        "has_seg": "'seg'" in text or '"seg"' in text,
         "has_lora": "lora" in text.lower(),
     }
 
@@ -69,7 +68,6 @@ def _summarize_cuda_graph_status(status: dict[str, Any] | None) -> dict[str, Any
 
     summary = {
         "enabled": bool(status.get("enabled", False)),
-        "allow_seg": bool(status.get("allow_seg", False)),
         "cache_size": int(status.get("cache_size") or 0),
         "max_cache_size": int(status.get("max_cache_size") or 0),
         "last_bypass_reason": status.get("last_bypass_reason"),

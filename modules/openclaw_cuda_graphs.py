@@ -64,21 +64,6 @@ def _reset_stats() -> None:
     })
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-
-    return value.strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-def _allow_seg_graphs() -> bool:
-    # SEG graphing remains opt-in. SEG mutates Python attention hook state and
-    # CUDA graph replay skips Python, so live should keep this false until a
-    # full static-equivalence validation exists for the active SEG pipeline.
-    return _env_flag("OPENCLAW_CUDA_GRAPH_ALLOW_SEG", False)
-
-
 def _min_key_hits_before_capture() -> int:
     try:
         return max(1, int(os.environ.get("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", "2") or 2))
@@ -92,7 +77,6 @@ def status() -> dict[str, Any]:
             "enabled": _ENABLED,
             "cache_size": len(_CACHE),
             "max_cache_size": _MAX_CACHE_SIZE,
-            "allow_seg": _allow_seg_graphs(),
             "min_key_hits_before_capture": _min_key_hits_before_capture(),
             **_STATS,
             "lifecycle_state_keys": sorted(_LIFECYCLE_STATE),
@@ -236,71 +220,6 @@ def _copy_into_static(static: Any, current: Any) -> None:
             _copy_into_static(dst, src)
 
 
-def _runtime_boundary_state() -> tuple[Any, ...]:
-    try:
-        from modules import devices, shared, sd_hijack_optimizations
-    except Exception:
-        devices = shared = sd_hijack_optimizations = None
-
-    model = getattr(shared, "sd_model", None) if shared is not None else None
-    checkpoint_info = getattr(model, "sd_checkpoint_info", None)
-    checkpoint_key = (
-        id(model) if model is not None else None,
-        getattr(checkpoint_info, "filename", None),
-        getattr(checkpoint_info, "hash", None),
-        getattr(checkpoint_info, "sha256", None),
-        repr(getattr(model, "used_config", None)),
-    )
-    vae_key = (
-        getattr(model, "loaded_vae_file", None),
-        id(getattr(model, "first_stage_model", None)) if model is not None else None,
-    )
-    try:
-        import networks
-
-        lora_key = tuple(
-            (
-                getattr(net, "name", None),
-                getattr(net, "mentioned_name", None),
-                getattr(net, "te_multiplier", None),
-                getattr(net, "unet_multiplier", None),
-                getattr(net, "dyn_dim", None),
-                networks.network_lora_source_signature(getattr(net, "network_on_disk", None), net)
-                if hasattr(networks, "network_lora_source_signature")
-                else None,
-            )
-            for net in getattr(networks, "loaded_networks", [])
-        )
-    except Exception:
-        lora_key = None
-    try:
-        attention_key = sd_hijack_optimizations.sdpa_backend_status() if sd_hijack_optimizations is not None else None
-    except Exception:
-        attention_key = None
-    precision_key = (
-        getattr(devices, "dtype", None),
-        getattr(devices, "dtype_unet", None),
-        getattr(devices, "dtype_vae", None),
-        getattr(devices, "unet_needs_upcast", None),
-        getattr(devices, "fp8", None),
-        getattr(devices, "mxfp8", None),
-        getattr(devices, "nvfp4", None),
-        os.environ.get("OPENCLAW_SDPA_BACKEND"),
-        os.environ.get("OPENCLAW_CUDA_GRAPHS"),
-        os.environ.get("OPENCLAW_CUDA_GRAPH_ALLOW_SEG"),
-    )
-    dependency_epochs = openclaw_cache_epochs.epoch_subset((
-        "checkpoint_object_epoch", "model_movement_epoch", "vae_object_epoch",
-        "lora_applied_epoch", "forward_hook_epoch", "precision_epoch",
-        "device_epoch", "attention_epoch", "compile_epoch",
-    ))
-    return (checkpoint_key, vae_key, lora_key, repr(attention_key), tuple(map(str, precision_key)), dependency_epochs)
-
-
-def refresh_runtime_state() -> dict[str, Any]:
-    return invalidate_if_changed("runtime", _runtime_boundary_state(), "runtime_changed")
-
-
 def note_model_loaded(model: Any | None = None, reason: str = "model_changed") -> dict[str, Any]:
     checkpoint_info = getattr(model, "sd_checkpoint_info", None)
     state = (
@@ -407,92 +326,6 @@ def _seg_params(denoiser: Any | None) -> Any | None:
     return incant_cfg.get("seg_params") if isinstance(incant_cfg, dict) else None
 
 
-def _seg_window(denoiser: Any, seg_params: Any) -> tuple[int | None, int | None, int | None]:
-    total_steps = getattr(denoiser, "total_steps", None) or getattr(denoiser, "steps", None)
-    if total_steps is None:
-        try:
-            from modules.shared import state
-
-            total_steps = state.sampling_steps
-        except Exception:
-            total_steps = None
-
-    try:
-        total = int(total_steps) if total_steps else None
-    except (TypeError, ValueError):
-        total = None
-    try:
-        start_step = int(getattr(seg_params, "seg_start_step", 0) or 0)
-    except (TypeError, ValueError):
-        start_step = None
-    try:
-        end_step = int(getattr(seg_params, "seg_end_step", -1) or -1)
-    except (TypeError, ValueError):
-        end_step = None
-    return total, start_step, end_step
-
-
-def _seg_active_for_all_graph_steps(denoiser: Any, seg_params: Any) -> bool:
-    # SEG toggles Python attention hooks per step. CUDA graph replay bypasses
-    # Python, so replay is safe only when the SEG hook flag is enabled for every
-    # denoiser call in the sampling window. Partial/intermittent SEG stays eager
-    # to preserve image quality over speed.
-    total_steps, start_step, end_step = _seg_window(denoiser, seg_params)
-    if total_steps is None or start_step is None or end_step is None or total_steps <= 0:
-        return False
-    return start_step <= 0 and end_step >= total_steps - 1
-
-
-def _seg_module_signature(seg_params: Any) -> tuple[Any, ...] | None:
-    modules = getattr(seg_params, "crossattn_modules", None)
-    if not modules:
-        return None
-    signature = []
-    for module in modules:
-        to_q = getattr(module, "to_q", None)
-        if to_q is None or not hasattr(to_q, "seg_enable"):
-            return None
-        signature.append((
-            getattr(module, "network_layer_name", None),
-            type(module).__module__,
-            type(module).__qualname__,
-            int(getattr(module, "heads", 0) or 0),
-            id(to_q),
-        ))
-    return tuple(signature)
-
-
-def _seg_graph_state_key(denoiser: Any | None) -> Any:
-    seg_params = _seg_params(denoiser)
-    if denoiser is None or seg_params is None or not bool(getattr(seg_params, "seg_active", False)):
-        return None
-
-    p = getattr(denoiser, "p", None)
-    try:
-        import modules.shared as shared
-
-        batch_cond_uncond = bool(getattr(shared.opts, "batch_cond_uncond", False))
-    except Exception:
-        batch_cond_uncond = None
-
-    total_steps, start_step, end_step = _seg_window(denoiser, seg_params)
-    module_signature = _seg_module_signature(seg_params)
-    return (
-        "seg",
-        _allow_seg_graphs(),
-        bool(getattr(seg_params, "seg_active", False)),
-        float(getattr(seg_params, "seg_blur_sigma", 0.0) or 0.0),
-        float(getattr(seg_params, "seg_blur_threshold", 0.0) or 0.0),
-        start_step,
-        end_step,
-        total_steps,
-        _seg_active_for_all_graph_steps(denoiser, seg_params),
-        int(getattr(p, "height", 0) or 0),
-        int(getattr(p, "width", 0) or 0),
-        batch_cond_uncond,
-        module_signature,
-    )
-
 def _img2img_graph_state_key(denoiser: Any | None) -> Any:
     if denoiser is None:
         return None
@@ -513,7 +346,6 @@ def _denoiser_graph_key(denoiser: Any | None) -> Any:
     sd_model = getattr(p, "sd_model", None) if p is not None else None
     unet = getattr(getattr(sd_model, "model", None), "diffusion_model", None)
     return (
-        _seg_graph_state_key(denoiser),
         _img2img_graph_state_key(denoiser),
         # TeaCache is implemented as a per-request Python UNet.forward patch. The
         # CUDA graph cache key must include this active hook state; otherwise a graph
@@ -572,8 +404,7 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None) -> str | None:
             # parameters span the full sampling window, replay bypasses the Python
             # hook lifecycle and has produced process-dependent repeated-SEG output.
             # Keep SEG eager until the hook state is represented as explicit graph
-            # input/state; OPENCLAW_CUDA_GRAPH_ALLOW_SEG is retained as diagnostics
-            # only and must not trade fixed-seed quality for graph speed.
+            # input/state; never trade fixed-seed quality for graph speed.
             return "seg_attention_hooks"
 
     return None
@@ -660,7 +491,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
-                    warmup_out = fn(static_x, static_sigma, cond=static_cond)
+                    fn(static_x, static_sigma, cond=static_cond)
                 torch.cuda.current_stream().wait_stream(stream)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):

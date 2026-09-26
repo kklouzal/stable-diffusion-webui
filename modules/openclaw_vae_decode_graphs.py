@@ -12,8 +12,6 @@ import torch
 from modules import openclaw_cache_epochs
 
 _ENABLED = False
-_OPERATION_DECODE = "decode"
-_OPERATION_ENCODE = "encode"
 _GRAPH_CONTRACT_VERSION = 2
 _EPOCH_DIMENSIONS = (
     "checkpoint_object_epoch",
@@ -145,14 +143,6 @@ def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) 
     return status()
 
 
-def note_model_loaded(state: Any = None) -> dict[str, Any]:
-    return invalidate_if_changed("model", state if state is not None else _runtime_identity(None)[0], "model_changed")
-
-
-def note_vae_loaded(state: Any = None) -> dict[str, Any]:
-    return invalidate_if_changed("vae", state if state is not None else _runtime_identity(None)[1], "vae_changed")
-
-
 def _callable_identity(value: Any) -> tuple[Any, ...] | None:
     if value is None:
         return None
@@ -213,16 +203,15 @@ def _tensor_key(x: torch.Tensor) -> tuple[Any, ...]:
     )
 
 
-def _option_identity(operation: str, approximation: int) -> tuple[Any, ...]:
+def _option_identity(approximation: int) -> tuple[Any, ...]:
     try:
         from modules import shared
 
         opts = getattr(shared, "opts", None)
         cmd_opts = getattr(shared, "cmd_opts", None)
-        method_name = "sd_vae_decode_method" if operation == _OPERATION_DECODE else "sd_vae_encode_method"
         return (
             approximation,
-            getattr(opts, method_name, None),
+            getattr(opts, "sd_vae_decode_method", None),
             bool(getattr(opts, "hypertile_enable_vae", False)),
             bool(getattr(cmd_opts, "no_half_vae", False)),
             bool(getattr(cmd_opts, "upcast_sampling", False)),
@@ -285,31 +274,24 @@ def _mutation_epochs() -> tuple[tuple[str, int], ...]:
         return tuple()
 
 
-def _bypass_reason(model: Any, x: Any, approximation: int, operation: str) -> str | None:
+def _bypass_reason(model: Any, x: Any, approximation: int) -> str | None:
+    # Decode only: encoding samples a posterior, so a capture-only invocation would consume an
+    # extra RNG result on the cold path. Encode stays eager until its RNG state is a tested graph input.
     if not _ENABLED:
         return "disabled"
-    if operation not in {_OPERATION_DECODE, _OPERATION_ENCODE}:
-        return "unsupported_operation"
-    # Encoding commonly samples a posterior. A capture-only invocation would
-    # consume an extra RNG result on the cold path, so encoding remains eager
-    # until its RNG state is an explicit, equivalence-tested graph dependency.
-    if operation == _OPERATION_ENCODE:
-        return "encode_rng_semantics"
     if approximation != 0:
         return "vae_approximation"
     if not torch.is_tensor(x):
         return "not_tensor"
     if not x.is_cuda:
         return "not_cuda"
-    expected_channels = 4 if operation == _OPERATION_DECODE else 3
-    if x.ndim != 4 or x.shape[1] != expected_channels:
+    if x.ndim != 4 or x.shape[1] != 4:
         return "unsupported_shape"
     try:
         from modules import lowvram, shared
 
         opts = getattr(shared, "opts", None)
-        method_name = "sd_vae_decode_method" if operation == _OPERATION_DECODE else "sd_vae_encode_method"
-        if getattr(opts, method_name, "Full") != "Full":
+        if getattr(opts, "sd_vae_decode_method", "Full") != "Full":
             return "vae_method"
         if getattr(opts, "hypertile_enable_vae", False):
             return "hypertile_vae"
@@ -318,35 +300,29 @@ def _bypass_reason(model: Any, x: Any, approximation: int, operation: str) -> st
     except Exception:
         return "state_probe_failed"
     vae = getattr(model, "first_stage_model", None)
-    method = "decode_first_stage" if operation == _OPERATION_DECODE else "encode_first_stage"
-    if vae is None or not hasattr(model, method):
+    if vae is None or not hasattr(model, "decode_first_stage"):
         return "missing_vae"
     if bool(getattr(vae, "training", False)):
         return "vae_training"
     return None
 
 
-def _key(model: Any, x: torch.Tensor, approximation: int, operation: str = _OPERATION_DECODE) -> tuple[Any, ...]:
+def _key(model: Any, x: torch.Tensor, approximation: int) -> tuple[Any, ...]:
     return (
         "vae_cuda_graph",
-        operation,
         _runtime_identity(model),
         _tensor_key(x),
-        _option_identity(operation, approximation),
+        _option_identity(approximation),
         _mutation_epochs(),
         _graph_runtime_identity(),
     )
 
 
-def _execute(model: Any, x: torch.Tensor, operation: str) -> torch.Tensor:
+def _execute(model: Any, x: torch.Tensor) -> torch.Tensor:
     from modules import devices
 
     with torch.no_grad(), devices.without_autocast():
-        vae_input = x.to(model.first_stage_model.dtype)
-        if operation == _OPERATION_DECODE:
-            return model.decode_first_stage(vae_input)
-        encoded = model.encode_first_stage(vae_input)
-        return model.get_first_stage_encoding(encoded)
+        return model.decode_first_stage(x.to(model.first_stage_model.dtype))
 
 
 def _remember_failed_key_locked(key: tuple[Any, ...]) -> None:
@@ -365,10 +341,10 @@ def _evict_locked() -> None:
         openclaw_cache_epochs.observe("E11", "eviction", reason="capacity", semantic_key=evicted_key)
 
 
-def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATION_DECODE) -> torch.Tensor | None:
+def run(model: Any, x: Any, approximation: int = 0) -> torch.Tensor | None:
     global _LAST_ERROR, _LAST_KEY
     with _EXECUTION_LOCK:
-        reason = _bypass_reason(model, x, approximation, operation)
+        reason = _bypass_reason(model, x, approximation)
         if reason is not None:
             with _LOCK:
                 _observe_bypass(reason)
@@ -378,7 +354,7 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                 _observe_bypass("cache_disabled")
             return None
 
-        key = _key(model, x, approximation, operation)
+        key = _key(model, x, approximation)
         with _LOCK:
             _LAST_KEY = key
         key_lock = _key_lock(key)
@@ -410,16 +386,16 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                 stream = torch.cuda.Stream(device=x.device)
                 stream.wait_stream(torch.cuda.current_stream(x.device))
                 with torch.cuda.stream(stream):
-                    warmup_output = _execute(model, static_input, operation)
+                    _execute(model, static_input)
                 torch.cuda.current_stream(x.device).wait_stream(stream)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    static_output = _execute(model, static_input, operation)
+                    static_output = _execute(model, static_input)
                 # CUDA graph capture completes asynchronously. Synchronize before
                 # publishing or replaying a first-use entry so capture work cannot
                 # race the request stream and seed a process-local output basin.
                 torch.cuda.synchronize()
-                entry = {"graph": graph, "input": static_input, "output": static_output, "operation": operation}
+                entry = {"graph": graph, "input": static_input, "output": static_output}
                 with _LOCK:
                     # Publish only the fully captured entry. Invalidation cannot
                     # interleave because it shares _EXECUTION_LOCK.
@@ -451,11 +427,6 @@ def run(model: Any, x: Any, approximation: int = 0, *, operation: str = _OPERATI
                     _observe_bypass("capture_failed")
                     openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_CACHE_MAX)
                 return None
-
-
-def run_encode(model: Any, x: Any, approximation: int = 0) -> torch.Tensor | None:
-    """Reserved encode direction with explicit safe eager fallback semantics."""
-    return run(model, x, approximation, operation=_OPERATION_ENCODE)
 
 
 set_enabled(_flag("OPENCLAW_VAE_DECODE_GRAPHS", False), clear_cache=True)

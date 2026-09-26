@@ -48,67 +48,12 @@ def make_denoiser(*, active=True, start=0, end=4, total_steps=5, hooks=True, blu
     return types.SimpleNamespace(mask=None, nmask=None, p=p, total_steps=total_steps)
 
 
-class CudaGraphSegBypassTests(unittest.TestCase):
-    def setUp(self):
-        self.previous_allow_seg = os.environ.pop("OPENCLAW_CUDA_GRAPH_ALLOW_SEG", None)
-        shared = sys.modules["modules.shared"]
-        self.previous_batch_cond_uncond = getattr(shared.opts, "batch_cond_uncond", None)
-        shared.opts.batch_cond_uncond = True
+class CudaGraphBypassTests(unittest.TestCase):
+    def test_active_seg_always_bypasses_graphs(self):
+        for denoiser in (make_denoiser(), make_denoiser(end=3), make_denoiser(hooks=False)):
+            self.assertEqual(openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser), "seg_attention_hooks")
 
-    def tearDown(self):
-        if self.previous_allow_seg is None:
-            os.environ.pop("OPENCLAW_CUDA_GRAPH_ALLOW_SEG", None)
-        else:
-            os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = self.previous_allow_seg
-        shared = sys.modules["modules.shared"]
-        shared.opts.batch_cond_uncond = self.previous_batch_cond_uncond
-
-    def test_seg_bypasses_without_explicit_operator_opt_in(self):
-        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(make_denoiser())
-
-        self.assertEqual(reason, "seg_disabled")
-
-    def test_full_window_seg_uses_graph_path_when_static_paired_and_opted_in(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-
-        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(make_denoiser())
-
-        self.assertIsNone(reason)
-
-    def test_partial_window_seg_still_bypasses(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-
-        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(make_denoiser(end=3))
-
-        self.assertEqual(reason, "seg_active")
-
-    def test_seg_bypasses_without_paired_cfg_batch(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-        shared = sys.modules["modules.shared"]
-        shared.opts.batch_cond_uncond = False
-
-        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(make_denoiser())
-
-        self.assertEqual(reason, "seg_unpaired_cfg")
-
-    def test_seg_bypasses_when_hooks_are_not_ready(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-
-        reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(make_denoiser(hooks=False))
-
-        self.assertEqual(reason, "seg_hooks_unready")
-
-    def test_seg_graph_key_includes_parameters_that_change_hook_math(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-
-        base = openclaw_cuda_graphs._denoiser_graph_key(make_denoiser())
-        changed_blur = openclaw_cuda_graphs._denoiser_graph_key(make_denoiser(blur_sigma=10.0))
-        changed_window = openclaw_cuda_graphs._denoiser_graph_key(make_denoiser(end=5, total_steps=6))
-
-        self.assertNotEqual(base, changed_blur)
-        self.assertNotEqual(base, changed_window)
-
-    def test_masks_still_bypass_when_seg_is_allowed(self):
+    def test_masks_bypass_graphs(self):
         denoiser = make_denoiser()
         denoiser.p.mask = object()
 
@@ -125,9 +70,8 @@ class CudaGraphSegBypassTests(unittest.TestCase):
 
         self.assertEqual(reason, "external_unet_forward_hook")
 
-    def test_unmasked_img2img_init_latent_is_graphable_when_seg_is_allowed(self):
-        os.environ["OPENCLAW_CUDA_GRAPH_ALLOW_SEG"] = "1"
-        denoiser = make_denoiser()
+    def test_unmasked_img2img_init_latent_is_graphable(self):
+        denoiser = make_denoiser(active=False)
         denoiser.init_latent = object()
 
         reason = openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser)
@@ -216,22 +160,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
         self.assertEqual(repeated_again["invalidations"], 1)
         self.assertEqual(repeated_again["invalidation_reasons"], {"model_changed": 1})
 
-    def test_runtime_refresh_invalidates_on_backend_state_change_once(self):
-        os.environ["OPENCLAW_SDPA_BACKEND"] = "flash"
-        openclaw_cuda_graphs.refresh_runtime_state()
-        self.seed_graph_state()
-
-        unchanged = openclaw_cuda_graphs.refresh_runtime_state()
-
-        self.assertEqual(unchanged["invalidations"], 0)
-        self.assertEqual(unchanged["cache_size"], 1)
-
-        os.environ["OPENCLAW_SDPA_BACKEND"] = "math"
-        changed = openclaw_cuda_graphs.refresh_runtime_state()
-
-        self.assertEqual(changed["invalidations"], 1)
-        self.assertEqual(changed["invalidation_reasons"], {"runtime_changed": 1})
-        self.assertEqual(changed["cache_size"], 0)
 
     def test_note_model_and_vae_loaded_are_noops_for_same_state(self):
         checkpoint = types.SimpleNamespace(filename="a.safetensors", hash="short", sha256="long")
@@ -252,7 +180,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
 
         self.assertEqual(changed_vae["invalidations"], 1)
         self.assertEqual(changed_vae["invalidation_reasons"], {"vae_changed": 1})
-
 
 
 class CudaGraphCacheSizeTests(unittest.TestCase):
@@ -448,7 +375,6 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         self.assertEqual(events[-1], ("result", "replayed"))
         self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
         self.assertEqual(openclaw_cuda_graphs.status()["invalidations"], 1)
-
 
 
 class OpenClawImportOrderTests(unittest.TestCase):
@@ -656,7 +582,7 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
 
         execute_calls = []
 
-        def execute(model, static_input, operation):
+        def execute(model, static_input):
             execute_calls.append(static_input)
             return static_input.value * 3 if len(execute_calls) % 2 == 1 else Output(static_input)
 
@@ -719,12 +645,6 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
             self.assertEqual(self.graphs.status()["evictions"], 1)
         finally:
             self.graphs._CACHE_MAX = old_max
-
-    def test_encode_decode_separation_and_safe_encode_fallback(self):
-        self.graphs.set_enabled(True, clear_cache=True)
-        self.assertEqual(self.graphs._bypass_reason(object(), object(), 0, "encode"), "encode_rng_semantics")
-        self.assertIsNone(self.graphs.run_encode(object(), object()))
-        self.assertEqual(self.graphs.status()["bypass_reasons"].get("encode_rng_semantics"), 1)
 
     def test_cache_max_env_parse_is_clamped_and_fallback_safe(self):
         previous = os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX")

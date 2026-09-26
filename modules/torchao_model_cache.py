@@ -218,16 +218,6 @@ def load_sidecar(cache_path: str, suffix: str) -> Optional[dict]:
         return None
 
 
-def expected_cache_metadata(filename: str, cache_version: int, config_name: str, coverage=None) -> dict:
-    return {
-        "cache_version": cache_version,
-        "config": config_name,
-        "source": stat_source(filename),
-        "coverage": sorted(coverage) if coverage is not None else None,
-        "contract": artifact_contract(config_name, coverage),
-    }
-
-
 def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> bool:
     if not os.path.exists(cache_path):
         return False

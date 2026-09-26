@@ -20,12 +20,16 @@ def load_profile(max_size: str = "16"):
     return profile
 
 
+def cache_sigmas(profile, steps, tensor, params):
+    return profile.cached_tensor("sigmas", "Euler", "Karras", steps, tensor.device, tensor.dtype, lambda: tensor, params=params)
+
+
 class GenerationProfileCacheTests(unittest.TestCase):
-    def test_cache_tensor_reuses_exact_key(self):
+    def test_cached_tensor_reuses_exact_key(self):
         profile = load_profile()
 
-        first = profile.cache_tensor("sigmas", "Euler", "Karras", 20, torch.arange(3), params=("a",))
-        second = profile.cache_tensor("sigmas", "Euler", "Karras", 20, torch.arange(3) + 10, params=("a",))
+        first = cache_sigmas(profile, 20, torch.arange(3), ("a",))
+        second = cache_sigmas(profile, 20, torch.arange(3) + 10, ("a",))
 
         self.assertIs(second, first)
         self.assertEqual(profile.status()["hits"], 1)
@@ -34,8 +38,8 @@ class GenerationProfileCacheTests(unittest.TestCase):
     def test_cache_key_includes_params(self):
         profile = load_profile()
 
-        first = profile.cache_tensor("sigmas", "Euler", "Karras", 20, torch.arange(3), params=("a",))
-        second = profile.cache_tensor("sigmas", "Euler", "Karras", 20, torch.arange(3) + 10, params=("b",))
+        first = cache_sigmas(profile, 20, torch.arange(3), ("a",))
+        second = cache_sigmas(profile, 20, torch.arange(3) + 10, ("b",))
 
         self.assertIsNot(second, first)
         torch.testing.assert_close(second, torch.arange(3) + 10)
@@ -108,8 +112,8 @@ class GenerationProfileCacheTests(unittest.TestCase):
     def test_cache_honors_max_size(self):
         profile = load_profile(max_size="1")
 
-        profile.cache_tensor("sigmas", "Euler", "Karras", 20, torch.arange(3), params=("a",))
-        profile.cache_tensor("sigmas", "Euler", "Karras", 21, torch.arange(4), params=("a",))
+        cache_sigmas(profile, 20, torch.arange(3), ("a",))
+        cache_sigmas(profile, 21, torch.arange(4), ("a",))
 
         status = profile.status()
         self.assertEqual(status["cache_size"], 1)

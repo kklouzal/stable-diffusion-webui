@@ -13,41 +13,9 @@ CONFIG_NAME = nvfp4_config.CONFIG_NAME
 SIDECAR_SUFFIX = ".nvfp4-cache.json"
 LABEL = "NVFP4"
 
-_is_safetensors = torchao_model_cache.is_safetensors
-_sha256_file = torchao_model_cache.sha256_file
-_stat_source = torchao_model_cache.stat_source
-_tensor_meta = torchao_model_cache.tensor_meta
-_device_matches = torchao_model_cache.device_matches
-_metadata_matches = torchao_model_cache.metadata_matches
-_bias_metadata_matches = torchao_model_cache.bias_metadata_matches
-_cached_bias_matches = torchao_model_cache.cached_bias_matches
-_parameter_on_device = torchao_model_cache.parameter_on_device
-_write_atomic_bytes = torchao_model_cache.write_atomic_bytes
-_iter_eligible_linear_modules = torchao_model_cache.iter_eligible_linear_modules
-
 
 def is_nvfp4_cache_path(filename: str) -> bool:
     return torchao_model_cache.is_cache_path(filename, CACHE_DIR_NAME)
-
-
-def _cache_path_for(filename: Optional[str]) -> Optional[str]:
-    return torchao_model_cache.cache_path_for(filename, CACHE_DIR_NAME)
-
-
-def _sidecar_path(cache_path: str) -> str:
-    return torchao_model_cache.sidecar_path(cache_path, SIDECAR_SUFFIX)
-
-
-def _load_sidecar(cache_path: str) -> Optional[dict]:
-    return torchao_model_cache.load_sidecar(cache_path, SIDECAR_SUFFIX)
-
-
-def _expected_cache_metadata(filename: str, coverage=None) -> dict:
-    return torchao_model_cache.expected_cache_metadata(filename, CACHE_VERSION, CONFIG_NAME, coverage)
-
-
-def _sidecar_matches(filename: str, cache_path: str, coverage=None) -> bool:
-    return torchao_model_cache.sidecar_matches(filename, cache_path, CACHE_VERSION, CONFIG_NAME, SIDECAR_SUFFIX, coverage)
 
 
 def _register_nvfp4_safe_globals() -> None:
@@ -55,10 +23,6 @@ def _register_nvfp4_safe_globals() -> None:
     # weights_only=True, but allow TorchAO's tensor subclass through PyTorch's
     # safe unpickler instead of falling back to unrestricted pickle loading.
     torch.serialization.add_safe_globals([NVFP4Tensor])
-
-
-def _torch_load_cache(cache_path: str, device: torch.device | str):
-    return torchao_model_cache.torch_load_cache(cache_path, device, _register_nvfp4_safe_globals)
 
 
 def _is_nvfp4_tensor(tensor) -> bool:

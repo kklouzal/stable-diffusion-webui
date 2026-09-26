@@ -47,8 +47,7 @@ def test_controlnet_owner_marker_bypasses_cuda_graph_capture():
     assert unet._controlnet_forward_hook_owner is owner
 
 
-def test_cuda_graphs_bypass_seg_attention_hooks_even_when_opted_in(monkeypatch):
-    monkeypatch.setattr(openclaw_cuda_graphs, "_allow_seg_graphs", lambda: True)
+def test_cuda_graphs_bypass_seg_attention_hooks():
     seg_params = SimpleNamespace(
         seg_active=True,
         seg_blur_sigma=3.0,

@@ -376,7 +376,8 @@ def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts(
     assert 'observe("E12", "reject"' in publish
     assert "semantic_key=wanted_key" in publish
     assert "current_network_state_identity" in Path("modules/processing.py").read_text()
-    assert "lora_applied_epoch" in Path("modules/openclaw_cuda_graphs.py").read_text()
+    # CUDA graphs drop captured LoRA state through note_lora_loaded on every apply/unload.
+    assert source.count("openclaw_cuda_graphs.note_lora_loaded(") >= 2
     assert "lora_applied_epoch" in Path("modules/mxfp8_diagnostics.py").read_text()
 
 

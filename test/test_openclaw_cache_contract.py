@@ -127,8 +127,3 @@ def test_endpoint_schema_is_read_only_and_bounded():
         assert set(item["events"]) == openclaw_cache_epochs.EVENTS
 
 
-def test_size_provider_failures_do_not_break_snapshot():
-    openclaw_cache_epochs.register_size_provider("E08", lambda: (_ for _ in ()).throw(RuntimeError("private path")))
-    item = family(openclaw_cache_epochs.snapshot(), "E08")
-    assert item["current_size"] is None
-    assert item["capacity"] is None

@@ -8,7 +8,7 @@ from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Iterator, Mapping
 
 SCHEMA_VERSION = 2
 MAX_REASON_CODES = 32
@@ -178,7 +178,6 @@ class _FamilyState:
     dependency_observations: int = 0
     capacity: int | None = None
     current_size: int | None = None
-    size_provider: Callable[[], tuple[int | None, int | None]] | None = None
 
 
 class CacheTelemetryRegistry:
@@ -190,10 +189,6 @@ class CacheTelemetryRegistry:
     def digest(value: Any) -> str:
         payload = _opaque_bytes(value)
         return hashlib.sha256(payload).hexdigest()[:KEY_DIGEST_LENGTH]
-
-    def register_size_provider(self, family_id: str, provider: Callable[[], tuple[int | None, int | None]]) -> None:
-        with self._lock:
-            self._state(family_id).size_provider = provider
 
     def set_size(self, family_id: str, *, current_size: int | None = None, capacity: int | None = None) -> None:
         with self._lock:
@@ -243,7 +238,6 @@ class CacheTelemetryRegistry:
                     dict(state.events), dict(state.reasons), dict(state.keys),
                     dict(state.dependencies), state.key_observations,
                     state.dependency_observations, state.current_size, state.capacity,
-                    state.size_provider,
                 )
                 for family_id, state in self._families.items()
             }
@@ -251,14 +245,7 @@ class CacheTelemetryRegistry:
         families = []
         totals: Counter[str] = Counter()
         for family_id in sorted(_FAMILY_NAMES):
-            events, reasons, keys, dependencies, key_total, dependency_total, current_size, capacity, provider = copied[family_id]
-            if provider is not None:
-                try:
-                    supplied_size, supplied_capacity = provider()
-                    current_size = _safe_nonnegative_int(supplied_size)
-                    capacity = _safe_nonnegative_int(supplied_capacity)
-                except Exception:
-                    current_size, capacity = None, None
+            events, reasons, keys, dependencies, key_total, dependency_total, current_size, capacity = copied[family_id]
             totals.update(events)
             dirty, stable = _FAMILY_DEPENDENCIES[family_id]
             families.append({
@@ -510,10 +497,6 @@ def observe(family_id: str, event: str, *, reason: str | None = None, semantic_k
 
 def observe_dependency(family_id: str, dimensions: Mapping[str, Any]) -> str:
     return registry.observe_dependency(family_id, dimensions)
-
-
-def register_size_provider(family_id: str, provider: Callable[[], tuple[int | None, int | None]]) -> None:
-    registry.register_size_provider(family_id, provider)
 
 
 def set_size(family_id: str, *, current_size: int | None = None, capacity: int | None = None) -> None:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
-import json
 import os
 import time
 import uuid
@@ -11,28 +9,6 @@ from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 SCHEMA_VERSION = 1
-
-
-def sha256_file(path: str | os.PathLike[str]) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def strong_file_identity(path: str | os.PathLike[str]) -> dict:
-    resolved = os.path.abspath(os.fspath(path))
-    stat = os.stat(resolved)
-    return {
-        "path": resolved,
-        "device": stat.st_dev,
-        "inode": stat.st_ino,
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "ctime_ns": stat.st_ctime_ns,
-        "sha256": sha256_file(resolved),
-    }
 
 
 def atomic_write(path: str | os.PathLike[str], data: bytes) -> None:
@@ -90,18 +66,6 @@ def has_active_lease(path: str | os.PathLike[str]) -> bool:
     return any(base.parent.glob(base.name + ".lease.*"))
 
 
-def cleanup_partial_files(root: str | os.PathLike[str], *, older_than_seconds: int = 3600, dry_run: bool = True) -> list[str]:
-    cutoff = time.time() - older_than_seconds
-    selected = []
-    for path in Path(root).rglob(".partial-*"):
-        if path.is_file() and path.stat().st_mtime <= cutoff:
-            selected.append(str(path))
-            if not dry_run:
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
-    return sorted(selected)
-
-
 def enforce_quota(
     artifacts: Iterable[str | os.PathLike[str]],
     *,
@@ -138,10 +102,6 @@ def enforce_quota(
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(member)
     return {"schema_version": SCHEMA_VERSION, "dry_run": dry_run, "max_bytes": max_bytes, "before_bytes": total, "after_bytes": remaining, "evicted": evicted, "protected": [g["primary"] for g in groups if g["active"]], "within_quota": remaining <= max_bytes}
-
-
-def write_quota_report(path: str | os.PathLike[str], report: dict) -> None:
-    atomic_write(path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf8"))
 
 
 def enforce_directory_quota(root: str | os.PathLike[str], *, max_bytes: int, dry_run: bool = True) -> dict:
