@@ -150,11 +150,10 @@ def test_session_requires_residual_for_current_call_index():
     signature = ((1, 1), "torch.float32", "cpu")
     session.residuals[0] = (signature, torch.ones((1, 1), dtype=torch.float32))
 
-    assert session.can_use_current_residual()
     assert session.current_residual(signature) is not None
     assert session.current_residual(((2, 1), "torch.float32", "cpu")) is None
     session.call_index = 1
-    assert not session.can_use_current_residual()
+    assert session.current_residual(signature) is None
 
 
 def test_session_isolates_cache_by_call_signature():

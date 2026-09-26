@@ -225,9 +225,6 @@ class TeaCacheSession:
         self.call_index = 0
         self.use_cache = True
 
-    def can_use_current_residual(self) -> bool:
-        return self.use_cache and self.call_index in self.residuals
-
     def current_residual(self, signature: tuple) -> Optional[torch.Tensor]:
         cached = self.residuals.get(self.call_index)
         if not self.use_cache or cached is None or cached[0] != signature:
@@ -316,7 +313,6 @@ class TeaCacheScript(scripts.Script):
 
     def process_before_every_sampling(self, p: processing.StableDiffusionProcessing, *args, **kwargs):
         # initialize and configure cache
-        global _cache
         enabled, threshold, max_consecutive, start, end = normalize_args(args)
         if not enabled:
             return
@@ -360,7 +356,6 @@ class TeaCacheScript(scripts.Script):
         _set_cache(None)
         self.original_forward = None
         self.patched_unet = None
-        _set_cache(None)
 
 
 def _patched_forward_inner(
