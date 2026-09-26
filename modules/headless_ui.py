@@ -59,6 +59,7 @@ class _FallbackComponent:
     def click(self, *args: Any, **kwargs: Any): return self
     def change(self, *args: Any, **kwargs: Any): return self
     def submit(self, *args: Any, **kwargs: Any): return self
+    def blur(self, *args: Any, **kwargs: Any): return self
     def release(self, *args: Any, **kwargs: Any): return self
     def select(self, *args: Any, **kwargs: Any): return self
     def upload(self, *args: Any, **kwargs: Any): return self
