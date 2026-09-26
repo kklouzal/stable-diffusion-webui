@@ -1,0 +1,17 @@
+# Host unit: install as /etc/systemd/system/gb10build.slice, then `systemctl daemon-reload && systemctl enable --now gb10build.slice`.
+# The unit name must not contain "-": systemd nests dashed slice names (gb10-build.slice -> gb10.slice/gb10-build.slice)
+# while BuildKit uses --cgroup-parent as a literal cgroupfs path, so only a dashless name gets the CPU mask.
+[Unit]
+Description=GB10 container image builds on the Cortex-X925 performance cores
+Documentation=file:///home/kklouzal/stable-diffusion-webui/gb10/gb10build.slice
+
+[Slice]
+# Same performance-core mask the docker-.scope policy gives containers. gb10/build.sh
+# passes --cgroup-parent gb10build.slice so BuildKit RUN steps land here instead of
+# inheriting the control-plane (efficiency-core) placement.
+AllowedCPUs=5-9 15-19
+
+[Install]
+# Keep the slice (and its CPU mask) realized even while no build is running;
+# BuildKit creates its per-step cgroups under it directly.
+WantedBy=slices.target
