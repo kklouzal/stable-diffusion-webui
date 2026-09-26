@@ -9,6 +9,7 @@ from scripts.ui_wrapper import UIWrapper
 from scripts.pag import PAGExtensionScript
 from scripts.cfg_combiner import CFGCombinerScript
 from scripts.smoothed_energy_guidance import SEGExtensionScript
+from scripts.incant_utils import timing
 
 logger = logging.getLogger(__name__)
 logger.setLevel(environ.get("SD_WEBUI_LOG_LEVEL", logging.INFO))
@@ -37,27 +38,13 @@ submodules: list[SubmoduleInfo] = [
 ]
 
 
-
-
-def _record_extension_timing(p, name, hook_name, elapsed):
-        timings = getattr(p, "openclaw_extension_timings", None)
-        if timings is None:
-                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
-
-        elapsed = float(elapsed)
-        timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
-        ext = timings["extensions"].setdefault(name, {"total_seconds": 0.0, "calls": 0, "hooks": {}})
-        ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
-        ext["calls"] = int(ext.get("calls") or 0) + 1
-        ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
-
-
 def _timed_module_call(p, module, hook_name, func, *args, **kwargs):
         started = time.perf_counter()
         try:
                 return func(*args, **kwargs)
         finally:
-                _record_extension_timing(p, f"Incantations.{module.__class__.__name__}", hook_name, time.perf_counter() - started)
+                elapsed = time.perf_counter() - started
+                timing.merge_into_processing(p, f"Incantations.{module.__class__.__name__}", {hook_name: {"total_seconds": elapsed, "calls": 1}})
 
 class IncantBaseExtensionScript(scripts.Script):
         # Extension title in menu UI

@@ -10,8 +10,8 @@ from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 
-from scripts.ui_wrapper import UIWrapper
-from scripts.incant_utils import module_hooks
+from scripts.ui_wrapper import UIWrapper, xyz_field_setter
+from scripts.incant_utils import module_hooks, timing
 
 import torch
 from torch.nn import functional as F
@@ -46,33 +46,6 @@ class SEGStateParams:
                 self.seg_end_step: int = 150
                 self.crossattn_modules = [] # callable lambda
                 self.openclaw_extension_timings = {}
-
-
-
-
-def _record_seg_timing(seg_params, hook_name, elapsed):
-        timings = seg_params.openclaw_extension_timings
-        elapsed = float(elapsed)
-        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
-        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
-        hook["calls"] = int(hook.get("calls") or 0) + 1
-
-
-def _merge_seg_timings(p, seg_params):
-        if not seg_params.openclaw_extension_timings:
-                return
-        timings = getattr(p, "openclaw_extension_timings", None)
-        if timings is None:
-                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
-        ext = timings["extensions"].setdefault("Incantations.SEGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
-        for hook_name, hook in seg_params.openclaw_extension_timings.items():
-                elapsed = float(hook.get("total_seconds") or 0.0)
-                calls = int(hook.get("calls") or 0)
-                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["calls"] = int(ext.get("calls") or 0) + calls
-                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
-        seg_params.openclaw_extension_timings = {}
 
 
 def _blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, blur_fn):
@@ -185,7 +158,8 @@ class SEGExtensionScript(UIWrapper):
         def postprocess_batch(self, p, *args, **kwargs):
                 seg_params = getattr(p, "incant_cfg_params", {}).get("seg_params") if getattr(p, "incant_cfg_params", None) else None
                 if seg_params is not None:
-                        _merge_seg_timings(p, seg_params)
+                        timing.merge_into_processing(p, "Incantations.SEGExtensionScript", seg_params.openclaw_extension_timings)
+                        seg_params.openclaw_extension_timings = {}
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed SEG hooks and callbacks')
@@ -300,7 +274,7 @@ class SEGExtensionScript(UIWrapper):
                 try:
                         self._on_cfg_denoiser_callback(params, seg_params)
                 finally:
-                        _record_seg_timing(seg_params, "cfg_denoiser_callback", time.perf_counter() - started)
+                        timing.record(seg_params.openclaw_extension_timings, "cfg_denoiser_callback", time.perf_counter() - started)
 
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
                 # Keep SEG hooks installed for the batch; per-step work only toggles
@@ -323,33 +297,12 @@ class SEGExtensionScript(UIWrapper):
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = scripts.loaded_script_module("xyz_grid.py")
                 extra_axis_options = {
-                        xyz_grid.AxisOption("[SEG] Active", str, seg_apply_override('seg_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
-                        xyz_grid.AxisOption("[SEG] SEG Blur Sigma", float, seg_apply_field("seg_blur_sigma")),
-                        xyz_grid.AxisOption("[SEG] SEG Start Step", int, seg_apply_field("seg_start_step")),
-                        xyz_grid.AxisOption("[SEG] SEG End Step", int, seg_apply_field("seg_end_step")),
+                        xyz_grid.AxisOption("[SEG] Active", str, xyz_field_setter('seg_active', 'seg_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
+                        xyz_grid.AxisOption("[SEG] SEG Blur Sigma", float, xyz_field_setter("seg_blur_sigma", 'seg_active')),
+                        xyz_grid.AxisOption("[SEG] SEG Start Step", int, xyz_field_setter("seg_start_step", 'seg_active')),
+                        xyz_grid.AxisOption("[SEG] SEG End Step", int, xyz_field_setter("seg_end_step", 'seg_active')),
                 }
                 return extra_axis_options
-
-
-
-# XYZ Plot
-# Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
-def seg_apply_override(field, boolean: bool = False):
-    def fun(p, x, xs):
-        if boolean:
-            x = x.lower() == "true"
-        setattr(p, field, x)
-        if not hasattr(p, "seg_active"):
-                p.seg_active = True
-    return fun
-
-
-def seg_apply_field(field):
-    def fun(p, x, xs):
-        if not hasattr(p, "seg_active"):
-                p.seg_active = True
-        setattr(p, field, x)
-    return fun
 
 
 # Gaussian blur

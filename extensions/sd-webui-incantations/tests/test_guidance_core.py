@@ -797,5 +797,44 @@ class ModuleHookTests(unittest.TestCase):
         self.assertEqual(calls["count"], 1)
 
 
+class SharedHelperTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.timing = importlib.import_module("scripts.incant_utils.timing")
+        cls.ui_wrapper = importlib.import_module("scripts.ui_wrapper")
+
+    def test_hook_timings_fold_into_processing_record(self):
+        p = types.SimpleNamespace()
+        hooks = {}
+        self.timing.record(hooks, "cfg_denoiser_callback", 0.25)
+        self.timing.record(hooks, "cfg_denoiser_callback", 0.5)
+        self.timing.record(hooks.setdefault("details", {}), "pag_hidden_denoise", 0.125)
+        self.timing.merge_into_processing(p, "Incantations.PAGExtensionScript", {"process": {"total_seconds": 1.0, "calls": 1}})
+        self.timing.merge_into_processing(p, "Incantations.PAGExtensionScript", hooks)
+
+        self.assertEqual(p.openclaw_extension_timings, {
+            "total_seconds": 1.75,
+            "extensions": {
+                "Incantations.PAGExtensionScript": {
+                    "total_seconds": 1.75,
+                    "calls": 3,
+                    "hooks": {"process": 1.0, "cfg_denoiser_callback": 0.75},
+                    "details": {"pag_hidden_denoise": {"total_seconds": 0.125, "calls": 1}},
+                },
+            },
+        })
+
+    def test_xyz_field_setter_enables_feature_only_when_unset(self):
+        setter = self.ui_wrapper.xyz_field_setter
+        p = types.SimpleNamespace()
+        setter("cfg_interval_schedule", "pag_active", also_enable="cfg_interval_enable")(p, "Linear", [])
+        self.assertEqual(vars(p), {"cfg_interval_schedule": "Linear", "pag_active": True, "cfg_interval_enable": True})
+
+        p = types.SimpleNamespace(pag_active=False)
+        setter("pag_sanf", "pag_active", boolean=True)(p, "True", [])
+        self.assertEqual(vars(p), {"pag_active": False, "pag_sanf": True})
+
+
 if __name__ == "__main__":
     unittest.main()

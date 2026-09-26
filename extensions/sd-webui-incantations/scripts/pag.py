@@ -4,13 +4,13 @@ from contextlib import suppress
 from os import environ
 import modules.scripts as scripts
 from modules import headless_ui as gr
-from scripts.ui_wrapper import UIWrapper
+from scripts.ui_wrapper import UIWrapper, xyz_field_setter
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
 from modules.sd_samplers_cfg_denoiser import catenate_conds, subscript_cond
 from modules import shared
-from scripts.incant_utils import module_hooks
+from scripts.incant_utils import module_hooks, timing
 
 import math
 import torch
@@ -272,50 +272,6 @@ def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_con
         return x_out
 
 
-
-
-def _record_pag_timing(pag_params, hook_name, elapsed):
-        timings = pag_params.openclaw_extension_timings
-        elapsed = float(elapsed)
-        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
-        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + elapsed, 6)
-        hook["calls"] = int(hook.get("calls") or 0) + 1
-
-
-def _record_pag_detail(pag_params, detail_name, elapsed):
-        timings = pag_params.openclaw_extension_timings
-        elapsed = float(elapsed)
-        details = timings.setdefault("details", {})
-        detail = details.setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
-        detail["total_seconds"] = round(float(detail.get("total_seconds") or 0.0) + elapsed, 6)
-        detail["calls"] = int(detail.get("calls") or 0) + 1
-
-
-def _merge_pag_timings(p, pag_params):
-        if not pag_params.openclaw_extension_timings:
-                return
-        timings = getattr(p, "openclaw_extension_timings", None)
-        if timings is None:
-                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
-        ext = timings["extensions"].setdefault("Incantations.PAGExtensionScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
-        detail_timings = pag_params.openclaw_extension_timings.pop("details", {})
-        for hook_name, hook in pag_params.openclaw_extension_timings.items():
-                elapsed = float(hook.get("total_seconds") or 0.0)
-                calls = int(hook.get("calls") or 0)
-                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["calls"] = int(ext.get("calls") or 0) + calls
-                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
-        if detail_timings:
-                ext["details"] = ext.get("details", {})
-                for detail_name, detail in detail_timings.items():
-                        elapsed = float(detail.get("total_seconds") or 0.0)
-                        calls = int(detail.get("calls") or 0)
-                        existing = ext["details"].setdefault(detail_name, {"total_seconds": 0.0, "calls": 0})
-                        existing["total_seconds"] = round(float(existing.get("total_seconds") or 0.0) + elapsed, 6)
-                        existing["calls"] = int(existing.get("calls") or 0) + calls
-        pag_params.openclaw_extension_timings = {}
-
 class PAGExtensionScript(UIWrapper):
         def __init__(self):
                 self._cfg_denoiser_callback = None
@@ -427,7 +383,7 @@ class PAGExtensionScript(UIWrapper):
                 p.incant_cfg_params['pag_params'] = pag_params
 
                 # Preserve any setup timing already recorded before state was attached.
-                _record_pag_timing(pag_params, "create_hook_setup", 0.0)
+                timing.record(pag_params.openclaw_extension_timings, "create_hook_setup", 0.0)
 
                 pag_params.pag_active = active
                 pag_params.pag_sanf = pag_sanf
@@ -501,7 +457,8 @@ class PAGExtensionScript(UIWrapper):
         def postprocess_batch(self, p, *args, **kwargs):
                 pag_params = getattr(p, "incant_cfg_params", {}).get("pag_params") if getattr(p, "incant_cfg_params", None) else None
                 if pag_params is not None:
-                        _merge_pag_timings(p, pag_params)
+                        timing.merge_into_processing(p, "Incantations.PAGExtensionScript", pag_params.openclaw_extension_timings)
+                        pag_params.openclaw_extension_timings = {}
                 self.remove_all_hooks()
                 self.remove_callbacks()
                 logger.debug('Removed PAG hooks and callbacks')
@@ -600,7 +557,7 @@ class PAGExtensionScript(UIWrapper):
                 try:
                         self._on_cfg_denoiser_callback(params, pag_params)
                 finally:
-                        _record_pag_timing(pag_params, "cfg_denoiser_callback", time.perf_counter() - started)
+                        timing.record(pag_params.openclaw_extension_timings, "cfg_denoiser_callback", time.perf_counter() - started)
 
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
@@ -665,7 +622,7 @@ class PAGExtensionScript(UIWrapper):
                 try:
                         self._on_cfg_denoised_callback(params, pag_params)
                 finally:
-                        _record_pag_timing(pag_params, "cfg_denoised_callback", time.perf_counter() - started)
+                        timing.record(pag_params.openclaw_extension_timings, "cfg_denoised_callback", time.perf_counter() - started)
 
         def _on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
                 """ Callback function for the CFGDenoisedParams
@@ -713,7 +670,7 @@ class PAGExtensionScript(UIWrapper):
                                         pag_params.batch_size,
                                 )
                         finally:
-                                _record_pag_detail(pag_params, "pag_hidden_denoise", time.perf_counter() - hidden_started)
+                                timing.record(pag_params.openclaw_extension_timings.setdefault("details", {}), "pag_hidden_denoise", time.perf_counter() - hidden_started)
                 finally:
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises
@@ -728,15 +685,15 @@ class PAGExtensionScript(UIWrapper):
         def get_xyz_axis_options(self) -> dict:
                 xyz_grid = scripts.loaded_script_module("xyz_grid.py")
                 extra_axis_options = {
-                        xyz_grid.AxisOption("[PAG] Active", str, pag_apply_override('pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
-                        xyz_grid.AxisOption("[PAG] SANF", str, pag_apply_override('pag_sanf', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
-                        xyz_grid.AxisOption("[PAG] PAG Scale", float, pag_apply_field("pag_scale")),
-                        xyz_grid.AxisOption("[PAG] PAG Start Step", int, pag_apply_field("pag_start_step")),
-                        xyz_grid.AxisOption("[PAG] PAG End Step", int, pag_apply_field("pag_end_step")),
-                        xyz_grid.AxisOption("[PAG] Enable CFG Scheduler", str, pag_apply_override('cfg_interval_enable', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
-                        xyz_grid.AxisOption("[PAG] CFG Noise Interval Low", float, pag_apply_field("cfg_interval_low")),
-                        xyz_grid.AxisOption("[PAG] CFG Noise Interval High", float, pag_apply_field("cfg_interval_high")),
-                        xyz_grid.AxisOption("[PAG] CFG Schedule Type", str, pag_apply_override('cfg_interval_schedule', boolean=False), choices=lambda: SCHEDULES),
+                        xyz_grid.AxisOption("[PAG] Active", str, xyz_field_setter('pag_active', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
+                        xyz_grid.AxisOption("[PAG] SANF", str, xyz_field_setter('pag_sanf', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
+                        xyz_grid.AxisOption("[PAG] PAG Scale", float, xyz_field_setter("pag_scale", 'pag_active')),
+                        xyz_grid.AxisOption("[PAG] PAG Start Step", int, xyz_field_setter("pag_start_step", 'pag_active')),
+                        xyz_grid.AxisOption("[PAG] PAG End Step", int, xyz_field_setter("pag_end_step", 'pag_active')),
+                        xyz_grid.AxisOption("[PAG] Enable CFG Scheduler", str, xyz_field_setter('cfg_interval_enable', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
+                        xyz_grid.AxisOption("[PAG] CFG Noise Interval Low", float, xyz_field_setter("cfg_interval_low", 'pag_active')),
+                        xyz_grid.AxisOption("[PAG] CFG Noise Interval High", float, xyz_field_setter("cfg_interval_high", 'pag_active')),
+                        xyz_grid.AxisOption("[PAG] CFG Schedule Type", str, xyz_field_setter('cfg_interval_schedule', 'pag_active', also_enable='cfg_interval_enable'), choices=lambda: SCHEDULES),
                 }
                 return extra_axis_options
 
@@ -959,25 +916,3 @@ _CFG_SCHEDULE_DISPATCH = {
         # this schedule should not add a second hard-coded step interval.
         'Interval': constant_schedule,
 }
-
-
-# XYZ Plot
-# Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
-def pag_apply_override(field, boolean: bool = False):
-    def fun(p, x, xs):
-        if boolean:
-            x = x.lower() == "true"
-        setattr(p, field, x)
-        if not hasattr(p, "pag_active"):
-                p.pag_active = True
-        if 'cfg_interval_' in field and not hasattr(p, "cfg_interval_enable"):
-            p.cfg_interval_enable = True
-    return fun
-
-
-def pag_apply_field(field):
-    def fun(p, x, xs):
-        if not hasattr(p, "pag_active"):
-                p.pag_active = True
-        setattr(p, field, x)
-    return fun

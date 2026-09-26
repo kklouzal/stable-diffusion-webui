@@ -6,6 +6,7 @@ from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 from scripts.ui_wrapper import UIWrapper
+from scripts.incant_utils import timing
 
 logger = logging.getLogger(__name__)
 _SANF_KERNEL_CACHE = {}
@@ -41,31 +42,6 @@ def _sanf_guidance_blend(cfg_x, pag_x):
         # The previous 2-way stack + argmax path selected CFG on ties because
         # index 0 won. Keep that behavior while avoiding the stack/reduction.
         return torch.where(soft_rt >= soft_rs, cfg_x, pag_x)
-
-
-def _record_cfg_timing(cfg_dict, hook_name, elapsed):
-        timings = cfg_dict.setdefault("openclaw_extension_timings", {})
-        hook = timings.setdefault(hook_name, {"total_seconds": 0.0, "calls": 0})
-        hook["total_seconds"] = round(float(hook.get("total_seconds") or 0.0) + float(elapsed), 6)
-        hook["calls"] = int(hook.get("calls") or 0) + 1
-
-
-def _merge_cfg_timings(p, cfg_dict):
-        cfg_timings = (cfg_dict or {}).get("openclaw_extension_timings") or {}
-        if not cfg_timings:
-                return
-        timings = getattr(p, "openclaw_extension_timings", None)
-        if timings is None:
-                timings = p.openclaw_extension_timings = {"total_seconds": 0.0, "extensions": {}}
-        ext = timings["extensions"].setdefault("Incantations.CFGCombinerScript", {"total_seconds": 0.0, "calls": 0, "hooks": {}})
-        for hook_name, hook in cfg_timings.items():
-                elapsed = float(hook.get("total_seconds") or 0.0)
-                calls = int(hook.get("calls") or 0)
-                timings["total_seconds"] = round(float(timings.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["total_seconds"] = round(float(ext.get("total_seconds") or 0.0) + elapsed, 6)
-                ext["calls"] = int(ext.get("calls") or 0) + calls
-                ext["hooks"][hook_name] = round(float(ext["hooks"].get(hook_name) or 0.0) + elapsed, 6)
-        cfg_dict["openclaw_extension_timings"] = {}
 
 
 class CFGCombinerScript(UIWrapper):
@@ -128,7 +104,10 @@ class CFGCombinerScript(UIWrapper):
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
             logger.debug("CFGCombinerScript postprocess_batch")
             cfg_dict = getattr(p, 'incant_cfg_params', None)
-            _merge_cfg_timings(p, cfg_dict)
+            cfg_timings = (cfg_dict or {}).get("openclaw_extension_timings")
+            if cfg_timings:
+                timing.merge_into_processing(p, "Incantations.CFGCombinerScript", cfg_timings)
+                cfg_dict["openclaw_extension_timings"] = {}
             self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
 
@@ -250,7 +229,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                 try:
                         denoised = original_func(x_out, conds_list, uncond, cfg_scale)
                 finally:
-                        _record_cfg_timing(cfg_dict, "combine_original", time.perf_counter() - original_started)
+                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_original", time.perf_counter() - original_started)
 
                 # 2. PAG
                 run_pag = False
@@ -289,7 +268,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                                                 try:
                                                         denoised[i] += pag_x
                                                 finally:
-                                                        _record_cfg_timing(cfg_dict, "combine_pag_blend", time.perf_counter() - pag_blend_started)
+                                                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_pag_blend", time.perf_counter() - pag_blend_started)
                                                 continue
 
                                         # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
@@ -299,7 +278,7 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                                                 sal_cfg = _sanf_guidance_blend(model_delta * (weight * cfg_scale), pag_x)
                                                 denoised[i] += sal_cfg
                                         finally:
-                                                _record_cfg_timing(cfg_dict, "combine_sanf_blend", time.perf_counter() - sanf_started)
+                                                timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_sanf_blend", time.perf_counter() - sanf_started)
                                 except Exception as e:
                                         logger.exception("Exception in combine_denoised_pass_conds_list - %s", e)
 

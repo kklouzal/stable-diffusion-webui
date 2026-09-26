@@ -29,3 +29,21 @@ class UIWrapper:
 
     def get_xyz_axis_options(self) -> list:
         return []
+
+
+def xyz_field_setter(field, active_field, *, boolean=False, also_enable=None):
+    """Return an X/Y/Z AxisOption apply function for a submodule parameter.
+
+    Stores the axis value on ``p.<field>`` ("true"/"false" become bools when
+    ``boolean``) and defaults ``p.<active_field>`` -- and ``p.<also_enable>`` when
+    given -- to True if the request left it unset, so plotting a parameter also
+    turns its feature on.
+    """
+    def apply(p, x, xs):
+        if boolean:
+            x = x.lower() == "true"
+        setattr(p, field, x)
+        for flag in (active_field, also_enable):
+            if flag is not None and not hasattr(p, flag):
+                setattr(p, flag, True)
+    return apply
