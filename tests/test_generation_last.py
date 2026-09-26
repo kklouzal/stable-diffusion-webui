@@ -173,7 +173,7 @@ class GenerationLastTests(unittest.TestCase):
         path = self.module.snapshot_path()
         self.assertEqual(path, Path(self.temp.name) / "generation-last" / "generation-last.json")
         self.assertTrue(path.is_file())
-        self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+        self.assertEqual(list(path.parent.glob(".*")), [])  # no temporary left behind
 
     def test_cancelled_generation_does_not_replace_previous_snapshot(self):
         p = StableDiffusionProcessingTxt2Img()

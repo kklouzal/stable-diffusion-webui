@@ -12,7 +12,7 @@ from typing import Any
 
 import torch
 
-from modules import openclaw_cache_epochs
+from modules import openclaw_cache_epochs, persistent_artifact_cache
 
 _LOCK = threading.Lock()
 _LAST_RESULT: dict[str, Any] | None = None
@@ -373,9 +373,7 @@ def run_probe(include_benchmarks: bool = True, save: bool = True) -> dict[str, A
     result["duration_seconds"] = round(finished - started, 3)
     if save:
         data = _jsonable(result)
-        tmp = last_result_path().with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf8")
-        tmp.replace(last_result_path())
+        persistent_artifact_cache.atomic_write(last_result_path(), json.dumps(data, indent=2, sort_keys=True).encode("utf8"))
     return _jsonable(result)
 
 

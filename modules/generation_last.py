@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from modules import paths, shared
+from modules import paths, persistent_artifact_cache, shared
 
 
 SCHEMA_VERSION = 3
@@ -533,17 +533,7 @@ def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     if len(payload.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
         raise ValueError(f"last-generation snapshot exceeds the {_MAX_SNAPSHOT_BYTES}-byte retention limit")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(temporary, "w", encoding="utf-8") as file:
-        file.write(payload)
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(temporary, path)
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    persistent_artifact_cache.atomic_write(path, payload.encode("utf-8"))
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:

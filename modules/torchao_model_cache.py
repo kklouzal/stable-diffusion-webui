@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import torch
 
-from modules import persistent_artifact_cache
+from modules import cache, persistent_artifact_cache
 
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
 ARTIFACT_SCHEMA_VERSION = 2
@@ -74,15 +74,7 @@ def sha256_file(filename: str) -> str:
 
 
 def file_identity(filename: str) -> dict:
-    stat = os.stat(filename)
-    return {
-        "path": os.path.abspath(filename),
-        "device": stat.st_dev,
-        "inode": stat.st_ino,
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "ctime_ns": stat.st_ctime_ns,
-    }
+    return {"path": os.path.abspath(filename), **cache.file_revision(os.stat(filename))}
 
 
 def stat_source(filename: str, *, identity_trusted: bool = True) -> dict:
@@ -241,7 +233,7 @@ def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_n
             sidecar["cache"] = sidecar_cache
             updated = True
         if updated:
-            write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+            persistent_artifact_cache.atomic_write(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
 
     expected_coverage = sorted(coverage) if coverage is not None else None
     coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected_coverage)
@@ -253,16 +245,6 @@ def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_n
         and coverage_matches
         and cache_matches
     )
-
-
-def write_atomic_bytes(path: str, data: bytes) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(path), prefix=".tmp-", suffix=".json") as f:
-        tmp = f.name
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
 
 
 def torch_load_cache(cache_path: str, device: torch.device | str, register_safe_globals: Callable[[], None]):
@@ -450,7 +432,8 @@ def save_from_model(
             "skipped_linear": skipped_linear,
             "skipped_reasons": skipped_reasons,
         }
-        write_atomic_bytes(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
+        # Same directory as the artifact, so its directory fsync also makes the artifact rename durable.
+        persistent_artifact_cache.atomic_write(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
     quota_bytes = int(os.environ.get("OPENCLAW_TORCHAO_CACHE_MAX_BYTES", str(256 * 1024 ** 3)))
     quota_dry_run = os.environ.get("OPENCLAW_TORCHAO_CACHE_QUOTA_DRY_RUN", "0") == "1"
     quota = persistent_artifact_cache.enforce_directory_quota(
