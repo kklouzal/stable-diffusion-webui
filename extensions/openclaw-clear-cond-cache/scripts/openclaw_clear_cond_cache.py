@@ -279,22 +279,19 @@ def _install_backend_status_hooks() -> None:
                 _pop_backend_activity(token)
         return wrapped
 
-    def _wrap_prepare_quant_lora(label: str, phase: str):
-        def factory(original):
-            def wrapped(*args, **kwargs):
-                lora_count = len(getattr(_lora_networks, "loaded_networks", []) or [])
-                token = _push_backend_activity(phase, label, detail=f"{lora_count} active LoRA{'s' if lora_count != 1 else ''}")
-                try:
-                    return original(*args, **kwargs)
-                finally:
-                    _pop_backend_activity(token)
-            return wrapped
-        return factory
+    def _wrap_prepare_quant_lora(original):
+        def wrapped(backend, *args, **kwargs):
+            lora_count = len(getattr(_lora_networks, "loaded_networks", []) or [])
+            token = _push_backend_activity("quant_lora_prepare", f"Preparing {backend.label} LoRA weights", detail=f"{lora_count} active LoRA{'s' if lora_count != 1 else ''}")
+            try:
+                return original(backend, *args, **kwargs)
+            finally:
+                _pop_backend_activity(token)
+        return wrapped
 
     _wrap_backend_function(_lora_networks, "load_networks", _wrap_load_networks)
     _wrap_backend_function(_lora_networks, "load_network", _wrap_load_network)
-    _wrap_backend_function(_lora_networks, "prepare_mxfp8_active_config", _wrap_prepare_quant_lora("Preparing MXFP8 LoRA weights", "quant_lora_prepare"))
-    _wrap_backend_function(_lora_networks, "prepare_nvfp4_active_config", _wrap_prepare_quant_lora("Preparing NVFP4 LoRA weights", "quant_lora_prepare"))
+    _wrap_backend_function(_lora_networks, "prepare_quant_active_config", _wrap_prepare_quant_lora)
     _backend_lora_hooks_installed = True
 
 

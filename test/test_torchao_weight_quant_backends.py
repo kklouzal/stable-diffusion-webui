@@ -73,8 +73,11 @@ def test_storage_gating_and_policy_signature_layout(monkeypatch):
     assert sd_models.torchao_quant_policy_signature(sd15) == (False, (), None, False, (), None, torch.bfloat16)
 
 
-def test_backend_status_hook_targets_live_sd_models_function():
-    # _wrap_backend_function skips missing attributes silently, so a rename would drop the status hook unnoticed.
-    source = (Path(__file__).resolve().parents[1] / "extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py").read_text()
+def test_backend_status_hooks_target_live_functions():
+    # _wrap_backend_function skips missing attributes silently, so a rename would drop a status hook unnoticed.
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py").read_text()
     assert '_wrap_backend_function(_sd_models, "apply_weight_quantization"' in source
     assert callable(sd_models.apply_weight_quantization)
+    assert '_wrap_backend_function(_lora_networks, "prepare_quant_active_config"' in source
+    assert "\ndef prepare_quant_active_config(backend):" in (root / "extensions-builtin/Lora/networks.py").read_text().replace("\r\n", "\n")

@@ -1,4 +1,4 @@
-from modules import extra_networks, shared
+from modules import extra_networks, shared, torchao_weight_quant
 import networks
 
 
@@ -47,14 +47,11 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             dyn_dims.append(dyn_dim)
 
         networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
-        if not networks.prepare_mxfp8_active_config():
-            error = getattr(shared.sd_model, "network_mxfp8_prepare_error", "MXFP8 LoRA preparation failed")
-            p.comment(f"MXFP8 LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
-            raise FatalLoraPreparationError(error)
-        if not networks.prepare_nvfp4_active_config():
-            error = getattr(shared.sd_model, "network_nvfp4_prepare_error", "NVFP4 LoRA preparation failed")
-            p.comment(f"NVFP4 LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
-            raise FatalLoraPreparationError(error)
+        for backend in torchao_weight_quant.BACKENDS.values():
+            if not networks.prepare_quant_active_config(backend):
+                error = getattr(shared.sd_model, f"network_{backend.name}_prepare_error", f"{backend.label} LoRA preparation failed")
+                p.comment(f"{backend.label} LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
+                raise FatalLoraPreparationError(error)
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):

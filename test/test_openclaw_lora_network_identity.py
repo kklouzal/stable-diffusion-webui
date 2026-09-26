@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from modules.torchao_weight_quant import MXFP8, NVFP4
+
 
 class _TestOpts(SimpleNamespace):
     def __getattr__(self, name):
@@ -435,7 +437,7 @@ def test_quant_unload_restores_managed_base_and_invalidates_stale_active_config(
     assert linear.network_current_names == ()
     assert linear.network_mxfp8_merged_lora_applied is False
     assert not getattr(model, "network_mxfp8_active_config_ready", False)
-    assert not networks.network_mxfp8_is_model_prepared(model)
+    assert not networks.network_quant_is_model_prepared(MXFP8, model)
 
 
 def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora_networks, monkeypatch):
@@ -452,13 +454,13 @@ def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora
     net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None)
     networks.loaded_networks[:] = [net]
 
-    assert networks.network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias") == 0
-    networks.network_quant_restore_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias", "network_mxfp8_merged_lora_applied")
-    assert networks.network_quant_capture_managed_base(model, "network_mxfp8_base_weight", "network_mxfp8_base_bias") == 0
+    assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
+    networks.network_quant_restore_managed_base(MXFP8, model)
+    assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
     assert torch.equal(linear.weight, linear.network_mxfp8_base_weight)
-    assert not networks.network_mxfp8_is_model_prepared(model)
-    linear.network_current_names = networks.network_mxfp8_wanted_names()
-    assert networks.network_mxfp8_is_model_prepared(model)
+    assert not networks.network_quant_is_model_prepared(MXFP8, model)
+    linear.network_current_names = networks.network_wanted_names()
+    assert networks.network_quant_is_model_prepared(MXFP8, model)
 
 
 def test_nvfp4_unload_restores_managed_base_and_invalidates_stale_active_config(lora_networks, monkeypatch):
@@ -491,7 +493,51 @@ def test_nvfp4_unload_restores_managed_base_and_invalidates_stale_active_config(
     assert linear.network_current_names == ()
     assert linear.network_nvfp4_merged_lora_applied is False
     assert not getattr(model, "network_nvfp4_active_config_ready", False)
-    assert not networks.network_nvfp4_is_model_prepared(model)
+    assert not networks.network_quant_is_model_prepared(NVFP4, model)
+
+
+def test_quant_prepare_is_one_transaction_and_rolls_back_on_failure(lora_networks, monkeypatch):
+    import dataclasses
+    import torch
+    networks = lora_networks
+    linear = torch.nn.Linear(2, 2, bias=True, dtype=torch.bfloat16)
+    linear.network_layer_name = "layer"
+    linear.network_nvfp4_base_weight = linear.weight.detach().cpu().clone()
+    linear.network_nvfp4_base_bias = linear.bias.detach().cpu().clone()
+    model = SimpleNamespace(network_nvfp4_managed_modules=[("layer", linear)], sd_checkpoint_info=SimpleNamespace(filename="ckpt", hash="h", sha256="s"))
+    monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
+    monkeypatch.setattr(networks.shared.opts, "nvfp4_linear_coverage", ["unet_other"], raising=False)
+    monkeypatch.setattr(networks.devices, "nvfp4", True, raising=False)
+    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+    quantized = []
+
+    def quantize_(module, config, filter_fn, device):
+        assert config == "nvfp4-config" and filter_fn(module, "layer")
+        quantized.append(module)
+
+    monkeypatch.setitem(sys.modules, "torchao.quantization", SimpleNamespace(quantize_=quantize_))
+    backend = dataclasses.replace(NVFP4, make_config=lambda: "nvfp4-config", validate_config=lambda _config: None, tensor_type=lambda: torch.nn.Parameter)
+
+    assert networks.prepare_quant_active_config(backend)
+    assert quantized == [linear]
+    stats = model.network_nvfp4_prepare_stats
+    assert (stats["prepared_linear"], stats["quantized_linear"], stats["failed_linear"], stats["nvfp4_linear_coverage"]) == (1, 1, 0, ["unet_other"])
+    assert model.network_nvfp4_active_config_ready is True
+    assert networks.network_quant_is_model_prepared(backend, model)
+    assert networks.prepare_quant_active_config(backend)  # same active signature: nothing is re-quantized
+    assert quantized == [linear]
+
+    def failing_quantize_(module, config, filter_fn, device):
+        raise RuntimeError("injected quantize failure")
+
+    monkeypatch.setitem(sys.modules, "torchao.quantization", SimpleNamespace(quantize_=failing_quantize_))
+    networks.network_quant_mark_model_unprepared(backend, model)
+    weight_before, bias_before = linear.weight, linear.bias
+    assert not networks.prepare_quant_active_config(backend)
+    assert linear.weight is weight_before and linear.bias is bias_before
+    assert model.network_nvfp4_prepare_error == "failed to prepare active NVFP4 LoRA config for 1 Linear modules: ['layer']"
+    assert not getattr(model, "network_nvfp4_active_config_ready", False)
+
 
 def test_generation_owner_rejects_cross_request_overlap_and_cleans_exception(lora_networks):
     import threading
