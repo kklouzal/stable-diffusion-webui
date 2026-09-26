@@ -700,16 +700,18 @@ class ControlNetUiGroup(object):
                     fn=create_ui_unit, inputs=list(unit_args), outputs=unit
                 )
 
-        (
+        submit_button = (
             ControlNetUiGroup.a1111_context.img2img_submit_button
             if self.is_img2img
             else ControlNetUiGroup.a1111_context.txt2img_submit_button
-        ).click(
-            fn=create_ui_unit,
-            inputs=list(unit_args),
-            outputs=unit,
-            queue=False,
         )
+        if submit_button is not None:
+            submit_button.click(
+                fn=create_ui_unit,
+                inputs=list(unit_args),
+                outputs=unit,
+                queue=False,
+            )
         self.register_core_callbacks()
         self.ui_initialized = True
         return unit

@@ -389,6 +389,10 @@ class UnetHook(nn.Module):
         self.current_uc_indices = []
         self.current_c_indices = []
         self.is_in_high_res_fix = False
+        # OPENCLAW_CONTROLNET_FORWARD_OWNER_V2: this instance owns only the
+        # wrapper carrying this opaque token. Never restore another owner.
+        self._forward_hook_owner_token = object()
+        self._forward_hook_wrapper = None
 
     @staticmethod
     def call_vae_using_process(p, x, batch_size=None, mask=None):
@@ -894,12 +898,16 @@ class UnetHook(nn.Module):
                 if isinstance(param.control_model, torch.nn.Module):
                     param.control_model.to("cpu")
 
-        def forward_webui(*args, **kwargs):
-            # webui will handle other compoments 
+        def forward_webui(self, x, timesteps=None, context=None, y=None, **kwargs):
+            # webui will handle other compoments
+            # Disabled/no-unit execution calls the captured bound baseline
+            # without forwarding the wrapper's bound self a second time.
+            if not outer.control_params:
+                return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
             try:
                 if shared.cmd_opts.lowvram:
                     lowvram.send_everything_to_cpu()
-                return forward(*args, **kwargs)
+                return forward(self, x, timesteps=timesteps, context=context, y=y, **kwargs)
             except Exception as e:
                 move_all_control_model_to_cpu()
                 raise e
@@ -987,9 +995,25 @@ class UnetHook(nn.Module):
             process.sample_before_CN_hack = process.sample
         process.sample = process_sample
 
-        model._original_forward = model.forward
-        outer.original_forward = model.forward
-        model.forward = forward_webui.__get__(model, UNetModel)
+        active_owner = getattr(model, "_controlnet_forward_hook_owner", None)
+        active_wrapper = getattr(model, "_controlnet_forward_hook_wrapper", None)
+        if active_owner is outer._forward_hook_owner_token:
+            # hook() may be called twice for one owner, but never wrap or
+            # overwrite a callable another actor installed above our wrapper.
+            if model.forward is not active_wrapper:
+                raise RuntimeError("ControlNet UNet forward changed while this hook still owns it")
+            outer.original_forward = model._controlnet_forward_hook_baseline
+            outer._forward_hook_wrapper = active_wrapper
+        elif active_owner is not None:
+            raise RuntimeError("ControlNet UNet forward hook is owned by another live hook")
+        else:
+            outer.original_forward = model.forward
+            wrapper = forward_webui.__get__(model, UNetModel)
+            model._controlnet_forward_hook_baseline = outer.original_forward
+            model._controlnet_forward_hook_owner = outer._forward_hook_owner_token
+            model._controlnet_forward_hook_wrapper = wrapper
+            outer._forward_hook_wrapper = wrapper
+            model.forward = wrapper
 
         if model_is_sdxl:
             register_schedule(sd_ldm)
@@ -1066,9 +1090,16 @@ class UnetHook(nn.Module):
 
     def restore(self):
         scripts.script_callbacks.remove_callbacks_for_function(self.guidance_schedule_handler)
-        self.control_params = None
 
-        if self.model is not None:
-            if hasattr(self.model, "_original_forward"):
-                self.model.forward = self.model._original_forward
-                del self.model._original_forward
+        model = self.model
+        if model is not None and getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token:
+            wrapper = getattr(model, "_controlnet_forward_hook_wrapper", None)
+            # Only detach the wrapper installed by this owner. If another actor
+            # changed model.forward, leave that live callable untouched.
+            if model.forward is wrapper and wrapper is self._forward_hook_wrapper:
+                model.forward = model._controlnet_forward_hook_baseline
+                del model._controlnet_forward_hook_baseline
+                del model._controlnet_forward_hook_owner
+                del model._controlnet_forward_hook_wrapper
+        self._forward_hook_wrapper = None
+        self.control_params = None

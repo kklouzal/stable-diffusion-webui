@@ -468,6 +468,67 @@ class Script(scripts.Script, metaclass=(
         return control_model
 
     @staticmethod
+    def normalize_remote_resize_mode(value, default):
+        if isinstance(value, ResizeMode):
+            return value
+        aliases = {
+            0: ResizeMode.RESIZE,
+            1: ResizeMode.INNER_FIT,
+            2: ResizeMode.OUTER_FIT,
+            "0": ResizeMode.RESIZE,
+            "1": ResizeMode.INNER_FIT,
+            "2": ResizeMode.OUTER_FIT,
+            "Just resize": ResizeMode.RESIZE,
+            "Just Resize": ResizeMode.RESIZE,
+            "Crop and resize": ResizeMode.INNER_FIT,
+            "Crop and Resize": ResizeMode.INNER_FIT,
+            "Resize and fill": ResizeMode.OUTER_FIT,
+            "Resize and Fill": ResizeMode.OUTER_FIT,
+        }
+        if value in aliases:
+            return aliases[value]
+        try:
+            return ResizeMode(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def normalize_remote_control_mode(value, default):
+        if isinstance(value, ControlMode):
+            return value
+        aliases = {
+            0: ControlMode.BALANCED,
+            1: ControlMode.PROMPT,
+            2: ControlMode.CONTROL,
+            "0": ControlMode.BALANCED,
+            "1": ControlMode.PROMPT,
+            "2": ControlMode.CONTROL,
+            "Balanced": ControlMode.BALANCED,
+            "My prompt is more important": ControlMode.PROMPT,
+            "ControlNet is more important": ControlMode.CONTROL,
+        }
+        if value in aliases:
+            return aliases[value]
+        try:
+            return ControlMode(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def normalize_guidance_interval(start, end):
+        def as_float(value, default):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        start = min(1.0, max(0.0, as_float(start, 0.0)))
+        end = min(1.0, max(0.0, as_float(end, 1.0)))
+        if end < start:
+            end = start
+        return start, end
+
+    @staticmethod
     def get_remote_call(p, attribute, default=None, idx=0, strict=False, force=False):
         if not force and not shared.opts.data.get("control_net_allow_script_control", False):
             return default
@@ -479,6 +540,11 @@ class Script(scripts.Script, metaclass=(
                 return obj[idx]
             else:
                 return None
+
+        if idx > 0:
+            indexed_attribute_value = getattr(p, f"{attribute}{idx + 1}", None)
+            if indexed_attribute_value is not None:
+                return indexed_attribute_value
 
         attribute_value = get_element(getattr(p, attribute, None), strict)
         return attribute_value if attribute_value is not None else default
@@ -492,17 +558,18 @@ class Script(scripts.Script, metaclass=(
         unit.model = selector(p, "control_net_model", unit.model, idx)
         unit.weight = selector(p, "control_net_weight", unit.weight, idx)
         unit.image = selector(p, "control_net_image", unit.image, idx)
-        unit.resize_mode = selector(p, "control_net_resize_mode", unit.resize_mode, idx)
+        unit.resize_mode = Script.normalize_remote_resize_mode(selector(p, "control_net_resize_mode", unit.resize_mode, idx), unit.resize_mode)
         unit.low_vram = selector(p, "control_net_lowvram", unit.low_vram, idx)
         unit.processor_res = selector(p, "control_net_pres", unit.processor_res, idx)
         unit.threshold_a = selector(p, "control_net_pthr_a", unit.threshold_a, idx)
         unit.threshold_b = selector(p, "control_net_pthr_b", unit.threshold_b, idx)
-        unit.guidance_start = selector(p, "control_net_guidance_start", unit.guidance_start, idx)
-        unit.guidance_end = selector(p, "control_net_guidance_end", unit.guidance_end, idx)
+        guidance_start = selector(p, "control_net_guidance_start", unit.guidance_start, idx)
+        guidance_end = selector(p, "control_net_guidance_end", unit.guidance_end, idx)
         # Backward compatibility. See https://github.com/Mikubill/sd-webui-controlnet/issues/1740
         # for more details.
-        unit.guidance_end = selector(p, "control_net_guidance_strength", unit.guidance_end, idx)
-        unit.control_mode = selector(p, "control_net_control_mode", unit.control_mode, idx)
+        guidance_end = selector(p, "control_net_guidance_strength", guidance_end, idx)
+        unit.guidance_start, unit.guidance_end = Script.normalize_guidance_interval(guidance_start, guidance_end)
+        unit.control_mode = Script.normalize_remote_control_mode(selector(p, "control_net_control_mode", unit.control_mode, idx), unit.control_mode)
         unit.pixel_perfect = selector(p, "control_net_pixel_perfect", unit.pixel_perfect, idx)
 
         return unit
@@ -644,10 +711,12 @@ class Script(scripts.Script, metaclass=(
 
         units = external_code.get_all_units_in_processing(p)
         if len(units) == 0:
-            # fill a null group
-            remote_unit = Script.parse_remote_call(p, ControlNetUnit(), 0)
-            if remote_unit.enabled:
-                units.append(remote_unit)
+            # fill null groups from legacy remote-call fields, including indexed
+            # control_net_*2/control_net_*3 aliases accepted by the API model.
+            for idx in range(external_code.get_max_models_num()):
+                remote_unit = Script.parse_remote_call(p, ControlNetUnit(), idx)
+                if remote_unit.enabled:
+                    units.append(remote_unit)
 
         enabled_units = []
         for idx, unit in enumerate(units):
@@ -1362,7 +1431,9 @@ def on_ui_settings():
     shared.opts.add_option("control_net_models_path", shared.OptionInfo(
         "", "Extra path to scan for ControlNet models (e.g. training output directory)", section=section))
     shared.opts.add_option("control_net_modules_path", shared.OptionInfo(
-        "", "Path to directory containing annotator model directories (overrides corresponding command line flag)", section=section).needs_reload_ui())
+        "", "Legacy path to directory containing annotator/preprocessor model directories (overrides corresponding command line flag when no preprocessor-specific path is set)", section=section).needs_reload_ui())
+    shared.opts.add_option("control_net_preprocessor_models_path", shared.OptionInfo(
+        "", "Path to directory containing annotator/preprocessor model directories (overrides legacy setting and corresponding command line flag)", section=section).needs_reload_ui())
     shared.opts.add_option("control_net_unit_count", shared.OptionInfo(
         3, "Multi-ControlNet: ControlNet unit number", gr.Slider, {"minimum": 1, "maximum": 10, "step": 1}, section=section).needs_reload_ui())
     shared.opts.add_option("control_net_model_cache_size", shared.OptionInfo(

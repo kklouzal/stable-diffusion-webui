@@ -25,7 +25,19 @@ class ZoeDetector:
             load_file_from_url(remote_model_path, model_dir=self.model_dir)
         conf = get_config("zoedepth", "infer")
         model = ZoeDepth.build_from_config(conf)
-        model.load_state_dict(torch.load(modelpath, map_location=model.device)['model'])
+        incompatible = model.load_state_dict(
+            torch.load(modelpath, map_location=model.device)['model'], strict=False
+        )
+        unsupported_missing = list(incompatible.missing_keys)
+        unsupported_unexpected = [
+            key for key in incompatible.unexpected_keys
+            if not key.endswith(".attn.relative_position_index")
+        ]
+        if unsupported_missing or unsupported_unexpected:
+            raise RuntimeError(
+                "Unsupported ZoeDepth checkpoint mismatch: "
+                f"missing={unsupported_missing}, unexpected={unsupported_unexpected}"
+            )
         model.eval()
         self.model = model.to(self.device)
 
