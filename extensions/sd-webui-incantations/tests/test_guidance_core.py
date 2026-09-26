@@ -114,33 +114,6 @@ def install_a1111_stubs():
 
 
 class DynamicThresholdingTests(unittest.TestCase):
-    @staticmethod
-    def _reference_experiment_mode3(actual_res, step, max_steps):
-        coefs = torch.tensor(
-            [
-                [0.298, 0.207, 0.208, 0.0],
-                [0.187, 0.286, 0.173, 0.0],
-                [-0.158, 0.189, 0.264, 0.0],
-                [-0.184, -0.271, -0.473, 1.0],
-            ],
-            device=actual_res.device,
-            dtype=actual_res.dtype,
-        )
-        res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
-        max_rgb = res_rgb[:, :3].amax(dim=(1, 2, 3))
-        max_w = res_rgb[:, 3].amax(dim=(1, 2))
-        if step / max(max_steps - 1, 1) > 0.2:
-            should_scale = (max_rgb < 2.0) & (max_w < 3.0)
-        else:
-            should_scale = (max_rgb > 2.4) & (max_w > 3.0)
-        scale = torch.where(
-            should_scale,
-            max_rgb.div(2.4).clamp_min(torch.finfo(actual_res.dtype).eps),
-            torch.ones_like(max_rgb),
-        )
-        res_rgb = res_rgb / scale.view(-1, 1, 1, 1)
-        return torch.einsum("laxy,ab -> lbxy", res_rgb, coefs.inverse())
-
     def test_relative_path_preserves_dtype_and_finiteness(self):
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
             dt = DynThresh(
@@ -151,7 +124,6 @@ class DynamicThresholdingTests(unittest.TestCase):
                 "Constant",
                 0.0,
                 4.0,
-                0,
                 10,
                 True,
                 "MEAN",
@@ -169,7 +141,7 @@ class DynamicThresholdingTests(unittest.TestCase):
 
     def test_std_variability_handles_single_spatial_sample_without_nan(self):
         dt = DynThresh(
-            7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 1.0, 0, 1, False, "MEAN", "STD", 1.0
+            7.0, 1.0, "Constant", 0.0, "Constant", 0.0, 1.0, 1, False, "MEAN", "STD", 1.0
         )
         dt.step = 0
         uncond = torch.zeros(1, 4, 1, 1, dtype=torch.float32)
@@ -189,7 +161,6 @@ class DynamicThresholdingTests(unittest.TestCase):
             "Constant",
             0.0,
             4.0,
-            0,
             10,
             True,
             "MEAN",
@@ -217,7 +188,6 @@ class DynamicThresholdingTests(unittest.TestCase):
             "Constant",
             0.0,
             4.0,
-            0,
             10,
             True,
             "MEAN",
@@ -230,74 +200,6 @@ class DynamicThresholdingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "constant across batches"):
             dt.dynthresh(cond, uncond, 9.0, None)
-
-    def test_experiment_mode3_matches_reference_float32(self):
-        torch.manual_seed(1234)
-        base = DynThresh(
-            7.0,
-            1.0,
-            "Constant",
-            0.0,
-            "Constant",
-            0.0,
-            4.0,
-            0,
-            10,
-            True,
-            "MEAN",
-            "AD",
-            1.0,
-        )
-        exp3 = DynThresh(
-            7.0,
-            1.0,
-            "Constant",
-            0.0,
-            "Constant",
-            0.0,
-            4.0,
-            3,
-            10,
-            True,
-            "MEAN",
-            "AD",
-            1.0,
-        )
-        base.step = exp3.step = 3
-        uncond = torch.randn(2, 4, 8, 8)
-        relative = torch.randn_like(uncond) * 0.1
-
-        expected = self._reference_experiment_mode3(
-            base.dynthresh_from_relative(relative, uncond, 12.0), 3, 10
-        )
-        actual = exp3.dynthresh_from_relative(relative, uncond, 12.0)
-
-        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-
-    def test_experiment_mode3_preserves_dtype_and_handles_single_step(self):
-        for dtype in (torch.float32, torch.float16, torch.bfloat16):
-            dt = DynThresh(
-                7.0,
-                1.0,
-                "Constant",
-                0.0,
-                "Constant",
-                0.0,
-                4.0,
-                3,
-                1,
-                True,
-                "MEAN",
-                "AD",
-                1.0,
-            )
-            dt.step = 0
-            uncond = torch.randn(2, 4, 8, 8, dtype=dtype)
-            relative = torch.randn_like(uncond) * 0.1
-            out = dt.dynthresh_from_relative(relative, uncond, 12.0)
-            self.assertEqual(out.dtype, dtype)
-            self.assertEqual(out.shape, uncond.shape)
-            self.assertTrue(torch.isfinite(out.float()).all())
 
 
 class DynamicThresholdingLifecycleTests(unittest.TestCase):

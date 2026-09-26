@@ -102,7 +102,6 @@ class Script(scripts.Script):
         mimic_scale_min = getattr(p, 'dynthres_mimic_scale_min', mimic_scale_min)
         cfg_mode = getattr(p, 'dynthres_cfg_mode', cfg_mode)
         cfg_scale_min = getattr(p, 'dynthres_cfg_scale_min', cfg_scale_min)
-        experiment_mode = getattr(p, 'dynthres_experiment_mode', 0)
         sched_val = getattr(p, 'dynthres_scheduler_val', sched_val)
         p.extra_generation_params["Dynamic thresholding enabled"] = True
         p.extra_generation_params["Mimic scale"] = mimic_scale
@@ -130,7 +129,7 @@ class Script(scripts.Script):
 
             # Make a placeholder sampler
             sampler = sd_samplers.all_samplers_map[orig_sampler_name]
-            dt_data = dynthres_core.DynThresh(mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, experiment_mode, p.steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi)
+            dt_data = dynthres_core.DynThresh(mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, p.steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi)
             def new_constructor(model):
                 result = sampler.constructor(model)
                 cfg = CustomCFGDenoiser(result, dt_data)
@@ -164,19 +163,6 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
         denoised_uncond = x_out[-uncond.shape[0]:]
         self.main_class.step = self.step
         self.main_class.max_steps = self.total_steps
-
-        if self.main_class.experiment_mode >= 4 and self.main_class.experiment_mode <= 5:
-            # https://arxiv.org/pdf/2305.08891.pdf "Rescale CFG". It's not good, but if you want to test it, just set experiment_mode = 4 + phi.
-            denoised = torch.clone(denoised_uncond)
-            fi = self.main_class.experiment_mode - 4.0
-            for i, conds in enumerate(conds_list):
-                for cond_index, weight in conds:
-                    xcfg = (denoised_uncond[i] + (x_out[cond_index] - denoised_uncond[i]) * (cond_scale * weight))
-                    denom = torch.std(xcfg.float(), unbiased=False).clamp_min(torch.finfo(torch.float32).eps)
-                    xrescaled = xcfg * (torch.std(x_out[cond_index].float(), unbiased=False) / denom).to(dtype=xcfg.dtype)
-                    xfinal = fi * xrescaled + (1.0 - fi) * xcfg
-                    denoised[i] = xfinal
-            return denoised
 
         relative = torch.zeros_like(denoised_uncond)
         for i, conds in enumerate(conds_list):

@@ -1,24 +1,14 @@
-import logging
 import math
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 ######################### DynThresh Core #########################
 
 class DynThresh:
 
     Modes = ("Constant", "Linear Down", "Cosine Down", "Half Cosine Down", "Linear Up", "Cosine Up", "Half Cosine Up", "Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth")
-    _EXPERIMENT_MODE3_COEFS = (
-        (0.298, 0.207, 0.208, 0.0),
-        (0.187, 0.286, 0.173, 0.0),
-        (-0.158, 0.189, 0.264, 0.0),
-        (-0.184, -0.271, -0.473, 1.0),
-    )
-    _experiment_mode3_matrix_cache = {}  # noqa: RUF012 - shared tensor cache keyed by device/dtype.
 
-    def __init__(self, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, experiment_mode, max_steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi):
+    def __init__(self, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, max_steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi):
         self.mimic_scale = mimic_scale
         self.threshold_percentile = threshold_percentile
         self.mimic_mode = mimic_mode
@@ -26,7 +16,6 @@ class DynThresh:
         self.max_steps = max_steps
         self.cfg_scale_min = cfg_scale_min
         self.mimic_scale_min = mimic_scale_min
-        self.experiment_mode = experiment_mode
         self.sched_val = sched_val
         self.sep_feat_channels = separate_feature_channels
         self.scaling_startpoint = scaling_startpoint
@@ -73,17 +62,6 @@ class DynThresh:
     def _safe_denominator(value):
         eps = torch.finfo(value.dtype).eps
         return value.clamp_min(eps)
-
-    @classmethod
-    def _experiment_mode3_matrices(cls, device, dtype):
-        device = torch.device(device)
-        key = (device.type, device.index, dtype)
-        matrices = cls._experiment_mode3_matrix_cache.get(key)
-        if matrices is None:
-            coefs = torch.tensor(cls._EXPERIMENT_MODE3_COEFS, device=device, dtype=dtype)
-            matrices = (coefs, torch.linalg.inv(coefs))
-            cls._experiment_mode3_matrix_cache[key] = matrices
-        return matrices
 
     def dynthresh_from_relative(self, relative, uncond, cfg_scale):
         """Apply Dynamic Thresholding from an already aggregated CFG delta.
@@ -152,38 +130,6 @@ class DynThresh:
 
         if self.interpolate_phi != 1.0:
             actual_res = actual_res * self.interpolate_phi + cfg_target * (1.0 - self.interpolate_phi)
-
-        if self.experiment_mode == 1:
-            actual_res[:, 1].mul_(torch.where(actual_res[:, 0] > 1.0, 0.5, 1.0))
-            actual_res[:, 1].mul_(torch.where(actual_res[:, 1] > 1.0, 0.5, 1.0))
-            actual_res[:, 2].mul_(torch.where(actual_res[:, 2] > 1.5, 0.5, 1.0))
-        elif self.experiment_mode == 2:
-            over_scale = actual_res.abs().amax(dim=1, keepdim=True) > 1.5
-            actual_res = actual_res * torch.where(over_scale, 0.7, 1.0)
-        elif self.experiment_mode == 3:
-            coefs, inv_coefs = self._experiment_mode3_matrices(actual_res.device, stats_dtype)
-            res_rgb = torch.einsum("laxy,ab -> lbxy", actual_res, coefs)
-            rgb_channel_max = res_rgb[:, :3].amax(dim=(2, 3))
-            max_rgb = rgb_channel_max.amax(dim=1)
-            max_w = res_rgb[:, 3].amax(dim=(1, 2))
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "experiment_mode=3 max values: rgb_channels=%s, w=%s, rgb=%s",
-                    rgb_channel_max,
-                    max_w,
-                    max_rgb,
-                )
-            if self.step / max(self.max_steps - 1, 1) > 0.2:
-                should_scale = (max_rgb < 2.0) & (max_w < 3.0)
-            else:
-                should_scale = (max_rgb > 2.4) & (max_w > 3.0)
-            scale = torch.where(
-                should_scale,
-                self._safe_denominator(max_rgb / 2.4),
-                torch.ones_like(max_rgb),
-            )
-            res_rgb = res_rgb / scale.view(-1, 1, 1, 1)
-            actual_res = torch.einsum("laxy,ab -> lbxy", res_rgb, inv_coefs)
 
         return actual_res.to(dtype=orig_dtype)
 
