@@ -256,17 +256,20 @@ class KDiffusionSigmasCacheTests(unittest.TestCase):
         self.assertEqual(second.dtype, torch.float64)
         self.assertEqual(second.device, torch.device("cpu"))
 
-    def test_cache_can_be_bounded_by_environment(self):
+    def test_cache_honors_max_size_bound(self):
         _module, _shared, profile = load_kdiffusion_module()
-        os.environ["OPENCLAW_GENERATION_PROFILE_CACHE_MAX"] = "1"
-        profile.clear()
+        previous = profile._MAX_SIZE  # read once from OPENCLAW_GENERATION_PROFILE_CACHE_MAX at import
+        profile._MAX_SIZE = 1
+        try:
+            profile.clear()
+            profile.cached_tensor("direct", "a", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1))
+            profile.cached_tensor("direct", "b", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1) * 2)
 
-        profile.cached_tensor("direct", "a", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1))
-        profile.cached_tensor("direct", "b", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1) * 2)
-
-        status = profile.status()
-        self.assertEqual(status["cache_size"], 1)
-        self.assertEqual(status["evictions"], 1)
+            status = profile.status()
+            self.assertEqual(status["cache_size"], 1)
+            self.assertEqual(status["evictions"], 1)
+        finally:
+            profile._MAX_SIZE = previous
 
 
 if __name__ == "__main__":

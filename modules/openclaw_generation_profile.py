@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -8,7 +7,7 @@ from typing import Any, Callable
 
 import torch
 
-from modules import openclaw_cache_epochs
+from modules import openclaw_cache_epochs, openclaw_env
 
 
 @dataclass(frozen=True)
@@ -39,11 +38,7 @@ def enabled() -> bool:
     return True
 
 
-def _max_size() -> int:
-    try:
-        return max(0, int(os.environ.get("OPENCLAW_GENERATION_PROFILE_CACHE_MAX", "16") or 0))
-    except ValueError:
-        return 16
+_MAX_SIZE = openclaw_env.env_int("OPENCLAW_GENERATION_PROFILE_CACHE_MAX", 16, minimum=0)
 
 
 def _jsonable_key(key: GenerationProfileKey | None) -> dict[str, Any] | None:
@@ -65,7 +60,7 @@ def status() -> dict[str, Any]:
         return {
             "enabled": enabled(),
             "cache_size": len(_TENSOR_CACHE),
-            "max_cache_size": _max_size(),
+            "max_cache_size": _MAX_SIZE,
             **_STATS,
             "last_key": _jsonable_key(_STATS.get("last_key")),
         }
@@ -86,7 +81,7 @@ def clear() -> dict[str, Any]:
         })
         if cleared:
             openclaw_cache_epochs.observe("E08", "invalidate", reason="cache_cleared", count=cleared)
-        openclaw_cache_epochs.set_size("E08", current_size=0, capacity=_max_size())
+        openclaw_cache_epochs.set_size("E08", current_size=0, capacity=_MAX_SIZE)
         return status()
 
 
@@ -118,7 +113,7 @@ def make_key(
 
 
 def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor]) -> torch.Tensor:
-    max_size = _max_size()
+    max_size = _MAX_SIZE
     if max_size <= 0:
         bypass("max_size_zero")
         return factory()

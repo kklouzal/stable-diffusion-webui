@@ -185,16 +185,13 @@ class CudaGraphInvalidationTests(unittest.TestCase):
 class CudaGraphCacheSizeTests(unittest.TestCase):
     def setUp(self):
         self.previous_max_cache_size = openclaw_cuda_graphs._MAX_CACHE_SIZE
-        self.previous_min_key_hits = os.environ.get("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS")
-        os.environ.pop("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", None)
+        self.previous_min_key_hits = openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE
+        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = 2
         openclaw_cuda_graphs.set_enabled(False, clear=True)
 
     def tearDown(self):
         openclaw_cuda_graphs._MAX_CACHE_SIZE = self.previous_max_cache_size
-        if self.previous_min_key_hits is None:
-            os.environ.pop("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", None)
-        else:
-            os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = self.previous_min_key_hits
+        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = self.previous_min_key_hits
         openclaw_cuda_graphs.set_enabled(False, clear=True)
 
     def test_zero_max_cache_size_clears_existing_cache_entries(self):
@@ -272,7 +269,7 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             self.skipTest("CUDA is required for capture return-equivalence test")
 
         openclaw_cuda_graphs._MAX_CACHE_SIZE = 1
-        os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = "1"
+        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = 1
         openclaw_cuda_graphs.set_enabled(True, clear=True)
         x = torch.zeros(1, device="cuda")
         calls = []
@@ -284,17 +281,6 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
 
         self.assertTrue(torch.equal(out.cpu(), torch.ones(1)))
-
-    def test_min_key_hits_can_be_set_to_one_for_immediate_capture(self):
-        previous = os.environ.get("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS")
-        os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = "1"
-        try:
-            self.assertEqual(openclaw_cuda_graphs._min_key_hits_before_capture(), 1)
-        finally:
-            if previous is None:
-                os.environ.pop("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", None)
-            else:
-                os.environ["OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS"] = previous
 
     def test_model_invalidation_waits_for_inflight_replay_and_clone(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)
@@ -645,18 +631,6 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         finally:
             self.graphs._CACHE_MAX = old_max
 
-    def test_cache_max_env_parse_is_clamped_and_fallback_safe(self):
-        previous = os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX")
-        try:
-            os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = "-7"
-            self.assertEqual(self.graphs._read_cache_max(), 0)
-            os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = "not-an-int"
-            self.assertEqual(self.graphs._read_cache_max(), 4)
-        finally:
-            if previous is None:
-                os.environ.pop("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX", None)
-            else:
-                os.environ["OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX"] = previous
 
     def test_non_full_approximation_bypasses(self):
         self.graphs.set_enabled(True, clear_cache=True)

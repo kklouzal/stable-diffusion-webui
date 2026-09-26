@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from modules import openclaw_cache_epochs
+from modules import openclaw_cache_epochs, openclaw_env
 
 _ENABLED = False
 _GRAPH_CONTRACT_VERSION = 2
@@ -26,14 +26,7 @@ _EPOCH_DIMENSIONS = (
 )
 
 
-def _read_cache_max() -> int:
-    try:
-        return max(0, int(os.environ.get("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX", "4") or 0))
-    except ValueError:
-        return 4
-
-
-_CACHE_MAX = _read_cache_max()
+_CACHE_MAX = openclaw_env.env_int("OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX", 4, minimum=0)
 _LOCK = threading.RLock()
 # CUDA graph replay and lifecycle invalidation share one execution lock. VAE graph
 # entries retain mutable input/output storage and CUDA graph pools; serializing the
@@ -47,11 +40,6 @@ _BYPASS_REASONS: dict[str, int] = {}
 _INVALIDATION_REASONS: dict[str, int] = {}
 _LAST_ERROR: str | None = None
 _LAST_KEY: tuple[Any, ...] | None = None
-
-
-def _flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _observe_bypass(reason: str) -> None:
@@ -410,4 +398,4 @@ def run(model: Any, x: Any, approximation: int = 0) -> torch.Tensor | None:
                 return None
 
 
-set_enabled(_flag("OPENCLAW_VAE_DECODE_GRAPHS", False), clear_cache=True)
+set_enabled(openclaw_env.env_bool("OPENCLAW_VAE_DECODE_GRAPHS", False), clear_cache=True)

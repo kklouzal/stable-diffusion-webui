@@ -7,7 +7,7 @@ import threading
 from modules import headless_ui as gr
 from fastapi import FastAPI
 
-from modules import script_callbacks
+from modules import openclaw_env, script_callbacks
 
 
 def api_mxfp8_diagnostics(_: gr.Blocks, app: FastAPI):
@@ -23,7 +23,7 @@ def api_mxfp8_diagnostics(_: gr.Blocks, app: FastAPI):
         return {"ok": True, "started": started, "running": mxfp8_diagnostics.get_last_result().get("running"), "path": str(mxfp8_diagnostics.last_result_path())}
 
     delay = float(os.environ.get("A1111_MXFP8_STARTUP_PROBE_DELAY", "20"))
-    if os.environ.get("A1111_MXFP8_STARTUP_PROBE", "1") not in ("0", "false", "False"):
+    if openclaw_env.env_bool("A1111_MXFP8_STARTUP_PROBE", True):
         threading.Timer(delay, lambda: mxfp8_diagnostics.run_probe_background(include_benchmarks=True)).start()
 
 

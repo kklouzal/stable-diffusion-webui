@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 import traceback
 from typing import Any
 
 import torch
 
-from modules import openclaw_cache_epochs
+from modules import openclaw_cache_epochs, openclaw_env
 
 _ENABLED = False
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -36,14 +35,8 @@ _LIFECYCLE_STATE: dict[str, Any] = {}
 _MISSING = object()
 
 
-def _read_max_cache_size() -> int:
-    try:
-        return max(0, int(os.environ.get("OPENCLAW_CUDA_GRAPH_CACHE_MAX", "8") or 0))
-    except ValueError:
-        return 8
-
-
-_MAX_CACHE_SIZE = _read_max_cache_size()
+_MAX_CACHE_SIZE = openclaw_env.env_int("OPENCLAW_CUDA_GRAPH_CACHE_MAX", 8, minimum=0)
+_MIN_KEY_HITS_BEFORE_CAPTURE = openclaw_env.env_int("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", 2, minimum=1)
 
 
 def _reset_stats() -> None:
@@ -64,20 +57,13 @@ def _reset_stats() -> None:
     })
 
 
-def _min_key_hits_before_capture() -> int:
-    try:
-        return max(1, int(os.environ.get("OPENCLAW_CUDA_GRAPH_MIN_KEY_HITS", "2") or 2))
-    except ValueError:
-        return 2
-
-
 def status() -> dict[str, Any]:
     with _LOCK:
         return {
             "enabled": _ENABLED,
             "cache_size": len(_CACHE),
             "max_cache_size": _MAX_CACHE_SIZE,
-            "min_key_hits_before_capture": _min_key_hits_before_capture(),
+            "min_key_hits_before_capture": _MIN_KEY_HITS_BEFORE_CAPTURE,
             **_STATS,
             "lifecycle_state_keys": sorted(_LIFECYCLE_STATE),
         }
@@ -445,7 +431,7 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
             _STATS["fallbacks"] += 1
             _STATS["last_key"] = repr(key)
         return fn(x, sigma, cond=cond)
-    if entry is None and _min_key_hits_before_capture() > 1:
+    if entry is None and _MIN_KEY_HITS_BEFORE_CAPTURE > 1:
         with _LOCK:
             seen_before = key in _SEEN_KEYS
             if not seen_before:

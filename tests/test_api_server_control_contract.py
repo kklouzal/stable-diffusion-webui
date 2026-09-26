@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from modules import openclaw_env
+
 
 def load_api_control_class():
     source = Path("modules/api/api.py").read_text(encoding="utf8")
@@ -12,7 +14,6 @@ def load_api_control_class():
         "__init__",
         "_call_with_queue_lock",
         "add_api_route",
-        "_env_flag",
         "apply_openclaw_runtime_defaults",
         "get_cuda_graphs",
         "set_cuda_graphs",
@@ -36,7 +37,7 @@ def load_api_control_class():
     subset = ast.Module(body=[ast.ClassDef(name="Api", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
     ast.fix_missing_locations(subset)
 
-    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "BackgroundTasks": object, "os": os}
+    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "BackgroundTasks": object, "os": os, "openclaw_env": openclaw_env}
     exec(compile(subset, "api-server-control", "exec"), namespace)
     return namespace["Api"]
 
@@ -348,11 +349,14 @@ def test_openclaw_runtime_defaults_apply_env_values_without_raising(monkeypatch)
     api.apply_openclaw_runtime_defaults()
 
     assert calls == [("sdpa", "math"), ("graphs", True, True)]
-    assert api_class._env_flag("OPENCLAW_CUDA_GRAPHS") is True
     monkeypatch.setenv("OPENCLAW_CUDA_GRAPHS", "off")
-    assert api_class._env_flag("OPENCLAW_CUDA_GRAPHS") is False
+    calls.clear()
+    api.apply_openclaw_runtime_defaults()
+    assert calls == [("sdpa", "math"), ("graphs", False, True)]
     monkeypatch.delenv("OPENCLAW_CUDA_GRAPHS")
-    assert api_class._env_flag("OPENCLAW_CUDA_GRAPHS") is None
+    calls.clear()
+    api.apply_openclaw_runtime_defaults()
+    assert calls == [("sdpa", "math")]  # unset leaves the graph runtime untouched
 
 
 def test_get_memory_preserves_ram_and_cuda_response_shape(monkeypatch):

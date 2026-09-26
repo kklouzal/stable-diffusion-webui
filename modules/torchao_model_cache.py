@@ -11,10 +11,12 @@ from typing import Callable, Optional
 
 import torch
 
-from modules import cache, persistent_artifact_cache
+from modules import cache, openclaw_env, persistent_artifact_cache
 
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
 ARTIFACT_SCHEMA_VERSION = 2
+_CACHE_QUOTA_BYTES = openclaw_env.env_int("OPENCLAW_TORCHAO_CACHE_MAX_BYTES", 256 * 1024 ** 3, minimum=0)
+_CACHE_QUOTA_DRY_RUN = openclaw_env.env_bool("OPENCLAW_TORCHAO_CACHE_QUOTA_DRY_RUN", False)
 
 
 def runtime_compatibility() -> dict:
@@ -434,10 +436,8 @@ def save_from_model(
         }
         # Same directory as the artifact, so its directory fsync also makes the artifact rename durable.
         persistent_artifact_cache.atomic_write(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
-    quota_bytes = int(os.environ.get("OPENCLAW_TORCHAO_CACHE_MAX_BYTES", str(256 * 1024 ** 3)))
-    quota_dry_run = os.environ.get("OPENCLAW_TORCHAO_CACHE_QUOTA_DRY_RUN", "0") == "1"
     quota = persistent_artifact_cache.enforce_directory_quota(
-        os.path.dirname(cache_path), max_bytes=quota_bytes, dry_run=quota_dry_run
+        os.path.dirname(cache_path), max_bytes=_CACHE_QUOTA_BYTES, dry_run=_CACHE_QUOTA_DRY_RUN
     )
     if quota["evicted"] or not quota["within_quota"]:
         print(f"{label} cache quota: {json.dumps(quota, sort_keys=True)}", flush=True)

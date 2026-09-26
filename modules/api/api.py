@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, torchao_weight_quant
+from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, ui, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -718,13 +718,6 @@ class Api:
         self.apply_openclaw_runtime_defaults()
 
 
-    @staticmethod
-    def _env_flag(name: str) -> bool | None:
-        value = os.environ.get(name)
-        if value is None:
-            return None
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-
     def apply_openclaw_runtime_defaults(self):
         sdpa_backend = os.environ.get("OPENCLAW_SDPA_BACKEND")
         if sdpa_backend:
@@ -733,7 +726,7 @@ class Api:
             except Exception:
                 errors.report("Failed to apply OpenClaw SDPA backend default from environment", exc_info=True)
 
-        cuda_graphs_enabled = self._env_flag("OPENCLAW_CUDA_GRAPHS")
+        cuda_graphs_enabled = openclaw_env.env_bool("OPENCLAW_CUDA_GRAPHS", None)
         if cuda_graphs_enabled is not None:
             try:
                 from modules import openclaw_cuda_graphs
