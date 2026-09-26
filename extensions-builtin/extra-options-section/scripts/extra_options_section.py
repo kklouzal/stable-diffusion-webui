@@ -30,7 +30,7 @@ class ExtraOptionsSection(scripts.Script):
             for infotext_name, setting_name in infotext_utils.infotext_setting_name_mapping()
         }
 
-        with gr.Blocks() as interface:
+        with gr.Blocks():
             with gr.Accordion("Options", open=False, elem_id=elem_id_tabname) if shared.opts.extra_options_accordion and extra_options else gr.Group(elem_id=elem_id_tabname):
 
                 try:
@@ -62,12 +62,6 @@ class ExtraOptionsSection(scripts.Script):
                             setting_infotext_name = mapping.get(setting_name)
                             if setting_infotext_name is not None:
                                 self.infotext_fields.append((comp, setting_infotext_name))
-
-        def get_settings_values():
-            res = [ui_settings.get_value_for_setting(key) for key in self.setting_names]
-            return res[0] if len(res) == 1 else res
-
-        interface.load(fn=get_settings_values, inputs=[], outputs=self.comps, queue=False, show_progress=False)
 
         return self.comps
 

@@ -1,33 +1,15 @@
 from __future__ import annotations
-import base64
-import io
 import json
-import os
 import re
 import sys
 
-from modules import headless_ui as gr
-from modules.paths import data_path
-from modules import shared, ui_tempdir, script_callbacks, processing, infotext_versions, images, prompt_parser, errors
-from PIL import Image
+from modules import shared, processing, infotext_versions, prompt_parser
 
 sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]  # alias for old name
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
 re_imagesize = re.compile(r"^(\d+)x(\d+)$")
-type_of_gr_update = type(gr.update())
-
-
-class ParamBinding:
-    def __init__(self, paste_button, tabname, source_text_component=None, source_image_component=None, source_tabname=None, override_settings_component=None, paste_field_names=None):
-        self.paste_button = paste_button
-        self.tabname = tabname
-        self.source_text_component = source_text_component
-        self.source_image_component = source_image_component
-        self.source_tabname = source_tabname
-        self.override_settings_component = override_settings_component
-        self.paste_field_names = paste_field_names or []
 
 
 class PasteField(tuple):
@@ -44,12 +26,10 @@ class PasteField(tuple):
 
 
 paste_fields: dict[str, dict] = {}
-registered_param_bindings: list[ParamBinding] = []
 
 
 def reset():
     paste_fields.clear()
-    registered_param_bindings.clear()
 
 
 def quote(text):
@@ -69,35 +49,6 @@ def unquote(text):
         return text
 
 
-def image_from_url_text(filedata):
-    if filedata is None:
-        return None
-
-    if type(filedata) == list and filedata and type(filedata[0]) == dict and filedata[0].get("is_file", False):
-        filedata = filedata[0]
-
-    if type(filedata) == dict and filedata.get("is_file", False):
-        filename = filedata["name"]
-        is_in_right_dir = ui_tempdir.check_tmp_file(shared.demo, filename)
-        assert is_in_right_dir, 'trying to open image file outside of allowed directories'
-
-        filename = filename.rsplit('?', 1)[0]
-        return images.read(filename)
-
-    if type(filedata) == list:
-        if len(filedata) == 0:
-            return None
-
-        filedata = filedata[0]
-
-    if filedata.startswith("data:image/png;base64,"):
-        filedata = filedata[len("data:image/png;base64,"):]
-
-    filedata = base64.decodebytes(filedata.encode('utf-8'))
-    image = images.read(io.BytesIO(filedata))
-    return image
-
-
 def add_paste_fields(tabname, init_img, fields, override_settings_component=None):
 
     if fields:
@@ -106,99 +57,6 @@ def add_paste_fields(tabname, init_img, fields, override_settings_component=None
                 fields[i] = PasteField(*fields[i])
 
     paste_fields[tabname] = {"init_img": init_img, "fields": fields, "override_settings_component": override_settings_component}
-
-    # backwards compatibility for existing extensions
-    import modules.ui
-    if tabname == 'txt2img':
-        modules.ui.txt2img_paste_fields = fields
-    elif tabname == 'img2img':
-        modules.ui.img2img_paste_fields = fields
-
-
-def create_buttons(tabs_list):
-    buttons = {}
-    for tab in tabs_list:
-        buttons[tab] = gr.Button(f"Send to {tab}", elem_id=f"{tab}_tab")
-    return buttons
-
-
-def bind_buttons(buttons, send_image, send_generate_info):
-    """old function for backwards compatibility; do not use this, use register_paste_params_button"""
-    for tabname, button in buttons.items():
-        source_text_component = send_generate_info if isinstance(send_generate_info, gr.components.Component) else None
-        source_tabname = send_generate_info if isinstance(send_generate_info, str) else None
-
-        register_paste_params_button(ParamBinding(paste_button=button, tabname=tabname, source_text_component=source_text_component, source_image_component=send_image, source_tabname=source_tabname))
-
-
-def register_paste_params_button(binding: ParamBinding):
-    registered_param_bindings.append(binding)
-
-
-def connect_paste_params_buttons():
-    for binding in registered_param_bindings:
-        destination_image_component = paste_fields[binding.tabname]["init_img"]
-        fields = paste_fields[binding.tabname]["fields"]
-        override_settings_component = binding.override_settings_component or paste_fields[binding.tabname]["override_settings_component"]
-
-        def paste_fields_with_names(tabname, names):
-            return [field for field, name in paste_fields[tabname]["fields"] if name in names]
-
-        destination_width_component = next(iter([field for field, name in fields if name == "Size-1"] if fields else []), None)
-        destination_height_component = next(iter([field for field, name in fields if name == "Size-2"] if fields else []), None)
-
-        if binding.source_image_component and destination_image_component:
-            need_send_dementions = destination_width_component and binding.tabname != 'inpaint'
-            if isinstance(binding.source_image_component, gr.Gallery):
-                func = send_image_and_dimensions if need_send_dementions else image_from_url_text
-                jsfunc = "extract_image_from_gallery"
-            else:
-                func = send_image_and_dimensions if need_send_dementions else lambda x: x
-                jsfunc = None
-
-            binding.paste_button.click(
-                fn=func,
-                _js=jsfunc,
-                inputs=[binding.source_image_component],
-                outputs=[destination_image_component, destination_width_component, destination_height_component] if need_send_dementions else [destination_image_component],
-                show_progress=False,
-            )
-
-        if binding.source_text_component is not None and fields is not None:
-            connect_paste(binding.paste_button, fields, binding.source_text_component, override_settings_component, binding.tabname)
-
-        if binding.source_tabname is not None and fields is not None:
-            paste_field_names = ['Prompt', 'Negative prompt', 'Steps', 'Face restoration'] + (["Seed"] if shared.opts.send_seed else []) + binding.paste_field_names
-            binding.paste_button.click(
-                fn=lambda *x: x,
-                inputs=paste_fields_with_names(binding.source_tabname, paste_field_names),
-                outputs=paste_fields_with_names(binding.tabname, paste_field_names),
-                show_progress=False,
-            )
-
-        binding.paste_button.click(
-            fn=None,
-            _js=f"switch_to_{binding.tabname}",
-            inputs=None,
-            outputs=None,
-            show_progress=False,
-        )
-
-
-def send_image_and_dimensions(x):
-    if isinstance(x, Image.Image):
-        img = x
-    else:
-        img = image_from_url_text(x)
-
-    if shared.opts.send_size and isinstance(img, Image.Image):
-        w = img.width
-        h = img.height
-    else:
-        w = gr.update()
-        h = gr.update()
-
-    return img, w, h
 
 
 def restore_old_hires_fix_params(res):
@@ -489,76 +347,3 @@ def get_override_settings(params, *, skip_fields=None):
         res.append((param_name, setting_name, v))
 
     return res
-
-
-def connect_paste(button, paste_fields, input_comp, override_settings_component, tabname):
-    def paste_func(prompt):
-        if not prompt and not shared.cmd_opts.hide_ui_dir_config and not shared.cmd_opts.no_prompt_history:
-            filename = os.path.join(data_path, "params.txt")
-            try:
-                with open(filename, "r", encoding="utf8") as file:
-                    prompt = file.read()
-            except OSError:
-                pass
-
-        params = parse_generation_parameters(prompt)
-        script_callbacks.infotext_pasted_callback(prompt, params)
-        res = []
-
-        for output, key in paste_fields:
-            if callable(key):
-                try:
-                    v = key(params)
-                except Exception:
-                    errors.report(f"Error executing {key}", exc_info=True)
-                    v = None
-            else:
-                v = params.get(key, None)
-
-            if v is None:
-                res.append(gr.update())
-            elif isinstance(v, type_of_gr_update):
-                res.append(v)
-            else:
-                try:
-                    valtype = type(output.value)
-
-                    if valtype == bool and v == "False":
-                        val = False
-                    elif valtype == int:
-                        val = float(v)
-                    else:
-                        val = valtype(v)
-
-                    res.append(gr.update(value=val))
-                except Exception:
-                    res.append(gr.update())
-
-        return res
-
-    if override_settings_component is not None:
-        already_handled_fields = {key: 1 for _, key in paste_fields}
-
-        def paste_settings(params):
-            vals = get_override_settings(params, skip_fields=already_handled_fields)
-
-            vals_pairs = [f"{infotext_text}: {value}" for infotext_text, setting_name, value in vals]
-
-            return gr.Dropdown.update(value=vals_pairs, choices=vals_pairs, visible=bool(vals_pairs))
-
-        paste_fields = paste_fields + [(override_settings_component, paste_settings)]
-
-    button.click(
-        fn=paste_func,
-        inputs=[input_comp],
-        outputs=[x[0] for x in paste_fields],
-        show_progress=False,
-    )
-    button.click(
-        fn=None,
-        _js=f"recalculate_prompts_{tabname}",
-        inputs=[],
-        outputs=[],
-        show_progress=False,
-    )
-

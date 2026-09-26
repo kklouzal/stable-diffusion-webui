@@ -7,13 +7,10 @@ import network
 import networks
 import lora_patches
 import extra_networks_lora
-import ui_extra_networks_lora
-from modules import script_callbacks, ui_extra_networks, extra_networks, shared
+from modules import script_callbacks, extra_networks, shared
 
 
 def before_ui():
-    ui_extra_networks.register_page(ui_extra_networks_lora.ExtraNetworksPageLora())
-
     networks.extra_network_lora = extra_networks_lora.ExtraNetworkLora()
     extra_networks.register_extra_network(networks.extra_network_lora)
     extra_networks.register_extra_network_alias(networks.extra_network_lora, "lyco")

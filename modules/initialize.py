@@ -28,7 +28,7 @@ def imports():
     shared_init.initialize()
     startup_timer.record("initialize shared")
 
-    from modules import processing, ui_component_patches, ui  # noqa: F401
+    from modules import processing  # noqa: F401
     startup_timer.record("other imports")
 
 
@@ -91,10 +91,6 @@ def initialize_rest():
     sd_models.list_models()
     startup_timer.record("list SD models")
 
-    from modules import localization
-    localization.list_localizations(cmd_opts.localizations_dir)
-    startup_timer.record("list localizations")
-
     with startup_timer.subcategory("load scripts"):
         scripts.load_scripts()
 
@@ -141,10 +137,6 @@ def initialize_rest():
     from modules import shared_items
     shared_items.reload_hypernetworks()
     startup_timer.record("reload hypernetworks")
-
-    from modules import ui_extra_networks
-    ui_extra_networks.initialize()
-    ui_extra_networks.register_default_pages()
 
     from modules import extra_networks
     extra_networks.initialize()

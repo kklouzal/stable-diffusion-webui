@@ -1,6 +1,6 @@
 import torch
 
-from modules import shared, ui_html_extensions
+from modules import shared
 
 
 class Profiler:
@@ -39,8 +39,4 @@ class Profiler:
             self.profiler.__exit__(exc_type, exc, exc_tb)
 
             self.profiler.export_chrome_trace(shared.opts.profiling_filename)
-
-
-def webpath():
-    return ui_html_extensions.webpath(shared.opts.profiling_filename)
 

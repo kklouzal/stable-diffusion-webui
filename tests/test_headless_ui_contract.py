@@ -19,7 +19,7 @@ def load_headless_ui():
 
 def test_components_accept_the_event_methods_quicksettings_wiring_calls():
     gr = load_headless_ui()
-    # modules/ui_settings.py wires quicksettings with submit+blur for Textbox and release/change otherwise.
+    # Script ui() code and vendored ControlNet UI code wire these events on inert components.
     for component in (gr.Textbox(), gr.Slider(), gr.Dropdown(), gr.Checkbox()):
         for event in ("submit", "blur", "release", "change", "click", "then"):
             assert getattr(component, event)(fn=None, inputs=[], outputs=[]) is component

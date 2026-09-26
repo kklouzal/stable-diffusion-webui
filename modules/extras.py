@@ -7,33 +7,9 @@ import json
 import torch
 import tqdm
 
-from modules import shared, images, sd_models, sd_vae, sd_models_config, errors
-from modules.ui_common import plaintext_to_html
+from modules import shared, sd_models, sd_vae, sd_models_config, errors
 from modules import headless_ui as gr
 import safetensors.torch
-
-
-def run_pnginfo(image):
-    if image is None:
-        return '', '', ''
-
-    geninfo, items = images.read_info_from_image(image)
-    items = {**{'parameters': geninfo}, **items}
-
-    info = ''
-    for key, text in items.items():
-        info += f"""
-<div class="infotext">
-<p><b>{plaintext_to_html(str(key))}</b></p>
-<p>{plaintext_to_html(str(text))}</p>
-</div>
-""".strip()+"\n"
-
-    if len(info) == 0:
-        message = "Nothing found in the image."
-        info = f"<div><p>{message}<p></div>"
-
-    return '', geninfo, info
 
 
 def create_config(ckpt_result, config_source, a, b, c):

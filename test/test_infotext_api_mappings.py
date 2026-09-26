@@ -239,24 +239,43 @@ def test_apply_infotext_uses_pydantic_v2_field_metadata():
     assert "request.__fields__" not in source
 
 
-def test_apply_infotext_keeps_componentless_builtin_fields_off_script_arg_zero(monkeypatch):
+def test_apply_infotext_keeps_componentless_builtin_fields_off_script_arg_zero():
     # Built-in paste fields carry no UI component, and script_runner.inputs[0] is None (the selectable-script index).
+    # Loaded from source so the test does not depend on other tests' modules-package stubs.
+    import types
+    import typing
     from types import SimpleNamespace
 
-    from modules import shared, shared_init
-    if getattr(shared, "opts", None) is None:
-        shared_init.initialize()
-    from modules import infotext_utils
-    from modules.api import api as api_module, models
-    from modules.infotext_utils import PasteField
+    import pydantic
+
+    tree = ast.parse(Path("modules/api/api.py").read_text())
+    api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in {"api_field_value_type", "api_infotext_value_for_field"}]
+    functions += [node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == "apply_infotext"]
+    module = ast.Module(body=functions, type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    class Field:
+        def __init__(self, component, label, *, api=None):
+            self.component, self.label, self.function, self.api = component, label, None, api
 
     script_component = type("Control", (), {"value": 0.5})()  # hashable, like UI components
-    fields = [PasteField(None, "Steps", api="steps"), PasteField(script_component, "Script value")]
-    monkeypatch.setitem(infotext_utils.paste_fields, "txt2img", {"init_img": None, "fields": fields, "override_settings_component": None})
-    request = models.StableDiffusionTxt2ImgProcessingAPI(infotext="a cat\nSteps: 7, Script value: 0.25, Seed: 1")
-    mentioned = {}
+    infotext_utils = SimpleNamespace(
+        paste_fields={"txt2img": {"fields": [Field(None, "Steps", api="steps"), Field(script_component, "Script value")]}},
+        parse_generation_parameters=lambda _text: {"Steps": "7", "Script value": "0.25"},
+        get_override_settings=lambda _params: [],
+    )
+    namespace = {"typing": typing, "types": types, "infotext_utils": infotext_utils}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
 
-    api_module.Api.apply_infotext(object(), request, "txt2img", script_runner=SimpleNamespace(inputs=[None, script_component]), mentioned_script_args=mentioned)
+    class Request(pydantic.BaseModel):
+        infotext: typing.Optional[str] = None
+        steps: int = 50
+        override_settings: typing.Optional[dict] = None
+
+    request = Request(infotext="a cat")
+    mentioned = {}
+    namespace["apply_infotext"](None, request, "txt2img", script_runner=SimpleNamespace(inputs=[None, script_component]), mentioned_script_args=mentioned)
 
     assert request.steps == 7
     assert mentioned == {1: 0.25}
