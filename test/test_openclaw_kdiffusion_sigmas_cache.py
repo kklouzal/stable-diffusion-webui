@@ -271,6 +271,30 @@ class KDiffusionSigmasCacheTests(unittest.TestCase):
         finally:
             profile._MAX_SIZE = previous
 
+    def test_noised_img2img_latent_applies_extra_noise_after_callback(self):
+        module, shared, _profile = load_kdiffusion_module()
+        sampler = object.__new__(module.KDiffusionSampler)
+        p = types.SimpleNamespace(extra_generation_params={})
+        x, noise = torch.ones(2), torch.full((2,), 0.5)
+
+        shared.opts.img2img_extra_noise = 0
+        torch.testing.assert_close(sampler.noised_img2img_latent(p, x, noise, 2.0), torch.full((2,), 2.0))
+        self.assertEqual(p.extra_generation_params, {})
+
+        seen = []
+
+        def callback(params):
+            seen.append(params.xi.clone())
+            params.noise = params.noise * 4
+
+        module.ExtraNoiseParams = lambda noise, x, xi: types.SimpleNamespace(noise=noise, x=x, xi=xi)
+        module.extra_noise_callback = callback
+        shared.opts.img2img_extra_noise = 0.25
+        xi = sampler.noised_img2img_latent(p, x, noise, 2.0)
+        torch.testing.assert_close(seen[0], torch.full((2,), 2.0))
+        torch.testing.assert_close(xi, torch.full((2,), 2.5))  # 2.0 + callback noise (0.5 * 4) * 0.25
+        self.assertEqual(p.extra_generation_params, {"Extra noise": 0.25})
+
 
 if __name__ == "__main__":
     unittest.main()

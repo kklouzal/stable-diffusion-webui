@@ -18,7 +18,6 @@ from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
 from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, sd_schedulers, shared
-from modules.script_callbacks import ExtraNoiseParams, extra_noise_callback
 from modules.shared import opts, state
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
@@ -546,17 +545,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         sigma_sched_start = steps - t_enc - 1
         sigma_sched = sigmas[sigma_sched_start:]
         sampling_steps = _sigma_transition_count(sigma_sched)
-        if hasattr(shared.sd_model, "add_noise_to_latent"):
-            xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
-        else:
-            xi = x + noise * sigma_sched[0]
-
-        if opts.img2img_extra_noise > 0:
-            p.extra_generation_params["Extra noise"] = opts.img2img_extra_noise
-            extra_noise_params = ExtraNoiseParams(noise, x, xi)
-            extra_noise_callback(extra_noise_params)
-            noise = extra_noise_params.noise
-            xi += noise * opts.img2img_extra_noise
+        xi = self.noised_img2img_latent(p, x, noise, sigma_sched[0])
 
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x

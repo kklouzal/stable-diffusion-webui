@@ -193,23 +193,26 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             ),
         )
 
-    def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
-        steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
-
-        sigmas = self.get_sigmas(p, steps)
-        sigma_sched = sigmas[steps - t_enc - 1:]
-
+    def noised_img2img_latent(self, p, x, noise, sigma0):
+        """Noise the img2img init latent `x` to `sigma0`, then apply the "Extra noise" option and its callback."""
         if hasattr(shared.sd_model, 'add_noise_to_latent'):
-            xi = shared.sd_model.add_noise_to_latent(x, noise, sigma_sched[0])
+            xi = shared.sd_model.add_noise_to_latent(x, noise, sigma0)
         else:
-            xi = x + noise * sigma_sched[0]
+            xi = x + noise * sigma0
 
         if opts.img2img_extra_noise > 0:
             p.extra_generation_params["Extra noise"] = opts.img2img_extra_noise
             extra_noise_params = ExtraNoiseParams(noise, x, xi)
             extra_noise_callback(extra_noise_params)
-            noise = extra_noise_params.noise
-            xi += noise * opts.img2img_extra_noise
+            xi += extra_noise_params.noise * opts.img2img_extra_noise
+        return xi
+
+    def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
+        steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
+
+        sigmas = self.get_sigmas(p, steps)
+        sigma_sched = sigmas[steps - t_enc - 1:]
+        xi = self.noised_img2img_latent(p, x, noise, sigma_sched[0])
 
         extra_params_kwargs = self.initialize(p)
         parameters = inspect.signature(self.func).parameters
