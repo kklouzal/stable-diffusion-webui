@@ -36,7 +36,7 @@ def load_api_control_class():
     subset = ast.Module(body=[ast.ClassDef(name="Api", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
     ast.fix_missing_locations(subset)
 
-    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "os": os}
+    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "BackgroundTasks": object, "os": os}
     exec(compile(subset, "api-server-control", "exec"), namespace)
     return namespace["Api"]
 
@@ -234,11 +234,9 @@ def test_server_control_side_effects_and_response_status(monkeypatch):
         is_restartable=lambda: False,
         restart_program=lambda: calls.append("restart-program"),
     )
-    shared_stub = SimpleNamespace(state=SimpleNamespace(server_command=None))
     monkeypatch.setitem(api_class.kill_webui.__globals__, "restart", restart_stub)
     monkeypatch.setitem(api_class.restart_webui.__globals__, "restart", restart_stub)
     monkeypatch.setitem(api_class.restart_webui.__globals__, "Response", Response)
-    monkeypatch.setitem(api_class.stop_webui.__globals__, "shared", shared_stub)
     monkeypatch.setitem(api_class.stop_webui.__globals__, "Response", Response)
 
     api = api_class.__new__(api_class)
@@ -253,10 +251,20 @@ def test_server_control_side_effects_and_response_status(monkeypatch):
     assert api.restart_webui().status_code == 501
     assert calls == ["stop-program", "restart-program"]
 
-    stop_response = api.stop_webui()
-    assert shared_stub.state.server_command == "stop"
+    class BackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, func, *args, **kwargs):
+            self.tasks.append(func)
+
+    monkeypatch.setitem(api_class.stop_webui.__globals__, "restart", restart_stub)
+    background = BackgroundTasks()
+    stop_response = api.stop_webui(background)
     assert stop_response.content == "Stopping."
     assert stop_response.status_code == 200
+    assert calls == ["stop-program", "restart-program"]  # nothing exits before the response is sent
+    assert background.tasks == [restart_stub.stop_program]
 
 
 def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(monkeypatch):

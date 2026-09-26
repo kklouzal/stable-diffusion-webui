@@ -4,6 +4,8 @@ import io
 import os
 import sys
 import time
+import types
+import typing
 import datetime
 import uvicorn
 import ipaddress
@@ -11,7 +13,7 @@ import requests
 from modules import headless_ui as gr
 from threading import Lock
 from io import BytesIO
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.exceptions import HTTPException
 from fastapi.responses import JSONResponse
@@ -409,6 +411,21 @@ def script_default_ui_values(script):
     if controls is None:
         return []
     return [elem.value for elem in controls]
+
+
+def api_field_value_type(annotation):
+    """Scalar type an infotext value is coerced to for a pydantic field annotation.
+
+    Optional[X] and X | None yield X. Containers, Literal, Any and other unions yield NoneType,
+    which makes api_infotext_value_for_field keep the parsed value's own type.
+    """
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        args = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return api_field_value_type(args[0]) if len(args) == 1 else type(None)
+    if annotation is typing.Any or origin is not None or not isinstance(annotation, type):
+        return type(None)
+    return annotation
 
 
 def api_infotext_value_for_field(field, params, target_type):
@@ -979,12 +996,13 @@ class Api:
             return {}
 
         possible_fields = infotext_utils.paste_fields[tabname]["fields"]
-        set_fields = request.model_dump(exclude_unset=True) if hasattr(request, "request") else request.dict(exclude_unset=True)  # pydantic v1/v2 have different names for this
+        set_fields = request.model_dump(exclude_unset=True)
         params = infotext_utils.parse_generation_parameters(request.infotext)
+        model_fields = type(request).model_fields
 
         def get_field_value(field, params):
-            if field.api in request.__fields__:
-                target_type = request.__fields__[field.api].type_
+            if field.api in model_fields:
+                target_type = api_field_value_type(model_fields[field.api].annotation)
             else:
                 target_type = type(field.component.value)
 
@@ -1527,6 +1545,7 @@ class Api:
             restart.restart_program()
         return Response(status_code=501)
 
-    def stop_webui(self):
-        shared.state.server_command = "stop"
+    def stop_webui(self, background_tasks: BackgroundTasks):
+        # API-only runtime has no main loop to hand a stop command to: exit once the response is sent.
+        background_tasks.add_task(restart.stop_program)
         return Response("Stopping.")

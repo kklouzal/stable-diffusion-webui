@@ -202,3 +202,38 @@ def test_get_infotext_names_uses_option_and_legacy_setting_mappings():
     exec(compile(module, "modules/shared_items.py", "exec"), namespace)
 
     assert namespace["get_infotext_names"]() == ["Clip skip", "Legacy field", "Prompt"]
+
+
+def load_api_field_value_type():
+    source = Path("modules/api/api.py").read_text()
+    tree = ast.parse(source)
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "api_field_value_type")
+    module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"types": types, "typing": __import__("typing")}
+    exec(compile(module, "modules/api/api.py", "exec"), namespace)
+    return namespace[helper.name]
+
+
+def test_api_field_value_type_unwraps_pydantic_v2_annotations():
+    import typing
+
+    field_type = load_api_field_value_type()
+
+    assert field_type(int) is int
+    assert field_type(typing.Optional[int]) is int
+    assert field_type(float | None) is float
+    assert field_type(typing.Optional[bool]) is bool
+    assert field_type(str) is str
+    # Containers, literals, Any and multi-type unions keep the parsed value's own type.
+    assert field_type(typing.Optional[list[str]]) is type(None)
+    assert field_type(dict[str, typing.Any]) is type(None)
+    assert field_type(typing.Literal["a", "b"]) is type(None)
+    assert field_type(typing.Any) is type(None)
+    assert field_type(int | str) is type(None)
+
+
+def test_apply_infotext_uses_pydantic_v2_field_metadata():
+    source = Path("modules/api/api.py").read_text()
+    assert ".type_" not in source
+    assert "request.__fields__" not in source
