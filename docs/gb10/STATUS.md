@@ -2,35 +2,25 @@
 
 ## Mission
 
-Refactor the GB10-native AUTOMATIC1111 container from the older NVIDIA PyTorch-base approach to the newer NVIDIA CUDA-base + explicit PyTorch nightly `cu132` approach, while keeping the repo reviewable and the host-mounted user-data layout intact.
+Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch base, keeping the repo reviewable, the NGC-tuned framework stack protected, and the host-mounted user-data layout intact.
 
-## Current status
+## Current status (2026-09-25)
 
-**Full image build now succeeds on the GB10 with the CUDA-base refactor.**
-
-The repo currently:
-
-- still targets the same upstream A1111 source and persistent host-mounted runtime surfaces
-- now defaults the Dockerfile/build flow to NVIDIA CUDA NGC + explicit PyTorch nightly `cu132`
-- now freezes/protects the base Python package set after torch install so later app deps cannot overwrite or shadow it
-- now keeps `wheelbuilder` on a Rust + OpenSSL-capable path for packages that still need native wheels, while `tokenizers` is required to resolve to a current compatible aarch64 wheel
-- now routes heavy builder compiles through `ccache` via BuildKit cache mounts
-- still keeps upstream `webui.sh` out of authority for runtime bootstrap
-- still keeps user-owned runtime surfaces under `/opt/gb10/stable-diffusion`
-- now vendors `sd-webui-incantations` as GB10-owned first-class extension source for PAG, SEG, CFG-combiner, and CFG-Fix behavior
-- has completed a real successful full-image build on the GB10 host
-- now emits `/opt/stable-diffusion-webui/BUILD_MANIFEST.txt` and `.json` during image build, classifying installed Python packages into base-layer-provided vs A1111 direct vs A1111 indirect and annotating latest-visible-version drift reasons
+- production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `sha256:2240717e...`, built from commit `fca55394` on `latest`
+- rollback image: `local/gb10-a1111:pre-deps-20260925` (`sha256:87340a8f...`, the 2026-09-06 build plus hot-patch layers)
+- builds: `gb10/build.sh` from this checkout; System-Statistics' Rebuild button uses the same `gb10/build.sh` and `gb10/run.sh`
+- the NGC package set is protected, except 55 stock PyPI wheels released to the A1111 resolver (`docker/base-released-packages.txt`)
+- `/opt/stable-diffusion-webui/BUILD_MANIFEST.*` and `PROTECTED_PACKAGES.json` record the package classification, NGC floors, and protection checks
 
 ## Current chosen defaults
 
-- base image family: `nvcr.io/nvidia/cuda`
-- base image tag: `nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`
-- PyTorch nightly CUDA lane: `cu132`
-- torch-extension arch policy in repo build path: `12.1a` for GB10 Blackwell-targeted extension wheels; `12.1f` is not directly accepted by the current PyTorch extension build path and is no longer preferred over `12.1a`
-- upstream repo: `https://github.com/AUTOMATIC1111/stable-diffusion-webui.git`
-- upstream ref: `dev`
+- base image: `nvcr.io/nvidia/pytorch:26.08-py3` (newest NGC tag as of 2026-09-25; CUDA 13.4.1, cuDNN 9.25, NVIDIA PyTorch `2.14.0a0+4fdf77b` built for CUDA 13.4, Triton 3.8.0)
+- MSLK built from source at `88d06bc` against the inherited stack
+- torch-extension arch policy: `12.1a` (`12.1f` is not accepted by the PyTorch extension build path)
+- A1111 source: this fork checkout, branch `latest`
 - host storage root: `/opt/gb10/stable-diffusion`
-- default port: `7860`
+- default port: `7860` (API-only, `--nowebui`)
+- build CPU placement: `gb10build.slice` (performance cores 5-9,15-19) once those CPUs are not boot-isolated with `isolcpus=domain`; until then builds use the default efficiency-core placement
 
 ## Persistent host surfaces
 
@@ -58,14 +48,20 @@ Host-owned persistent surfaces:
 
 ## Current image/runtime doctrine
 
-- upstream `webui.sh` is not the container authority
-- runtime Python environment is image-owned
-- NVIDIA CUDA base image owns the CUDA/runtime substrate
-- PyTorch is installed explicitly from the selected nightly lane during build
-- the resulting base Python package set is frozen/protected before later app dependency installs
-- builder stage resolves and prebuilds the non-framework Python dependency closure
-- runtime installs the curated non-framework runtime set with `--no-deps` under the protected constraints file
+- upstream `webui.sh` is not the container authority; the runtime Python environment is image-owned
+- the NGC PyTorch image owns CUDA, cuDNN, TensorRT, and the NVIDIA-built torch/torchvision/Triton/TransformerEngine stack
+- the base stage records the pristine NGC package set; the build fails if any build step changes an inherited package (MSLK is the one intentional rebuild)
+- every NGC package stays pinned except the released list, which the A1111 resolver may move forward (never below the NGC version, capped by every installed package's declared requirements)
+- the builder stage resolves and prebuilds the application closure; the runtime stage installs it with `--no-deps` and fails if the protected boundary changed
 - upstream companion repos required by A1111 are baked into the image
+
+## Deployment evidence — 2026-09-25 dependency refresh
+
+- 42 package changes vs the previous image, including transformers 5.17.0, accelerate 1.15.0, openai 3.19.2, starlette 1.7.0, timm 1.0.30, pytorch-lightning 2.6.6, uvicorn 0.54.0, huggingface-hub 1.33.0, tokenizers 0.23.2, pydantic 2.13.5, scipy 1.18.1, numba 0.67.0
+- numpy is NGC's 2.1.0 again. Earlier builds' MSLK `--force-reinstall` had replaced it with PyPI 2.5.x, which broke NGC's numba 0.64.
+- `pip check`: only the stale `dctorch` `numpy<2` metadata and NGC `triton-kernels` `pytest` remain (pre-existing)
+- captured A1111-Controller img2img + ControlNet workload: output within the previous image's cross-process noise floor (PSNR 39.4-40.1 dB vs 38.1 dB old-vs-old); warm latency 29.06 / 29.14 s on production after deploy (previous baseline 29.5 s)
+- evidence: `~/audit-artifacts/gb10-a1111-deps-refresh-20260925/`
 
 ## Current baked upstream companion repos
 
