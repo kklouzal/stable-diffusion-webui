@@ -51,6 +51,19 @@ ENV MAX_JOBS=4
 ENV CMAKE_BUILD_PARALLEL_LEVEL=4
 ENV PATH=/usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Record the pristine NGC Python package set before this stage installs anything, so the
+# protection snapshot can prove no inherited package was replaced by a build step.
+RUN python3 - <<'PY' > /opt/build/ngc-pristine-packages.txt
+import importlib.metadata as md
+import re
+seen = {}
+for dist in md.distributions():
+    name = dist.metadata.get("Name")
+    if name:
+        seen.setdefault(re.sub(r"[-_.]+", "-", name.lower()), dist.version)
+print("\n".join(f"{name}=={version}" for name, version in sorted(seen.items())))
+PY
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     build-essential \
@@ -84,7 +97,8 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 #   inherited NGC packages from A1111 application requirements
 # - build MSLK from source against the inherited CUDA 13.4 / NGC PyTorch stack so
 #   the native mslk.so baseline stays aligned with GB10 bf16/NVFP4 work
-# - freeze the resulting system-Python package set so later app deps cannot overwrite it
+# - freeze the resulting system-Python package set so later app deps cannot overwrite it,
+#   except stock PyPI wheels named in docker/base-released-packages.txt
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     python /opt/build/patch-torchao.py \
     && python -m pip install --break-system-packages \
@@ -103,49 +117,15 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && cd /opt/build/MSLK \
     && MSLK_PACKAGE_NAME=${MSLK_PACKAGE_NAME} python setup.py --verbose bdist_wheel \
       ${CMAKE_ARGS} \
-    && python -m pip install --break-system-packages --force-reinstall /opt/build/MSLK/dist/mslk-*.whl \
+    && python -m pip install --break-system-packages --force-reinstall --no-deps /opt/build/MSLK/dist/mslk-*.whl \
     && ccache --show-stats --verbose \
     && rm -rf /opt/build/MSLK
 
-RUN python - <<'PY'
-import importlib.metadata as md
-import json
-import re
-from pathlib import Path
-
-def normalize(name: str) -> str:
-    return re.sub(r'[-_.]+', '-', name.strip().lower())
-
-def version(name: str):
-    try:
-        return md.version(name)
-    except md.PackageNotFoundError:
-        return None
-
-pins = []
-seen = set()
-for dist in sorted(md.distributions(), key=lambda d: normalize(d.metadata.get('Name', ''))):
-    name = dist.metadata.get('Name')
-    if not name:
-        continue
-    norm = normalize(name)
-    if norm in seen:
-        continue
-    seen.add(norm)
-    pins.append(f'{norm}=={dist.version}')
-
-Path('/opt/build/base-python-protected-constraints.txt').write_text('\n'.join(pins) + '\n')
-Path('/opt/build/base-python-protected-names.txt').write_text('\n'.join(x.split('==', 1)[0] for x in pins) + '\n')
-print(json.dumps({
-    'protected_count': len(pins),
-    'torch': md.version('torch'),
-    'torchvision': md.version('torchvision'),
-    'torchaudio': version('torchaudio'),
-    'torchaudio_optional_absent': version('torchaudio') is None,
-    'torchao': md.version('torchao'),
-    'mslk': md.version('mslk'),
-}, indent=2))
-PY
+# Protect every NGC package at its exact version except the reviewed released list,
+# which the application resolver may move forward (NGC version is the floor).
+COPY docker/base-released-packages.txt /opt/build/base-released-packages.txt
+COPY docker/snapshot-base-packages.py /opt/build/snapshot-base-packages.py
+RUN python /opt/build/snapshot-base-packages.py --released /opt/build/base-released-packages.txt --pristine /opt/build/ngc-pristine-packages.txt --rebuilt mslk --out-dir /opt/build
 
 FROM torch-base AS source
 
@@ -222,6 +202,7 @@ RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --profile minimal --default-t
 COPY --from=source /opt/build/stable-diffusion-webui /opt/build/stable-diffusion-webui
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
+COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/build/base-python-released-floors.txt
 COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-sd-webui-controlnet-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
@@ -234,9 +215,12 @@ COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 # Builder-stage wheel doctrine:
 # - resolve the full dependency closure once against the inherited NVIDIA package set
-# - exclude every NVIDIA-provided direct package from the app resolver input and
-#   represent the exact NVIDIA versions with dependency-free resolver stubs; this
-#   avoids rejecting internally tested NGC combinations because of stale metadata
+# - exclude every protected NVIDIA-provided direct package from the app resolver input and
+#   represent the exact NVIDIA versions with resolver stubs; stubs declare only their
+#   requirements on released packages, which avoids rejecting internally tested NGC
+#   combinations because of stale metadata while still capping released versions
+# - released packages resolve to the newest version that satisfies A1111, every stub that
+#   declares a requirement on them (requested explicitly), the protected pins, and the NGC floor
 # - prebuild wheels for the full resolved closure in this throwaway stage
 # - tokenizers follows the current Transformers-compatible range, but must not fall
 #   below the known-good GB10 floor or fall back to an sdist/Rust build
@@ -247,11 +231,11 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && cargo --version \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-names-file /opt/build/base-python-protected-names.txt \
     && python /opt/build/patch-facexlib-wheel.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
-    && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt \
+    && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt --released-floors /opt/build/base-python-released-floors.txt --dependents-out /opt/build/protected-resolver-dependents.txt \
     && python -m venv /opt/build/resolver-venv \
     && python -m pip --python /opt/build/resolver-venv install --force-reinstall -c /opt/build/base-python-protected-constraints.txt pip \
     && /opt/build/resolver-venv/bin/python -m pip install --no-deps --no-index -r /opt/build/protected-resolver-stubs.txt \
-    && /opt/build/resolver-venv/bin/python -m pip install --dry-run --report /opt/build/report.json -r /opt/build/requirements-resolver.txt \
+    && /opt/build/resolver-venv/bin/python -m pip install --dry-run --report /opt/build/report.json -c /opt/build/base-python-protected-constraints.txt -c /opt/build/base-python-released-floors.txt -r /opt/build/requirements-resolver.txt -r /opt/build/protected-resolver-dependents.txt \
     && python /opt/build/assert-resolved-package.py --package transformers --min-version 5.7.0 \
     && python /opt/build/assert-resolved-package.py --package tokenizers --min-version 0.22.2 --require-wheel \
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
@@ -307,6 +291,7 @@ COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
+COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/base-python-released-floors.txt
 COPY requirements_versions.txt /opt/requirements-image.txt
 COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
 COPY docker/check-protected-stack.py /usr/local/bin/gb10-a1111-check-protected-stack
@@ -321,7 +306,8 @@ COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 # - do not let upstream webui.sh create/manage its own venv here
 # - do not let upstream launch bootstrap replace the CUDA-base + PyTorch package set
 # - protect every package inherited from the NVIDIA base image from application deps
-#   and fail the build if A1111 requires an incompatible replacement
+#   and fail the build if A1111 requires an incompatible replacement; released packages
+#   are replaced only by newer resolved versions whose declared requirements all hold
 # - do install the repo-owned A1111 dependency closure from requirements_versions.txt
 #   as normal application dependencies, filtered only against the protected base set
 RUN python - <<'PY'
@@ -381,7 +367,7 @@ print(json.dumps({
     }
 }, indent=2))
 PY
-RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
+RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --released-floors /opt/base-python-released-floors.txt --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
     && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
        MSLK_SOURCE_REPO="${MSLK_REPO}" \

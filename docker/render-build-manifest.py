@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 BASE_CONSTRAINTS = Path(os.environ.get('BASE_CONSTRAINTS', '/opt/base-python-protected-constraints.txt'))
+RELEASED_FLOORS = Path(os.environ.get('RELEASED_FLOORS', '/opt/base-python-released-floors.txt'))
 DIRECT_REQUIREMENTS = Path(os.environ.get('DIRECT_REQUIREMENTS', '/opt/requirements-image.txt'))  # copied from repo requirements_versions.txt
 A1111_DIR = Path(os.environ.get('A1111_DIR', '/opt/stable-diffusion-webui'))
 OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST.txt')))
@@ -64,7 +65,20 @@ def load_req_map(path: Path) -> dict[str, str]:
     return out
 
 
+def load_floor_map(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not path.exists():
+        return data
+    for raw in path.read_text().splitlines():
+        raw = raw.strip()
+        if raw and not raw.startswith('#') and '>=' in raw:
+            name, version = raw.split('>=', 1)
+            data[normalize(name)] = version.strip()
+    return data
+
+
 base_pkgs = load_constraint_map(BASE_CONSTRAINTS)
+released_floors = load_floor_map(RELEASED_FLOORS)
 repo_direct_map = load_req_map(DIRECT_REQUIREMENTS)
 upstream_versions_map = load_req_map(A1111_DIR / 'requirements_versions.txt')
 upstream_plain_map = load_req_map(A1111_DIR / 'requirements.txt')
@@ -77,6 +91,8 @@ for dist in md.distributions():
     if not name:
         continue
     norm = normalize(name)
+    if norm in all_dists:
+        continue  # shadowed copy later on sys.path; the first one is what Python imports
     all_dists[norm] = {
         'display': name,
         'version': dist.version,
@@ -165,6 +181,11 @@ def latest_visible(name: str, extra_index_url: str | None = None) -> str:
     return result
 
 
+def released_tag(name: str) -> str:
+    floor = released_floors.get(name)
+    return f'|Released-From-NGC:{floor}' if floor else ''
+
+
 def direct_reason(name: str) -> str:
     hoisted = name in base_pkgs
     if name == 'clip':
@@ -211,7 +232,7 @@ for name in sorted(all_dists):
     }
     if name in explicit_direct:
         item['category'] = 'direct'
-        item['source_reason'] = direct_reason(name)
+        item['source_reason'] = direct_reason(name) + released_tag(name)
         item['repo_direct_entry'] = repo_direct_map.get(name)
         item['upstream_versions_entry'] = upstream_versions_map.get(name)
         item['upstream_requirements_entry'] = upstream_plain_map.get(name)
@@ -222,7 +243,7 @@ for name in sorted(all_dists):
         sections['base'].append(item)
     else:
         item['category'] = 'indirect'
-        item['source_reason'] = indirect_reason(name)
+        item['source_reason'] = indirect_reason(name) + released_tag(name)
         sections['indirect'].append(item)
 
 for name in sorted(PYTORCH_NIGHTLY_OPTIONAL_ABSENT):
@@ -260,6 +281,7 @@ lines.append('[classification summary]')
 lines.append('base-layer-provided = CUDA/PyTorch/base packages protected before A1111 app dependency installation')
 lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt; base matches stay protected')
 lines.append('a1111-indirect = transitive dependencies pulled in under the direct set')
+lines.append('Released-From-NGC:<version> = NGC stock wheel released to the app resolver (docker/base-released-packages.txt); <version> is the NGC floor')
 lines.append('torchaudio = optional for the NGC CUDA 13.4 lane; absence is accepted unless a runtime import requirement is proven')
 lines.append(f"base_layer_provided: {len(sections['base'])}")
 lines.append(f"a1111_direct: {len(sections['direct'])}")
@@ -284,6 +306,7 @@ text = '\n'.join(lines).rstrip() + '\n'
 OUTPUT_TEXT.write_text(text)
 OUTPUT_JSON.write_text(json.dumps({
     'summary': {k: len(v) for k, v in sections.items()},
+    'released_from_ngc': released_floors,
     'pytorch_nightly_index_url': PYTORCH_NIGHTLY_INDEX_URL,
     'mslk_nightly_index_url': MSLK_NIGHTLY_INDEX_URL,
     'upstream_direct_count': len(upstream_direct),

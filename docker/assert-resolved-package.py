@@ -49,7 +49,7 @@ def main() -> int:
         try:
             installed_version = md.version(args.package)
         except md.PackageNotFoundError:
-            raise SystemExit(f'{args.package}: not present in pip report or installed environment')
+            raise SystemExit(f'{args.package}: not present in pip report or installed environment') from None
         if args.min_version and version_key(installed_version) < version_key(args.min_version):
             raise SystemExit(f'{args.package}: installed {installed_version}, below required floor {args.min_version}')
         if args.max_version and version_key(installed_version) > version_key(args.max_version):

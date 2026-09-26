@@ -8,6 +8,9 @@ import json
 import re
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.version import Version
+
 EXACT_PROTECTED = {"torch", "torchvision", "torchaudio", "triton"}
 PREFIX_PROTECTED = ("nvidia-", "cuda-")
 REQUIRED_PRESENT = {"torch", "torchvision", "triton"}
@@ -120,6 +123,52 @@ def compare(before: dict, after: dict) -> list[str]:
     return problems
 
 
+def load_released_floors(path: Path) -> dict[str, str]:
+    floors = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        req = Requirement(line)
+        spec = list(req.specifier)
+        if len(spec) != 1 or spec[0].operator != ">=":
+            raise SystemExit(f"released floor must be name>=version: {line}")
+        floors[normalize(req.name)] = spec[0].version
+    return floors
+
+
+def check_released(floors: dict[str, str]) -> tuple[dict, list[str]]:
+    """Released packages must stay at or above their NGC floor and satisfy every installed
+    distribution's declared requirement on them (effective copies only)."""
+    installed: dict[str, md.Distribution] = {}
+    for dist in md.distributions():
+        name = dist.metadata.get("Name")
+        if name:
+            installed.setdefault(normalize(name), dist)
+    problems = []
+    report = {}
+    for name, floor in sorted(floors.items()):
+        dist = installed.get(name)
+        version = dist.version if dist else None
+        report[name] = {"floor": floor, "installed": version}
+        if version is None:
+            problems.append(f"released package is absent: {name}")
+        elif Version(version) < Version(floor):
+            problems.append(f"released package below NGC floor: {name} {version} < {floor}")
+    for parent, dist in sorted(installed.items()):
+        for raw in dist.requires or ():
+            req = Requirement(raw)
+            target = normalize(req.name)
+            if target not in floors or target not in installed:
+                continue
+            if req.marker is not None and not req.marker.evaluate({"extra": ""}):
+                continue
+            version = installed[target].version
+            if not req.specifier.contains(version, prereleases=True):
+                problems.append(f"{parent} requires {req.name}{req.specifier}, installed {version}")
+    return report, problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Snapshot/compare GB10 protected CUDA/PyTorch package boundary.")
     ap.add_argument("--snapshot", help="write a baseline snapshot JSON")
@@ -130,6 +179,7 @@ def main() -> int:
         default=str(DEFAULT_PROTECTED_NAMES_FILE),
         help="newline-delimited package names inherited from the NVIDIA base image",
     )
+    ap.add_argument("--released-floors", help="name>=version floors of NGC packages released to the app resolver")
     args = ap.parse_args()
 
     protected_names_file = Path(args.protected_names_file)
@@ -145,6 +195,12 @@ def main() -> int:
         before_data = before.get("current", before)
         problems = compare(before_data, current)
         result = {"before": before_data, "current": current, "problems": problems}
+
+    if args.released_floors:
+        released, released_problems = check_released(load_released_floors(Path(args.released_floors)))
+        problems = problems + released_problems
+        result["released"] = released
+        result["problems"] = problems
 
     out_path = Path(args.out or args.snapshot or "-")
     if str(out_path) != "-":
@@ -165,6 +221,8 @@ def main() -> int:
     if absent:
         print("optional protected package absent by policy: " + ", ".join(sorted(absent)))
     print(f"protected NVIDIA base package boundary: ok ({len(base_protected_names)} packages)")
+    if args.released_floors:
+        print(f"released NGC packages: ok ({len(result['released'])} packages at or above floor, requirements satisfied)")
     return 0
 
 

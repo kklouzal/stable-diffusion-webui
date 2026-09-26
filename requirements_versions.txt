@@ -7,7 +7,7 @@
 setuptools==69.5.1
 GitPython
 Pillow
-pytz==2026.3.post1
+pytz==2026.4
 accelerate
 blendmodes==2025
 clean-fid
@@ -15,7 +15,7 @@ diskcache
 einops
 facexlib
 fastapi==0.141.1
-uvicorn==0.52.4
+uvicorn==0.54.0
 httpcore
 httpx
 requests
@@ -55,4 +55,5 @@ openai
 boto3
 aliyun-python-sdk-core
 aliyun-python-sdk-alimt
-# pydantic is intentionally omitted: the NVIDIA base image owns and protects it.
+# pydantic is intentionally omitted: fastapi and openai pull it in, and it resolves as a released
+# NGC package (docker/base-released-packages.txt) with the NGC version as its floor.

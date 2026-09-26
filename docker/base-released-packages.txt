@@ -1,0 +1,69 @@
+# NGC base-image Python packages released from protection to the A1111 application resolver.
+#
+# Every other package inherited from the NGC PyTorch base stays protected at its exact NGC version.
+# A package listed here is resolved with the A1111 dependency closure instead: newest release that
+# satisfies A1111 requirements AND every installed package's declared requirements, never below the
+# NGC version (the floor). docker/snapshot-base-packages.py enforces the release rule at build time:
+#   - the effective installed copy is a stock PyPI wheel (pip-installed from an index, no local
+#     version label, no direct URL): NVIDIA did not build or tune it
+#   - it is outside the declared requirement closure of the NVIDIA-built runtime stack A1111 imports
+#     (torch, torchvision, triton, torchao, mslk), so numpy, pillow, sympy, networkx, filelock,
+#     fsspec, jinja2, setuptools and typing-extensions stay protected
+#   - no CUDA/NVIDIA package prefixes
+# Membership criterion (review when A1111 dependencies change): the package is in the A1111 runtime
+# dependency closure. dpkg-owned copies (PyYAML, Pygments) are not pip-replaceable and stay protected.
+annotated-types
+antlr4-python3-runtime
+anyio
+attrs
+certifi
+cffi
+charset-normalizer
+click
+contourpy
+cycler
+dill
+einops
+fonttools
+h11
+hf-xet
+httpcore
+httpx
+huggingface-hub
+idna
+importlib-metadata
+jsonschema
+jsonschema-specifications
+kiwisolver
+lark
+llvmlite
+markdown-it-py
+matplotlib
+mdurl
+multiprocess
+ninja
+numba
+omegaconf
+packaging
+protobuf
+psutil
+pycparser
+pydantic
+pydantic-core
+pyparsing
+python-dateutil
+referencing
+regex
+requests
+rich
+rpds-py
+safetensors
+scipy
+send2trash
+six
+tokenizers
+tqdm
+typing-inspection
+urllib3
+wcwidth
+zipp
