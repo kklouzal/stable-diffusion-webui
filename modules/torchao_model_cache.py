@@ -43,7 +43,8 @@ def runtime_compatibility() -> dict:
     return {
         "python": list(sys.version_info[:3]),
         "platform": platform.platform(),
-        "torch": torch.__version__,
+        # torch.__version__ is a TorchVersion; the weights_only cache unpickler only accepts plain str.
+        "torch": str(torch.__version__),
         "torchao": torchao_version,
         "cuda_runtime": cuda,
         "cuda_driver": driver,

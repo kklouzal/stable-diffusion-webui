@@ -111,3 +111,16 @@ def test_torchao_sidecar_corruption_or_missing_contract_forces_regeneration(monk
     assert torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
     cache.write_bytes(b"broken")
     assert not torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+
+
+def test_artifact_contract_survives_weights_only_load(tmp_path):
+    # Cache payloads embed the contract and are loaded with weights_only=True; a torch.torch_version.TorchVersion
+    # (what torch.__version__ is) is not an allowed global there, so every cache would be rejected and rebuilt.
+    import torch
+
+    from modules import torchao_model_cache
+
+    path = tmp_path / "artifact.pt"
+    torch.save({"contract": torchao_model_cache.artifact_contract("cfg", ["unet_other"])}, path)
+    loaded = torchao_model_cache.torch_load_cache(str(path), "cpu", lambda: None)  # the production weights_only loader
+    assert loaded["contract"]["runtime"]["torch"] == str(torch.__version__)
