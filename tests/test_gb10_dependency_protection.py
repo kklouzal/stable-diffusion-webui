@@ -50,35 +50,6 @@ def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
     assert removed == {"numpy", "setuptools", "torch"}
 
 
-def test_runtime_filter_excludes_all_nvidia_base_packages(tmp_path: Path):
-    source = tmp_path / "resolved.txt"
-    source.write_text(
-        "numpy==2.3.2\nrequests==2.32.5\nsetuptools==69.5.1\ntorch==2.12.1\n",
-        encoding="utf-8",
-    )
-    target = tmp_path / "runtime.txt"
-    protected = tmp_path / "protected.txt"
-    protected.write_text("numpy\nsetuptools\n", encoding="utf-8")
-    audit = tmp_path / "audit.json"
-    env = os.environ.copy()
-    env.update(
-        SOURCE=str(source),
-        TARGET=str(target),
-        AUDIT=str(audit),
-        BASE_PROTECTED_NAMES_FILE=str(protected),
-    )
-
-    subprocess.run(
-        [sys.executable, str(ROOT / "docker" / "filter-resolved-requirements.py")],
-        check=True,
-        env=env,
-    )
-
-    assert target.read_text(encoding="utf-8") == "requests==2.32.5\n"
-    removed = {item["name"] for item in json.loads(audit.read_text())["removed"]}
-    assert removed == {"numpy", "setuptools", "torch"}
-
-
 def test_protected_resolver_stubs_preserve_versions_without_base_dependencies(tmp_path: Path):
     constraints = tmp_path / "constraints.txt"
     constraints.write_text("numpy==2.5.2\npip==26.2.1\n", encoding="utf-8")

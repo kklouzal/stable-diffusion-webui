@@ -5,13 +5,10 @@ from pathlib import Path
 BUILD_ROOT = Path('/opt/build')
 PATCH_ROOT = Path('/opt/build/patches')
 MOUNTED_EXTENSION_PATCH_ROOT = PATCH_ROOT / 'mounted-extensions'
+# Patch sets that exist under patches/ (see patches/README.md); a missing directory is a build error.
 TARGETS = {
-    'stable-diffusion-webui': BUILD_ROOT / 'stable-diffusion-webui',
     'stable-diffusion-stability-ai': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'stable-diffusion-stability-ai',
     'generative-models': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'generative-models',
-    'k-diffusion': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'k-diffusion',
-    'BLIP': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'BLIP',
-    'stable-diffusion-webui-assets': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'stable-diffusion-webui-assets',
 }
 
 
@@ -21,15 +18,9 @@ def run(cmd):
 
 
 def main():
-    if not PATCH_ROOT.exists():
-        print('no patches directory present; skipping')
-        return
-
     applied = 0
     for patch_set, repo in TARGETS.items():
         patch_dir = PATCH_ROOT / patch_set
-        if not patch_dir.exists():
-            continue
         patches = sorted(p for p in patch_dir.iterdir() if p.is_file() and p.suffix == '.patch')
         if not patches:
             continue

@@ -209,7 +209,9 @@ def main() -> int:
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
 
-    if args.snapshot:
+    # Without --out the snapshot path was the output path above; write it separately only
+    # when --out sent the result elsewhere.
+    if args.snapshot and args.out:
         Path(args.snapshot).parent.mkdir(parents=True, exist_ok=True)
         Path(args.snapshot).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 

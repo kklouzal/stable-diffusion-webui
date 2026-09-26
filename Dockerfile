@@ -3,7 +3,6 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3
 ARG PYTHON_VERSION=3.12
 ARG PYTORCH_NIGHTLY_CUDA_TAG=cu134
-ARG TORCHAO_PACKAGE=torchao
 ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
 ARG MSLK_COMMIT=88d06bc2784f3b550d7ec851d4ca67a16a844fe2
 ARG MSLK_PACKAGE_NAME=mslk
@@ -24,8 +23,6 @@ FROM ${BASE_IMAGE} AS torch-base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTHON_VERSION
-ARG PYTORCH_NIGHTLY_CUDA_TAG
-ARG TORCHAO_PACKAGE
 ARG MSLK_REPO
 ARG MSLK_COMMIT
 ARG MSLK_PACKAGE_NAME
@@ -140,17 +137,12 @@ ARG BLIP_REPO
 ARG BLIP_COMMIT
 ARG ASSETS_REPO
 ARG ASSETS_COMMIT
-ARG CLIP_PACKAGE_URL
 
 COPY patches /opt/build/patches
 COPY docker/apply-local-patches.py /opt/build/apply-local-patches.py
 
 SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/build
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgoogle-perftools-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY . /opt/build/stable-diffusion-webui
 
@@ -206,12 +198,10 @@ COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/build/bas
 COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-sd-webui-controlnet-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
-COPY docker/filter-resolved-requirements.py /opt/build/filter-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
 COPY docker/create-protected-package-stubs.py /opt/build/create-protected-package-stubs.py
 COPY docker/patch-facexlib-wheel.py /opt/build/patch-facexlib-wheel.py
 COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
-COPY docker/patch-torchao.py /opt/build/patch-torchao.py
 
 # Builder-stage wheel doctrine:
 # - resolve the full dependency closure once against the inherited NVIDIA package set
@@ -272,7 +262,6 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG A1111_UID=2323
 ARG A1111_GID=2323
 ARG PYTORCH_NIGHTLY_CUDA_TAG
-ARG MSLK_REPO
 ARG MSLK_COMMIT
 
 SHELL ["/bin/bash", "-lc"]
@@ -293,7 +282,6 @@ COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/bas
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
 COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/base-python-released-floors.txt
 COPY requirements_versions.txt /opt/requirements-image.txt
-COPY docker/filter-resolved-requirements.py /usr/local/bin/gb10-a1111-filter-requirements
 COPY docker/check-protected-stack.py /usr/local/bin/gb10-a1111-check-protected-stack
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
@@ -309,71 +297,22 @@ COPY docker/launch-a1111.sh /usr/local/bin/gb10-a1111-launch
 #   and fail the build if A1111 requires an incompatible replacement; released packages
 #   are replaced only by newer resolved versions whose declared requirements all hold
 # - do install the repo-owned A1111 dependency closure from requirements_versions.txt
-#   as normal application dependencies, filtered only against the protected base set
-RUN python - <<'PY'
-import importlib.metadata as md
-import json
-
-def version(name):
-    try:
-        return md.version(name)
-    except md.PackageNotFoundError:
-        return None
-
-print(json.dumps({
-    'before_runtime_install': {
-        'torch': version('torch'),
-        'torchvision': version('torchvision'),
-        'torchaudio': version('torchaudio'),
-    'torchaudio_optional_absent': version('torchaudio') is None,
-        'torchao': version('torchao'),
-        'mslk': version('mslk'),
-        'browser_ui': None,
-        'transformers': version('transformers'),
-        'clip': version('clip'),
-    }
-}, indent=2))
-PY
+#   as normal application dependencies; render-resolved-requirements.py already failed the
+#   wheelbuilder stage if that resolved closure contained any protected base package
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
-    chmod +x /usr/local/bin/gb10-a1111-filter-requirements /usr/local/bin/gb10-a1111-check-protected-stack /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat \
+    chmod +x /usr/local/bin/gb10-a1111-check-protected-stack /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat \
     && /usr/local/bin/gb10-a1111-patch-torch-mkldnn-compat \
     && /usr/local/bin/gb10-a1111-check-protected-stack --snapshot /opt/protected-packages-before.json \
-    && SOURCE=/opt/requirements-resolved.txt TARGET=/opt/requirements-runtime.txt BASE_PROTECTED_NAMES_FILE=/opt/base-python-protected-names.txt /usr/local/bin/gb10-a1111-filter-requirements \
-    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -r /opt/requirements-runtime.txt \
+    && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels -r /opt/requirements-resolved.txt \
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels /opt/wheels/clip-*.whl dctorch \
     && /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
-    && /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat \
-    && python - <<'PY'
-import importlib.metadata as md
-import json
-
-def version(name):
-    try:
-        return md.version(name)
-    except md.PackageNotFoundError:
-        return None
-
-print(json.dumps({
-    'after_runtime_install': {
-        'torch': md.version('torch'),
-        'torchvision': md.version('torchvision'),
-        'torchaudio': version('torchaudio'),
-    'torchaudio_optional_absent': version('torchaudio') is None,
-        'torchao': md.version('torchao'),
-        'mslk': md.version('mslk'),
-        'browser_ui': None,
-        'transformers': md.version('transformers'),
-        'clip': md.version('clip'),
-    }
-}, indent=2))
-PY
+    && /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat
 RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --released-floors /opt/base-python-released-floors.txt --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
     && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
-       MSLK_SOURCE_REPO="${MSLK_REPO}" \
        MSLK_SOURCE_COMMIT="${MSLK_COMMIT}" \
        /usr/local/bin/gb10-a1111-render-build-manifest
-RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /opt/requirements-runtime.txt /root/.cache/pip \
+RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /root/.cache/pip \
     && chmod +x /usr/local/bin/gb10-a1111-entrypoint /usr/local/bin/gb10-a1111-launch \
     && mkdir -p /opt/stable-diffusion-webui/tmp /opt/stable-diffusion-webui/cache \
     && chown -R a1111:a1111 /opt/stable-diffusion-webui /home/a1111

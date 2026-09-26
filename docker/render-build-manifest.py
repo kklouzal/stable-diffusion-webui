@@ -18,7 +18,6 @@ PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
 PYTORCH_NIGHTLY_OPTIONAL_ABSENT = {'torchaudio'}
 TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
 MSLK_NIGHTLY_INDEX_URL = os.environ.get('MSLK_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu132')
-MSLK_SOURCE_REPO = os.environ.get('MSLK_SOURCE_REPO')
 MSLK_SOURCE_COMMIT = os.environ.get('MSLK_SOURCE_COMMIT')
 EXTRA_DIRECT = {'clip'}
 LATEST_QUERY_MODE = os.environ.get('GB10_PACKAGE_LATEST_QUERIES', '0')
@@ -27,10 +26,6 @@ latest_audit: list[dict] = []
 
 def normalize(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name.strip().lower())
-
-
-def canonical_req_line(line: str) -> str:
-    return re.sub(r'\s+', '', line.split('#', 1)[0].strip().lower())
 
 
 def parse_req_name(line: str) -> str | None:
@@ -43,8 +38,6 @@ def parse_req_name(line: str) -> str | None:
 
 def load_constraint_map(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
-    if not path.exists():
-        return data
     for raw in path.read_text().splitlines():
         raw = raw.strip()
         if not raw or '==' not in raw:
@@ -56,8 +49,6 @@ def load_constraint_map(path: Path) -> dict[str, str]:
 
 def load_req_map(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
-    if not path.exists():
-        return out
     for raw in path.read_text().splitlines():
         name = parse_req_name(raw)
         if name and name not in out:
@@ -67,8 +58,6 @@ def load_req_map(path: Path) -> dict[str, str]:
 
 def load_floor_map(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
-    if not path.exists():
-        return data
     for raw in path.read_text().splitlines():
         raw = raw.strip()
         if raw and not raw.startswith('#') and '>=' in raw:
@@ -79,10 +68,10 @@ def load_floor_map(path: Path) -> dict[str, str]:
 
 base_pkgs = load_constraint_map(BASE_CONSTRAINTS)
 released_floors = load_floor_map(RELEASED_FLOORS)
+# DIRECT_REQUIREMENTS is the image copy of A1111_DIR/requirements_versions.txt (same file, unpatched).
 repo_direct_map = load_req_map(DIRECT_REQUIREMENTS)
-upstream_versions_map = load_req_map(A1111_DIR / 'requirements_versions.txt')
 upstream_plain_map = load_req_map(A1111_DIR / 'requirements.txt')
-upstream_direct = (set(upstream_versions_map) | set(upstream_plain_map)) - {'torch'}
+upstream_direct = (set(repo_direct_map) | set(upstream_plain_map)) - {'torch'}
 repo_direct = set(repo_direct_map) | EXTRA_DIRECT
 
 all_dists: dict[str, dict] = {}
@@ -187,14 +176,11 @@ def released_tag(name: str) -> str:
 
 
 def direct_reason(name: str) -> str:
+    # Only called for explicit_direct names, i.e. 'clip' or a requirements_versions.txt entry.
     hoisted = name in base_pkgs
     if name == 'clip':
         return 'Repo-Built-Wheel|Hoisted-Into-Base' if hoisted else 'Repo-Built-Wheel'
-    if name in repo_direct_map:
-        return 'Repo-Owned-Requirement|Hoisted-Into-Base' if hoisted else 'Repo-Owned-Requirement'
-    if name in upstream_direct:
-        return 'A1111-Requirement|Hoisted-Into-Base' if hoisted else 'A1111-Requirement'
-    return 'Repo-Selected-Direct|Hoisted-Into-Base' if hoisted else 'Repo-Selected-Direct'
+    return 'Repo-Owned-Requirement|Hoisted-Into-Base' if hoisted else 'Repo-Owned-Requirement'
 
 
 def base_reason(name: str) -> str:
@@ -234,7 +220,7 @@ for name in sorted(all_dists):
         item['category'] = 'direct'
         item['source_reason'] = direct_reason(name) + released_tag(name)
         item['repo_direct_entry'] = repo_direct_map.get(name)
-        item['upstream_versions_entry'] = upstream_versions_map.get(name)
+        item['upstream_versions_entry'] = repo_direct_map.get(name)
         item['upstream_requirements_entry'] = upstream_plain_map.get(name)
         sections['direct'].append(item)
     elif name in base_pkgs:
