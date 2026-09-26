@@ -66,8 +66,6 @@ OptionHTML = options.OptionHTML
 
 natural_sort_key = util.natural_sort_key
 listfiles = util.listfiles
-html_path = util.html_path
-html = util.html
 walk_files = util.walk_files
 ldm_print = util.ldm_print
 

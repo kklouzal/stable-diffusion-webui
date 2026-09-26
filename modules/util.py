@@ -3,7 +3,7 @@ import os
 import re
 
 from modules import shared
-from modules.paths_internal import script_path, cwd
+from modules.paths_internal import cwd
 
 
 def natural_sort_key(s, regex=re.compile('([0-9]+)')):
@@ -13,20 +13,6 @@ def natural_sort_key(s, regex=re.compile('([0-9]+)')):
 def listfiles(dirname):
     filenames = [os.path.join(dirname, x) for x in sorted(os.listdir(dirname), key=natural_sort_key) if not x.startswith(".")]
     return [file for file in filenames if os.path.isfile(file)]
-
-
-def html_path(filename):
-    return os.path.join(script_path, "html", filename)
-
-
-def html(filename):
-    path = html_path(filename)
-
-    try:
-        with open(path, encoding="utf8") as file:
-            return file.read()
-    except OSError:
-        return ""
 
 
 def walk_files(path, allowed_extensions=None):
