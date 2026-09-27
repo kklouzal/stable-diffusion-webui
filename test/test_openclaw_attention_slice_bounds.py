@@ -166,6 +166,23 @@ def test_sdpa_math_backend_uses_non_deprecated_torch_nn_attention_api():
     assert not [warning for warning in caught if issubclass(warning.category, FutureWarning)]
 
 
+def test_select_optimizer_resolves_an_unknown_setting_like_automatic(capsys):
+    # Priority order as sd_hijack.list_optimizers sorts it: Doggettx 90, sdp-no-mem 80, sdp 70.
+    available = [opt.SdOptimizationDoggettx(), opt.SdOptimizationSdpNoMem(), opt.SdOptimizationSdp()]
+    doggettx, sdp = available[0], available[2]
+    flags = SimpleNamespace(opt_sdp_attention=True, disable_opt_split_attention=False)
+
+    # The GB10 config carried SD.Next's "Scaled-Dot-Product", which used to select Doggettx despite --opt-sdp-attention.
+    assert opt.select_optimizer("Scaled-Dot-Product", available, flags) is sdp
+    assert "'Scaled-Dot-Product' is not available; using Automatic" in capsys.readouterr().out
+    assert opt.select_optimizer("Automatic", available, flags) is sdp
+    assert opt.select_optimizer("sdp - scaled dot product", available, flags) is sdp
+    assert opt.select_optimizer("Doggettx", available, flags) is doggettx
+    assert opt.select_optimizer("None", available, flags) is None
+    assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=False)) is doggettx
+    assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=True)) is None
+
+
 if __name__ == "__main__":
     test_doggettx_attention_keeps_positive_slice_when_memory_steps_exceed_tokens()
     test_sdpa_math_backend_uses_non_deprecated_torch_nn_attention_api()

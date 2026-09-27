@@ -143,6 +143,26 @@ def list_optimizers(res):
     ])
 
 
+def select_optimizer(selection, available, cmd_opts):
+    """Resolve the cross_attention_optimization setting against `available` (sorted by priority, highest first).
+
+    Returns None to disable. "Automatic" picks the first optimizer whose command-line flag is set (for example
+    --opt-sdp-attention), else the highest-priority one. A value that names no available optimizer, such as another
+    UI's "Scaled-Dot-Product", resolves like Automatic with a notice; it used to fall through to the highest-priority
+    optimizer (Doggettx), silently ignoring --opt-sdp-attention.
+    """
+    if selection == "None" or not available:
+        return None
+    matching = next((x for x in available if x.title() == selection), None)
+    if matching is not None:
+        return matching
+    if selection != "Automatic":
+        print(f"Cross attention optimization {selection!r} is not available; using Automatic.")
+    if cmd_opts.disable_opt_split_attention:
+        return None
+    return next((x for x in available if x.cmd_opt and getattr(cmd_opts, x.cmd_opt, False)), available[0])
+
+
 def get_xformers_flash_attention_op(*_args, **_kwargs):
     return None
 

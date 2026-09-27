@@ -107,7 +107,7 @@
     "lora_in_memory_limit": 16,
     "lora_not_found_warning_console": false,
     "lora_not_found_gradio_warning": false,
-    "cross_attention_optimization": "Scaled-Dot-Product",
+    "cross_attention_optimization": "sdp - scaled dot product",
     "s_min_uncond": 0,
     "s_min_uncond_all": false,
     "token_merging_ratio": 0,

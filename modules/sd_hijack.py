@@ -76,19 +76,7 @@ def apply_optimizations(option=None):
         current_optimizer.undo()
         current_optimizer = None
 
-    selection = option or shared.opts.cross_attention_optimization
-    if selection == "Automatic" and len(optimizers) > 0:
-        matching_optimizer = next(iter([x for x in optimizers if x.cmd_opt and getattr(shared.cmd_opts, x.cmd_opt, False)]), optimizers[0])
-    else:
-        matching_optimizer = next(iter([x for x in optimizers if x.title() == selection]), None)
-
-    if selection == "None":
-        matching_optimizer = None
-    elif selection == "Automatic" and shared.cmd_opts.disable_opt_split_attention:
-        matching_optimizer = None
-    elif matching_optimizer is None:
-        matching_optimizer = optimizers[0]
-
+    matching_optimizer = sd_hijack_optimizations.select_optimizer(option or shared.opts.cross_attention_optimization, optimizers, shared.cmd_opts)
     if matching_optimizer is not None:
         print(f"Applying attention optimization: {matching_optimizer.name}... ", end='')
         matching_optimizer.apply()
