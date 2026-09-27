@@ -65,28 +65,28 @@ class UNet(nn.Module):
         
         # Decoder
         self.de_block4 = nn.Sequential(     # in_ch=160 out_ch=96
-            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(160, 96, kernel_size=3, padding=1),
             nn.InstanceNorm2d(96),
             nn.LeakyReLU(0.1),
             nn.Dropout(p=0.2)
         )
         self.de_block3 = nn.Sequential(     # in_ch=96x2 out_ch=32
-            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(96*2, 32, kernel_size=3, padding=1),
             nn.InstanceNorm2d(32),
             nn.LeakyReLU(0.1),
             nn.Dropout(p=0.2)
         )
         self.de_block2 = nn.Sequential(     # in_ch=32x2 out_ch=24
-            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(32*2, 24, kernel_size=3, padding=1),
             nn.InstanceNorm2d(24),
             nn.LeakyReLU(0.1),
             nn.Dropout(p=0.2)
         )
         self.de_block1 = nn.Sequential(     # in_ch=24x2 out_ch=16
-            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(24*2, 16, kernel_size=3, padding=1),
             nn.InstanceNorm2d(16),
             nn.LeakyReLU(0.1),
@@ -94,7 +94,7 @@ class UNet(nn.Module):
         )
         
         self.de_block0 = nn.Sequential(     # in_ch=16x2 out_ch=7
-            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(16*2, self.NUM_SEG_CLASSES, kernel_size=3, padding=1),
             nn.Softmax2d()
         )

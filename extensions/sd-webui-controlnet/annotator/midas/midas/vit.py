@@ -478,7 +478,7 @@ def _make_vit_b_rn50_backbone(
 def _make_pretrained_vitb_rn50_384(
     pretrained, use_readout="ignore", hooks=None, use_vit_only=False
 ):
-    model = timm.create_model("vit_base_resnet50_384", pretrained=pretrained)
+    model = timm.create_model("vit_base_r50_s16_384", pretrained=pretrained)  # current timm name of vit_base_resnet50_384
 
     hooks = [0, 1, 8, 11] if hooks == None else hooks
     return _make_vit_b_rn50_backbone(

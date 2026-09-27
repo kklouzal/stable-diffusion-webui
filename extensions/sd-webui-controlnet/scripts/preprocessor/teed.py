@@ -95,7 +95,9 @@ class PreprocessorAnyline(Preprocessor):
             lineart_result, lower_bound=0, upper_bound=1
         )
         cleaned = morphology.remove_small_objects(
-            lineart_result.astype(bool), min_size=36, connectivity=1
+            # skimage 0.26 forwards the deprecated min_size=36 unchanged as max_size, which removes areas <= 36
+            # (older skimage removed < 36); max_size=36 keeps the output the deployed image has been producing.
+            lineart_result.astype(bool), max_size=36, connectivity=1
         )
         lineart_result = lineart_result * cleaned
         final_result = combine_layers(mteed_result, lineart_result)
