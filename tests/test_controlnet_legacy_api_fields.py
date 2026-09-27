@@ -53,7 +53,6 @@ def test_generated_api_models_support_protected_pydantic_v2():
     source = MODELS_SOURCE.read_text()
 
     assert "ConfigDict(populate_by_name=True, frozen=False)" in source
-    assert 'hasattr(BaseModel, "model_fields")' in source
     assert "current_image: Optional[str] = Field(default=None" in source
     assert "textinfo: Optional[str] = Field(default=None" in source
 

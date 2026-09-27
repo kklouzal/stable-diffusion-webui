@@ -1,11 +1,6 @@
 import inspect
 
-from pydantic import BaseModel, Field, create_model
-
-try:
-    from pydantic import ConfigDict
-except ImportError:  # Pydantic 1.x development/test environments
-    ConfigDict = None
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from typing import Any, Optional, Literal
 from inflection import underscore
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
@@ -150,17 +145,7 @@ class PydanticModelGenerator:
                 Field(default=d.field_value, alias=d.field_alias, exclude=d.field_exclude, title=d.field_title, description=d.field_description),
             ) for d in self._model_def
         }
-        if ConfigDict is not None and hasattr(BaseModel, "model_fields"):
-            DynamicModel = create_model(
-                self._model_name,
-                __config__=ConfigDict(populate_by_name=True, frozen=False),
-                **fields,
-            )
-        else:
-            DynamicModel = create_model(self._model_name, **fields)
-            DynamicModel.__config__.allow_population_by_field_name = True
-            DynamicModel.__config__.allow_mutation = True
-        return DynamicModel
+        return create_model(self._model_name, __config__=ConfigDict(populate_by_name=True, frozen=False), **fields)
 
 StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
     "StableDiffusionProcessingTxt2Img",

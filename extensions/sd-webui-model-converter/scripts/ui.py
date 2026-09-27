@@ -49,12 +49,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/model-converter/convert")
     def openclaw_model_converter_convert(request: ConvertRequest):
         try:
-            payload = (
-                request.model_dump()
-                if hasattr(request, "model_dump")
-                else request.dict()
-            )
-            result = convert.convert_single(payload)
+            result = convert.convert_single(request.model_dump())
             return {"ok": True, "result": result}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}
