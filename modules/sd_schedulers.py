@@ -140,10 +140,11 @@ def beta_scheduler(n, sigma_min, sigma_max, inner_model, device):
     # From "Beta Sampling is All You Need" [arXiv:2407.12173] (Lee et. al, 2024)
     alpha = shared.opts.beta_dist_alpha
     beta = shared.opts.beta_dist_beta
-    curve = torch.as_tensor(stats.beta.ppf(np.linspace(1, 0, n), alpha, beta), device=device, dtype=torch.float32)
-
     start = inner_model.sigma_to_t(_as_sigma(sigma_max, device))
     end = inner_model.sigma_to_t(_as_sigma(sigma_min, device))
+    # sigma_to_t follows the model wrapper's sigma buffers (CUDA), not `device`, so build the curve there. Keep float32:
+    # quantized sigma_to_t returns integer timesteps, which the interpolation must not truncate.
+    curve = torch.as_tensor(stats.beta.ppf(np.linspace(1, 0, n), alpha, beta), device=start.device, dtype=torch.float32)
     timesteps = end + curve * (start - end)
     return _append_zero(_sigmas_from_timesteps(inner_model, timesteps, device))
 

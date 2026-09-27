@@ -151,6 +151,32 @@ class OpenClawSchedulerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "step count"):
                     scheduler(0, 0.1, 10.0, torch.device("cpu"))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a second device")
+    def test_beta_scheduler_follows_inner_model_device_and_matches_paper_formula(self):
+        # The real wrapper's sigma_to_t returns timesteps on the model device (CUDA) while sigmas are built with
+        # device=cpu; the curve must be built next to the timesteps. Oracle: upstream per-element formula (2174ce5a).
+        from scipy import stats
+        import numpy as np
+
+        schedulers = load_scheduler_module()
+
+        class CudaInnerModel:
+            def sigma_to_t(self, sigma):
+                return sigma.to("cuda") * 10.0
+
+            def t_to_sigma(self, t):
+                return t / 10.0
+
+        inner_model = CudaInnerModel()
+        sigmas = schedulers.beta_scheduler(8, 0.1, 10.0, inner_model, torch.device("cpu"))
+
+        curve = [stats.beta.ppf(x, 0.6, 0.6) for x in np.linspace(1, 0, 8)]
+        start = inner_model.sigma_to_t(torch.tensor(10.0))
+        end = inner_model.sigma_to_t(torch.tensor(0.1))
+        expected = torch.tensor([float(inner_model.t_to_sigma(end + x * (start - end))) for x in curve] + [0.0])
+        self.assertEqual(sigmas.device.type, "cpu")
+        torch.testing.assert_close(sigmas, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
