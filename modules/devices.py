@@ -106,9 +106,10 @@ def enable_tf32():
         if cuda_no_autocast():
             torch.backends.cudnn.benchmark = True
 
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
+        # torch 2.9+ per-backend TF32 API; the allow_tf32 flags and set_float32_matmul_precision are its legacy form.
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
+        torch.backends.cudnn.rnn.fp32_precision = "tf32"
 
 
 errors.run(enable_tf32, "Enabling TF32")
