@@ -444,7 +444,7 @@ def run():
     if xyz_grid:
         add_axis_options(xyz_grid)
     else:
-        logger.warn("xyz script not found")
+        logger.warning("xyz script not found")
 
 
 if not import_error:

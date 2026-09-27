@@ -158,7 +158,7 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
                     ]
                     img = np.concatenate([img, mask], axis=2)
                 else:
-                    logger.warn(
+                    logger.warning(
                         f"Preprocessor {controlnet_module} does not accept mask. Mask ignored"
                     )
 
@@ -240,4 +240,4 @@ try:
 
     script_callbacks.on_app_started(controlnet_api)
 except Exception:
-    logger.warn("Unable to mount ControlNet API.")
+    logger.warning("Unable to mount ControlNet API.")

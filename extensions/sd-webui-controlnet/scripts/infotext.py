@@ -72,7 +72,7 @@ class Infotext(object):
                     updates[component_locator] = value
                     logger.debug(f"InfoText: Setting {component_locator} = {value}")
             except Exception as e:
-                logger.warn(
+                logger.warning(
                     f"Failed to parse infotext, legacy format infotext is no longer supported:\n{v}\n{e}"
                 )
 

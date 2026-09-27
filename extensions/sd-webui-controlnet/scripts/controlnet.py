@@ -889,7 +889,7 @@ class Script(scripts.Script, metaclass=(
         cnet_sd_version = StableDiffusionVersion.detect_from_model_name(unit.model)
 
         if cnet_sd_version == StableDiffusionVersion.UNKNOWN:
-            logger.warn(f"Unable to determine version for ControlNet model '{unit.model}'.")
+            logger.warning(f"Unable to determine version for ControlNet model '{unit.model}'.")
             return
 
         if not sd_version.is_compatible_with(cnet_sd_version):

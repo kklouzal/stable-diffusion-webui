@@ -655,7 +655,7 @@ class InsightFaceModel:
         if not faces:
             raise Exception("Insightface: No face found in image.")
         if len(faces) > 1:
-            logger.warn("Insightface: More than one face is detected in the image. "
+            logger.warning("Insightface: More than one face is detected in the image. "
                         "Only the biggest one will be used.")
         # only use the biggest face
         face = sorted(faces, key=lambda x:(x['bbox'][2]-x['bbox'][0])*(x['bbox'][3]-x['bbox'][1]))[-1]
