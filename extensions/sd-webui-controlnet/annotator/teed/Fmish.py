@@ -7,7 +7,6 @@ import torch
 import torch.nn.functional as F
 
 
-@torch.jit.script
 def mish(input):
     """
     Applies the mish function element-wise:

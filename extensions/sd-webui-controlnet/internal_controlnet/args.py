@@ -3,7 +3,7 @@ import os
 import torch
 import numpy as np
 from typing import Optional, List, Annotated, ClassVar, Callable, Any, Tuple, Union
-from pydantic import BaseModel, validator, root_validator, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from PIL import Image
 from logging import Logger
 from copy import copy
@@ -55,9 +55,7 @@ class ControlNetUnit(BaseModel):
     Represents an entire ControlNet processing unit.
     """
 
-    class Config:
-        arbitrary_types_allowed = True
-        extra = "ignore"
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
 
     cls_match_module: ClassVar[Callable[[str], bool]] = _unimplemented_func
     cls_match_model: ClassVar[Callable[[str], bool]] = _unimplemented_func
@@ -75,17 +73,19 @@ class ControlNetUnit(BaseModel):
 
     # General fields.
     enabled: bool = False
-    module: str = "none"
+    module: str = Field(default="none", validate_default=True)
 
-    @validator("module", always=True, pre=True)
+    @field_validator("module", mode="before")
+    @classmethod
     def check_module(cls, value: str) -> str:
         if not ControlNetUnit.cls_match_module(value):
             raise ValueError(f"module({value}) not found in supported modules.")
         return value
 
-    model: str = "None"
+    model: str = Field(default="None", validate_default=True)
 
-    @validator("model", always=True, pre=True)
+    @field_validator("model", mode="before")
+    @classmethod
     def check_model(cls, value: str) -> str:
         if not ControlNetUnit.cls_match_model(value):
             raise ValueError(f"model({value}) not found in supported models.")
@@ -96,9 +96,10 @@ class ControlNetUnit(BaseModel):
     # The image to be used for this ControlNetUnit.
     image: Optional[Any] = None
 
-    resize_mode: ResizeMode = ResizeMode.INNER_FIT
+    resize_mode: ResizeMode = Field(default=ResizeMode.INNER_FIT, validate_default=True)
 
-    @validator("resize_mode", always=True, pre=True)
+    @field_validator("resize_mode", mode="before")
+    @classmethod
     def check_resize_mode(cls, value) -> ResizeMode:
         resize_mode_aliases = {
             "Inner Fit (Scale to Fit)": "Crop and Resize",
@@ -116,48 +117,47 @@ class ControlNetUnit(BaseModel):
     threshold_a: float = -1
     threshold_b: float = -1
 
-    @root_validator
-    def bound_check_params(cls, values: dict) -> dict:
+    @model_validator(mode="after")
+    def bound_check_params(self) -> "ControlNetUnit":
         """
         Checks and corrects negative parameters in ControlNetUnit 'unit' in place.
         Parameters 'processor_res', 'threshold_a', 'threshold_b' are reset to
         their default values if negative.
         """
-        enabled = values.get("enabled")
-        if not enabled:
-            return values
+        if not self.enabled:
+            return self
 
-        module = values.get("module")
+        module = self.module
         if not module:
-            return values
+            return self
 
-        preprocessor = cls.cls_get_preprocessor(module)
+        preprocessor = type(self).cls_get_preprocessor(module)
         assert preprocessor is not None
         for unit_param, param in zip(
             ("processor_res", "threshold_a", "threshold_b"),
             ("slider_resolution", "slider_1", "slider_2"),
         ):
-            value = values.get(unit_param)
+            value = getattr(self, unit_param)
             cfg = getattr(preprocessor, param)
             if value < cfg.minimum or value > cfg.maximum:
-                values[unit_param] = cfg.value
+                setattr(self, unit_param, cfg.value)
                 # Only report warning when non-default value is used.
                 if value != -1:
-                    cls.cls_logger.info(
+                    type(self).cls_logger.info(
                         f"[{module}.{unit_param}] Invalid value({value}), using default value {cfg.value}."
                     )
-        return values
+        return self
 
     guidance_start: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
     guidance_end: Annotated[float, Field(ge=0.0, le=1.0)] = 1.0
 
-    @root_validator
-    def guidance_check(cls, values: dict) -> dict:
-        start = values.get("guidance_start")
-        end = values.get("guidance_end")
+    @model_validator(mode="after")
+    def guidance_check(self) -> "ControlNetUnit":
+        start = self.guidance_start
+        end = self.guidance_end
         if start > end:
             raise ValueError(f"guidance_start({start}) > guidance_end({end})")
-        return values
+        return self
 
     pixel_perfect: bool = False
     control_mode: ControlMode = ControlMode.BALANCED
@@ -192,7 +192,8 @@ class ControlNetUnit(BaseModel):
     # The effective region mask that unit's effect should be restricted to.
     effective_region_mask: Optional[np.ndarray] = None
 
-    @validator("effective_region_mask", pre=True)
+    @field_validator("effective_region_mask", mode="before")
+    @classmethod
     def parse_effective_region_mask(cls, value) -> np.ndarray:
         if isinstance(value, str):
             return cls.cls_decode_base64(value)
@@ -215,7 +216,8 @@ class ControlNetUnit(BaseModel):
     # Currently the option is only accessible in API calls.
     ipadapter_input: Optional[List[Any]] = None
 
-    @validator("ipadapter_input", pre=True)
+    @field_validator("ipadapter_input", mode="before")
+    @classmethod
     def parse_ipadapter_input(cls, value) -> Optional[List[Any]]:
         if value is None:
             return None
@@ -326,7 +328,7 @@ class ControlNetUnit(BaseModel):
             if alias in values:
                 assert key not in values, f"Conflict of field '{alias}' and '{key}'"
                 values[key] = values[alias]
-                cls.cls_logger.warn(
+                cls.cls_logger.warning(
                     f"Deprecated alias '{alias}' detected. This field will be removed on 2024-06-01"
                     f"Please use '{key}' instead."
                 )
@@ -476,7 +478,3 @@ class ControlNetUnit(BaseModel):
                 for (key, value) in (item.strip().split(": "),)
             },
         )
-
-    def __copy__(self) -> ControlNetUnit:
-        """Override the behavior on `copy.copy` calls."""
-        return self.copy()

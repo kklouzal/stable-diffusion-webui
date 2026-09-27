@@ -201,9 +201,10 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
 
     class Person(BaseModel):
         pose_keypoints_2d: List[float]
-        hand_right_keypoints_2d: Optional[List[float]]
-        hand_left_keypoints_2d: Optional[List[float]]
-        face_keypoints_2d: Optional[List[float]]
+        # Pydantic 2 makes Optional fields without a default required; these keypoints may be omitted.
+        hand_right_keypoints_2d: Optional[List[float]] = None
+        hand_left_keypoints_2d: Optional[List[float]] = None
+        face_keypoints_2d: Optional[List[float]] = None
 
     class PoseData(BaseModel):
         people: List[Person]
@@ -227,7 +228,7 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
 
             return {
                 "images": [
-                    encode_to_base64(draw(*decode_json_as_poses(pose.dict())))
+                    encode_to_base64(draw(*decode_json_as_poses(pose.model_dump())))
                     for pose in pose_data
                 ],
                 "info": "Success",

@@ -194,7 +194,7 @@ def unhijack_function(module, name, new_name):
 
 def get_cn_batches(p: processing.StableDiffusionProcessing) -> Tuple[bool, List[List[str]], str, List[str]]:
     units = external_code.get_all_units_in_processing(p)
-    units = [unit.copy() for unit in units if getattr(unit, 'enabled', False)]
+    units = [unit.model_copy() for unit in units if getattr(unit, 'enabled', False)]
     any_unit_is_batch = False
     output_dir = ''
     input_file_names = []

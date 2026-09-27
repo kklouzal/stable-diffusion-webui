@@ -160,4 +160,4 @@ def test_run_sh_applies_preprocessor_path_patch_to_mounted_controlnet_extension(
 
     assert 'CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"' in run_sh
     assert "patch-controlnet-preprocessor-path.py" in run_sh
-    assert run_sh.index("patch-controlnet-preprocessor-path.py") < run_sh.index("patch-controlnet-teed.py")
+    assert run_sh.index('CONTROLNET_ROOT="') < run_sh.index("patch-controlnet-preprocessor-path.py")

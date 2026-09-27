@@ -702,7 +702,7 @@ class Script(scripts.Script, metaclass=(
             assert isinstance(unit.image, list)
             result = []
             for image in unit.image:
-                u = unit.copy()
+                u = unit.model_copy()
                 u.image = [image]
                 u.input_mode = InputMode.SIMPLE
                 u.weight = unit.weight / len(unit.image)

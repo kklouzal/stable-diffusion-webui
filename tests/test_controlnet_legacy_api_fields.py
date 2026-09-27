@@ -6,7 +6,8 @@ import sys
 WEBUI_ROOT = Path(__file__).resolve().parents[1]
 MODELS_SOURCE = WEBUI_ROOT / "modules" / "api" / "models.py"
 API_SOURCE = WEBUI_ROOT / "modules" / "api" / "api.py"
-CONTROLNET_SOURCE = WEBUI_ROOT / "extensions" / "sd-webui-controlnet" / "scripts" / "controlnet.py"
+CONTROLNET_ROOT = WEBUI_ROOT / "extensions" / "sd-webui-controlnet"
+CONTROLNET_SOURCE = CONTROLNET_ROOT / "scripts" / "controlnet.py"
 
 
 def test_controlnet_legacy_remote_fields_are_explicit_api_model_fields():
@@ -57,29 +58,16 @@ def test_generated_api_models_support_protected_pydantic_v2():
     assert "textinfo: Optional[str] = Field(default=None" in source
 
 
-def test_controlnet_root_validators_are_patched_for_pydantic_v2(tmp_path: Path):
-    args_module = tmp_path / "args.py"
-    args_module.write_text(
-        "class ControlNetUnit:\n"
-        "    @root_validator\n"
-        "    def bound_check_params(cls, values):\n"
-        "        return values\n"
-        "    @root_validator\n"
-        "    def guidance_check(cls, values):\n"
-        "        return values\n"
+def test_controlnet_unit_uses_native_pydantic_v2_validators():
+    # ControlNet's own ControlNetUnit tests are the behavioral oracle for the v1 -> v2 validator migration; they need
+    # the extension root as the import root. Any leftover v1 API (@validator, @root_validator, class Config, .copy())
+    # emits PydanticDeprecatedSince20, which is an error here.
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-W", "error::pydantic.warnings.PydanticDeprecatedSince20", "unit_tests"],
+        cwd=CONTROLNET_ROOT, capture_output=True, text=True, timeout=600,
     )
-    patcher = WEBUI_ROOT / "gb10" / "patch-controlnet-pydantic2.py"
-
-    subprocess.run([sys.executable, str(patcher), str(args_module)], check=True)
-    subprocess.run([sys.executable, str(patcher), "--check", str(args_module)], check=True)
-
-    assert args_module.read_text().count("@root_validator(skip_on_failure=True)") == 2
-
-
-def test_launcher_applies_controlnet_pydantic2_patch():
-    launcher = (WEBUI_ROOT / "gb10" / "run.sh").read_text()
-
-    assert launcher.count('patch-controlnet-pydantic2.py"') == 2
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
 
 
 def test_controlnet_legacy_aliases_are_normalized_before_processing():
