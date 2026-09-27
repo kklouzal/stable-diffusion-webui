@@ -58,7 +58,8 @@ class DeepDanbooru:
 
         with torch.no_grad(), devices.autocast():
             x = torch.from_numpy(a).to(devices.device, devices.dtype)
-            y = self.model(x)[0].detach().cpu().numpy()
+            # numpy has no bfloat16; the probabilities are only thresholded and formatted, so float32 is exact.
+            y = self.model(x)[0].detach().float().cpu().numpy()
 
         probability_dict = {}
 
