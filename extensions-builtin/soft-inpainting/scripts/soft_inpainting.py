@@ -84,11 +84,11 @@ def latent_blend(settings, a, b, t):
 
     # Calculate the magnitude of the interpolated vectors. (We will remove this magnitude.)
     # 64-bit operations are used here to allow large exponents.
-    current_magnitude = torch.norm(image_interp, p=2, dim=1, keepdim=True).to(float64(image_interp)).add_(0.00001)
+    current_magnitude = torch.linalg.vector_norm(image_interp, ord=2, dim=1, keepdim=True).to(float64(image_interp)).add_(0.00001)
 
     # Interpolate the powered magnitudes, then un-power them (bring them back to a power of 1).
-    a_magnitude = torch.norm(a, p=2, dim=1, keepdim=True).to(float64(a)).pow_(settings.inpaint_detail_preservation) * one_minus_t3
-    b_magnitude = torch.norm(b, p=2, dim=1, keepdim=True).to(float64(b)).pow_(settings.inpaint_detail_preservation) * t3
+    a_magnitude = torch.linalg.vector_norm(a, ord=2, dim=1, keepdim=True).to(float64(a)).pow_(settings.inpaint_detail_preservation) * one_minus_t3
+    b_magnitude = torch.linalg.vector_norm(b, ord=2, dim=1, keepdim=True).to(float64(b)).pow_(settings.inpaint_detail_preservation) * t3
     desired_magnitude = a_magnitude
     desired_magnitude.add_(b_magnitude).pow_(1 / settings.inpaint_detail_preservation)
     del a_magnitude, b_magnitude, t3, one_minus_t3
@@ -153,7 +153,7 @@ def apply_adaptive_masks(
     mask_scalar = mask_scalar / (1.00001 - mask_scalar)
     mask_scalar = mask_scalar.cpu().numpy()
 
-    latent_distance = torch.norm(latent_processed - latent_orig, p=2, dim=1)
+    latent_distance = torch.linalg.vector_norm(latent_processed - latent_orig, ord=2, dim=1)
 
     kernel, kernel_center = get_gaussian_kernel(stddev_radius=1.5, max_radius=2)
 

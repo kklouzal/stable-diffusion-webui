@@ -83,8 +83,8 @@ def create_generator(seed):
 
 # from https://discuss.pytorch.org/t/help-regarding-slerp-function-for-generative-model-sampling/32475/3
 def slerp(val, low, high):
-    low_norm = low / torch.norm(low, dim=1, keepdim=True)
-    high_norm = high / torch.norm(high, dim=1, keepdim=True)
+    low_norm = low / torch.linalg.vector_norm(low, dim=1, keepdim=True)
+    high_norm = high / torch.linalg.vector_norm(high, dim=1, keepdim=True)
     dot = (low_norm * high_norm).sum(1).clamp(-1.0, 1.0)
 
     lerp = low * (1 - val) + high * val

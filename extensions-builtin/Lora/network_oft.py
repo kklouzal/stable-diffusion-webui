@@ -74,7 +74,7 @@ class NetworkModuleOFT(network.NetworkModule):
         if not self.is_R:
             block_Q = oft_blocks - oft_blocks.transpose(-1, -2) # ensure skew-symmetric orthogonal matrix
             if self.constraint != 0:
-                norm_Q = torch.norm(block_Q.flatten())
+                norm_Q = torch.linalg.vector_norm(block_Q.flatten())
                 new_norm_Q = torch.clamp(norm_Q, max=self.constraint.to(oft_blocks.device))
                 block_Q = block_Q * ((new_norm_Q + 1e-8) / (norm_Q + 1e-8))
             oft_blocks = torch.matmul(eye + block_Q, (eye - block_Q).float().inverse())
