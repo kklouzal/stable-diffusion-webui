@@ -45,8 +45,9 @@ class RestrictedUnpickler(pickle.Unpickler):
             return getattr(torch, name)
         if module == 'torch.nn.modules.container' and name in ['ParameterDict']:
             return getattr(torch.nn.modules.container, name)
-        if module == 'numpy.core.multiarray' and name in ['scalar', '_reconstruct']:
-            return getattr(numpy.core.multiarray, name)
+        # NumPy 2 pickles name numpy._core.multiarray; files written under NumPy 1 name numpy.core.multiarray.
+        if module in ('numpy._core.multiarray', 'numpy.core.multiarray') and name in ['scalar', '_reconstruct']:
+            return getattr(numpy._core.multiarray, name)
         if module == 'numpy' and name in ['dtype', 'ndarray']:
             return getattr(numpy, name)
         if module == '_codecs' and name == 'encode':
