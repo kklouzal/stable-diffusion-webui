@@ -24,16 +24,6 @@ def fix_torch_version():
         torch.__long_version__ = torch.__version__
         torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
 
-def fix_pytorch_lightning():
-    # Keep legacy SD/LDSR/extension imports working with PyTorch Lightning 2.x.
-    # Prefer the modern rank_zero module directly, but provide the old module
-    # name silently for third-party code that has not been updated yet.
-    if "pytorch_lightning.utilities.distributed" in sys.modules:
-        return
-
-    import pytorch_lightning.utilities.rank_zero as rank_zero
-    sys.modules["pytorch_lightning.utilities.distributed"] = rank_zero
-
 def fix_asyncio_event_loop_policy():
     """
         The default `asyncio` event loop policy only automatically creates
