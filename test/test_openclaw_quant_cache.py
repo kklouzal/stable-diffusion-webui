@@ -87,6 +87,16 @@ def test_torchao_contract_rejects_runtime_and_scheme_changes(monkeypatch):
     assert not torchao_model_cache.contract_matches(changed_scheme, expected)
 
 
+def test_torchao_runtime_contract_records_only_probed_facts_as_plain_json():
+    # Sidecars store the contract as JSON and payloads reload it through the weights_only unpickler, so every
+    # value must survive a JSON round trip. Fields are only what this torch build can actually probe.
+    import json
+
+    runtime = torchao_model_cache.runtime_compatibility()
+    assert set(runtime) == {"python", "platform", "torch", "torchao", "cuda_runtime", "device"}
+    assert json.loads(json.dumps(runtime)) == runtime
+
+
 def test_torchao_sidecar_corruption_or_missing_contract_forces_regeneration(monkeypatch, tmp_path):
     from modules import torchao_model_cache
 

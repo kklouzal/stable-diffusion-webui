@@ -27,7 +27,6 @@ def runtime_compatibility() -> dict:
         torchao_version = "unavailable"
     cuda = getattr(torch.version, "cuda", None)
     device = None
-    driver = None
     if torch.cuda.is_available():
         index = torch.cuda.current_device()
         props = torch.cuda.get_device_properties(index)
@@ -36,10 +35,6 @@ def runtime_compatibility() -> dict:
             "capability": list(torch.cuda.get_device_capability(index)),
             "total_memory": props.total_memory,
         }
-        try:
-            driver = torch._C._cuda_getDriverVersion()
-        except Exception:
-            driver = None
     return {
         "python": list(sys.version_info[:3]),
         "platform": platform.platform(),
@@ -47,7 +42,6 @@ def runtime_compatibility() -> dict:
         "torch": str(torch.__version__),
         "torchao": torchao_version,
         "cuda_runtime": cuda,
-        "cuda_driver": driver,
         "device": device,
     }
 
