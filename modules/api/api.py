@@ -1021,7 +1021,7 @@ class Api:
         if update:
             populate_update.update(update)
 
-        populate = request.copy(update=populate_update)
+        populate = request.model_copy(update=populate_update)
         if populate.sampler_name:
             populate.sampler_index = None  # prevent a warning later on
 
