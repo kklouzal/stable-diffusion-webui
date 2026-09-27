@@ -548,6 +548,9 @@ def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, sdp
         backends = _selected_sdpa_backends()
     if backends is None:
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+    # Enables exactly these backends; torch still picks among them in its own priority order (flash, efficient, math,
+    # cudnn), not in list order. set_priority=True would honor the list, but on GB10 with SDXL bf16 shapes cuDNN
+    # measured 8-16% slower than flash, so list order stays unenforced and "cudnn,flash,efficient,math" runs flash.
     with sdpa_kernel(backends):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
 
