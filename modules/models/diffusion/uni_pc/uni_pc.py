@@ -399,6 +399,24 @@ class UniPC:
         self.before_sample = before_sample
         self.after_sample = after_sample
         self.after_update = after_update
+        self.linalg_infos = []
+
+    def _solve(self, A, B):
+        # torch.linalg.solve/inv check for singular input with a device->host sync on every call; the
+        # unchecked *_ex variants compute the same result, and sample() checks the collected infos once at the end.
+        result, info = torch.linalg.solve_ex(A, B, check_errors=False)
+        self.linalg_infos.append(info)
+        return result
+
+    def _inv(self, A):
+        inverse, info = torch.linalg.inv_ex(A, check_errors=False)
+        self.linalg_infos.append(info)
+        return inverse
+
+    def check_linalg_infos(self):
+        infos, self.linalg_infos = self.linalg_infos, []
+        if infos and bool(torch.stack([info.reshape(-1) for info in infos]).any()):
+            raise torch.linalg.LinAlgError("UniPC: singular coefficient matrix (repeated timesteps?)")
 
     def dynamic_thresholding_fn(self, x0, t=None):
         """
@@ -561,12 +579,12 @@ class UniPC:
 
         if len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1) # (B, K)
-            C_inv_p = torch.linalg.inv(C[:-1, :-1])
+            C_inv_p = self._inv(C[:-1, :-1])
             A_p = C_inv_p
 
         if use_corrector:
             #print('using corrector')
-            C_inv = torch.linalg.inv(C)
+            C_inv = self._inv(C)
             A_c = C_inv
 
         hh = -h if self.predict_x0 else h
@@ -687,7 +705,7 @@ class UniPC:
                 if order == 2:
                     rhos_p = b.new_full((1,), 0.5)
                 else:
-                    rhos_p = torch.linalg.solve(R[:-1, :-1], b[:-1])
+                    rhos_p = self._solve(R[:-1, :-1], b[:-1])
         else:
             D1s = None
 
@@ -697,7 +715,7 @@ class UniPC:
             if order == 1:
                 rhos_c = b.new_full((1,), 0.5)
             else:
-                rhos_c = torch.linalg.solve(R, b)
+                rhos_c = self._solve(R, b)
 
         model_t = None
         if self.predict_x0:
@@ -803,6 +821,7 @@ class UniPC:
                         pbar.update()
         else:
             raise NotImplementedError()
+        self.check_linalg_infos()
         if denoise_to_zero:
             x = self.denoise_to_zero_fn(x, torch.full((x.shape[0],), t_0, device=device))
         return x
