@@ -768,8 +768,11 @@ def legacy_controlnet_forward(harness, cn, x, hint, timesteps, context, y):
     return [o.to(original_type) for o in outs]
 
 
-def oracle_hooked_forward(harness, x, timesteps, context, y):
-    """The original ControlNet hooked forward for one plain SDXL unit, written out independently."""
+def oracle_hooked_forward(harness, x, timesteps, context, y, hint=None):
+    """The original ControlNet hooked forward for one plain SDXL unit, written out independently.
+
+    The UNet part is the sgm forward (its own timestep embedding) plus the control residuals.
+    """
     unet = harness.unet
     param = harness.control_param
     if (context[:, 0, :].abs() - 1024.0).abs().mean() < 1e-3:
@@ -779,7 +782,8 @@ def oracle_hooked_forward(harness, x, timesteps, context, y):
         # Unmarked prompts (e.g. hires-pass conds): every row counts as cond.
         cond_mark = torch.ones(x.shape[0], 1, 1, 1, dtype=x.dtype)
         ctx = context
-    control = legacy_controlnet_forward(harness, harness.controlnet.control_model, x, param.hint_cond, timesteps, ctx, y)
+    hint = param.hint_cond if hint is None else hint
+    control = legacy_controlnet_forward(harness, harness.controlnet.control_model, x, hint, timesteps, ctx, y)
     if param.cfg_injection or param.global_average_pooling:
         control = [c * cond_mark for c in control]
     control = [c * param.weight for c in control]
@@ -788,7 +792,7 @@ def oracle_hooked_forward(harness, x, timesteps, context, y):
     total = [0.0] * 10
     for idx, item in enumerate(control):
         total[idx] = item + total[idx]
-    t_emb = real_modules()["ldm.modules.diffusionmodules.util"].timestep_embedding(timesteps, unet.model_channels, repeat_only=False)
+    t_emb = harness.openaimodel.timestep_embedding(timesteps, unet.model_channels, repeat_only=False)
     emb = unet.time_embed(t_emb) + unet.label_emb(y)
     hs = []
     h = x
@@ -941,3 +945,198 @@ def test_teacache_patched_unet_gets_whole_calls(layout):
     pag_calls = [call for call in harness.unet_calls if call[3]]
     assert [call[0].shape[0] for call in pag_calls] == [call[0].shape[0] for call in main_calls]
     assert torch.equal(harness.pag_params.pag_x_out, oracle_pag_cond_rows(harness, main_calls, sum(repeats)))
+
+
+def test_controlnet_unet_timestep_embedding_is_the_sgm_one_computed_on_the_timesteps_device():
+    """The hooked forward embeds timesteps like the UNet it replaces: sgm's util.timestep_embedding builds the
+    frequencies on the timesteps' device. Frequencies built on the CPU and uploaded (ldm's util) can differ from
+    a CUDA exp in the last bit, so on a GPU the hooked UNet would not compute the unhooked UNet's embedding."""
+    from torch.overrides import TorchFunctionMode
+
+    harness = Harness(mode="base")
+    harness.install_controlnet()
+    arange_devices = []
+
+    class RecordArange(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            if func is torch.arange:
+                arange_devices.append(kwargs.get("device"))
+            return func(*args, **kwargs)
+
+    x, timesteps, context, y = unet_inputs()
+    with torch.inference_mode():
+        with RecordArange():
+            out = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        expected = oracle_hooked_forward(harness, x, timesteps, context, y)
+    # The ControlNet's embedding and the hooked UNet's: both build their frequencies on the timesteps' device.
+    assert len(arange_devices) >= 2
+    assert all(device is not None and torch.device(device) == timesteps.device for device in arange_devices)
+    assert torch.equal(out, expected)
+
+
+def bf16_harness(preprocessor, hint_channels=3):
+    """The harness UNet and ControlNet computing in bfloat16 under CPU autocast (norms keep fp32 weights; CPU
+    autocast has no fp32 policy for them), with devices.dtype_unet = bfloat16 like the deployed runtime."""
+    harness = Harness(mode="unet")
+    harness.install_controlnet(preprocessor=preprocessor, hint_channels=hint_channels)
+    # The real VAE encode returns latents in dtype_unet.
+    fake_vae_latent = harness.hook.UnetHook.call_vae_using_process
+    harness.hook.UnetHook.call_vae_using_process = staticmethod(lambda p, x, mask=None: fake_vae_latent(p, x, mask).to(torch.bfloat16))
+    for module in (*harness.unet.modules(), *harness.controlnet.modules()):
+        if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
+            module.to(torch.bfloat16)
+    harness.cldm.devices.dtype_unet = torch.bfloat16
+    return harness
+
+
+def bf16_forward(harness, x, timesteps, context, y):
+    with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16):
+        return harness.sample(lambda: harness.unet(x.bfloat16(), timesteps=timesteps, context=context.bfloat16(), y=y.bfloat16()))
+
+
+@pytest.mark.parametrize("preprocessor", ["inpaint_only", "tile_colorfix"])
+def test_controlnet_eps_post_processing_is_float32_under_a_bf16_unet(preprocessor):
+    """inpaint_only / colorfix rewrite the UNet's eps through x0 = a*x_t - b*eps and back (a, b ~ 10 at these
+    timesteps). In bfloat16 the rounded coefficients and products perturbed eps by several ulps even where x0
+    is kept; the conversion now runs in float32 and rounds once. Oracle: the same formulas in float64 on the
+    same bf16 UNet output, rounded to bf16."""
+    inpaint = preprocessor == "inpaint_only"
+    harness = bf16_harness(preprocessor, hint_channels=4 if inpaint else 3)
+    try:
+        param = harness.control_param
+        if inpaint:
+            param.hint_cond[:, 3, :32] = 1.0  # inpaint the top half, keep the bottom half
+            param.hint_cond[:, 3, 32:] = 0.0
+        else:
+            param.preprocessor["threshold_a"] = 2  # blur radius k
+        x, timesteps, context, y = unet_inputs()
+        timesteps = timesteps * 0.0 + torch.tensor([700.0, 950.0])
+        out = bf16_forward(harness, x, timesteps, context, y)
+        assert out.dtype == torch.bfloat16
+        latent = param.used_hint_cond_latent
+        # The same call without the post-processing (the name selects it; control and hint protocol are the same).
+        param.preprocessor["name"] = "inpaint" if inpaint else "tile_resample"
+        plain = bf16_forward(harness, x, timesteps, context, y)
+    finally:
+        harness.cldm.devices.dtype_unet = torch.float32
+
+    ldm = harness.sd_ldm
+    t = torch.round(timesteps.double()).long()
+
+    def coef(table):
+        return table.double()[t][:, None, None, None]
+
+    a, b = coef(ldm.sqrt_recip_alphas_cumprod), coef(ldm.sqrt_recipm1_alphas_cumprod)
+    xt, eps, x0_origin = x.bfloat16().double(), plain.double(), latent.double()
+    x0_prd = a * xt - b * eps
+    if inpaint:
+        mask = torch.nn.functional.max_pool2d(param.hint_cond[:, 3:4].double(), (10, 10), stride=(8, 8), padding=1)
+        assert 0 < mask.mean() < 1
+        x0 = x0_prd * mask + x0_origin * (1 - mask)
+    else:
+        def blur(v, k=2):
+            return torch.nn.functional.avg_pool2d(torch.nn.functional.pad(v, (k, k, k, k), mode="replicate"), (2 * k + 1, 2 * k + 1), stride=(1, 1))
+        x0 = x0_prd - blur(x0_prd) + blur(x0_origin)
+    w = param.weight
+    expected = ((a * xt - x0) / b * w + eps * (1 - w)).bfloat16()
+    ulp = torch.finfo(torch.bfloat16).eps * expected.double().abs().clamp_min(2.0 ** -8)
+    assert ((out.double() - expected.double()).abs() <= ulp).all()
+    assert (out == expected).double().mean() > 0.99
+    if inpaint:
+        # Where the mask keeps the prediction (x0 = x0_prd) with full weight, eps comes back unchanged.
+        harness.cldm.devices.dtype_unet = torch.bfloat16
+        try:
+            param.preprocessor["name"] = "inpaint_only"
+            param.weight = 1.0
+            param.hint_cond[:, 3] = 1.0
+            param.hint_cond = param.hint_cond.clone()  # the setter drops the hint-derived caches
+            kept = bf16_forward(harness, x, timesteps, context, y)
+            param.preprocessor["name"] = "inpaint"
+            plain_full = bf16_forward(harness, x, timesteps, context, y)
+        finally:
+            harness.cldm.devices.dtype_unet = torch.float32
+        assert torch.equal(kept, plain_full)
+
+
+def test_controlnet_hires_pass_detection_with_same_size_hints_follows_a1111s_pass_flag():
+    """Hires fix at scale 1 builds low-res and hires hints of the same size: the latent size cannot tell the
+    passes apart, so every call used to count as the hires pass (hr_option, forced soft injection, ...)."""
+    harness = Harness(mode="base")
+    harness.install_controlnet()
+    param = harness.control_param
+    param.hr_hint_cond = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(11))
+    param.hr_option = harness.enums.HiResFixOption.HIGH_RES_ONLY
+    x, timesteps, context, y = unet_inputs()
+    with torch.inference_mode():
+        harness.process.is_hr_pass = False
+        low = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        assert harness.controlnet_calls == 0 and harness.unet_hook.is_in_high_res_fix is False
+        plain = harness.openaimodel.UNetModel.forward(harness.unet, x, timesteps=timesteps, context=context[:, 1:], y=y)
+        harness.process.is_hr_pass = True
+        high = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        assert harness.controlnet_calls == 1 and harness.unet_hook.is_in_high_res_fix is True
+        expected_high = oracle_hooked_forward(harness, x, timesteps, context, y, hint=param.hr_hint_cond)
+    assert torch.equal(low, plain)
+    assert torch.equal(high, expected_high)
+
+
+def test_controlnet_hires_pass_detection_compares_both_dimensions():
+    """A hires resize that keeps the height (1024x1024 -> 1536x1024): the low-res latent matches the low-res
+    hint; comparing heights only picked the wider hires hint and failed on the residual shapes."""
+    harness = Harness(mode="base")
+    harness.install_controlnet()
+    param = harness.control_param
+    param.hr_hint_cond = torch.rand(1, 3, 64, 96, generator=torch.Generator().manual_seed(12))
+    x, timesteps, context, y = unet_inputs()  # 8x8 latent = 64x64 pixels
+    with torch.inference_mode():
+        out = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        expected = oracle_hooked_forward(harness, x, timesteps, context, y)
+    assert harness.unet_hook.is_in_high_res_fix is False
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize("count", [9, 10, 13])
+def test_controlnet_advanced_weighting_needs_one_weight_per_sdxl_residual(count):
+    """SDXL ControlNets return 10 residuals; zip() used to drop residuals past a short list (the middle block
+    first) and to apply the first 10 of 13 SD1.5 weights."""
+    harness = Harness(mode="base")
+    harness.install_controlnet(weight=0.7)
+    harness.control_param.advanced_weighting = [0.7] * count
+    x, timesteps, context, y = unet_inputs()
+    with torch.inference_mode():
+        if count != 10:
+            with pytest.raises(ValueError, match="advanced_weighting"):
+                harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+            return
+        out = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        expected = oracle_hooked_forward(harness, x, timesteps, context, y)
+    assert torch.equal(out, expected)
+
+
+def test_controlnet_instantid_context_is_the_image_embed_rows_without_host_round_trips():
+    """InstantID's ControlNet context is ImageEmbed.eval(cond_mark) (cond embeds on cond rows, uncond embeds
+    on uncond rows); it is now selected on the device from embeds cast once, instead of eval() moving
+    cond_mark to the embeds' (CPU) device and back on every call."""
+    harness = Harness(mode="base")
+    harness.install_controlnet()
+    param = harness.control_param
+    param.control_model_type = harness.enums.ControlModelType.InstantID
+    gen = torch.Generator().manual_seed(21)
+
+    class Embed:  # ImageEmbed's fields only: eval() must not be called any more
+        cond_emb = torch.randn(1, 3, 16, generator=gen)
+        uncond_emb = torch.randn(1, 3, 16, generator=gen)
+
+    param.control_context_override = Embed()
+    contexts = []
+    harness.controlnet.control_model.register_forward_pre_hook(lambda module, args, kwargs: contexts.append(kwargs["context"]), with_kwargs=True)
+    x, timesteps, context, y = unet_inputs()  # row 0 cond, row 1 uncond
+    with torch.inference_mode():
+        harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+    cond_mark = torch.tensor([1.0, 0.0])[:, None, None]
+    legacy = Embed.cond_emb * cond_mark + Embed.uncond_emb * (1 - cond_mark)  # ImageEmbed.eval
+    assert len(contexts) == 2
+    assert all(torch.equal(c, legacy) for c in contexts)
+    assert param.control_context_device[0] is param.control_context_override

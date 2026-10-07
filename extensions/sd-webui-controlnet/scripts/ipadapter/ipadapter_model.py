@@ -164,18 +164,17 @@ class IPAdapterModel(torch.nn.Module):
         self.image_proj_model.to(self.device)
 
         if self.is_plus:
-            from annotator.clipvision import clip_vision_h_uc, clip_vision_vith_uc
+            from annotator.clipvision import clip_vision_h_uc
 
             cond = self.image_proj_model(
                 clip_vision_output["hidden_states"][-2].to(
                     device=self.device, dtype=torch.float32
                 )
             )
-            uncond = (
-                clip_vision_vith_uc.to(cond)
-                if self.sdxl_plus
-                else self.image_proj_model(clip_vision_h_uc.to(cond))
-            )
+            # This model's projection of the ViT-H penultimate hidden states of a zero image, for SD1.5 and
+            # SDXL alike (IPAdapterPlus/IPAdapterPlusXL.get_image_embeds of tencent-ailab/IP-Adapter): a fixed
+            # projected uncond would belong to one SDXL plus checkpoint only.
+            uncond = self.image_proj_model(clip_vision_h_uc.to(cond))
             return ImageEmbed(cond, uncond)
 
         clip_image_embeds = clip_vision_output["image_embeds"].to(

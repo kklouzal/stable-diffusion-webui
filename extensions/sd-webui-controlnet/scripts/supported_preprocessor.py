@@ -108,6 +108,11 @@ class Preprocessor(ABC):
     # _cache_identity. A ClassVar, not a dataclass field: a field default would be
     # assigned per instance by __init__ and shadow a subclass's `cacheable = True`.
     cacheable: ClassVar[bool] = False
+    # Request kwargs a cacheable preprocessor never reads, kept out of the result key: the unit's
+    # ControlNet model (the same depth map serves every depth model; only the non-cacheable
+    # ip-adapter-auto reads it) and the CLIP-on-CPU flag. A cacheable preprocessor that reads
+    # one of these must override this.
+    cache_ignored_kwargs: ClassVar[frozenset] = frozenset(("model", "low_vram"))
     _result_cache: Optional[AtomicLRU] = field(default=None, init=False, repr=False, compare=False)
 
     all_processors: ClassVar[Dict[str, "Preprocessor"]] = {}
@@ -237,7 +242,8 @@ class Preprocessor(ABC):
             ),
             str(self.device), str(getattr(devices, "dtype", None)),
             str(getattr(devices, "dtype_unet", None)), runtime_identity(torch),
-            freeze(semantic_options), freeze(args), freeze(kwargs),
+            freeze(semantic_options), freeze(args),
+            freeze({k: v for k, v in kwargs.items() if k not in self.cache_ignored_kwargs}),
         )
 
     def clear_cache(self, reason="explicit"):

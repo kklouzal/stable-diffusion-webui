@@ -429,10 +429,19 @@ class Script(scripts.Script, metaclass=(
             stat.st_mtime_ns, stat.st_ctime_ns,
         )
         sd_model = p.sd_model
+        # 'difference' ControlNets add the UNet's weights at build time. Checkpoint switches load in place
+        # (same unet object) and --no-hashing leaves sha256 None, so the checkpoint file identifies them.
+        checkpoint_info = getattr(sd_model, "sd_checkpoint_info", None)
+        checkpoint_file = getattr(checkpoint_info, "filename", None)
+        checkpoint_revision = None
+        if checkpoint_file and os.path.isfile(checkpoint_file):
+            checkpoint_stat = os.stat(checkpoint_file)
+            checkpoint_revision = (
+                os.path.realpath(checkpoint_file), checkpoint_stat.st_size, checkpoint_stat.st_mtime_ns,
+            )
         base_revision = (
             type(unet).__module__, type(unet).__qualname__, id(unet),
-            getattr(sd_model, "sd_checkpoint_info", None) and
-            getattr(sd_model.sd_checkpoint_info, "sha256", None),
+            getattr(checkpoint_info, "sha256", None), checkpoint_revision,
         )
         loader_options = {
             key: value for key, value in shared.opts.data.items()
@@ -924,9 +933,15 @@ class Script(scripts.Script, metaclass=(
             and getattr(p, 'enable_hr', False)
         )
         if high_res_fix:
+            # The final hires size of StableDiffusionProcessingTxt2Img.calculate_target_resolution (after its
+            # latent truncation when both resize dimensions are given).
             if p.hr_resize_x == 0 and p.hr_resize_y == 0:
                 hr_y = int(p.height * p.hr_scale)
                 hr_x = int(p.width * p.hr_scale)
+            elif p.hr_resize_y == 0:
+                hr_y, hr_x = p.hr_resize_x * p.height // p.width, p.hr_resize_x
+            elif p.hr_resize_x == 0:
+                hr_y, hr_x = p.hr_resize_y, p.hr_resize_y * p.width // p.height
             else:
                 hr_y, hr_x = p.hr_resize_y, p.hr_resize_x
             hr_y = align_dim_latent(hr_y)

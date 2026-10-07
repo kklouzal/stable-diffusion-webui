@@ -56,6 +56,7 @@ class PlugableControlModel(nn.Module):
         else:
             self.control_model = controlnet_from_state_dict(self.config, state_dict, dtype)
         self.gpu_component = None
+        self.lowvram_hooks = None
         self.is_control_lora = False
 
     def reset(self):
@@ -65,7 +66,15 @@ class PlugableControlModel(nn.Module):
         return self.control_model(*args, **kwargs)
 
     def aggressive_lowvram(self):
+        """Keep the model on the CPU and move one submodule at a time to the device as it runs.
+
+        Called before every ControlNet forward of a low-VRAM unit. The pre-hooks are registered once per
+        model (this model object is cached across requests), not once per call.
+        """
         self.to('cpu')
+        self.gpu_component = None
+        if self.lowvram_hooks is not None:
+            return
 
         def send_me_to_gpu(module, _):
             if self.gpu_component == module:
@@ -77,18 +86,21 @@ class PlugableControlModel(nn.Module):
             module.to(devices.get_device_for("controlnet"))
             self.gpu_component = module
 
-        self.control_model.time_embed.register_forward_pre_hook(send_me_to_gpu)
-        self.control_model.input_hint_block.register_forward_pre_hook(send_me_to_gpu)
-        self.control_model.label_emb.register_forward_pre_hook(send_me_to_gpu)
-        for m in self.control_model.input_blocks:
-            m.register_forward_pre_hook(send_me_to_gpu)
-        for m in self.control_model.zero_convs:
-            m.register_forward_pre_hook(send_me_to_gpu)
-        self.control_model.middle_block.register_forward_pre_hook(send_me_to_gpu)
-        self.control_model.middle_block_out.register_forward_pre_hook(send_me_to_gpu)
+        cm = self.control_model
+        modules = [cm.time_embed, cm.input_hint_block, cm.label_emb, *cm.input_blocks, *cm.zero_convs, cm.middle_block, cm.middle_block_out]
+        # Union ControlNet parts (task_embedding is a bare parameter; union_controlnet_merge moves its row).
+        modules += [m for m in (getattr(cm, 'transformer_layes', None), getattr(cm, 'spatial_ch_projs', None), getattr(cm, 'control_add_embedding', None)) if m is not None]
+        self.lowvram_hooks = [m.register_forward_pre_hook(send_me_to_gpu) for m in modules]
         return
 
     def fullvram(self):
+        # A low-VRAM request may have left its pre-hooks on this cached model; they would move a
+        # submodule back to the CPU before every module call.
+        if self.lowvram_hooks is not None:
+            for handle in self.lowvram_hooks:
+                handle.remove()
+            self.lowvram_hooks = None
+            self.gpu_component = None
         self.to(devices.get_device_for("controlnet"))
         return
 
@@ -361,7 +373,8 @@ class ControlNet(nn.Module):
             controlnet_cond = self.input_hint_block(hint[idx], emb, context)
             feat_seq = torch.mean(controlnet_cond, dim=(2, 3))
             if idx < len(control_type):
-                feat_seq += self.task_embedding[control_type[idx]]
+                # No-op except in low-VRAM mode, where the bare parameter stays on the CPU.
+                feat_seq += self.task_embedding[control_type[idx]].to(device=feat_seq.device)
 
             inputs.append(feat_seq.unsqueeze(1))
             condition_list.append(controlnet_cond)

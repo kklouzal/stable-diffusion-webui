@@ -2,7 +2,7 @@ import itertools
 import torch
 import math
 from threading import RLock
-from typing import Union, Dict, Optional, Callable
+from typing import Union, Dict, Optional
 
 from .pulid_attn import PuLIDAttnSetting
 from .ipadapter_model import ImageEmbed, IPAdapterModel
@@ -41,12 +41,16 @@ def attn_forward_hacked(self, x, context=None, **kwargs):
     )
     out = out.transpose(1, 2).reshape(batch_size, -1, h * head_dim)
 
-    del k, v
+    del k, v, x
 
+    # Each hack sees the attention output so far (PuLID projects its id attention against it) and returns
+    # the term to add, or None when inactive at this layer/step.
     for f in self.ipadapter_hacks:
-        out = out + f(self, x, q)
+        ip_out = f(self, out, q)
+        if ip_out is not None:
+            out = out + ip_out
 
-    del q, x
+    del q
 
     return self.to_out(out)
 
@@ -113,9 +117,13 @@ class PlugableIPAdapter(torch.nn.Module):
         self.latent_height: int = 0
         self.effective_region_mask = None
         self.pulid_attn_setting: Optional[PuLIDAttnSetting] = None
+        self.region_masks = {}
+        self.cond_rows_memo = None
 
     def reset(self):
         self.cache = {}
+        self.region_masks = {}
+        self.cond_rows_memo = None
 
     def release_request_state(self):
         self.reset()
@@ -148,7 +156,7 @@ class PlugableIPAdapter(torch.nn.Module):
         self.effective_region_mask = effective_region_mask
         self.pulid_attn_setting = pulid_attn_setting
 
-        self.cache = {}
+        self.reset()
 
         self.weight = weight
         device = torch.device("cpu")
@@ -188,96 +196,111 @@ class PlugableIPAdapter(torch.nn.Module):
             assert isinstance(self.weight, (float, int))
             return self.weight
 
-    def call_ip(self, key: str, feat, device):
-        if key in self.cache:
-            return self.cache[key]
-        else:
-            ip = self.ipadapter.ip_layers.to_kvs[key](feat).to(device)
-            self.cache[key] = ip
-            return ip
+    def cond_rows(self, cond_mark: torch.Tensor) -> torch.Tensor:
+        """(B, 1, 1) bool on cond_mark's device: True for the call's cond rows.
+
+        cond_mark is the (B, 1, 1, 1) row mark hook.py sets per UNet call (1 for cond rows, 0 for uncond rows).
+        Every attn2 layer of a call sees the same cond_mark object, so the mask is built once per call.
+        """
+        memo = self.cond_rows_memo
+        if memo is None or memo[0] is not cond_mark:
+            memo = self.cond_rows_memo = (cond_mark, cond_mark[:, :, :, 0] > 0.5)
+        return memo[1]
+
+    def call_ip(self, key: str, cond_mark: torch.Tensor, device, dtype) -> torch.Tensor:
+        """`key`'s projection (to_k_ip/to_v_ip) of the image embeds for the rows of this call, (B, T, C) in `dtype`.
+
+        The projection is row-wise and bias-free, so the cond and uncond embeds (with PuLID's zero tokens) are
+        projected once per request, in the IP-Adapter's dtype on its device, and each call selects its rows by
+        cond_mark. The row layout must not be frozen at the first call: A1111 runs cond and uncond rows as
+        separate UNet calls (prompt and negative prompt of different token lengths without padding,
+        batch_cond_uncond off) and drops the uncond rows on skipped-uncond steps.
+        """
+        cache_key = (key, device, dtype)
+        projected = self.cache.get(cache_key)
+        if projected is None:
+            cond_emb, uncond_emb = self.image_emb
+            emb = torch.cat([cond_emb, uncond_emb])
+            if self.ipadapter.is_pulid:
+                emb = self.pulid_attn_setting.append_zero_tokens(emb)
+            both = self.ipadapter.ip_layers.to_kvs[key](emb).to(device=device, dtype=dtype)
+            projected = self.cache[cache_key] = (both[: cond_emb.shape[0]], both[cond_emb.shape[0]:])
+        cond, uncond = projected
+        return torch.where(self.cond_rows(cond_mark), cond, uncond)
 
     def apply_effective_region_mask(self, out: torch.Tensor) -> torch.Tensor:
         if self.effective_region_mask is None:
             return out
 
         _, sequence_length, _ = out.shape
-        # sequence_length = mask_h * mask_w
-        # sequence_length = (latent_height * factor) * (latent_height * factor)
-        # sequence_length = (latent_height * latent_height) * factor ^ 2
-        factor = math.sqrt(sequence_length / (self.latent_width * self.latent_height))
-        assert (
-            factor > 0
-        ), f"{factor}, {sequence_length}, {self.latent_width}, {self.latent_height}"
-        mask_h = int(self.latent_height * factor)
-        mask_w = int(self.latent_width * factor)
+        mask = self.region_masks.get((sequence_length, out.device))
+        if mask is None:
+            # sequence_length = mask_h * mask_w
+            # sequence_length = (latent_height * factor) * (latent_height * factor)
+            # sequence_length = (latent_height * latent_height) * factor ^ 2
+            factor = math.sqrt(sequence_length / (self.latent_width * self.latent_height))
+            assert (
+                factor > 0
+            ), f"{factor}, {sequence_length}, {self.latent_width}, {self.latent_height}"
+            mask_h = int(self.latent_height * factor)
+            mask_w = int(self.latent_width * factor)
 
-        mask = torch.nn.functional.interpolate(
-            self.effective_region_mask.to(out.device),
-            size=(mask_h, mask_w),
-            mode="bilinear",
-        ).squeeze()
-        mask = mask.repeat(len(current_model.cond_mark), 1, 1)
-        mask = mask.view(mask.shape[0], -1, 1).repeat(1, 1, out.shape[2])
+            # (1, mask_h * mask_w, 1): broadcast over the call's rows and channels.
+            mask = torch.nn.functional.interpolate(
+                self.effective_region_mask.to(out.device),
+                size=(mask_h, mask_w),
+                mode="bilinear",
+            ).view(1, -1, 1)
+            self.region_masks[(sequence_length, out.device)] = mask
         return out * mask
 
     def attn_eval(
         self,
         hidden_states: torch.Tensor,
         query: torch.Tensor,
-        cond_uncond_image_emb: torch.Tensor,
+        ip_k: torch.Tensor,
+        ip_v: torch.Tensor,
         attn_heads: int,
         head_dim: int,
-        emb_to_k: Callable[[torch.Tensor], torch.Tensor],
-        emb_to_v: Callable[[torch.Tensor], torch.Tensor],
     ):
+        """hidden_states: the attention output (B, L, heads * head_dim); query: (B, heads, L, head_dim);
+        ip_k/ip_v: the call's image k/v rows (B, T, heads * head_dim) in the query's dtype."""
         if self.ipadapter.is_pulid:
             assert self.pulid_attn_setting is not None
             return self.pulid_attn_setting.eval(
                 hidden_states,
                 query,
-                cond_uncond_image_emb,
+                ip_k,
+                ip_v,
                 attn_heads,
                 head_dim,
-                emb_to_k,
-                emb_to_v,
             )
         else:
             return self._attn_eval_ipadapter(
                 hidden_states,
                 query,
-                cond_uncond_image_emb,
+                ip_k,
+                ip_v,
                 attn_heads,
                 head_dim,
-                emb_to_k,
-                emb_to_v,
             )
 
     def _attn_eval_ipadapter(
         self,
         hidden_states: torch.Tensor,
         query: torch.Tensor,
-        cond_uncond_image_emb: torch.Tensor,
+        ip_k: torch.Tensor,
+        ip_v: torch.Tensor,
         attn_heads: int,
         head_dim: int,
-        emb_to_k: Callable[[torch.Tensor], torch.Tensor],
-        emb_to_v: Callable[[torch.Tensor], torch.Tensor],
     ):
         assert hidden_states.ndim == 3
         batch_size, sequence_length, inner_dim = hidden_states.shape
-        ip_k = emb_to_k(cond_uncond_image_emb)
-        ip_v = emb_to_v(cond_uncond_image_emb)
 
         ip_k, ip_v = map(
             lambda t: t.view(batch_size, -1, attn_heads, head_dim).transpose(1, 2),
             (ip_k, ip_v),
         )
-        assert ip_k.dtype == ip_v.dtype
-
-        # On MacOS, q can be float16 instead of float32.
-        # https://github.com/Mikubill/sd-webui-controlnet/issues/2208
-        if query.dtype != ip_k.dtype:
-            ip_k = ip_k.to(dtype=query.dtype)
-            ip_v = ip_v.to(dtype=query.dtype)
 
         ip_out = torch.nn.functional.scaled_dot_product_attention(
             query, ip_k, ip_v, attn_mask=None, dropout_p=0.0, is_causal=False
@@ -287,11 +310,11 @@ class PlugableIPAdapter(torch.nn.Module):
 
     @torch.no_grad()
     def patch_forward(self, number: int, transformer_index: int):
+        k_key = f"{number * 2 + 1}_to_k_ip"
+        v_key = f"{number * 2 + 1}_to_v_ip"
+
         @torch.no_grad()
-        def forward(attn_blk, x, q):
-            batch_size, sequence_length, inner_dim = x.shape
-            h = attn_blk.heads
-            head_dim = inner_dim // h
+        def forward(attn_blk, out, q):
             weight = self.weight_on_transformer(transformer_index)
 
             current_sampling_percent = getattr(
@@ -302,18 +325,20 @@ class PlugableIPAdapter(torch.nn.Module):
                 or current_sampling_percent > self.p_end
                 or weight == 0.0
             ):
-                return 0.0
+                return None
 
-            k_key = f"{number * 2 + 1}_to_k_ip"
-            v_key = f"{number * 2 + 1}_to_v_ip"
+            batch_size, sequence_length, inner_dim = out.shape
+            h = attn_blk.heads
+            head_dim = inner_dim // h
+            cond_mark = current_model.cond_mark
+            # In the query's dtype (the dtype of the attention's own k/v, and what PuLID projects in).
             ip_out = self.attn_eval(
-                hidden_states=x,
+                hidden_states=out,
                 query=q,
-                cond_uncond_image_emb=self.image_emb.eval(current_model.cond_mark),
+                ip_k=self.call_ip(k_key, cond_mark, q.device, q.dtype),
+                ip_v=self.call_ip(v_key, cond_mark, q.device, q.dtype),
                 attn_heads=h,
                 head_dim=head_dim,
-                emb_to_k=lambda emb: self.call_ip(k_key, emb, device=q.device),
-                emb_to_v=lambda emb: self.call_ip(v_key, emb, device=q.device),
             )
             return self.apply_effective_region_mask(ip_out * weight)
 

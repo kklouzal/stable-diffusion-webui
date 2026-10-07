@@ -20,7 +20,9 @@ def load_state_dict(ckpt_path, location="cpu"):
     if extension.lower() == ".safetensors":
         state_dict = safetensors.torch.load_file(ckpt_path, device=location)
     else:
-        state_dict = unsafe_torch_load(ckpt_path, map_location=torch.device(location))
+        # Model files hold tensors only; explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot make a pickled
+        # .pth/.ckpt run code.
+        state_dict = unsafe_torch_load(ckpt_path, map_location=torch.device(location), weights_only=True)
     state_dict = get_state_dict(state_dict)
     logger.info(f"Loaded state_dict from [{ckpt_path}]")
     return state_dict

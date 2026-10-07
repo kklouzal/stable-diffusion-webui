@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from collections import OrderedDict
 
-from copy import deepcopy
 from modules import devices
 cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
 
@@ -50,24 +49,33 @@ class PlugableAdapter(nn.Module):
         self.control_model = control_model
         self.control = None
         self.hint_cond = None
-            
+        self.hint_source = None
+
     def reset(self):
         self.control = None
         self.hint_cond = None
-            
-    def forward(self, hint=None, x=None, *args, **kwargs):
-        if self.control is not None:
-            return deepcopy(self.control)
-        
-        self.hint_cond = cond_cast_unet(hint)
-        hint_in = cond_cast_unet(hint)
-        
-        if hasattr(self.control_model, 'conv_in') and \
-                (self.control_model.conv_in.in_channels == 64 or self.control_model.conv_in.in_channels == 256):
-            hint_in = hint_in[:, 0:1, :, :]
+        self.hint_source = None
 
-        self.control = self.control_model(hint_in)
-        return deepcopy(self.control)
+    def release_request_state(self):
+        """Drop the request's hint and features (UnetHook.restore); the model stays cached."""
+        self.reset()
+
+    def forward(self, hint=None, x=None, *args, **kwargs):
+        """The adapter features of `hint` (a list of tensors, or one tensor for the style adapter), computed
+        once per hint object: the hook passes the same hint tensor every step and a different one for the
+        hires pass. Callers must not modify the returned tensors in place (hook.py scales them into new
+        tensors first)."""
+        if self.control is None or hint is not self.hint_source:
+            self.hint_source = hint
+            self.hint_cond = cond_cast_unet(hint)
+            hint_in = self.hint_cond
+
+            if hasattr(self.control_model, 'conv_in') and \
+                    (self.control_model.conv_in.in_channels == 64 or self.control_model.conv_in.in_channels == 256):
+                hint_in = hint_in[:, 0:1, :, :]
+
+            self.control = self.control_model(hint_in)
+        return list(self.control) if isinstance(self.control, list) else self.control
 
     def aggressive_lowvram(self):
         self.to(devices.get_device_for("controlnet"))

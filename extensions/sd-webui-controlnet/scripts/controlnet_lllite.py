@@ -212,15 +212,19 @@ class PlugableControlLLLite(torch.nn.Module):
             is_in_high_res_fix = getattr(model, 'is_in_high_res_fix', False)
 
             if not is_in_high_res_fix:
-                hack = 0
+                hack = None
                 for weight, start, end, module in blk.lllite_list:
-                    module.to(x.device)
                     if current_sampling_percent < start or current_sampling_percent > end:
-                        hack = hack + 0
-                    else:
-                        hack = hack + module(x, current_h_shape) * weight
+                        continue
+                    # Module.to walks every parameter (tens of microseconds per module and call); lowvram
+                    # moves the modules back to the CPU after each call, so check before moving.
+                    if module.conditioning1[0].weight.device != x.device:
+                        module.to(x.device)
+                    term = module(x, current_h_shape) * weight
+                    hack = term if hack is None else hack + term
 
-                x = x + hack
+                if hack is not None:
+                    x = x + hack
 
             return original_forward(x, **kwargs)
         return forward
