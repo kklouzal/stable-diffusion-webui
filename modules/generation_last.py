@@ -191,11 +191,12 @@ def _png_without_metadata(raw: bytes) -> bytes | None:
     return b"".join(chunks)  # also drops data after IEND, which decoders ignore
 
 
-def _decode_inline_image(value: str):
+def _decode_inline_image(value: str, keep_png: bool = True):
     """Validate bounded inline base64 image data; never resolve paths or fetch URLs.
 
     Returns (retained_base64, None) for a PNG kept as sent minus metadata, so its
-    pixels, mode, palette and transparency replay exactly; else (None, decoded image).
+    pixels, mode, palette and transparency replay exactly (only when keep_png);
+    else (None, decoded image).
     """
     from PIL import Image
     import base64
@@ -213,24 +214,24 @@ def _decode_inline_image(value: str):
             raise ValueError("Image dimensions exceed budget")
         # Rejects truncated/corrupt data before retention and reads trailing text chunks into info.
         decoded.load()
-    png = _png_without_metadata(raw) if _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
+    png = _png_without_metadata(raw) if keep_png and _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
     if png is None:
         return None, decoded
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL) -> str:
+def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL, keep_inline_png: bool = True) -> str:
     """Return PNG base64 for a PIL/numpy/inline-base64 input.
 
-    source is the API request's inline data that decoded to the PIL image value;
-    it is retained when it is an eligible PNG, else value is encoded losslessly
-    at compress_level.
+    source is the API request's inline data that decoded to the PIL image value.
+    With keep_inline_png, an eligible inline PNG (source, or value itself) is
+    retained; otherwise the decoded pixels are encoded as RGBA at compress_level.
     """
     from PIL import Image
     import base64
     import io
 
-    if source is not None:
+    if source is not None and keep_inline_png:
         try:
             retained, _ = _decode_inline_image(source)
         except Exception:
@@ -240,7 +241,7 @@ def _encode_api_png(value: Any, source: str | None = None, compress_level: int =
         if retained is not None:
             return retained
     elif isinstance(value, str):
-        retained, value = _decode_inline_image(value)
+        retained, value = _decode_inline_image(value, keep_inline_png)
         if retained is not None:
             return retained
     if not isinstance(value, Image.Image):
@@ -266,13 +267,13 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     # Entries keep value alive so its id() cannot be reused during the snapshot.
     encoded_inputs = budget.setdefault("encoded", {})
     key = value if isinstance(value, str) else id(value)
-    # Re-encodes use zlib level 1; only when that does not fit the remaining
-    # budget is the historical default level tried, so nothing the old level-6
-    # encoding retained is newly omitted.
-    for compress_level in (_PNG_FAST_LEVEL, _PNG_DEFAULT_LEVEL):
+    # The kept inline PNG or a zlib level 1 re-encode comes first; only when that
+    # does not fit the remaining budget is the historical encoding (RGBA re-encode
+    # at the default level) tried, so nothing it retained is newly omitted.
+    for compress_level, keep_inline_png in ((_PNG_FAST_LEVEL, True), (_PNG_DEFAULT_LEVEL, False)):
         if (key, compress_level) not in encoded_inputs:
             try:
-                encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level))
+                encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level, keep_inline_png))
             except Exception:
                 encoded_inputs[key, compress_level] = (value, None)
         encoded = encoded_inputs[key, compress_level][1]

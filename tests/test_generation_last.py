@@ -388,9 +388,9 @@ class GenerationLastTests(unittest.TestCase):
         calls = []
         original = self.module._encode_api_png
 
-        def counting(value, source=None, compress_level=self.module._PNG_FAST_LEVEL):
+        def counting(value, *args, **kwargs):
             calls.append(value)
-            return original(value, source, compress_level)
+            return original(value, *args, **kwargs)
 
         with patch.object(self.module, "_encode_api_png", counting):
             snapshot = self.module.build_snapshot(p, self.processed)
@@ -531,6 +531,22 @@ class GenerationLastTests(unittest.TestCase):
         with patch.object(self.module, "_MAX_IMAGE_BYTES", len(default) - 1):
             self.assertIs(self.module._image_to_api_base64(image, limitations, "image", {"images": 0}), self.module._OMIT)
             self.assertTrue(any("per-image retention limit" in item for item in limitations))
+
+    def test_kept_inline_png_that_does_not_fit_falls_back_to_historical_reencode(self):
+        import base64
+        import io
+        image = Image.new("RGB", (256, 256), (10, 200, 30))
+        kept = base64.b64encode(self._png(image, compress_level=0)).decode("ascii")
+        historical = base64.b64encode(self._png(image.convert("RGBA"))).decode("ascii")
+        self.assertGreater(len(kept), len(historical))
+
+        limitations = []
+        self.assertEqual(self.module._image_to_api_base64(kept, limitations, "image", {"images": 0}), kept)
+        with patch.object(self.module, "_MAX_IMAGE_TOTAL_BYTES", len(historical)):
+            self.assertEqual(self.module._image_to_api_base64(kept, limitations, "image", {"images": 0}), historical)
+            with Image.open(io.BytesIO(self._png(image))) as decoded:
+                self.assertEqual(self.module._image_to_api_base64(decoded, limitations, "init", {"images": 0}, source=kept), historical)
+        self.assertFalse(limitations)
 
     def test_version_one_snapshot_is_available_without_new_generation(self):
         legacy = {
