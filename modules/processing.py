@@ -452,11 +452,25 @@ class StableDiffusionProcessing:
 
         return image_conditioning
 
+    def img2img_image_conditioning_reads_source(self):
+        """Whether img2img_image_conditioning uses source_image (else it returns dummy zeros)."""
+        return (
+            # HACK: Using introspection as the Depth2Image model doesn't appear to uniquely
+            # identify itself with a field common to all models. The conditioning_key is also hybrid.
+            isinstance(self.sd_model, LatentDepth2ImageDiffusion)
+            or self.sd_model.cond_stage_key == "edit"
+            or self.sampler.conditioning_key in {'hybrid', 'concat', 'crossattn-adm'}
+            or self.sampler.model_wrap.inner_model.is_sdxl_inpaint
+        )
+
     def img2img_image_conditioning(self, source_image, latent_image, image_mask=None, round_image_mask=True):
+        """source_image may be None when img2img_image_conditioning_reads_source() is False."""
+        if not self.img2img_image_conditioning_reads_source():
+            # Dummy zero conditioning if we're not using inpainting or depth model.
+            return latent_image.new_zeros(latent_image.shape[0], 5, 1, 1)
+
         source_image = devices.cond_cast_float(source_image)
 
-        # HACK: Using introspection as the Depth2Image model doesn't appear to uniquely
-        # identify itself with a field common to all models. The conditioning_key is also hybrid.
         if isinstance(self.sd_model, LatentDepth2ImageDiffusion):
             return self.depth2img_image_conditioning(source_image)
 
@@ -469,11 +483,8 @@ class StableDiffusionProcessing:
         if self.sampler.conditioning_key == "crossattn-adm":
             return self.unclip_image_conditioning(source_image)
 
-        if self.sampler.model_wrap.inner_model.is_sdxl_inpaint:
-            return self.inpainting_image_conditioning(source_image, latent_image, image_mask=image_mask)
-
-        # Dummy zero conditioning if we're not using inpainting or depth model.
-        return latent_image.new_zeros(latent_image.shape[0], 5, 1, 1)
+        # is_sdxl_inpaint
+        return self.inpainting_image_conditioning(source_image, latent_image, image_mask=image_mask)
 
     def init(self, all_prompts, all_seeds, all_subseeds):
         pass
@@ -1604,7 +1615,9 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             # Avoid making the inpainting conditioning unless necessary as
             # this does need some extra compute to decode / encode the image again.
             if getattr(self, "inpainting_mask_weight", shared.opts.inpainting_mask_weight) < 1.0:
-                image_conditioning = self.img2img_image_conditioning(decode_first_stage(self.sd_model, samples), samples)
+                # Models whose conditioning ignores the image (plain SDXL) get the same dummy without the full-size decode.
+                source_image = decode_first_stage(self.sd_model, samples) if self.img2img_image_conditioning_reads_source() else None
+                image_conditioning = self.img2img_image_conditioning(source_image, samples)
             else:
                 image_conditioning = self.txt2img_image_conditioning(samples)
         else:
