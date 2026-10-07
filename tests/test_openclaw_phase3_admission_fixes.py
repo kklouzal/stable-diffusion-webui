@@ -40,8 +40,8 @@ def test_vae_reset_preserves_enablement_and_telemetry_contract():
 def test_vae_api_clear_without_enabled_is_reset_not_disable():
     fn = _function("modules/api/api.py", "set_vae_decode_graphs")
     source = ast.unparse(fn)
-    assert "'enabled' in req" in source
-    assert "else None" in source
+    # A missing "enabled" keeps the current state (None); behaviour is pinned in test_api_server_control_contract.
+    assert "_request_bool(req, 'enabled', None)" in source
 
 
 def test_cuda_graph_first_request_returns_captured_output_contract():

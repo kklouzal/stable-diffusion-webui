@@ -449,16 +449,28 @@ def test_runtime_switch_booleans_follow_the_env_grammar(monkeypatch):
             calls.append((enabled, clear))
             return {}
 
+    class VaeGraphs:
+        @staticmethod
+        def set_enabled(enabled, clear_cache=False):
+            calls.append(("vae", enabled, clear_cache))
+            return {}
+
     real_import = __import__
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "modules" and "openclaw_cuda_graphs" in fromlist:
             return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
+        if name == "modules" and "openclaw_vae_decode_graphs" in fromlist:
+            return SimpleNamespace(openclaw_vae_decode_graphs=VaeGraphs)
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setitem(api_class.set_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
     api = api_class.__new__(api_class)
     api.queue_lock = DummyLock([])
+    api.set_vae_decode_graphs({"clear": True})  # no "enabled": reset the cache, keep the current state
+    api.set_vae_decode_graphs({"enabled": "no"})
+    assert calls == [("vae", None, True), ("vae", False, False)]
+    calls.clear()
     api.set_cuda_graphs({"enabled": "false", "clear": "Off"})
     api.set_cuda_graphs({"enabled": True, "clear": 0})
     assert calls == [(False, False), (True, False)]
