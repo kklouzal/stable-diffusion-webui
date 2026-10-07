@@ -72,6 +72,20 @@ def _controlnet_remote_api_keys():
 _CONTROLNET_UNIT_IMAGE_FIELDS = ("image", "input_image", "mask", "mask_image", "effective_region_mask", "batch_images", "ipadapter_input")
 
 
+def _validate_override_settings(override_settings, opts) -> None:
+    """Reject, as a malformed request (422) before the job starts, override_settings that opts.set(is_api=True) would
+    refuse once the generation runs (it raised there as a 500): an unknown option, or a value whose type differs from
+    the option's default (int and float interchangeable, None accepted). API-restricted options stay ignored."""
+    for key, value in (override_settings or {}).items():
+        if opts.data.get(key) == value:
+            continue  # opts.set leaves an unchanged value alone before looking the option up
+        option = opts.data_labels.get(key)
+        if option is None:
+            raise HTTPException(status_code=422, detail=f"override_settings: unknown option {key!r}")
+        if not opts.same_type(option.default, value):
+            raise HTTPException(status_code=422, detail=f"override_settings: option {key!r} expects a value of type {type(option.default).__name__}, got {type(value).__name__} {value!r}")
+
+
 def _response_parameters(request, *, include_images: bool) -> dict[str, Any]:
     """The request echoed back as response parameters, without ControlNet input images unless images were requested.
 
@@ -1092,6 +1106,7 @@ class Api:
     def _prepare_generation_api_request(self, request, tabname, script_runner, default_script_args, update=None, extra_pop_fields=()):
         infotext_script_args = {}
         self.apply_infotext(request, tabname, script_runner=script_runner, mentioned_script_args=infotext_script_args)
+        _validate_override_settings(request.override_settings, shared.opts)
 
         selectable_scripts, selectable_script_idx = self.get_selectable_script(request.script_name, script_runner)
         try:
