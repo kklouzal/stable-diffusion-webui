@@ -148,13 +148,13 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
             infotext = ", ".join([k if k == v else f'{k}: {infotext_utils.quote(v)}' for k, v in pp.info.items() if v is not None])
 
             if opts.enable_pnginfo:
-                pp.image.info = existing_pnginfo
-                pp.image.info["postprocessing"] = infotext
+                # a dict per image: sharing existing_pnginfo gave every output of this input the last one's infotext
+                pp.image.info = {**existing_pnginfo, "postprocessing": infotext}
 
             shared.state.assign_current_image(pp.image)
 
             if save_output:
-                fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
+                fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=pp.image.info if opts.enable_pnginfo else existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
 
                 if pp.caption:
                     save_caption_sidecar(fullfn, pp.caption, shared.opts.postprocessing_existing_caption_action)
