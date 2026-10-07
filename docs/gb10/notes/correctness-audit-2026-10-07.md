@@ -90,14 +90,18 @@ LoRA file digests memoized per file revision (0.1-13.7 s per activation), CUDA-g
 ControlNet schedule tables on device, DW-pose ONNX parsed once, ControlNet models rebuilt on checkpoint switches only
 when they are 'difference' models.
 
-## Open decisions
+## Resolved follow-ups (operator go-ahead, 2026-10-07)
 
-- Two reviewed-but-unmerged branches: API image-URL byte/pixel budgets with connections pinned to the checked address
-  (`worktree-agent-a3b67454aa3b8f5d9`, 5952302e) and atomic, verified gb10 patcher writes
-  (`worktree-agent-a6047407e608c950c`, d7777073).
-- Saving a custom multi-sampler swaps sampler entries without `queue_lock` (a microsecond window for a running
-  generation); taking the lock would make the controller's 30 s timeout fire behind long generations.
-- `PYTORCH_ALLOC_CONF=expandable_segments:True` (fragmentation on shared unified memory) needs a GPU measurement.
+- API image URLs: downloads are limited to 4 bytes per allowed pixel (`img_max_size_mp`), the image header is checked
+  against the pixel budget before decoding (413 when over), redirect bodies are never read, and each hop connects only
+  to the address that was validated (no DNS rebinding between check and connect; SNI and certificate checks still use
+  the hostname).
+- gb10 patchers replace their targets atomically and verify the patched text (blocks and `compile()`) before writing.
+- Multi-sampler chain saves publish into the sampler registry without a moment where a chain that stays registered is
+  missing (no `queue_lock`, so saves never wait behind a generation); sampler-name lookups are cached per registry
+  generation.
+- Still open: `PYTORCH_ALLOC_CONF=expandable_segments:True` (fragmentation on shared unified memory) needs a GPU
+  measurement.
 
 ## Live verification (deploy7-490eac83, 2026-10-07)
 
