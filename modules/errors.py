@@ -22,10 +22,11 @@ def get_exceptions():
         return list(reversed(exception_records))
 
 
-def record_exception():
-    """Records the exception being handled, unless it repeats the newest record: report() or display() followed by
-    print_error_explanation() (or another report) for one exception records it once."""
-    e = sys.exception()
+def record_exception(e: BaseException | None = None):
+    """Records `e` (default: the exception being handled), unless it repeats the newest record: report() or display()
+    followed by print_error_explanation() (or another report) for one exception records it once."""
+    if e is None:
+        e = sys.exception()
     if e is None:
         return
 
@@ -65,7 +66,8 @@ def print_error_explanation(message):
 
 
 def display(e: Exception, task, *, full_traceback=False):
-    record_exception()
+    # `e` is not necessarily the exception being handled (e.g. a cleanup failure displayed while handling another)
+    record_exception(e)
 
     print(f"{task or 'error'}: {type(e).__name__}", file=sys.stderr)
     te = traceback.TracebackException.from_exception(e)

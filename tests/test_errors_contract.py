@@ -36,3 +36,16 @@ def test_exception_records_keep_the_five_newest(monkeypatch):
             errors.record_exception()
 
     assert [record["exception"] for record in errors.get_exceptions()] == [f"failure {i}" for i in (6, 5, 4, 3, 2)]
+
+
+def test_display_records_the_displayed_exception_not_the_one_being_handled(monkeypatch, capsys):
+    monkeypatch.setattr(errors, "exception_records", [])
+    cleanup_failure = ValueError("cleanup failed")
+
+    try:
+        raise RuntimeError("primary failure")
+    except RuntimeError:
+        # e.g. a script cleanup failure displayed while the generation's own failure is being handled
+        errors.display(cleanup_failure, "script cleanup")
+
+    assert [record["exception"] for record in errors.get_exceptions()] == ["cleanup failed"]
