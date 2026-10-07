@@ -308,3 +308,18 @@ def test_read_rejects_truncated_data_at_the_boundary(images):
         images.read(io.BytesIO(raw[: len(raw) // 2]))
 
     assert np.array_equal(np.asarray(images.read(io.BytesIO(raw))), np.asarray(_random_rgb(64, 64)))
+
+
+def test_read_refuses_more_than_max_pixels_from_the_header(images):
+    """The pixel budget is checked before decoding: truncated pixel data over the budget raises the budget error, not
+    the decoder's."""
+    data = io.BytesIO()
+    _random_rgb(40, 26).save(data, format="PNG")
+    raw = data.getvalue()
+
+    with pytest.raises(Image.DecompressionBombError):
+        images.read(io.BytesIO(raw[: len(raw) // 2]), max_pixels=40 * 26 - 1)
+    with pytest.raises(OSError):
+        images.read(io.BytesIO(raw[: len(raw) // 2]), max_pixels=40 * 26)
+
+    assert images.read(io.BytesIO(raw), max_pixels=40 * 26).size == (40, 26)
