@@ -273,11 +273,18 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             calls.append(len(calls) + 1)
             return x_arg + calls[-1]
 
-        out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
+        with torch.no_grad():  # graphs are inference-only: with grad enabled run() falls back to one eager call
+            out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
 
         # One side-stream warm-up (+1), then the capture (+2) whose replay is returned; no extra eager warm.
         self.assertEqual(calls, [1, 2])
         self.assertTrue(torch.equal(out.cpu(), torch.full((1,), 2.0)))
+        status = openclaw_cuda_graphs.status()
+        self.assertEqual((status["captures"], status["failures"], status["fallbacks"]), (1, 0, 0))
+        with torch.no_grad():
+            hit = openclaw_cuda_graphs.run(fn, torch.full((1,), 5.0, device="cuda"), x, cond={"x": x})
+        self.assertEqual(calls, [1, 2])  # replay only
+        self.assertTrue(torch.equal(hit.cpu(), torch.full((1,), 7.0)))
 
     def test_model_invalidation_waits_for_inflight_replay_and_clone(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)

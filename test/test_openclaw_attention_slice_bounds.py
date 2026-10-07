@@ -119,6 +119,17 @@ from modules import sd_hijack_optimizations as opt
 _cleanup_attention_import_stubs()
 
 
+@pytest.fixture(autouse=True)
+def attention_options(monkeypatch):
+    """Give every test its own shared.opts/loaded_hypernetworks.
+
+    The import stub above is only installed when modules.shared is not imported yet; after another test module imported
+    the real one (whose opts stays None until the webui loads its config), the attention forwards would read None.
+    """
+    monkeypatch.setattr(opt.shared, "opts", SimpleNamespace(upcast_attn=False), raising=False)
+    monkeypatch.setattr(opt.shared, "loaded_hypernetworks", [], raising=False)
+
+
 class TinyCrossAttention(torch.nn.Module):
     def __init__(self, dim=8, heads=2):
         super().__init__()
