@@ -1011,7 +1011,10 @@ class Api:
         self.apply_infotext(request, tabname, script_runner=script_runner, mentioned_script_args=infotext_script_args)
 
         selectable_scripts, selectable_script_idx = self.get_selectable_script(request.script_name, script_runner)
-        sampler, scheduler = sd_samplers.get_sampler_and_scheduler(request.sampler_name or request.sampler_index, request.scheduler)
+        try:
+            sampler, scheduler = sd_samplers.get_sampler_and_scheduler(request.sampler_name or request.sampler_index, request.scheduler, strict=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
         populate_update = {
             "sampler_name": validate_sampler_name(sampler),

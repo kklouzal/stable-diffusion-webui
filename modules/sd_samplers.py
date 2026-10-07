@@ -99,7 +99,12 @@ def get_hr_scheduler_from_infotext(d: dict):
 
 
 @functools.cache
-def get_sampler_and_scheduler(sampler_name, scheduler_name, *, convert_automatic=True):
+def get_sampler_and_scheduler(sampler_name, scheduler_name, *, convert_automatic=True, strict=False):
+    """Split an optional scheduler suffix off sampler_name and resolve both names.
+
+    Unknown sampler names resolve to the default sampler unless strict is set, in which case they raise ValueError so
+    API callers are not silently given a different sampler than they asked for.
+    """
     default_sampler = samplers[0]
     found_scheduler = sd_schedulers.schedulers_map.get(scheduler_name, sd_schedulers.schedulers[0])
 
@@ -114,7 +119,13 @@ def get_sampler_and_scheduler(sampler_name, scheduler_name, *, convert_automatic
                 name = name[0:-(len(name_option) + 1)]
                 break
 
-    sampler = all_samplers_map.get(name, default_sampler)
+    sampler = all_samplers_map.get(name)
+    if sampler is None and strict and name.lower() in samplers_map:
+        sampler = all_samplers_map.get(samplers_map[name.lower()])
+    if sampler is None:
+        if strict:
+            raise ValueError(f"Sampler not found: {sampler_name}")
+        sampler = default_sampler
 
     # revert back to Automatic if it's the default scheduler for the selected sampler
     if convert_automatic and sampler.options.get('scheduler', None) == found_scheduler.name:
