@@ -62,7 +62,7 @@ def load_multi_sampler(monkeypatch):
     monkeypatch.setitem(sys.modules, "modules.sd_samplers_common", _module(
         "modules.sd_samplers_common",
         SamplerData=SamplerData,
-        InterruptedException=Exception,
+        InterruptedException=type("InterruptedException", (Exception,), {}),
         TorchHijack=lambda p: None,
     ))
     monkeypatch.setitem(sys.modules, "modules.sd_samplers_kdiffusion", _module(
@@ -85,6 +85,7 @@ def load_multi_sampler(monkeypatch):
     monkeypatch.setitem(sys.modules, "modules.shared", _module(
         "modules.shared",
         opts=types.SimpleNamespace(sgm_noise_multiplier=False, img2img_extra_noise=0),
+        cmd_opts=types.SimpleNamespace(disable_console_progressbars=True),
         state=types.SimpleNamespace(),
         total_tqdm=types.SimpleNamespace(update=lambda: None),
         sd_model=types.SimpleNamespace(),

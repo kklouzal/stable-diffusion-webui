@@ -548,7 +548,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                     self.last_latent = denoised
                     x = denoised
                 else:
-                    x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=False, callback=self._callback(p, offset=offset), **kwargs)
+                    x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self._callback(p, offset=offset), **kwargs)
                 self.last_latent = x
             self._save_snapshot(p, x, step=steps, final=True)
             return x
