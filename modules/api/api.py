@@ -534,7 +534,9 @@ def encode_pil_to_base64(image):
                 if isinstance(key, str) and isinstance(value, str):
                     metadata.add_text(key, value)
                     use_metadata = True
-            image.save(output_bytes, format="PNG", pnginfo=(metadata if use_metadata else None), quality=opts.jpeg_quality)
+            # zlib level 1 is lossless like the default level 6 but ~5x faster on
+            # large images for ~18% more bytes; PNG ignores jpeg_quality.
+            image.save(output_bytes, format="PNG", pnginfo=(metadata if use_metadata else None), compress_level=1)
 
         elif opts.samples_format.lower() in ("jpg", "jpeg", "webp"):
             if image.mode in ("RGBA", "P"):

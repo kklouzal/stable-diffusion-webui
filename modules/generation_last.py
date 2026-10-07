@@ -147,6 +147,8 @@ def _is_controlnet_unit(value: Any) -> bool:
     return type(value).__name__ == "ControlNetUnit"
 
 
+_PNG_FAST_LEVEL = 1  # lossless; ~5x faster than level 6 for ~18% more bytes
+_PNG_DEFAULT_LEVEL = -1  # Pillow/zlib default (level 6), the historical encoding
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # Chunks that define decoded pixels/mode/transparency, plus the ICC profile that
 # the RGBA re-encode also keeps (Pillow writes info["icc_profile"]).
@@ -217,11 +219,12 @@ def _decode_inline_image(value: str):
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _encode_api_png(value: Any, source: str | None = None) -> str:
+def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL) -> str:
     """Return PNG base64 for a PIL/numpy/inline-base64 input.
 
     source is the API request's inline data that decoded to the PIL image value;
-    it is retained when it is an eligible PNG, else value is encoded as before.
+    it is retained when it is an eligible PNG, else value is encoded losslessly
+    at compress_level.
     """
     from PIL import Image
     import base64
@@ -243,7 +246,7 @@ def _encode_api_png(value: Any, source: str | None = None) -> str:
     if not isinstance(value, Image.Image):
         value = Image.fromarray(value)
     with io.BytesIO() as output:
-        value.convert("RGBA").save(output, format="PNG")
+        value.convert("RGBA").save(output, format="PNG", compress_level=compress_level)
         return base64.b64encode(output.getvalue()).decode("ascii")
 
 
@@ -263,12 +266,18 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     # Entries keep value alive so its id() cannot be reused during the snapshot.
     encoded_inputs = budget.setdefault("encoded", {})
     key = value if isinstance(value, str) else id(value)
-    if key not in encoded_inputs:
-        try:
-            encoded_inputs[key] = (value, _encode_api_png(value, source))
-        except Exception:
-            encoded_inputs[key] = (value, None)
-    encoded = encoded_inputs[key][1]
+    # Re-encodes use zlib level 1; only when that does not fit the remaining
+    # budget is the historical default level tried, so nothing the old level-6
+    # encoding retained is newly omitted.
+    for compress_level in (_PNG_FAST_LEVEL, _PNG_DEFAULT_LEVEL):
+        if (key, compress_level) not in encoded_inputs:
+            try:
+                encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level))
+            except Exception:
+                encoded_inputs[key, compress_level] = (value, None)
+        encoded = encoded_inputs[key, compress_level][1]
+        if encoded is None or (len(encoded) <= _MAX_IMAGE_BYTES and budget["images"] + len(encoded) <= _MAX_IMAGE_TOTAL_BYTES):
+            break
     if encoded is None:
         _limitation(limitations, f"{path} could not be encoded as API PNG base64 data.")
         return _OMIT

@@ -388,9 +388,9 @@ class GenerationLastTests(unittest.TestCase):
         calls = []
         original = self.module._encode_api_png
 
-        def counting(value, source=None):
+        def counting(value, source=None, compress_level=self.module._PNG_FAST_LEVEL):
             calls.append(value)
-            return original(value, source)
+            return original(value, source, compress_level)
 
         with patch.object(self.module, "_encode_api_png", counting):
             snapshot = self.module.build_snapshot(p, self.processed)
@@ -504,6 +504,33 @@ class GenerationLastTests(unittest.TestCase):
         self.assertTrue(snapshot["replayable"], snapshot["limitations"])
         with Image.open(io.BytesIO(base64.b64decode(snapshot["parameters"]["init_images"][0]))) as stored:
             self.assertEqual((stored.mode, stored.convert("RGB").tobytes()), ("RGBA", decoded.tobytes()))
+
+    def test_reencoded_images_use_fast_png_level_unless_only_default_level_fits(self):
+        import base64
+        import io
+        image = Image.frombytes("RGB", (128, 128), bytes((x * 2 + y) % 256 for y in range(128) for x in range(128) for _ in range(3)))
+        rgba = image.convert("RGBA")
+        fast = base64.b64encode(self._png(rgba, compress_level=1)).decode("ascii")
+        default = base64.b64encode(self._png(rgba)).decode("ascii")
+        self.assertGreater(len(fast), len(default))
+
+        limitations = []
+        self.assertEqual(self.module._image_to_api_base64(image, limitations, "image", {"images": 0}), fast)
+        self.assertFalse(limitations)
+        with Image.open(io.BytesIO(base64.b64decode(fast))) as decoded:
+            self.assertEqual(decoded.tobytes(), rgba.tobytes())
+
+        with patch.object(self.module, "_MAX_IMAGE_BYTES", len(default)):
+            self.assertEqual(self.module._image_to_api_base64(image, limitations, "image", {"images": 0}), default)
+            self.assertFalse(limitations)
+        with patch.object(self.module, "_MAX_IMAGE_TOTAL_BYTES", len(fast) + len(default)):
+            budget = {"images": 0}
+            self.assertEqual(self.module._image_to_api_base64(image, limitations, "first", budget), fast)
+            self.assertEqual(self.module._image_to_api_base64(image, limitations, "second", budget), default)
+            self.assertFalse(limitations)
+        with patch.object(self.module, "_MAX_IMAGE_BYTES", len(default) - 1):
+            self.assertIs(self.module._image_to_api_base64(image, limitations, "image", {"images": 0}), self.module._OMIT)
+            self.assertTrue(any("per-image retention limit" in item for item in limitations))
 
     def test_version_one_snapshot_is_available_without_new_generation(self):
         legacy = {
