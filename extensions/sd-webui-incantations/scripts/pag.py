@@ -180,11 +180,10 @@ def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence):
         RNG, so those replays keep the previous one-call-per-main-call
         behavior and discard the uncond output.
         """
-        n_cond = memo.n_cond
         outs = []
         covered = 0
         for rec in memo.calls:
-                cond_rows = max(0, min(rec.rows, n_cond - rec.start))
+                cond_rows = rec.cond_rows
                 if cond_rows == 0 and rec.row_subset_ok and not preserve_call_sequence:
                         continue
                 rows = cond_rows if cond_rows and rec.row_subset_ok else rec.rows
@@ -197,8 +196,8 @@ def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence):
                 if cond_rows:
                         outs.append(out[:cond_rows])
                         covered += cond_rows
-        if covered != n_cond:
-                raise RuntimeError(f"PAG: the recorded main pass covers {covered} of {n_cond} cond rows")
+        if covered != memo.n_cond:
+                raise RuntimeError(f"PAG: the recorded main pass covers {covered} of {memo.n_cond} cond rows")
         return outs[0] if len(outs) == 1 else torch.cat(outs)
 
 

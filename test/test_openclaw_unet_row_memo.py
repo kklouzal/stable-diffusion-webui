@@ -138,6 +138,73 @@ class RowMemoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not batch-aligned"):
             self.memo.slice_cond_rows({"vector": torch.randn(1, 4)}, 3, 2)
 
+    def recorded_call(self, rows=3, n_cond=2):
+        denoiser = FakeDenoiser()
+        memo = self.memo.arm(denoiser, n_cond=n_cond)
+        x = torch.randn(rows, 4, 2, 2)
+        cond = {"crossattn": torch.randn(rows, 5, 8), "vector": torch.randn(rows, 6)}
+        denoiser.run_inner_model(x, torch.rand(rows), cond)
+        self.memo.disarm(denoiser)
+        return memo.calls[0]
+
+    def test_prefix_attaches_only_for_the_recorded_conditioning_and_replays_its_rows(self):
+        rec = self.recorded_call()
+        owner = object()
+        unet_x = rec.x * 2
+        with self.memo.recording(rec), torch.no_grad():
+            slot = self.memo.claim()
+            self.assertTrue(self.memo.can_record(slot, unet_x))
+            self.memo.attach_prefix(slot, self.memo.Prefix(owner, unet_x, rec.cond["crossattn"].clone(), rec.cond["vector"], {}))
+            self.assertIsNone(rec.prefix)
+            prefix = self.memo.Prefix(owner, unet_x, rec.cond["crossattn"], rec.cond["vector"], {"h": unet_x})
+            self.memo.attach_prefix(slot, prefix)
+            self.assertIs(rec.prefix, prefix)
+        rec.seal()
+
+        replay_cond = self.memo.slice_cond_rows(rec.cond, rec.rows, 2)
+        with self.memo.replaying(rec, 2):
+            slot = self.memo.claim()
+            self.assertFalse(self.memo.can_record(slot, unet_x[:2]))
+            self.assertIsNone(self.memo.replay_prefix(slot, object(), unet_x[:2], replay_cond["crossattn"], replay_cond["vector"]))
+            self.assertIsNone(self.memo.replay_prefix(slot, owner, unet_x[:2], replay_cond["crossattn"].clone(), replay_cond["vector"]))
+            self.assertIs(self.memo.replay_prefix(slot, owner, unet_x[:2], replay_cond["crossattn"], replay_cond["vector"]), prefix)
+            with self.assertRaisesRegex(RuntimeError, "expects 2"):
+                self.memo.replay_prefix(slot, owner, unet_x, replay_cond["crossattn"], replay_cond["vector"])
+            with self.assertRaisesRegex(RuntimeError, "does not match the recorded call"):
+                self.memo.replay_prefix(slot, owner, unet_x[:2].double(), replay_cond["crossattn"], replay_cond["vector"])
+        self.assertTrue(torch.equal(self.memo.rows_of(prefix.state["h"], prefix.rows, 2), unet_x[:2]))
+        self.assertIs(self.memo.rows_of(0.0, 3, 2), 0.0)
+        single = torch.ones(1, 4)
+        self.assertIs(self.memo.rows_of(single, 3, 2), single)
+        with self.assertRaisesRegex(RuntimeError, "not aligned"):
+            self.memo.rows_of(torch.ones(2, 4), 3, 2)
+
+    def test_replaying_drops_the_prefix_when_inputs_changed(self):
+        rec = self.recorded_call()
+        rec.prefix = self.memo.Prefix(object(), rec.x, rec.cond["crossattn"], rec.cond["vector"], {})
+        with self.memo.replaying(rec, 2):
+            pass
+        self.assertIsNotNone(rec.prefix)
+        rec.cond["vector"].mul_(1.0)
+        with self.memo.replaying(rec, 2):
+            pass
+        self.assertIsNone(rec.prefix)
+
+    def test_uncond_only_calls_and_grad_mode_never_record(self):
+        denoiser = FakeDenoiser()
+        memo = self.memo.arm(denoiser, n_cond=1)
+        x_in = torch.randn(2, 1)
+        denoiser.run_inner_model(x_in[0:1], torch.zeros(1), {})
+        denoiser.run_inner_model(x_in[1:2], torch.zeros(1), {})
+        self.assertEqual([rec.cond_rows for rec in memo.calls], [1, 0])
+        with self.memo.recording(memo.calls[1]), torch.no_grad():
+            self.assertFalse(self.memo.can_record(self.memo.claim(), x_in))
+        with self.memo.recording(memo.calls[0]), torch.enable_grad():
+            self.assertFalse(self.memo.can_record(self.memo.claim(), x_in))
+        memo.calls[0].prefix = object()
+        memo.clear()
+        self.assertEqual(memo.calls, [])
+
     def test_hypertile_unet_enabled_reads_wrapped_layer_state(self):
         wrapper = torch.nn.Module()
         wrapper.diffusion_model = torch.nn.Module()

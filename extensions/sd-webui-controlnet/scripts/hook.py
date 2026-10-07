@@ -500,8 +500,24 @@ class UnetHook(nn.Module):
                     return False
             return True
 
-        def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
-            memo_slot = sd_unet_row_memo.claim()
+        def control_is_replayable():
+            """Whether a replay of a recorded call's rows may reuse its control state.
+
+            Reference/AdaIN units run a nested UNet pass and fill attention banks per call, StyleAlign
+            hacks attention across rows, and colorfix/inpaint_only post-process the output with per-call
+            tensors; such calls are always recomputed.
+            """
+            if batch_option_style_align:
+                return False
+            for param in outer.control_params:
+                if param.control_model_type == ControlModelType.AttentionInjection:
+                    return False
+                if 'colorfix' in param.preprocessor['name'] or 'inpaint_only' in param.preprocessor['name']:
+                    return False
+            return True
+
+        def prepare_control(self, x, timesteps, context, y, memo_slot):
+            """Everything the hooked forward computes before the U-Net encoder."""
             is_sdxl = y is not None and model_is_sdxl
             total_t2i_adapter_embedding = [0.0] * 4
             if is_sdxl:
@@ -825,6 +841,52 @@ class UnetHook(nn.Module):
 
                 outer.attention_auto_machine = AutoMachine.Read
                 outer.gn_auto_machine = AutoMachine.Read
+
+            return is_sdxl, x, context, cond_mark, total_controlnet_embedding, total_t2i_adapter_embedding, require_inpaint_hijack, is_in_high_res_fix
+
+        def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+            memo_slot = sd_unet_row_memo.claim()
+            prefix = None
+            if memo_slot is not None and memo_slot.replay:
+                prefix = sd_unet_row_memo.replay_prefix(memo_slot, (outer, self), x, context, y)
+            if prefix is not None:
+                # PAG replay of recorded rows: the inputs are the recorded call's rows and nothing the
+                # control models see is perturbed, so reuse its control state instead of recomputing it.
+                state, m = prefix.state, int(x.shape[0])
+
+                def rows(t):
+                    return sd_unet_row_memo.rows_of(t, prefix.rows, m)
+
+                is_sdxl = state['is_sdxl']
+                require_inpaint_hijack = state['require_inpaint_hijack']
+                is_in_high_res_fix = state['is_in_high_res_fix']
+                x = rows(state['x'])
+                context = rows(state['context'])
+                cond_mark = rows(state['cond_mark'])
+                total_controlnet_embedding = [rows(t) for t in state['controlnet']]
+                total_t2i_adapter_embedding = [rows(t) for t in state['t2i']]
+                outer.current_c_indices = [i for i in state['c_indices'] if i < m]
+                outer.current_uc_indices = [i for i in state['uc_indices'] if i < m]
+                outer.model.cond_mark = cond_mark
+                self.is_in_high_res_fix = is_in_high_res_fix
+                outer.is_in_high_res_fix = is_in_high_res_fix
+            else:
+                raw_x, raw_context = x, context
+                (is_sdxl, x, context, cond_mark, total_controlnet_embedding, total_t2i_adapter_embedding,
+                 require_inpaint_hijack, is_in_high_res_fix) = prepare_control(self, x, timesteps, context, y, memo_slot)
+                if sd_unet_row_memo.can_record(memo_slot, raw_x) and control_is_replayable():
+                    sd_unet_row_memo.attach_prefix(memo_slot, sd_unet_row_memo.Prefix((outer, self), raw_x, raw_context, y, dict(
+                        is_sdxl=is_sdxl,
+                        require_inpaint_hijack=require_inpaint_hijack,
+                        is_in_high_res_fix=is_in_high_res_fix,
+                        x=x,
+                        context=context,
+                        cond_mark=cond_mark,
+                        controlnet=list(total_controlnet_embedding),
+                        t2i=list(total_t2i_adapter_embedding),
+                        c_indices=list(outer.current_c_indices),
+                        uc_indices=list(outer.current_uc_indices),
+                    )))
 
             # U-Net Encoder
             hs = []

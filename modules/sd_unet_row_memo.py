@@ -12,12 +12,16 @@ Lifetime and ownership (one denoiser step, one thread):
 2. Every main-pass ``run_inner_model(x, sigma, cond)`` call appends a ``CallRecord`` holding its inputs by
    reference. A1111 always puts the cond rows first and calls contiguous row ranges in order, so a record's
    ``start`` is the running row count; the recorder rejects calls that are not row slices of one batch.
-3. While a recorded call runs, the outermost UNet forward that understands the memo claims its slot
-   (``claim``). Nested forwards (ControlNet reference passes, CUDA-graph warm-up/capture) see the claimed
-   slot and do nothing. A claimant may flag the call as row-coupled (``row_subset_ok = False``).
+3. While a recorded call runs, the outermost UNet forward that understands the memo ("producer") claims
+   its slot (``claim``). Nested forwards (ControlNet reference passes, CUDA-graph warm-up/capture) see the
+   claimed slot and do nothing. A producer may flag the call as row-coupled (``row_subset_ok = False``) and,
+   on an eager inference call on the recording stream that is not being captured into a CUDA graph
+   (``can_record``), attach a ``Prefix``: references to work a replay of the same rows can reuse.
 4. The consumer takes the memo (``disarm``) in its ``cfg_denoised`` callback, replays rows ``[0, m)`` of
-   each record inside ``replaying`` and clears the memo in ``finally``. An exception inside a recorded call
-   drops the memo before it propagates; arming a later step replaces a memo that was never consumed.
+   each record inside ``replaying`` and clears the memo in ``finally``. The producer that claims a replay
+   slot reuses the prefix only after ``replay_prefix`` checked that the replay is fed the recorded inputs;
+   otherwise it computes everything. An exception inside a recorded call drops the memo before it
+   propagates; arming a later step replaces a memo that was never consumed.
 
 The slot lives in a ``ContextVar``, so concurrent API workers never see each other's records.
 """
@@ -33,17 +37,19 @@ import torch
 class CallRecord:
     """One main-pass ``run_inner_model`` call: rows ``[start, start + rows)`` of the step's CFG batch."""
 
-    __slots__ = ("start", "rows", "x", "sigma", "cond", "row_subset_ok", "_sealed")
+    __slots__ = ("start", "rows", "cond_rows", "x", "sigma", "cond", "row_subset_ok", "prefix", "_sealed")
 
-    def __init__(self, start: int, x: torch.Tensor, sigma: torch.Tensor, cond):
+    def __init__(self, start: int, x: torch.Tensor, sigma: torch.Tensor, cond, cond_rows: int = 0):
         self.start = start
         self.rows = int(x.shape[0])
+        self.cond_rows = cond_rows
         self.x = x
         self.sigma = sigma
         self.cond = cond
         # A claimant clears this when rows of this call are coupled (shared attention, per-call RNG over
         # all rows, caches sized by the first call), so a replay must evaluate every row of the call.
         self.row_subset_ok = True
+        self.prefix: Prefix | None = None
         self._sealed = None
 
     def _input_tensors(self):
@@ -99,12 +105,15 @@ class MainPassMemo:
                     "main-pass UNet call is not the next row slice of the step's CFG batch; "
                     "an extension called run_inner_model out of order while PAG was recording"
                 )
-        record = CallRecord(self.rows, x, sigma, cond)
+        cond_rows = max(0, min(int(x.shape[0]), self.n_cond - self.rows))
+        record = CallRecord(self.rows, x, sigma, cond, cond_rows)
         self.rows += record.rows
         self.calls.append(record)
         return record
 
     def clear(self) -> None:
+        for record in self.calls:
+            record.prefix = None
         self.calls = []
         self.rows = 0
 
@@ -167,15 +176,39 @@ def uninstall(denoiser) -> bool:
     return True
 
 
+class Prefix:
+    """Producer payload kept from a recorded call: references to its tensors, never copies.
+
+    ``owner`` identifies the producer and module that may reuse it. ``context`` and ``y`` are the
+    conditioning tensors the recorded UNet call received; a replay must receive row-prefix views of the
+    same tensors. ``state`` is producer-specific. Tensors in it whose leading dim is ``rows`` are cut to the
+    replay's rows with ``rows_of``.
+    """
+
+    __slots__ = ("owner", "rows", "x_shape", "x_dtype", "x_device", "context", "y", "state")
+
+    def __init__(self, owner, x: torch.Tensor, context, y, state):
+        self.owner = owner
+        self.rows = int(x.shape[0])
+        self.x_shape = tuple(x.shape)
+        self.x_dtype = x.dtype
+        self.x_device = x.device
+        self.context = context
+        self.y = y
+        self.state = state
+
+
 class Slot:
     """Per-call claim token. ``rows`` is the number of rows the call evaluates."""
 
-    __slots__ = ("rec", "rows", "replay", "claimed")
+    __slots__ = ("rec", "rows", "replay", "stream", "claimed")
 
     def __init__(self, rec: CallRecord, rows: int, replay: bool):
         self.rec = rec
         self.rows = rows
         self.replay = replay
+        # The stream the recorded call started on; tensors made on another stream (CUDA-graph warm-up) are never kept.
+        self.stream = torch.cuda.current_stream(rec.x.device) if rec.x.is_cuda else None
         self.claimed = False
 
 
@@ -207,7 +240,83 @@ def recording(rec: CallRecord):
 def replaying(rec: CallRecord, rows: int):
     if not 0 < rows <= rec.rows:
         raise ValueError(f"cannot replay {rows} rows of a {rec.rows}-row main-pass call")
+    if rec.prefix is not None and not rec.inputs_unchanged():
+        # Inputs were replaced or edited in place after the main call: nothing recorded may be reused.
+        rec.prefix = None
     return _slot(Slot(rec, rows, replay=True))
+
+
+def can_record(slot: Slot | None, x: torch.Tensor) -> bool:
+    """Whether the producer holding ``slot`` may keep tensors of this call for a replay.
+
+    Only eager inference calls of rows the consumer needs, on the stream the recorded call started on and
+    outside CUDA-graph capture: graph warm-up runs on a side stream and capture allocates from the graph's
+    private pool, neither of which may outlive the call.
+    """
+    if slot is None or slot.replay or slot.rec.cond_rows == 0 or torch.is_grad_enabled():
+        return False
+    if x.is_cuda:
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        if slot.stream is None or torch.cuda.current_stream(x.device) != slot.stream:
+            return False
+    return True
+
+
+def _same_tensor_rows(t, ref, rows: int) -> bool:
+    """``t`` is the first ``rows`` rows of ``ref`` (same storage, layout and dtype), or both are None."""
+    if t is None or ref is None:
+        return t is None and ref is None
+    return (
+        isinstance(t, torch.Tensor)
+        and isinstance(ref, torch.Tensor)
+        and t.data_ptr() == ref.data_ptr()
+        and t.dtype == ref.dtype
+        and t.shape[0] == rows
+        and tuple(t.shape[1:]) == tuple(ref.shape[1:])
+        and t.stride() == ref.stride()
+    )
+
+
+def attach_prefix(slot: Slot, prefix: Prefix) -> None:
+    """Keep ``prefix`` for the replay if the UNet received the recorded call's own conditioning.
+
+    A wrapper between the denoiser and the UNet that builds new conditioning per call (tiling, regional
+    prompting) fails this check, so its calls are always recomputed.
+    """
+    cond = slot.rec.cond if isinstance(slot.rec.cond, dict) else {}
+    if _same_tensor_rows(prefix.context, cond.get("crossattn"), slot.rec.rows) and _same_tensor_rows(prefix.y, cond.get("vector"), slot.rec.rows):
+        slot.rec.prefix = prefix
+
+
+def replay_prefix(slot: Slot, owner, x: torch.Tensor, context, y) -> Prefix | None:
+    """The recorded prefix a replay call may reuse, or None to compute everything.
+
+    Raises when the replay is fed the recorded conditioning but its shape contradicts the recording.
+    """
+    prefix = slot.rec.prefix
+    if prefix is None or prefix.owner != owner:
+        return None
+    m = slot.rows
+    if x.shape[0] != m:
+        raise RuntimeError(f"UNet replay received {x.shape[0]} rows, the memo slot expects {m}")
+    if not (_same_tensor_rows(context, prefix.context, m) and _same_tensor_rows(y, prefix.y, m)):
+        return None
+    if tuple(x.shape[1:]) != prefix.x_shape[1:] or x.dtype != prefix.x_dtype or x.device != prefix.x_device:
+        raise RuntimeError(
+            f"UNet replay input {tuple(x.shape)} {x.dtype} {x.device} does not match the recorded call "
+            f"{prefix.x_shape} {prefix.x_dtype} {prefix.x_device}"
+        )
+    return prefix
+
+
+def rows_of(t, rows: int, m: int):
+    """First ``m`` rows of a recorded per-row tensor; single-row (broadcast) tensors and non-tensors pass through."""
+    if not isinstance(t, torch.Tensor) or t.ndim == 0 or (t.shape[0] == 1 and rows != 1):
+        return t
+    if t.shape[0] != rows:
+        raise RuntimeError(f"recorded tensor of shape {tuple(t.shape)} is not aligned with the {rows}-row call")
+    return t[:m]
 
 
 def _slice_rows(value, rows: int, m: int):
