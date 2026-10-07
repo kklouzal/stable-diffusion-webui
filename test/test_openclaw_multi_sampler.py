@@ -246,3 +246,59 @@ def test_snapshots_round_to_uint8_like_generated_images(monkeypatch, tmp_path):
     assert path == tmp_path / "final.png"
     assert array.shape == (2, 2, 3) and array.dtype.name == "uint8"
     assert array[0, 0].tolist() == [0, 64, 255]
+
+
+class _WatchingDict(dict):
+    """Records every mutation after which the watched key is missing."""
+
+    def __init__(self, *args, watch):
+        super().__init__(*args)
+        self.watch = watch
+        self.missing_after = []
+
+    def _check(self, op):
+        if self.watch not in self:
+            self.missing_after.append(op)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._check("setitem")
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._check("delitem")
+
+    def pop(self, *args):
+        result = super().pop(*args)
+        self._check("pop")
+        return result
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._check("update")
+
+    def clear(self):
+        super().clear()
+        self._check("clear")
+
+
+def test_reregistering_never_drops_a_chain_that_stays_registered(monkeypatch):
+    # Saving a custom chain re-registers every chain from an API call that does not wait for queue_lock, while
+    # generations resolve sampler names: a chain that stays registered must never be absent, not even briefly.
+    module = load_multi_sampler(monkeypatch)
+    keep = {"name": "Multi: keep", "samplers": ["Euler", "DPM2"], "switch_ats": [1]}
+    gone = {"name": "Multi: gone", "samplers": ["Euler", "DPM2"], "switch_ats": [1]}
+    monkeypatch.setattr(module, "_load_custom_defs", lambda: [keep, gone])
+    module._register_definitions()
+    registry = module.sd_samplers
+    watched = _WatchingDict(registry.all_samplers_map, watch="Multi: keep")
+    monkeypatch.setattr(registry, "all_samplers_map", watched)
+    before = watched["Multi: keep"]
+
+    monkeypatch.setattr(module, "_load_custom_defs", lambda: [{**keep, "switch_ats": [2]}])
+    module._register_definitions()
+
+    assert watched.missing_after == []
+    assert watched["Multi: keep"] is not before and "Multi: gone" not in watched
+    assert [s.name for s in registry.all_samplers].count("Multi: keep") == 1
+    assert "Multi: gone" not in [s.name for s in registry.all_samplers]

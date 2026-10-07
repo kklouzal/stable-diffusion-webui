@@ -44,19 +44,34 @@ def create_sampler(name, model):
     return sampler
 
 
-def set_samplers():
-    global samplers, samplers_for_img2img, samplers_hidden
+# Bumped by set_samplers: sampler-name lookups are cached per registry generation (see get_sampler_and_scheduler).
+_registry_generation = 0
 
-    get_sampler_and_scheduler.cache_clear()
+
+def set_samplers():
+    """Publish the lookups derived from all_samplers.
+
+    Requests resolve sampler names while this runs (the multi-sampler re-registers its chains from an API call that
+    does not wait for queue_lock), so a name that stays registered is never missing from samplers_map: it is updated
+    in place and only names that are gone are removed afterwards. A lookup cached from the previous registry is keyed
+    to the previous generation and is never served again."""
+    global samplers, samplers_for_img2img, samplers_hidden, _registry_generation
+
+    names = {}
+    for sampler in all_samplers:
+        names[sampler.name.lower()] = sampler.name
+        for alias in sampler.aliases:
+            names[alias.lower()] = sampler.name
+
     samplers_hidden = set(shared.opts.hide_samplers)
     samplers = all_samplers
     samplers_for_img2img = all_samplers
+    samplers_map.update(names)
+    for stale in samplers_map.keys() - names.keys():
+        samplers_map.pop(stale, None)
 
-    samplers_map.clear()
-    for sampler in all_samplers:
-        samplers_map[sampler.name.lower()] = sampler.name
-        for alias in sampler.aliases:
-            samplers_map[alias.lower()] = sampler.name
+    _registry_generation += 1
+    _resolve_sampler_and_scheduler.cache_clear()
 
 
 def visible_sampler_names():
@@ -98,13 +113,17 @@ def get_hr_scheduler_from_infotext(d: dict):
     return get_hr_sampler_and_scheduler(d)[1]
 
 
-@functools.cache
 def get_sampler_and_scheduler(sampler_name, scheduler_name, *, convert_automatic=True, strict=False):
     """Split an optional scheduler suffix off sampler_name and resolve both names.
 
     Unknown sampler names resolve to the default sampler unless strict is set, in which case they raise ValueError so
     API callers are not silently given a different sampler than they asked for.
     """
+    return _resolve_sampler_and_scheduler(sampler_name, scheduler_name, convert_automatic, strict, _registry_generation)
+
+
+@functools.cache
+def _resolve_sampler_and_scheduler(sampler_name, scheduler_name, convert_automatic, strict, _generation):
     default_sampler = samplers[0]
     found_scheduler = sd_schedulers.schedulers_map.get(scheduler_name, sd_schedulers.schedulers[0])
 

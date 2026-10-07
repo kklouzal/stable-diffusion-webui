@@ -622,19 +622,26 @@ def _sampler_data_for(definition: dict[str, Any]) -> sd_samplers_common.SamplerD
 
 
 def _register_definitions() -> None:
+    """(Re)publish the custom and preview chain samplers in the core sampler registry.
+
+    Runs from API calls that do not wait for queue_lock (they would otherwise queue behind whole generations), while
+    requests resolve and create samplers: a chain that stays registered is replaced in place and never absent, the
+    sampler list is replaced by a new list (readers iterating the old one are unaffected), and only chains that are
+    gone are removed afterwards."""
     with _LOCK:
         _SAMPLER_FUNC_CACHE.clear()
         _SIGNATURE_PARAM_CACHE.clear()
         defs = _load_custom_defs() + list(_TRANSIENT_DEFS.values())
-        for name in list(_REGISTERED_NAMES):
-            sd_samplers.all_samplers_map.pop(name, None)
-            sd_samplers.all_samplers[:] = [s for s in sd_samplers.all_samplers if s.name != name]
-        _REGISTERED_NAMES.clear()
+        registered = {}
         for definition in defs:
             data = _sampler_data_for(definition)
-            sd_samplers.all_samplers.append(data)
-            sd_samplers.all_samplers_map[data.name] = data
-            _REGISTERED_NAMES.add(data.name)
+            registered[data.name] = data
+        sd_samplers.all_samplers_map.update(registered)
+        sd_samplers.all_samplers = [s for s in sd_samplers.all_samplers if s.name not in _REGISTERED_NAMES and s.name not in registered] + list(registered.values())
+        for name in _REGISTERED_NAMES - registered.keys():
+            sd_samplers.all_samplers_map.pop(name, None)
+        _REGISTERED_NAMES.clear()
+        _REGISTERED_NAMES.update(registered)
         sd_samplers.set_samplers()
 
 

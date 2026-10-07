@@ -111,7 +111,7 @@ def test_static_cache_reload_and_upscale_contracts():
     imgalt = (ROOT / "scripts/img2imgalt.py").read_text()
     hypertile = (ROOT / "extensions-builtin/hypertile/hypertile.py").read_text()
     ast.parse(sampler); ast.parse(multi); ast.parse(upscale); ast.parse(imgalt); ast.parse(hypertile)
-    assert "get_sampler_and_scheduler.cache_clear()" in sampler
+    assert "_resolve_sampler_and_scheduler.cache_clear()" in sampler
     register = multi[multi.index("def _register_definitions"):multi.index("def _upsert_custom")]
     assert "_SAMPLER_FUNC_CACHE.clear()" in register and "_SIGNATURE_PARAM_CACHE.clear()" in register
     assert "hashlib.sha256(image.tobytes()).digest()" in upscale
