@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, headless_setup, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant
+from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, headless_setup, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant, options
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -465,6 +465,24 @@ def script_name_to_index(name, scripts):
         raise HTTPException(status_code=422, detail=f"Script '{name}' not found") from e
 
 
+def _request_bool(req, key, default):
+    """A boolean request field: JSON true/false, 0/1, or the openclaw_env text grammar ("false" is False; bool()
+    made every non-empty string True). Missing -> default; null -> False, as bool(None) was."""
+    if not isinstance(req, dict) or key not in req:
+        return default
+    value = req[key]
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        try:
+            return openclaw_env.parse_bool(value, key)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+    raise HTTPException(status_code=422, detail=f"{key}={value!r} is not a boolean")
+
+
 def validate_sampler_name(name):
     config = sd_samplers.all_samplers_map.get(name, None)
     if config is None:
@@ -774,12 +792,15 @@ class Api:
     def get_sdpa_backend(self):
         return sd_hijack_optimizations.sdpa_backend_status()
 
+    # Runtime switches below change how the next generation computes (attention backend, graph capture/replay), so
+    # they take queue_lock like a generation: a request never runs half on the old setting and half on the new one.
     def set_sdpa_backend(self, req: dict[str, Any]):
         sdpa_backend = req.get("sdpa_backend") if isinstance(req, dict) else None
-        try:
-            return sd_hijack_optimizations.set_sdpa_backend(sdpa_backend)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        with self.queue_lock:
+            try:
+                return sd_hijack_optimizations.set_sdpa_backend(sdpa_backend)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def get_cuda_graphs(self):
         from modules import openclaw_cuda_graphs
@@ -787,9 +808,10 @@ class Api:
 
     def set_cuda_graphs(self, req: dict[str, Any]):
         from modules import openclaw_cuda_graphs
-        enabled = bool(req.get("enabled")) if isinstance(req, dict) else False
-        clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
-        return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
+        enabled = _request_bool(req, "enabled", False)
+        clear = _request_bool(req, "clear", False)
+        with self.queue_lock:
+            return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
 
     def get_vae_decode_graphs(self):
         from modules import openclaw_vae_decode_graphs
@@ -797,9 +819,10 @@ class Api:
 
     def set_vae_decode_graphs(self, req: dict[str, Any]):
         from modules import openclaw_vae_decode_graphs
-        enabled = bool(req["enabled"]) if isinstance(req, dict) and "enabled" in req else None
-        clear = bool(req.get("clear", False)) if isinstance(req, dict) else False
-        return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
+        enabled = _request_bool(req, "enabled", None)
+        clear = _request_bool(req, "clear", False)
+        with self.queue_lock:
+            return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
 
     def get_precision_map(self):
         # The precision map walks shared.sd_model. Keep it out of the model
@@ -846,42 +869,46 @@ class Api:
     def _train_response(info):
         return models.TrainResponse(info=info)
 
+    # Creating/training embeddings and hypernetworks uses the live model, shared.state and (training) swaps the
+    # attention optimizations process-wide, so these tasks take queue_lock like a generation.
     def _run_create_task(self, job, create_fn, args, success_prefix, error_prefix, after_create=None):
-        try:
-            shared.state.begin(job=job)
-            filename = create_fn(**args)
-            if after_create is not None:
-                after_create()
-            return self._create_response(f"{success_prefix}{filename}")
-        except AssertionError as e:
-            return self._create_response(f"{error_prefix}{e}")
-        finally:
-            shared.state.end()
+        with self.queue_lock:
+            try:
+                shared.state.begin(job=job)
+                filename = create_fn(**args)
+                if after_create is not None:
+                    after_create()
+                return self._create_response(f"{success_prefix}{filename}")
+            except AssertionError as e:
+                return self._create_response(f"{error_prefix}{e}")
+            finally:
+                shared.state.end()
 
     def _run_training_task(self, job, train_fn, args, success_prefix, error_prefix, before_train=None, after_train=None):
-        try:
-            shared.state.begin(job=job)
-            if before_train is not None:
-                before_train()
-            apply_optimizations = shared.opts.training_xattention_optimizations
-            error = None
-            filename = ''
-            if not apply_optimizations:
-                sd_hijack.undo_optimizations()
+        with self.queue_lock:
             try:
-                _, filename = train_fn(**args)
-            except Exception as e:
-                error = e
-            finally:
-                if after_train is not None:
-                    after_train()
+                shared.state.begin(job=job)
+                if before_train is not None:
+                    before_train()
+                apply_optimizations = shared.opts.training_xattention_optimizations
+                error = None
+                filename = ''
                 if not apply_optimizations:
-                    sd_hijack.apply_optimizations()
-            return self._train_response(f"{success_prefix}{filename} error: {error}")
-        except Exception as exc:
-            return self._train_response(f"{error_prefix}{exc}")
-        finally:
-            shared.state.end()
+                    sd_hijack.undo_optimizations()
+                try:
+                    _, filename = train_fn(**args)
+                except Exception as e:
+                    error = e
+                finally:
+                    if after_train is not None:
+                        after_train()
+                    if not apply_optimizations:
+                        sd_hijack.apply_optimizations()
+                return self._train_response(f"{success_prefix}{filename} error: {error}")
+            except Exception as exc:
+                return self._train_response(f"{error_prefix}{exc}")
+            finally:
+                shared.state.end()
 
     def auth(self, credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         if credentials.username in self.credentials:
@@ -1297,13 +1324,16 @@ class Api:
 
         return {}
 
+    # Moving or unloading the weights under a running generation would pull its model away mid-sampling.
     def unloadapi(self):
-        sd_models.unload_model_weights()
+        with self.queue_lock:
+            sd_models.unload_model_weights()
 
         return {}
 
     def reloadapi(self):
-        sd_models.send_model_to_device(shared.sd_model)
+        with self.queue_lock:
+            sd_models.send_model_to_device(shared.sd_model)
 
         return {}
 
@@ -1322,14 +1352,45 @@ class Api:
         return options
 
     def set_config(self, req: dict[str, Any]):
+        """Apply settings between generations (queue_lock): a concurrent POST used to change shared.opts while a
+        generation was running. Unknown keys are rejected before anything is applied. A setting whose onchange
+        failed (reverted) answers 500 and one the API may not set (restricted, hidden, runtime-only) answers 422,
+        naming the keys already applied; those, like every applied key, are saved so config.json matches memory."""
+        unknown = [key for key in req if key not in shared.opts.data_labels]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"unknown option(s): {', '.join(map(repr, unknown))}")
+
         checkpoint_name = req.get("sd_model_checkpoint", None)
         if checkpoint_name is not None and checkpoint_name not in sd_models.checkpoint_aliases:
             raise RuntimeError(f"model {checkpoint_name!r} not found")
 
-        for k, v in req.items():
-            shared.opts.set(k, v, is_api=True)
+        with self.queue_lock:
+            applied, changed, refused, failure = [], False, [], None
+            for key, value in req.items():
+                try:
+                    if shared.opts.set(key, value, is_api=True):
+                        changed = True
+                    elif shared.opts.data.get(key) != value:
+                        refused.append(key)
+                        continue
+                except options.OptionChangeFailed as e:
+                    errors.report(f"Setting {key!r} through the API failed", exc_info=True)
+                    failure = HTTPException(status_code=500, detail=f"{e}; applied before it: {applied}")
+                    failure.__cause__ = e
+                    break
+                except ValueError as e:  # value of the wrong type for the option
+                    failure = HTTPException(status_code=422, detail=f"option {key!r}: {e}; applied before it: {applied}")
+                    failure.__cause__ = e
+                    break
+                applied.append(key)
 
-        shared.opts.save(shared.config_filename)
+            if changed:
+                shared.opts.save(shared.config_filename)
+
+        if failure is not None:
+            raise failure
+        if refused:
+            raise HTTPException(status_code=422, detail=f"option(s) {', '.join(map(repr, refused))} cannot be set through the API; applied: {applied}")
         return
 
     def get_cmd_flags(self):

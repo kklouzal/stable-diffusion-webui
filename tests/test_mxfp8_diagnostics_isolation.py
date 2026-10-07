@@ -56,7 +56,12 @@ def test_background_probe_waits_for_the_generation_queue_lock(monkeypatch, tmp_p
 
     def fake_run_probe(include_benchmarks=True, save=True):
         started.set()
-        assert not call_queue.queue_lock.acquire(blocking=False)
+        # queue_lock is reentrant for its owner, so ask from another thread whether the probe holds it.
+        other = []
+        probe = threading.Thread(target=lambda: other.append(call_queue.queue_lock.acquire(blocking=False)))
+        probe.start()
+        probe.join()
+        assert other == [False]
         return {"ok": True}
 
     monkeypatch.setattr(mxfp8_diagnostics, "run_probe", fake_run_probe)
