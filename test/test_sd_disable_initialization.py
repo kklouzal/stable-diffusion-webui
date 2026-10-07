@@ -13,6 +13,10 @@ import torch
 from modules import paths  # noqa: F401  (puts repositories/ on sys.path for sd_disable_initialization's imports)
 from modules import sd_disable_initialization, shared
 
+# Blocks on different threads are serialized; a model load still running on a background thread (a test that ran
+# initialize()) can hold the lock for a while, so entering waits generously rather than failing.
+ENTER_TIMEOUT = 600
+
 HOOK_CLASSES = (torch.nn.Module, torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention, torch.nn.LayerNorm, torch.nn.GroupNorm)
 
 
@@ -48,11 +52,11 @@ def run_inside(context, body=None):
             if body is not None:
                 results.update(body())
             entered.set()
-            stop.wait(30)
+            stop.wait(ENTER_TIMEOUT)
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
-    assert entered.wait(30), "worker never entered the context"
+    assert entered.wait(ENTER_TIMEOUT), "worker never entered the context"
     return stop, thread, results
 
 
@@ -210,7 +214,7 @@ def test_failed_install_restores_everything_and_releases_the_lock(monkeypatch, c
 
     thread = threading.Thread(target=other, daemon=True)
     thread.start()
-    thread.join(30)
+    thread.join(ENTER_TIMEOUT)
     assert entered.is_set(), "the replacement lock stayed held after the failed install"
 
 
