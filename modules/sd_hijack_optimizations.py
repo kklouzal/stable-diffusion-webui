@@ -693,7 +693,10 @@ def sdp_attnblock_forward(self, x):
     k = self.k(h_)
     v = self.v(h_)
     b, c, h, w = q.shape
-    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    # Single-head 4-D layout: fused SDPA kernels reject 3-D q/k/v, which forced the math path and its fp32 L x L
+    # scores (~5 GB transient per image at a 160x160 latent). .contiguous() provides the stride-1 last dim those
+    # kernels require; it is a no-op for channels_last activations.
+    q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
     if shared.opts.upcast_attn:
         q, k, v = q.float(), k.float(), v.float()
@@ -702,7 +705,7 @@ def sdp_attnblock_forward(self, x):
     v = v.contiguous()
     out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
     out = out.to(dtype)
-    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
     return x + out
 
@@ -714,7 +717,8 @@ def sdp_no_mem_attnblock_forward(self, x):
     k = self.k(h_)
     v = self.v(h_)
     b, c, h, w = q.shape
-    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    # 4-D layout as in sdp_attnblock_forward; flash only takes 4-D input (and head_dim <= 256, else this stays on math).
+    q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
     if shared.opts.upcast_attn:
         q, k, v = q.float(), k.float(), v.float()
@@ -723,7 +727,7 @@ def sdp_no_mem_attnblock_forward(self, x):
     v = v.contiguous()
     out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
     out = out.to(dtype)
-    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
     return x + out
 

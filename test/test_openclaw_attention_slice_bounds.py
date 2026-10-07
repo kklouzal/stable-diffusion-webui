@@ -318,6 +318,126 @@ def test_full_set_skip_is_exact_when_overrideable_is_disabled(sdpa_selection, re
         assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
 
 
+class TinyAttnBlock(torch.nn.Module):
+    """Same parameters and structure as sgm/ldm diffusionmodules.model.AttnBlock (single head, head_dim = channels)."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = torch.nn.GroupNorm(32, channels, eps=1e-6)
+        self.q = torch.nn.Conv2d(channels, channels, 1)
+        self.k = torch.nn.Conv2d(channels, channels, 1)
+        self.v = torch.nn.Conv2d(channels, channels, 1)
+        self.proj_out = torch.nn.Conv2d(channels, channels, 1)
+
+
+def legacy_3d_attnblock_forward(self, x, sdpa_backend_override=None):
+    """Oracle: the pre-PV1 sdp_attnblock_forward / sdp_no_mem_attnblock_forward with 3-D q/k/v."""
+    h_ = self.norm(x)
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (opt.rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    dtype = q.dtype
+    if opt.shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+    out = opt.run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = opt.rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = self.proj_out(out)
+    return x + out
+
+
+def _attnblock_case(channels, dtype, channels_last, device="cpu", size=8, seed=0):
+    torch.manual_seed(seed)
+    block = TinyAttnBlock(channels).to(device=device, dtype=dtype).eval()
+    x = torch.randn(2 if device == "cpu" else 1, channels, size, size, device=device, dtype=dtype)
+    if channels_last:
+        block = block.to(memory_format=torch.channels_last)
+        x = x.contiguous(memory_format=torch.channels_last)
+    return block, x
+
+
+# Fused (online-softmax) kernel vs the math path: one rounding of the final bf16 residual add, or fp32 reassociation.
+_FUSED_VS_MATH_TOLERANCE = {torch.float32: dict(rtol=1e-5, atol=1e-5), torch.bfloat16: dict(rtol=2 ** -7, atol=2 ** -7)}
+
+
+@pytest.fixture
+def upcast_attn():
+    previous = opt.shared.opts.upcast_attn
+    yield lambda value: setattr(opt.shared.opts, "upcast_attn", value)
+    opt.shared.opts.upcast_attn = previous
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("channels_last", [False, True])
+@pytest.mark.parametrize("upcast", [False, True])
+def test_vae_attnblock_4d_layout_is_bitwise_identical_on_the_math_backend(sdpa_selection, upcast_attn, dtype, channels_last, upcast):
+    # Same backend on both sides isolates the layout change: the 3-D and 4-D math paths run the same batched GEMMs.
+    upcast_attn(upcast)
+    opt.set_sdpa_backend("math")
+    block, x = _attnblock_case(64, dtype, channels_last)
+    with torch.no_grad():
+        expected = legacy_3d_attnblock_forward(block, x)
+        out = opt.sdp_attnblock_forward(block, x)
+        out_no_mem = opt.sdp_no_mem_attnblock_forward(block, x)
+        expected_no_mem = legacy_3d_attnblock_forward(block, x, sdpa_backend_override="flash,math")
+
+    assert out.dtype == expected.dtype == dtype
+    assert out.stride() == expected.stride()
+    assert torch.equal(out, expected)
+    # "flash,math" ignores the active selection; CPU flash now accepts the 4-D input, so this is close, not bitwise.
+    torch.testing.assert_close(out_no_mem, expected_no_mem, **_FUSED_VS_MATH_TOLERANCE[dtype])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("channels_last", [False, True])
+@pytest.mark.parametrize("upcast", [False, True])
+def test_vae_attnblock_4d_default_selection_stays_close_to_legacy(sdpa_selection, upcast_attn, dtype, channels_last, upcast):
+    # With every backend enabled the 4-D input becomes eligible for a fused kernel (CPU flash here, mem-efficient on
+    # CUDA at head_dim 512) while the legacy 3-D input always ran math: numerically equivalent, not bitwise.
+    upcast_attn(upcast)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    block, x = _attnblock_case(64, dtype, channels_last, seed=1)
+    with torch.no_grad():
+        expected = legacy_3d_attnblock_forward(block, x)
+        out = opt.sdp_attnblock_forward(block, x)
+
+    assert out.stride() == expected.stride()
+    torch.testing.assert_close(out, expected, **_FUSED_VS_MATH_TOLERANCE[dtype])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA: SDXL-VAE mid-block shape on the fused kernel")
+def test_vae_attnblock_sdxl_shape_uses_mem_efficient_kernel_close_to_legacy_math_with_bounded_memory(sdpa_selection, upcast_attn):
+    # SDXL VAE mid-block: 512 channels at a 128x128 latent (1024x1024 image), bf16, channels_last as deployed.
+    upcast_attn(False)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    block, x = _attnblock_case(512, torch.bfloat16, True, device="cuda", size=128, seed=2)
+    tokens = x.shape[-2] * x.shape[-1]
+    with torch.no_grad():
+        h_ = block.norm(x)
+        q, k, v = (opt.rearrange(m(h_), 'b c h w -> b 1 (h w) c').contiguous() for m in (block.q, block.k, block.v))
+        params = torch.backends.cuda.SDPAParams(q, k, v, None, 0.0, False, False)
+        assert torch.backends.cuda.can_use_efficient_attention(params, True)
+        assert not torch.backends.cuda.can_use_flash_attention(params, False)  # head_dim 512 > 256
+        del h_, q, k, v, params
+
+        expected = legacy_3d_attnblock_forward(block, x)
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        out = opt.sdp_attnblock_forward(block, x)
+        torch.cuda.synchronize()
+        peak_delta = torch.cuda.max_memory_allocated() - baseline
+
+    # Bound: at most one bf16 ULP of the residual output per element (rtol = atol = 2^-7), mean error far smaller.
+    torch.testing.assert_close(out, expected, rtol=2 ** -7, atol=2 ** -7)
+    assert (out.float() - expected.float()).abs().mean().item() < 2e-3
+    # The legacy math path materialises fp32 L x L scores (tokens^2 * 4 B = 1 GiB here); the fused path stays O(L).
+    assert peak_delta < tokens * tokens * 4 // 4
+
+
 if __name__ == "__main__":
     test_doggettx_attention_keeps_positive_slice_when_memory_steps_exceed_tokens()
     test_sdpa_math_backend_uses_non_deprecated_torch_nn_attention_api()
