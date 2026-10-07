@@ -3,7 +3,7 @@ from packaging import version
 from einops import repeat
 import math
 
-from modules import devices
+from modules import devices, shared
 from modules.sd_hijack_utils import CondFunc
 
 
@@ -102,6 +102,87 @@ def spatial_transformer_forward(_, self, x: torch.Tensor, context=None):
     return x + x_in
 
 
+# bf16-native UNet norms. Under --precision autocast, CUDA autocast runs group_norm and layer_norm in fp32: every UNet
+# GroupNorm/LayerNorm reads an fp32 copy of its bf16 input and writes fp32, which the next Linear/conv casts back to
+# bf16 (GroupNorm32 adds its own x.float()/.type(x.dtype) round trip). ATen's bf16 CUDA norm kernels compute in fp32 from
+# the exactly widened bf16 values and round once on store, so with bf16 input and bf16 weights the UNet norms run with
+# autocast off for the call and skip the cast kernels and the fp32 traffic. Expected results, by kernel signature in the
+# torch 2.14 libtorch_cuda.so (not yet verified on device; run the CUDA tests in test/test_sd_hijack_unet.py):
+# - LayerNorm (BasicTransformerBlock norm1/2/3): bitwise identical to the autocast path. eps, mean and rstd stay fp32,
+#   and the vectorized kernel uses one vec_size for every dtype, so the reduction order matches as long as both paths
+#   vectorize; UnetLayerNorm keeps the bf16 operands aligned like the fp32 copies the autocast path makes.
+# - GroupNorm (GroupNorm32, SpatialTransformer.norm): the CUDA GroupNorm kernel takes eps in the input dtype, so eps becomes
+#   bf16(eps) (1e-5 -> 1.0014e-5, 1e-6 -> 9.984e-7). Results equal an fp32 run with that eps and differ from the autocast
+#   path by at most 1 bf16 ULP.
+# CLIP/open_clip and VAE norms are not touched. Set to False to restore the autocast fp32 norms everywhere.
+UNET_BF16_NATIVE_NORMS = True
+
+
+def bf16_native_norm_eligible(module, x):
+    """Whether a UNet norm can run natively in bf16 with the results described above, instead of autocast's fp32."""
+    # Training (grad enabled) keeps the fp32 norm backward.
+    if not UNET_BF16_NATIVE_NORMS or not x.is_cuda or x.dtype != torch.bfloat16 or torch.is_grad_enabled():
+        return False
+    if not torch.is_autocast_enabled("cuda") or torch.get_autocast_dtype("cuda") != torch.bfloat16:
+        return False
+    # Upcast sampling and quantized weight storage keep their own precision handling. Functional LoRA (lora_functional)
+    # adds each network's norm output to this norm's output, and that sum must keep happening in the autocast fp32 dtype.
+    if devices.unet_needs_upcast or devices.fp8 or devices.mxfp8 or devices.nvfp4 or getattr(shared.opts, "lora_functional", False):
+        return False
+    weight, bias = module.weight, module.bias
+    return (weight is None or weight.dtype == torch.bfloat16) and (bias is None or bias.dtype == torch.bfloat16)
+
+
+def group_norm32_bf16_forward(orig_func, self, x):
+    # Class-level GroupNorm.forward is looked up per call so the Lora extension's patch stays in the chain.
+    with torch.autocast("cuda", enabled=False):
+        return torch.nn.GroupNorm.forward(self, x)
+
+
+class UnetGroupNorm(torch.nn.GroupNorm):
+    """SpatialTransformer.norm (a plain GroupNorm): takes the bf16-native path when eligible.
+
+    The class is swapped onto the instances at construction, so CLIP and VAE norms never see it; state_dict keys and
+    isinstance checks are unchanged, and the class-level GroupNorm.forward (with the Lora patch) is what runs."""
+
+    def forward(self, x):
+        if bf16_native_norm_eligible(self, x):
+            with torch.autocast("cuda", enabled=False):
+                return torch.nn.GroupNorm.forward(self, x)
+        return torch.nn.GroupNorm.forward(self, x)
+
+
+class UnetLayerNorm(torch.nn.LayerNorm):
+    """BasicTransformerBlock norm1/2/3: take the bf16-native path when eligible; see UnetGroupNorm."""
+
+    def forward(self, x):
+        # A loaded hypernetwork adds its output to attn1's context (norm1's output) in that tensor's dtype.
+        # ATen vectorizes LayerNorm only on aligned operands; the autocast path's fp32 copies always are, and a
+        # non-contiguous input is copied (aligned) before the kernel.
+        if (
+            bf16_native_norm_eligible(self, x)
+            and not shared.loaded_hypernetworks
+            and all(t.data_ptr() % 16 == 0 for t in (x, self.weight, self.bias) if t is not None and t.is_contiguous())
+        ):
+            with torch.autocast("cuda", enabled=False):
+                return torch.nn.LayerNorm.forward(self, x)
+        return torch.nn.LayerNorm.forward(self, x)
+
+
+def transformer_block_init(orig_func, self, *args, **kwargs):
+    orig_func(self, *args, **kwargs)
+    for name in ("norm1", "norm2", "norm3"):
+        norm = getattr(self, name, None)
+        if type(norm) is torch.nn.LayerNorm:
+            norm.__class__ = UnetLayerNorm
+
+
+def spatial_transformer_init(orig_func, self, *args, **kwargs):
+    orig_func(self, *args, **kwargs)
+    if type(self.norm) is torch.nn.GroupNorm:
+        self.norm.__class__ = UnetGroupNorm
+
+
 class GELUHijack(torch.nn.GELU, torch.nn.Module):
     def __init__(self, *args, **kwargs):
         torch.nn.GELU.__init__(self, *args, **kwargs)
@@ -129,6 +210,14 @@ if version.parse(torch.__version__) <= version.parse("1.13.2") or torch.cuda.is_
     CondFunc('ldm.modules.diffusionmodules.util.GroupNorm32.forward', lambda orig_func, self, *args, **kwargs: orig_func(self.float(), *args, **kwargs), unet_needs_upcast)
     CondFunc('ldm.modules.attention.GEGLU.forward', lambda orig_func, self, x: orig_func(self.float(), x.float()).to(devices.dtype_unet), unet_needs_upcast)
     CondFunc('open_clip.transformer.ResidualAttentionBlock.__init__', lambda orig_func, *args, **kwargs: kwargs.update({'act_layer': GELUHijack}) and False or orig_func(*args, **kwargs), lambda _, *args, **kwargs: kwargs.get('act_layer') is None or kwargs['act_layer'] == torch.nn.GELU)
+
+bf16_native_norm_cond = lambda orig_func, self, x: bf16_native_norm_eligible(self, x)
+CondFunc('ldm.modules.diffusionmodules.util.GroupNorm32.forward', group_norm32_bf16_forward, bf16_native_norm_cond)
+CondFunc('sgm.modules.diffusionmodules.util.GroupNorm32.forward', group_norm32_bf16_forward, bf16_native_norm_cond)
+CondFunc('ldm.modules.attention.BasicTransformerBlock.__init__', transformer_block_init)
+CondFunc('sgm.modules.attention.BasicTransformerBlock.__init__', transformer_block_init)
+CondFunc('ldm.modules.attention.SpatialTransformer.__init__', spatial_transformer_init)
+CondFunc('sgm.modules.attention.SpatialTransformer.__init__', spatial_transformer_init)
 
 first_stage_cond = lambda _, self, *args, **kwargs: devices.unet_needs_upcast and self.model.diffusion_model.dtype in (torch.float16, torch.bfloat16)
 first_stage_sub = lambda orig_func, self, x, **kwargs: orig_func(self, x.to(devices.dtype_vae), **kwargs)
