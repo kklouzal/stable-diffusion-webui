@@ -97,7 +97,7 @@ class DenoiseRampTests(unittest.TestCase):
     def test_api_default_persistence_keeps_selected_delta_until_changed(self):
         persist = load_api_denoise_ramp_persist_helper()
 
-        script = types.SimpleNamespace(args_from=3, title=lambda: "OpenClaw Denoise Ramp")
+        script = types.SimpleNamespace(args_from=3, args_to=4, title=lambda: "OpenClaw Denoise Ramp")
         defaults = [None, None, None, 0.0]
 
         persist(defaults, script, [0.075])
