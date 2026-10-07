@@ -44,6 +44,7 @@ def install_a1111_stubs():
     sd_vae_mod.refresh_vae_list = lambda: None
     shared_mod = types.ModuleType("modules.shared")
     shared_mod.state = types.SimpleNamespace(begin=lambda: None, end=lambda: None, job=None, textinfo=None)
+    shared_mod.cmd_opts = types.SimpleNamespace(lora_dir="/tmp/Lora", lyco_dir_backcompat="/tmp/LyCORIS")
     call_queue_mod = types.ModuleType("modules.call_queue")
     call_queue_mod.queue_lock = RecordingLock()
     script_callbacks_mod = types.ModuleType("modules.script_callbacks")
@@ -340,11 +341,44 @@ class ConversionCorrectnessTests(unittest.TestCase):
             listed = Path(tmpdir) / "models" / "Lora" / "sub" / "style.safetensors"
             listed.parent.mkdir(parents=True)
             listed.write_bytes(b"x")
-            with mock.patch.object(self.convert.paths, "models_path", str(Path(tmpdir) / "models")):
+            cmd_opts = types.SimpleNamespace(
+                lora_dir=str(Path(tmpdir) / "models" / "Lora"), lyco_dir_backcompat=str(Path(tmpdir) / "models" / "LyCORIS")
+            )
+            with mock.patch.object(self.convert.shared, "cmd_opts", cmd_opts):
                 self.assertIsNone(self.convert.resolve_model_info(str(outside)))
                 self.assertIsNone(self.convert.resolve_lora_info(str(outside)))
                 self.assertEqual(self.convert.resolve_lora_info("sub/style").filepath, str(listed))
                 self.assertEqual(self.convert.resolve_lora_info(str(listed)).filepath, str(listed))
+
+    def test_lora_resolver_accepts_every_root_and_symlinked_directory_a1111_lists(self):
+        # networks.list_available_networks walks --lora-dir and --lyco-dir-backcompat with walk_files
+        # (os.walk followlinks=True), and the controller sends the path /sdapi/v1/loras reports.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lora_dir = root / "custom-lora-dir"
+            linked_target = root / "shared-loras"
+            linked_target.mkdir()
+            (linked_target / "linked.safetensors").write_bytes(b"x")
+            lora_dir.mkdir()
+            (lora_dir / "top.safetensors").write_bytes(b"x")
+            os.symlink(linked_target, lora_dir / "linked-dir")
+            lyco_dir = root / "models" / "LyCORIS"
+            lyco_dir.mkdir(parents=True)
+            (lyco_dir / "lyco.safetensors").write_bytes(b"x")
+            cmd_opts = types.SimpleNamespace(lora_dir=str(lora_dir), lyco_dir_backcompat=str(lyco_dir))
+            a1111_paths = [
+                str(lora_dir / "top.safetensors"),
+                str(lora_dir / "linked-dir" / "linked.safetensors"),
+                str(lyco_dir / "lyco.safetensors"),
+            ]
+            with mock.patch.object(self.convert.shared, "cmd_opts", cmd_opts):
+                for path in a1111_paths:
+                    with self.subTest(path=path):
+                        info = self.convert.resolve_lora_info(path)
+                        self.assertIsNotNone(info)
+                        self.assertEqual(info.filepath, path)
+                self.assertEqual(self.convert.resolve_lora_info("linked-dir/linked").filepath, a1111_paths[1])
+                self.assertIsNone(self.convert.resolve_lora_info(str(linked_target / "linked.safetensors")))
 
     def test_lora_metadata_drops_source_content_hashes(self):
         original = {"sshs_model_hash": "aa", "sshs_legacy_hash": "bb", "modelspec.hash_sha256": "0xcc", "ss_output_name": "style"}
