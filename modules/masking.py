@@ -1,6 +1,14 @@
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageFilter, ImageOps
+
+
+# (blur radius, composite repeats) for fill(), composited in this order.
+_FILL_LAYERS = ((256, 1), (64, 1), (16, 2), (4, 4), (2, 2), (0, 1))
+# Pillow releases the GIL while blurring, so fill() blurs its independent layers
+# concurrently. The executor starts its threads on first use.
+_FILL_EXECUTOR = ThreadPoolExecutor(max_workers=len(_FILL_LAYERS), thread_name_prefix="mask-fill")
 
 
 def get_crop_region_v2(mask, pad=0):
@@ -89,8 +97,11 @@ def fill(image, mask):
 
     image_masked = image_masked.convert('RGBa')
 
-    for radius, repeats in [(256, 1), (64, 1), (16, 2), (4, 4), (2, 2), (0, 1)]:
-        blurred = image_masked.filter(ImageFilter.GaussianBlur(radius)).convert('RGBA')
+    def blur(radius):
+        return image_masked.filter(ImageFilter.GaussianBlur(radius)).convert('RGBA')
+
+    # map() yields in submission order, so compositing order (and output) is unchanged.
+    for blurred, (_, repeats) in zip(_FILL_EXECUTOR.map(blur, [radius for radius, _ in _FILL_LAYERS]), _FILL_LAYERS):
         for _ in range(repeats):
             image_mod.alpha_composite(blurred)
 
