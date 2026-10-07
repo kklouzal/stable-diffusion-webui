@@ -12,6 +12,20 @@ import uuid
 EXT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = EXT_ROOT / "scripts" / "openclaw_clear_cond_cache.py"
 CURRENT_STATUS_MODULE = None
+_saved_modules = {}
+
+
+def setUpModule():
+    # install_a1111_stubs() replaces the `modules` package; restore it when this file finishes so later
+    # test files import the real A1111 modules.
+    _saved_modules.update({key: value for key, value in sys.modules.items() if key.split(".")[0] == "modules"})
+
+
+def tearDownModule():
+    for key in [key for key in sys.modules if key.split(".")[0] == "modules"]:
+        del sys.modules[key]
+    sys.modules.update(_saved_modules)
+    _saved_modules.clear()
 
 
 def _original_reload_model_weights(sd_model=None, info=None, forced_reload=False):
@@ -57,6 +71,7 @@ def install_a1111_stubs() -> None:
     processing_mod.StableDiffusionProcessing = StableDiffusionProcessing
     processing_mod.StableDiffusionProcessingImg2Img = StableDiffusionProcessingImg2Img
     processing_mod.StableDiffusionProcessingTxt2Img = StableDiffusionProcessingTxt2Img
+    openclaw_cache_epochs_mod = types.ModuleType("modules.openclaw_cache_epochs")
     textual_inversion_pkg = types.ModuleType("modules.textual_inversion")
     textual_inversion_mod = types.ModuleType("modules.textual_inversion.textual_inversion")
     textual_inversion_pkg.textual_inversion = textual_inversion_mod
@@ -67,6 +82,7 @@ def install_a1111_stubs() -> None:
     modules_pkg.prompt_parser = prompt_parser_mod
     modules_pkg.script_callbacks = script_callbacks_mod
     modules_pkg.sd_models = sd_models_mod
+    modules_pkg.openclaw_cache_epochs = openclaw_cache_epochs_mod
 
     sys.modules.update(
         {
@@ -74,6 +90,7 @@ def install_a1111_stubs() -> None:
             "modules.call_queue": call_queue_mod,
             "modules.extra_networks": extra_networks_mod,
             "modules.extras": extras_mod,
+            "modules.openclaw_cache_epochs": openclaw_cache_epochs_mod,
             "modules.prompt_parser": prompt_parser_mod,
             "modules.processing": processing_mod,
             "modules.script_callbacks": script_callbacks_mod,
@@ -204,6 +221,17 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/torch-compile", {"enabled": False}), {"ok": True, "vae": False})
         self.assertEqual(calls, [True, False])
 
+    def test_cudnn_benchmark_takes_queue_lock_in_the_threadpool(self):
+        calls = []
+
+        def apply(enabled):
+            calls.append(enabled)
+            return self._record({"ok": True, "cudnn_benchmark": enabled}, expect_lock=True)()
+
+        self.module.apply_cudnn_benchmark = apply
+        self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": True}), {"ok": True, "cudnn_benchmark": True})
+        self.assertEqual(calls, [True])
+
     def test_model_merge_runs_in_the_threadpool(self):
         self.module._run_openclaw_model_merge = self._record({"ok": True, "message": "merged"}, expect_lock=False)
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/model-merge", {"primary_model_name": "a"}), {"ok": True, "message": "merged"})
@@ -212,6 +240,22 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.module.estimate_token_count = self._record({"ok": True, "token_count": 3}, expect_lock=False)
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/token-count", {"text": "a b c"}), {"ok": True, "token_count": 3})
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/token_counter", {"text": "a b c"}), {"ok": True, "token_count": 3})
+
+
+class TokenCountTests(unittest.TestCase):
+    def setUp(self):
+        install_a1111_stubs()
+        self.module = import_extension_module()
+
+    def test_counts_the_longest_scheduled_prompt(self):
+        self.assertEqual(self.module.estimate_token_count("a b c", 20), {"ok": True, "token_count": 5, "max_length": 75})
+
+    def test_missing_text_encoder_is_not_reported_as_a_count(self):
+        self.module.model_hijack = types.SimpleNamespace(get_prompt_lengths=lambda prompt: ("-", "-"))
+        result = self.module.estimate_token_count("a b c", 20)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["token_count"])
+        self.assertIsNone(result["max_length"])
 
 
 if __name__ == "__main__":

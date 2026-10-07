@@ -3,7 +3,8 @@
 
 Each change is an exact ORIGINAL -> PATCHED text block. ORIGINAL blocks match the host checkout as deployed: upstream
 plus the 0001-modern-attention-fallbacks commit (5022f68) and patch-multidiffusion-terminal-tiles.py.
-- A target file must be either fully original (it gets patched) or fully patched (it is left alone).
+- A target file must be either fully original (it gets patched) or fully patched (it is left alone), or hold an
+  earlier version of some patched blocks (SUPERSEDED) with every other block patched (those blocks are upgraded).
 - Anything else aborts the deploy: unknown upstream text, a partial patch, CRLF line endings.
 - Every target is validated before any file is written. Each file is replaced atomically, keeping its mode and owner.
 - --check writes nothing and fails unless every target is fully patched.
@@ -19,6 +20,66 @@ import tempfile
 from pathlib import Path
 
 TILEVAE = "scripts/tilevae.py"
+
+# tile_utils/attn.py TV-ATTN blocks. *_V1 is the text deployed before the upcast/autocast fix: a file holding it is
+# upgraded in place (see SUPERSEDED), never treated as unknown drift.
+TV_ATTN_IMPORT_V1 = 'from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, run_scaled_dot_product_attention, sub_quad_attention\n'
+TV_ATTN_IMPORT = 'from modules.devices import without_autocast\n' + TV_ATTN_IMPORT_V1.replace('sub_quad_attention\n', 'sub_quad_attention  # gb10: TV-ATTN\n')
+TV_ATTN_SDPA_V1 = r"""def sdp_no_mem_attnblock_forward(self, x):
+    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+
+def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
+    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
+    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
+    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
+    # different valid kernel: numerically equivalent.
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
+    dtype = q.dtype
+    if shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = out.transpose(-1, -2).reshape(b, c, h, w)
+    out = self.proj_out(out)
+    return out
+"""
+TV_ATTN_SDPA = r"""def sdp_no_mem_attnblock_forward(self, x):
+    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+
+def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
+    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
+    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
+    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
+    # different valid kernel: numerically equivalent. Upcasting (upcast_attn) also turns autocast off for the kernel:
+    # CUDA autocast runs scaled_dot_product_attention in its lower-precision dtype and would cast the float32 q/k/v
+    # straight back (same fix as modules/sd_hijack_optimizations.py); without upcast_attn it is a no-op.
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
+    dtype = q.dtype
+    upcast = shared.opts.upcast_attn
+    if upcast:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    with without_autocast(disable=not upcast):
+        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = out.transpose(-1, -2).reshape(b, c, h, w)
+    out = self.proj_out(out)
+    return out
+"""
+
 
 BLOCKS: dict[str, list[tuple[str, str, str]]] = {
     TILEVAE: [
@@ -216,8 +277,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
             "TV-ATTN import",
             r"""from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, sub_quad_attention
 """,
-            r"""from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, run_scaled_dot_product_attention, sub_quad_attention
-""",
+            TV_ATTN_IMPORT,
         ),
         (
             "TV-ATTN 4-D SDPA",
@@ -243,31 +303,7 @@ def sdp_attnblock_forward(self, h_):
     out = self.proj_out(out)
     return out
 """,
-            r"""def sdp_no_mem_attnblock_forward(self, x):
-    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
-
-def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
-    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
-    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
-    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
-    # different valid kernel: numerically equivalent.
-    q = self.q(h_)
-    k = self.k(h_)
-    v = self.v(h_)
-    b, c, h, w = q.shape
-    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
-    dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
-    out = out.to(dtype)
-    out = out.transpose(-1, -2).reshape(b, c, h, w)
-    out = self.proj_out(out)
-    return out
-""",
+            TV_ATTN_SDPA,
         ),
     ],
     "tile_methods/mixtureofdiffusers.py": [
@@ -303,22 +339,40 @@ def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
 }
 
 
-def file_state(relative: str, source: str) -> str:
-    """Return "original" or "patched" for a target file's text, or raise SystemExit for anything else."""
+# Earlier PATCHED texts of a block, keyed by (target, block name). A deployed file holding them is upgraded to the
+# current PATCHED text; --check fails until it is.
+SUPERSEDED: dict[tuple[str, str], tuple[str, ...]] = {
+    ("tile_utils/attn.py", "TV-ATTN import"): (TV_ATTN_IMPORT_V1,),
+    ("tile_utils/attn.py", "TV-ATTN 4-D SDPA"): (TV_ATTN_SDPA_V1,),
+}
+
+
+def block_states(relative: str, source: str) -> list[tuple[str, str, str]]:
+    """(state, current text, patched text) per block: state is "original", "patched" or "superseded".
+
+    Exactly one of the block's known texts must occur, exactly once; anything else raises SystemExit."""
     if "\r" in source:
         raise SystemExit(f"unsupported MultiDiffusion source (CRLF line endings): {relative}")
     states = []
     for name, original, patched in BLOCKS[relative]:
-        counts = (source.count(original), source.count(patched))
-        if counts == (1, 0):
-            states.append("original")
-        elif counts == (0, 1):
-            states.append("patched")
-        else:
-            raise SystemExit(f"unsupported MultiDiffusion source for {name} (original x{counts[0]}, patched x{counts[1]}): {relative}")
-    if len(set(states)) != 1:
-        raise SystemExit(f"partially patched MultiDiffusion source: {relative}")
-    return states[0]
+        known = [("original", original), ("patched", patched)] + [("superseded", text) for text in SUPERSEDED.get((relative, name), ())]
+        counts = [source.count(text) for _state, text in known]
+        found = [entry for entry, count in zip(known, counts) if count]
+        if len(found) != 1 or sum(counts) != 1:
+            raise SystemExit(f"unsupported MultiDiffusion source for {name} (original/patched/superseded x{counts}): {relative}")
+        states.append((found[0][0], found[0][1], patched))
+    return states
+
+
+def file_state(relative: str, source: str) -> str:
+    """Return "original", "patched" or "superseded" (every block patched or superseded, at least one superseded)
+    for a target file's text, or raise SystemExit for anything else (unknown text, a partial patch, CRLF)."""
+    states = {state for state, _current, _patched in block_states(relative, source)}
+    if states == {"original"} or states == {"patched"}:
+        return states.pop()
+    if "original" not in states:
+        return "superseded"
+    raise SystemExit(f"partially patched MultiDiffusion source: {relative}")
 
 
 def replace_atomically(path: Path, text: str) -> None:
@@ -352,10 +406,10 @@ def main() -> int:
         source = path.read_bytes().decode("utf-8")
         state = file_state(relative, source)
         if args.check and state != "patched":
-            raise SystemExit(f"MultiDiffusion performance patch missing: {path}")
-        if state == "original":
-            for _name, original, patched in blocks:
-                source = source.replace(original, patched, 1)
+            raise SystemExit(f"MultiDiffusion performance patch {'outdated' if state == 'superseded' else 'missing'}: {path}")
+        if state != "patched":
+            for _state, current, patched in block_states(relative, source):
+                source = source.replace(current, patched, 1)
             pending[path] = source
 
     for path, text in pending.items():

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Patch and verify Ultimate Upscale state lifecycle."""
+"""Patch and verify Ultimate Upscale state lifecycle.
+
+USDUpscaler.process() calls state.begin() first and state.end() last; an exception in between left the shared job
+state open. The patch wraps everything between them in try/finally so one begin always owns one end.
+- The source must be UTF-8 with LF line endings (no newline translation; CRLF fails closed).
+- The rewrapped body must parse to exactly the original statements, and the result must pass the --check
+  verification, before anything is written.
+- --check writes nothing and fails unless the lifecycle is patched.
+"""
 from __future__ import annotations
 
 import argparse
@@ -70,7 +78,13 @@ def patch(source: str, target: Path) -> str:
         f"{indent}finally:\n",
         f"{indent}    state.end()\n",
     ]
-    return "".join(lines[:body_start] + replacement + lines[body_end + 1 :])
+    patched = "".join(lines[:body_start] + replacement + lines[body_end + 1 :])
+    # Re-indenting text lines is only valid when every body line is indented code (no multi-line string or
+    # continuation at a shallower indent); require the wrapped statements to parse to exactly the original ones.
+    wrapped = [child for child in process_node(patched, target).body if isinstance(child, ast.Try)]
+    if len(wrapped) != 1 or [ast.dump(stmt) for stmt in wrapped[0].body] != [ast.dump(stmt) for stmt in node.body[1:-1]]:
+        raise SystemExit(f"unsupported Ultimate Upscale process body (re-indentation changed its statements): {target}")
+    return patched
 
 
 def main() -> int:
@@ -79,10 +93,15 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     target = target_for(args.path)
-    source = target.read_text(encoding="utf-8")
+    if not target.is_file():
+        raise SystemExit(f"Ultimate Upscale source not found: {target}")
+    source = target.read_bytes().decode("utf-8")  # no newline translation: CRLF must fail closed
+    if "\r" in source:
+        raise SystemExit(f"unsupported Ultimate Upscale line endings (expected LF): {target}")
     if not args.check and MARKER not in source:
         source = patch(source, target)
-        target.write_text(source, encoding="utf-8")
+        verify(source, target)
+        target.write_bytes(source.encode("utf-8"))
         print(f"Patched Ultimate Upscale state lifecycle: {target}")
     verify(source, target)
     print(f"Ultimate Upscale lifecycle verified: {target}")

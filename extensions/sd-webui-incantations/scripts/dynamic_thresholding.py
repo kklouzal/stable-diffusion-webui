@@ -71,13 +71,22 @@ class Script(scripts.Script):
         return [enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi]
 
     last_id = 0
+    # Renamed samplers this script registered in all_samplers_map and has not removed yet. Generations are
+    # serialized (queue_lock), so at most one is in use; any other is left by a batch whose generation failed
+    # before postprocess_batch.
+    registered_samplers = set()
+
+    @staticmethod
+    def _unregister_samplers(names):
+        for name in names:
+            sd_samplers.all_samplers_map.pop(name, None)
+            Script.registered_samplers.discard(name)
 
     def _restore_original_sampler(self, p):
         if not hasattr(p, 'orig_sampler_name'):
             return
         p.sampler_name = p.orig_sampler_name
-        for added_sampler in p.fixed_samplers:
-            sd_samplers.all_samplers_map.pop(added_sampler, None)
+        self._unregister_samplers(p.fixed_samplers)
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
         del p.fixed_samplers
@@ -85,6 +94,7 @@ class Script(scripts.Script):
 
     def process_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, prompts, seeds, subseeds):
         self._restore_original_sampler(p)
+        self._unregister_samplers(list(Script.registered_samplers))
         enabled = getattr(p, 'dynthres_enabled', enabled)
         if not enabled:
             return
@@ -142,6 +152,7 @@ class Script(scripts.Script):
         p.orig_sampler_name = orig_sampler_name
         p.sampler_name, new_sampler = make_sampler(orig_sampler_name)
         sd_samplers.all_samplers_map[p.sampler_name] = new_sampler
+        Script.registered_samplers.add(p.sampler_name)
         p.fixed_samplers = [p.sampler_name]
 
         if p.sampler is not None:

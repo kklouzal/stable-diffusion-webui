@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Patch MultiDiffusion tile origins to include terminal latent edges."""
+"""Patch MultiDiffusion tile origins to include terminal latent edges.
+
+Upstream spreads origins as int(col * (w - tile_w) / (cols - 1)); the float floor can leave the last latent column
+or row uncovered (weight 0). The replacement steps by tile - overlap and appends the terminal origin. Its tile
+count equals upstream's, but the origins differ from upstream for most extents, not only for the uncovered ones.
+The source must be UTF-8 with LF line endings; anything but exactly-original or exactly-patched fails closed.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -68,14 +74,16 @@ def patch_file(path: Path) -> bool:
         raise SystemExit(f"MultiDiffusion source not found: {path}")
     if path.name != "utils.py" or path.parent.name != "tile_utils":
         raise SystemExit(f"refusing unexpected MultiDiffusion target (expected tile_utils/utils.py): {path}")
-    source = path.read_text(encoding="utf-8")
+    source = path.read_bytes().decode("utf-8")  # no newline translation: CRLF must fail closed, not be rewritten
+    if "\r" in source:
+        raise SystemExit(f"unsupported MultiDiffusion source (CRLF line endings): {path}")
     if PATCHED in source:
-        if ORIGINAL in source:
+        if ORIGINAL in source or source.count(PATCHED) != 1:
             raise SystemExit(f"ambiguous MultiDiffusion source contains original and patched blocks: {path}")
         return False
-    if source.count(ORIGINAL) != 1:
+    if source.count(ORIGINAL) != 1 or "def _gb10_terminal_tile_origins" in source:
         raise SystemExit(f"unsupported MultiDiffusion split_bboxes implementation: {path}")
-    path.write_text(source.replace(ORIGINAL, PATCHED, 1), encoding="utf-8")
+    path.write_bytes(source.replace(ORIGINAL, PATCHED, 1).encode("utf-8"))
     return True
 
 

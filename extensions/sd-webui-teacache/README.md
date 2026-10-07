@@ -44,8 +44,10 @@ Current defaults are conservative and disabled-by-default through the closed acc
 ## Local compatibility notes
 
 - Uses this fork's `modules.headless_ui` shim instead of importing Gradio directly, so API/headless startup can discover the script without a UI-only dependency path.
-- Restores the patched UNet forward method from an explicit `_openclaw_teacache_original_forward` attribute to reduce the chance of a stale patch after exception recovery.
+- Restores the patched UNet forward method from an explicit `_openclaw_teacache_original_forward` attribute to reduce the chance of a stale patch after exception recovery. Restoring only happens while TeaCache's patch is the live `unet.forward`: when a failed generation left the patch installed and another hook (ControlNet) wrapped above it, the patch stays as a pass-through until that hook restores its baseline, so TeaCache never drops another owner's wrapper.
 - Keeps TeaCache state per sampling pass and records enabled settings in infotext only when the script is active.
 - Isolates cached residuals by UNet call signature so conditional, unconditional, batch, dtype, and shape changes do not silently share stale residuals.
+- Keeps refresh decisions, accumulated distances and the `max_consecutive` hit counter per UNet call lane (call index within a denoiser step), so every lane, including PAG's hidden pass, is bounded by `max_consecutive` and lanes with identical inputs refresh on the same steps.
+- Refreshes a lane whenever its cross-attention context or vector conditioning differs from the conditioning its cached residual was computed with (prompt editing, lanes shifted by skipped calls). SDXL's first block never sees the context, so the first-block distance alone cannot notice such changes. UNet-internal hook state that changes without changing the inputs (for example a SEG/PAG step interval boundary) is not part of the cache key.
 - Disables residual reuse for non-SDXL models and masked/inpaint denoising paths; those modes need empirical validation before enabling because partial-latent blending and unsupported model coefficients can amplify quality drift.
 - Uses conservative quality-preserving defaults (`threshold=0.25`, `max_consecutive=4`, `start=0.35`, `end=0.90`) to avoid early composition and late detail/final-cleanup reuse by default.

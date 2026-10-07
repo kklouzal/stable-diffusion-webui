@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
 import traceback
+import uuid
 from collections import Counter
-from typing import Any
+from typing import Any, Callable
 
 import safetensors
 import safetensors.torch
@@ -15,14 +17,20 @@ from torch import Tensor
 from modules import paths, sd_models, sd_vae, shared
 
 OPENCLAW_CONVERTER_VERSION = "2026-05-10.4"
-DTYPES_TO_FP16 = {torch.float32, torch.float64, torch.bfloat16}
-DTYPES_TO_BF16 = {torch.float32, torch.float64, torch.float16}
+FLOAT8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+# float8 -> float16/bfloat16 is exact for every float8 value, so fp8 sources are widened like other floats.
+DTYPES_TO_FP16 = {torch.float32, torch.float64, torch.bfloat16, *FLOAT8_DTYPES}
+DTYPES_TO_BF16 = {torch.float32, torch.float64, torch.float16, *FLOAT8_DTYPES}
 DTYPES_TO_FLOAT8 = {torch.float32, torch.float64, torch.bfloat16, torch.float16}
 PART_ACTIONS = {"copy", "convert", "delete"}
 PRECISIONS = {"full", "fp32", "fp16", "bf16", "float8_e4m3fn", "float8_e5m2"}
 COMPONENT_PRECISIONS = {"inherit", *PRECISIONS}
+PRUNING_METHODS = {"disabled", "no-ema", "ema-only"}
 FORMATS = {"ckpt", "safetensors"}
 LORA_PRECISIONS = {"fp32", "fp16", "bf16"}
+# Content hashes of the source file's tensor data. A converted LoRA has different bytes, and A1111 trusts
+# sshs_model_hash as the LoRA hash (extensions-builtin/Lora/network.py), so these are never copied over.
+STALE_LORA_HASH_KEYS = {"sshs_model_hash", "sshs_legacy_hash", "modelspec.hash_sha256"}
 KNOWN_JUNK_PREFIXES = (
     "embedding_manager.embedder.",
     "lora_te_text_model",
@@ -89,8 +97,12 @@ def check_weight_type(k: str) -> str:
     return "other"
 
 
+def is_safetensors_path(path: str) -> bool:
+    return os.path.splitext(str(path))[1].lower() == ".safetensors"
+
+
 def load_model(path: str) -> dict[str, Any]:
-    if path.endswith(".safetensors"):
+    if is_safetensors_path(path):
         loaded = safetensors.torch.load_file(path, device="cpu")
     else:
         try:
@@ -139,6 +151,36 @@ def safe_output_path(directory: str, save_name: str, extension: str) -> str:
     return save_path
 
 
+def save_atomically(save_path: str, write: Callable[[str], None]) -> None:
+    """Publish ``save_path`` only after ``write`` has fully written and flushed it.
+
+    ``write`` serializes to a uniquely named hidden ``.partial`` sibling (ignored by the checkpoint and LoRA
+    listings), which is fsynced and renamed onto ``save_path``; a failed or interrupted save never leaves a
+    truncated checkpoint under the final name, and the temporary file is removed on failure. The no-overwrite
+    contract of safe_output_path is re-checked just before the rename (conversions run under queue_lock).
+    """
+    tmp_path = os.path.join(
+        os.path.dirname(save_path), f".openclaw-convert-{uuid.uuid4().hex}.partial"
+    )
+    try:
+        write(tmp_path)
+        with open(tmp_path, "rb") as f:
+            os.fsync(f.fileno())
+        if os.path.exists(save_path):
+            raise FileExistsError(f"refusing to overwrite existing file: {save_path}")
+        os.replace(tmp_path, save_path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_path)
+        raise
+
+
+def require_choice(kind: str, value: Any, allowed: set[str]) -> str:
+    if value not in allowed:
+        raise ValueError(f"unsupported {kind}: {value!r}")
+    return value
+
+
 def position_id_keys(model: dict[str, Any]) -> list[str]:
     return [str(key) for key in model if str(key).endswith("position_ids")]
 
@@ -163,9 +205,6 @@ def fix_model(
         "cond_stage_model.transformer.encoder.": "cond_stage_model.transformer.text_model.encoder.",
         "cond_stage_model.transformer.final_layer_norm.": "cond_stage_model.transformer.text_model.final_layer_norm.",
     }
-    fallback_position_id_key = (
-        "cond_stage_model.transformer.text_model.embeddings.position_ids"
-    )
     for key in list(model.keys()):
         for prefix, replacement in nai_keys.items():
             if isinstance(key, str) and key.startswith(prefix):
@@ -194,10 +233,17 @@ def fix_model(
                     f"[OpenClaw Model Converter] Fixed broken CLIP position_ids: {key}"
                 )
         else:
-            print(
-                "[OpenClaw Model Converter] Missing CLIP position_ids; adding standard 0..76 tensor"
-            )
-            model[fallback_position_id_key] = standard_position_ids_like()
+            # Only Hugging Face CLIP text models carry position_ids (SD1 cond_stage_model.transformer, SDXL
+            # conditioner.embedders.0.transformer); OpenCLIP encoders (SD2, SDXL embedders.1, refiner) have none.
+            token_suffix = "transformer.text_model.embeddings.token_embedding.weight"
+            for token_key in [k for k in model if str(k).endswith(token_suffix)]:
+                position_key = (
+                    token_key.removesuffix("token_embedding.weight") + "position_ids"
+                )
+                print(
+                    f"[OpenClaw Model Converter] Missing CLIP position_ids; adding standard 0..76 tensor: {position_key}"
+                )
+                model[position_key] = standard_position_ids_like()
     return model
 
 
@@ -213,14 +259,6 @@ def model_family(model: dict[str, Any]) -> str:
     if any(str(k).startswith("cond_stage_model.transformer") for k in model):
         return "SD1-like"
     return "unknown"
-
-
-def normalize_part_action(value: str, default: str = "convert") -> str:
-    return value if value in PART_ACTIONS else default
-
-
-def normalize_precision(value: str, default: str = "inherit") -> str:
-    return value if value in COMPONENT_PRECISIONS else default
 
 
 def normalize_bool(value: Any, default: bool = False) -> bool:
@@ -371,9 +409,12 @@ def scan_and_repair_nonfinite(
         if not isinstance(tensor, Tensor) or not torch.is_floating_point(tensor):
             continue
         total_tensors += 1
-        nan_count = int(torch.isnan(tensor).sum().item())
-        posinf_count = int(torch.isposinf(tensor).sum().item())
-        neginf_count = int(torch.isneginf(tensor).sum().item())
+        # CPU isposinf/isneginf/nan_to_num have no float8 kernels; float8 -> float16 is exact (inf/NaN
+        # included), so scan and repair a float16 copy and cast the repaired values back.
+        values = tensor.to(torch.float16) if tensor.dtype in FLOAT8_DTYPES else tensor
+        nan_count = int(torch.isnan(values).sum().item())
+        posinf_count = int(torch.isposinf(values).sum().item())
+        neginf_count = int(torch.isneginf(values).sum().item())
         bad_count = nan_count + posinf_count + neginf_count
         if bad_count:
             affected_tensors += 1
@@ -393,7 +434,9 @@ def scan_and_repair_nonfinite(
                     }
                 )
             if repair:
-                model[key] = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+                model[key] = torch.nan_to_num(
+                    values, nan=0.0, posinf=0.0, neginf=0.0
+                ).to(tensor.dtype)
     return {
         "scanned_float_tensors": total_tensors,
         "affected_tensors": affected_tensors,
@@ -407,13 +450,10 @@ def scan_and_repair_nonfinite(
 
 
 def safetensors_metadata(path: str) -> dict[str, str]:
-    if not str(path).endswith(".safetensors"):
+    if not is_safetensors_path(path):
         return {}
-    try:
-        with safetensors.safe_open(path, framework="pt", device="cpu") as f:
-            return {str(k): str(v) for k, v in (f.metadata() or {}).items()}
-    except Exception:
-        return {}
+    with safetensors.safe_open(path, framework="pt", device="cpu") as f:
+        return {str(k): str(v) for k, v in (f.metadata() or {}).items()}
 
 
 def lora_dir() -> str:
@@ -439,8 +479,8 @@ def list_loras() -> list[dict[str, str]]:
 
 
 def resolve_lora_info(name: str) -> MockModelInfo | None:
-    if name and os.path.exists(name):
-        return MockModelInfo(name)
+    # Only listed LoRAs: an arbitrary filesystem path would let an API caller read any file and write the
+    # converted output into its directory.
     for item in list_loras():
         candidates = {
             item["name"],
@@ -558,7 +598,7 @@ def lora_metadata(
     cleanup: bool,
     nonfinite: dict[str, Any],
 ) -> dict[str, str]:
-    metadata = dict(original)
+    metadata = {k: v for k, v in original.items() if k not in STALE_LORA_HASH_KEYS}
     metadata.update(
         {
             "openclaw_lora_converter_version": OPENCLAW_CONVERTER_VERSION,
@@ -632,7 +672,10 @@ def convert_lora(payload: dict[str, Any]) -> str:
         save_path = safe_output_path(
             os.path.dirname(model_info.filepath), save_name, ".safetensors"
         )
-        safetensors.torch.save_file(ok, save_path, metadata=metadata)
+        save_atomically(
+            save_path,
+            lambda path: safetensors.torch.save_file(ok, path, metadata=metadata),
+        )
         refresh_after_convert("lora")
         report = {
             "source_doctor": before_doctor,
@@ -708,8 +751,8 @@ def resolve_model_info(model: str) -> MockModelInfo | None:
     for info in sd_models.checkpoints_list.values():
         if model in {info.model_name, info.filename, os.path.basename(info.filename)}:
             return MockModelInfo(info.filename)
-    if model and os.path.exists(model):
-        return MockModelInfo(model)
+    # Only listed checkpoints: an arbitrary filesystem path would let an API caller read any file and write
+    # the converted output into its directory.
     return None
 
 
@@ -779,22 +822,28 @@ def do_convert(
     vae_precision="inherit",
     other_precision="inherit",
 ):
-    checkpoint_formats = [fmt for fmt in checkpoint_formats if fmt in FORMATS]
+    checkpoint_formats = list(
+        dict.fromkeys(
+            require_choice("format", fmt, FORMATS) for fmt in checkpoint_formats
+        )
+    )
     if not checkpoint_formats:
-        return "Error: choose at least one model save format"
-    if precision not in PRECISIONS:
-        return f"Error: unsupported precision {precision}"
+        raise ValueError("choose at least one model save format")
+    require_choice("precision", precision, PRECISIONS)
+    require_choice("pruning method", conv_type, PRUNING_METHODS)
     extra_opt = {
-        "unet": normalize_part_action(unet_conv),
-        "clip": normalize_part_action(text_encoder_conv),
-        "vae": normalize_part_action(vae_conv),
-        "other": normalize_part_action(others_conv),
+        "unet": require_choice("UNet action", unet_conv, PART_ACTIONS),
+        "clip": require_choice("CLIP action", text_encoder_conv, PART_ACTIONS),
+        "vae": require_choice("VAE action", vae_conv, PART_ACTIONS),
+        "other": require_choice("other-weights action", others_conv, PART_ACTIONS),
     }
     component_precisions = {
-        "unet": normalize_precision(unet_precision),
-        "clip": normalize_precision(clip_precision),
-        "vae": normalize_precision(vae_precision),
-        "other": normalize_precision(other_precision),
+        "unet": require_choice("UNet precision", unet_precision, COMPONENT_PRECISIONS),
+        "clip": require_choice("CLIP precision", clip_precision, COMPONENT_PRECISIONS),
+        "vae": require_choice("VAE precision", vae_precision, COMPONENT_PRECISIONS),
+        "other": require_choice(
+            "other-weights precision", other_precision, COMPONENT_PRECISIONS
+        ),
     }
     float8_components = {
         component
@@ -808,7 +857,10 @@ def do_convert(
     if float8_components and (
         float8_components - {"unet"} or extra_opt.get("unet") != "convert"
     ):
-        return "Error: float8 checkpoint export is experimental and currently limited to explicit UNet-only conversion; use MXFP8/NVFP4 runtime quantization for generation instead."
+        raise ValueError(
+            "float8 checkpoint export is experimental and currently limited to explicit UNet-only conversion; "
+            "use MXFP8/NVFP4 runtime quantization for generation instead."
+        )
     shared.state.begin()
     try:
         shared.state.job = "model-convert"
@@ -878,8 +930,10 @@ def do_convert(
                 f"[OpenClaw Model Converter] Baking in VAE from {bake_in_vae_filename}"
             )
             vae_dict = sd_vae.load_vae_dict(bake_in_vae_filename, map_location="cpu")
+            # VAE files are first_stage_model-relative (core loads them via first_stage_model.load_state_dict
+            # and the checkpoint merger bakes them under this prefix).
             for key, value in vae_dict.items():
-                handle_weight(key, value)
+                handle_weight("first_stage_model." + key, value)
             del vae_dict
         output_nonfinite = scan_and_repair_nonfinite(ok, repair=True)
         after_doctor = checkpoint_doctor(ok, model_info)
@@ -910,9 +964,17 @@ def do_convert(
             save_path = safe_output_path(ckpt_dir, save_name, ext)
             print(f"[OpenClaw Model Converter] Saving to {save_path}...")
             if fmt == "safetensors":
-                safetensors.torch.save_file(ok, save_path, metadata=metadata)
+                save_atomically(
+                    save_path,
+                    lambda path: safetensors.torch.save_file(ok, path, metadata=metadata),
+                )
             else:
-                torch.save({"state_dict": ok, "openclaw_metadata": metadata}, save_path)
+                save_atomically(
+                    save_path,
+                    lambda path: torch.save(
+                        {"state_dict": ok, "openclaw_metadata": metadata}, path
+                    ),
+                )
             output += f"Checkpoint saved to {save_path}\n"
         refresh_after_convert("checkpoint")
         report = {

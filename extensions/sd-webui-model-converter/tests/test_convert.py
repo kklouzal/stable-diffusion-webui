@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import tempfile
 import types
@@ -9,9 +10,26 @@ import unittest
 from unittest import mock
 
 import torch
+from safetensors.torch import load_file, save_file
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EXT_ROOT))
+
+# Package roots install_a1111_stubs() and the scripts.* imports replace; restored when this file finishes so
+# later test files import the real A1111 modules.
+_STUBBED_PACKAGES = ("modules", "scripts")
+_saved_modules = {}
+
+
+def setUpModule():
+    _saved_modules.update({key: value for key, value in sys.modules.items() if key.split(".")[0] in _STUBBED_PACKAGES})
+
+
+def tearDownModule():
+    for key in [key for key in sys.modules if key.split(".")[0] in _STUBBED_PACKAGES]:
+        del sys.modules[key]
+    sys.modules.update(_saved_modules)
+    _saved_modules.clear()
 
 
 def install_a1111_stubs():
@@ -176,6 +194,195 @@ class RouteLockTests(unittest.TestCase):
 
         self.assertEqual((result["ok"], result["error"]), (False, "selected model was not found"))
         self.assertFalse(self.lock.held)
+
+
+class ConversionCorrectnessTests(unittest.TestCase):
+    POSITION_IDS = "conditioner.embedders.0.transformer.text_model.embeddings.position_ids"
+
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.convert = importlib.import_module("scripts.convert")
+
+    def _source(self, tmpdir):
+        path = os.path.join(tmpdir, "model.safetensors")
+        save_file(
+            {
+                "model.diffusion_model.w": torch.tensor([0.5, -1.0, 3.0]),
+                "first_stage_model.encoder.conv_in.weight": torch.ones(3),
+                self.POSITION_IDS: torch.arange(77).unsqueeze(0),
+            },
+            path,
+        )
+        return path
+
+    def _convert(self, source_path, **overrides):
+        args = dict(
+            checkpoint_formats=["safetensors"], precision="fp16", conv_type="disabled", custom_name="out",
+            bake_in_vae="None", unet_conv="convert", text_encoder_conv="convert", vae_conv="convert",
+            others_conv="convert", fix_clip=False, force_position_id=True, delete_known_junk_data=False,
+        )
+        args.update(overrides)
+        return self.convert.do_convert(self.convert.MockModelInfo(source_path), **args)
+
+    def test_bake_in_vae_replaces_first_stage_model_weights(self):
+        vae = {"encoder.conv_in.weight": torch.full((3,), 2.0)}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = self._source(tmpdir)
+            with mock.patch.dict(self.convert.sd_vae.vae_dict, {"baked.safetensors": "/vae/baked.safetensors"}), \
+                    mock.patch.object(self.convert.sd_vae, "load_vae_dict", create=True, return_value=vae) as load_vae:
+                self._convert(source, bake_in_vae="baked.safetensors")
+            out = load_file(os.path.join(tmpdir, "out.safetensors"))
+            self.assertEqual(sorted(os.listdir(tmpdir)), ["model.safetensors", "out.safetensors"])
+
+        load_vae.assert_called_once_with("/vae/baked.safetensors", map_location="cpu")
+        self.assertNotIn("encoder.conv_in.weight", out)
+        self.assertTrue(torch.equal(out["first_stage_model.encoder.conv_in.weight"], torch.full((3,), 2.0, dtype=torch.float16)))
+
+    def test_float8_unet_export_scans_float8_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._convert(
+                self._source(tmpdir), precision="float8_e4m3fn",
+                clip_precision="fp16", vae_precision="fp16", other_precision="fp16",
+            )
+            out = load_file(os.path.join(tmpdir, "out.safetensors"))
+
+        self.assertEqual(out["model.diffusion_model.w"].dtype, torch.float8_e4m3fn)
+        self.assertEqual(out["model.diffusion_model.w"].float().tolist(), [0.5, -1.0, 3.0])
+        self.assertEqual(out["first_stage_model.encoder.conv_in.weight"].dtype, torch.float16)
+        self.assertEqual(out[self.POSITION_IDS].dtype, torch.int64)
+
+    def test_nonfinite_scan_and_repair_handle_float8(self):
+        model = {
+            "a": torch.tensor([1.0, float("nan"), -2.0]).to(torch.float8_e4m3fn),
+            "b": torch.tensor([float("inf"), float("-inf"), 0.5]).to(torch.float8_e5m2),
+        }
+
+        report = self.convert.scan_and_repair_nonfinite(model, repair=True)
+
+        self.assertEqual((report["nan_values"], report["posinf_values"], report["neginf_values"]), (1, 1, 1))
+        self.assertEqual((model["a"].dtype, model["a"].float().tolist()), (torch.float8_e4m3fn, [1.0, 0.0, -2.0]))
+        self.assertEqual((model["b"].dtype, model["b"].float().tolist()), (torch.float8_e5m2, [0.0, 0.0, 0.5]))
+
+    def test_fp16_and_bf16_widen_float8_sources_exactly(self):
+        bits = torch.arange(256, dtype=torch.uint8)
+        for fp8 in (torch.float8_e4m3fn, torch.float8_e5m2):
+            source = bits.view(fp8)
+            finite = torch.isfinite(source.float())
+            for conv, target in ((self.convert.conv_fp16, torch.float16), (self.convert.conv_bf16, torch.bfloat16)):
+                with self.subTest(source=fp8, target=target):
+                    out = conv(source)
+                    self.assertEqual(out.dtype, target)
+                    self.assertTrue(torch.equal(out.float()[finite], source.float()[finite]))
+
+    def test_duplicate_formats_are_written_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._convert(self._source(tmpdir), checkpoint_formats=["safetensors", "ckpt", "safetensors"])
+            self.assertEqual(sorted(os.listdir(tmpdir)), ["model.safetensors", "out.ckpt", "out.safetensors"])
+            # torch.serialization.load: when the real A1111 modules are imported in this process, modules.safe
+            # replaces torch.load with a checker that needs the real shared.cmd_opts.
+            ckpt = torch.serialization.load(os.path.join(tmpdir, "out.ckpt"), map_location="cpu", weights_only=True)
+
+        self.assertEqual(ckpt["state_dict"]["model.diffusion_model.w"].dtype, torch.float16)
+
+    def test_failed_save_leaves_no_file_under_final_name(self):
+        def partial_write(*args, **kwargs):
+            Path(args[1]).write_bytes(b"truncated")
+            raise OSError("disk full")
+
+        for fmt, target in (("safetensors", "safetensors.torch.save_file"), ("ckpt", "torch.save")):
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as tmpdir:
+                source = self._source(tmpdir)
+                module_name, attr = target.rsplit(".", 1)
+                module = self.convert.safetensors.torch if module_name == "safetensors.torch" else self.convert.torch
+                with mock.patch.object(module, attr, side_effect=partial_write):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        self._convert(source, checkpoint_formats=[fmt])
+                self.assertEqual(os.listdir(tmpdir), ["model.safetensors"])
+
+    def test_atomic_save_refuses_file_created_during_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            final = Path(tmpdir) / "out.safetensors"
+
+            def write(path):
+                Path(path).write_bytes(b"new")
+                final.write_bytes(b"other")
+
+            with self.assertRaisesRegex(FileExistsError, "overwrite"):
+                self.convert.save_atomically(str(final), write)
+            self.assertEqual((os.listdir(tmpdir), final.read_bytes()), (["out.safetensors"], b"other"))
+
+    def test_invalid_options_raise_instead_of_success_shaped_result(self):
+        info = self.convert.MockModelInfo("/nonexistent/model.safetensors")
+        cases = (
+            {"checkpoint_formats": ["bogus"]},
+            {"checkpoint_formats": []},
+            {"precision": "fp12"},
+            {"conv_type": "noema"},
+            {"vae_conv": "remove"},
+            {"unet_precision": "fp9"},
+            {"precision": "float8_e4m3fn"},
+        )
+        for case in cases:
+            args = dict(
+                checkpoint_formats=["safetensors"], precision="fp16", conv_type="disabled", custom_name="",
+                bake_in_vae="None", unet_conv="convert", text_encoder_conv="convert", vae_conv="convert",
+                others_conv="convert", fix_clip=False, force_position_id=True, delete_known_junk_data=False,
+            )
+            args.update(case)
+            with self.subTest(**case), self.assertRaises(ValueError):
+                self.convert.do_convert(info, **args)
+
+    def test_resolvers_only_accept_listed_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outside = Path(tmpdir) / "outside.safetensors"
+            outside.write_bytes(b"x")
+            listed = Path(tmpdir) / "models" / "Lora" / "sub" / "style.safetensors"
+            listed.parent.mkdir(parents=True)
+            listed.write_bytes(b"x")
+            with mock.patch.object(self.convert.paths, "models_path", str(Path(tmpdir) / "models")):
+                self.assertIsNone(self.convert.resolve_model_info(str(outside)))
+                self.assertIsNone(self.convert.resolve_lora_info(str(outside)))
+                self.assertEqual(self.convert.resolve_lora_info("sub/style").filepath, str(listed))
+                self.assertEqual(self.convert.resolve_lora_info(str(listed)).filepath, str(listed))
+
+    def test_lora_metadata_drops_source_content_hashes(self):
+        original = {"sshs_model_hash": "aa", "sshs_legacy_hash": "bb", "modelspec.hash_sha256": "0xcc", "ss_output_name": "style"}
+
+        metadata = self.convert.lora_metadata(
+            self.convert.MockModelInfo("/tmp/style.safetensors"), original,
+            precision="bf16", doctor={}, cleanup=False, nonfinite={},
+        )
+
+        self.assertFalse(set(metadata) & {"sshs_model_hash", "sshs_legacy_hash", "modelspec.hash_sha256"})
+        self.assertEqual(metadata["ss_output_name"], "style")
+
+    def test_fix_clip_adds_position_ids_only_to_hf_clip_text_models(self):
+        sd1_key = "cond_stage_model.transformer.text_model.embeddings.position_ids"
+        cases = (
+            ({"conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight": torch.zeros(1),
+              "conditioner.embedders.1.model.token_embedding.weight": torch.zeros(1)}, {self.POSITION_IDS}),
+            ({"cond_stage_model.transformer.text_model.embeddings.token_embedding.weight": torch.zeros(1)}, {sd1_key}),
+            ({"cond_stage_model.model.token_embedding.weight": torch.zeros(1)}, set()),
+        )
+        for model, expected in cases:
+            with self.subTest(keys=sorted(model)):
+                before = set(model)
+                self.convert.fix_model(model, fix_clip=True)
+                self.assertEqual(set(model) - before, expected)
+                for key in expected:
+                    self.assertTrue(torch.equal(model[key], torch.arange(77).unsqueeze(0)))
+
+    def test_safetensors_detection_is_case_insensitive_and_metadata_errors_propagate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "Style.SafeTensors")
+            save_file({"x": torch.ones(1)}, path, metadata={"ss_output_name": "style"})
+
+            self.assertEqual(set(self.convert.load_model(path)), {"x"})
+            self.assertEqual(self.convert.safetensors_metadata(path), {"ss_output_name": "style"})
+            with mock.patch.object(self.convert.safetensors, "safe_open", side_effect=OSError("unreadable")):
+                with self.assertRaisesRegex(OSError, "unreadable"):
+                    self.convert.safetensors_metadata(path)
 
 
 if __name__ == "__main__":

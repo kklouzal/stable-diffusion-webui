@@ -13,8 +13,28 @@ import pytest
 ROOT = Path(__file__).parents[1]
 MD_PATCHER = ROOT / "gb10" / "patch-multidiffusion-terminal-tiles.py"
 UU_PATCHER = ROOT / "gb10" / "patch-ultimate-upscale-state-lifecycle.py"
-INSTALLED_MD = Path("/opt/gb10/stable-diffusion/Extensions/multidiffusion-upscaler-for-automatic1111")
-INSTALLED_UU = Path("/opt/gb10/stable-diffusion/Extensions/ultimate-upscale-for-automatic1111")
+SUBCANVAS_PATCHER = ROOT / "gb10" / "patch-ultimate-upscale-subcanvas.py"
+
+
+def installed_extension(name: str) -> Path | None:
+    """The host deploy root, or the same checkout where run.sh mounts it inside a webui container."""
+    return next((path for path in (Path("/opt/gb10/stable-diffusion/Extensions") / name, ROOT / "extensions" / name) if path.is_dir()), None)
+
+
+INSTALLED_MD = installed_extension("multidiffusion-upscaler-for-automatic1111")
+INSTALLED_UU = installed_extension("ultimate-upscale-for-automatic1111")
+
+
+def load_patcher(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+MD_MODULE = load_patcher(MD_PATCHER, "gb10_patch_multidiffusion_terminal_tiles")
+UU_MODULE = load_patcher(UU_PATCHER, "gb10_patch_ultimate_upscale_state_lifecycle")
+SUBCANVAS_MODULE = load_patcher(SUBCANVAS_PATCHER, "gb10_patch_ultimate_upscale_subcanvas_for_lifecycle")
 
 
 def run_patcher(patcher: Path, target: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -26,29 +46,62 @@ def run_patcher(patcher: Path, target: Path, *, check: bool = True) -> subproces
     )
 
 
+def unpatch_lifecycle(source: str) -> str:
+    """Exact inverse of patch-ultimate-upscale-state-lifecycle.py's re-indenting try/finally rewrite."""
+    lines = source.splitlines(keepends=True)
+    marker = next(i for i, line in enumerate(lines) if line.strip() == f"# {UU_MODULE.MARKER}: one begin owns one end.")
+    start = marker - 1
+    indent = lines[start][: len(lines[start]) - len(lines[start].lstrip(" "))]
+    assert lines[start] == f"{indent}try:\n"
+    end = lines.index(f"{indent}finally:\n", marker)
+    assert lines[end + 1] == f"{indent}    state.end()\n"
+    body = [indent + line[len(indent) + 4 :] if line.strip() else line for line in lines[marker + 1 : end]]
+    return "".join(lines[:start] + body + [f"{indent}state.end()\n"] + lines[end + 2 :])
+
+
 @pytest.fixture()
 def multidiffusion_copy(tmp_path: Path) -> Path:
-    if not INSTALLED_MD.exists():
-        pytest.skip(f"installed MultiDiffusion fixture missing: {INSTALLED_MD}")
+    """Upstream split_bboxes: the installed checkout with the terminal-tiles patch reversed (round trip asserted)."""
+    if INSTALLED_MD is None:
+        pytest.skip("installed MultiDiffusion fixture missing")
     target = tmp_path / "multidiffusion-upscaler-for-automatic1111"
-    shutil.copytree(
-        INSTALLED_MD,
-        target,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-    )
+    shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+    utils = target / "tile_utils" / "utils.py"
+    installed = utils.read_bytes()
+    if MD_MODULE.PATCHED in installed.decode("utf-8"):
+        utils.write_bytes(installed.decode("utf-8").replace(MD_MODULE.PATCHED, MD_MODULE.ORIGINAL, 1).encode("utf-8"))
+        probe = tmp_path / "roundtrip" / "tile_utils" / "utils.py"
+        probe.parent.mkdir(parents=True)
+        probe.write_bytes(utils.read_bytes())
+        run_patcher(MD_PATCHER, probe)
+        assert probe.read_bytes() == installed
     return target
 
 
 @pytest.fixture()
 def ultimate_copy(tmp_path: Path) -> Path:
-    if not INSTALLED_UU.exists():
-        pytest.skip(f"installed Ultimate Upscale fixture missing: {INSTALLED_UU}")
+    """Upstream ultimate-upscale.py: the installed script with the sub-canvas and lifecycle patches reversed."""
+    if INSTALLED_UU is None:
+        pytest.skip("installed Ultimate Upscale fixture missing")
     target = tmp_path / "ultimate-upscale-for-automatic1111"
-    shutil.copytree(
-        INSTALLED_UU,
-        target,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-    )
+    shutil.copytree(INSTALLED_UU, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+    script = target / "scripts" / "ultimate-upscale.py"
+    installed = script.read_bytes()
+    text = installed.decode("utf-8")
+    if SUBCANVAS_MODULE.MARKER in text:
+        for original, patched, count in reversed(SUBCANVAS_MODULE.BLOCKS):
+            assert text.count(patched) == count
+            text = text.replace(patched, original)
+    if UU_MODULE.MARKER in text:
+        text = unpatch_lifecycle(text)
+    script.write_bytes(text.encode("utf-8"))
+    if script.read_bytes() != installed:
+        probe = tmp_path / "roundtrip.py"
+        probe.write_bytes(script.read_bytes())
+        run_patcher(UU_PATCHER, probe)
+        if SUBCANVAS_MODULE.MARKER in installed.decode("utf-8"):
+            run_patcher(SUBCANVAS_PATCHER, probe)
+        assert probe.read_bytes() == installed
     return target
 
 
@@ -153,7 +206,7 @@ class _State:
         self.events.append("end")
 
 
-def load_usdu_module(path: Path, state: _State):
+def load_usdu_module(path: Path, state: _State, monkeypatch):
     modules_pkg = types.ModuleType("modules")
     modules_pkg.__path__ = []
     modules_pkg.devices = types.SimpleNamespace(device="cpu")
@@ -177,16 +230,17 @@ def load_usdu_module(path: Path, state: _State):
     gradio_mod.Row = object
     gradio_mod.Radio = object
 
-    sys.modules["modules"] = modules_pkg
-    sys.modules["modules.shared"] = shared_mod
-    sys.modules["modules.processing"] = processing_mod
-    sys.modules["modules.images"] = images_mod
-    sys.modules["gradio"] = gradio_mod
+    # monkeypatch restores the real webui modules for later tests.
+    monkeypatch.setitem(sys.modules, "modules", modules_pkg)
+    monkeypatch.setitem(sys.modules, "modules.shared", shared_mod)
+    monkeypatch.setitem(sys.modules, "modules.processing", processing_mod)
+    monkeypatch.setitem(sys.modules, "modules.images", images_mod)
+    monkeypatch.setitem(sys.modules, "gradio", gradio_mod)
 
     spec = importlib.util.spec_from_file_location("ultimate_upscale_fixture", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules["ultimate_upscale_fixture"] = module
+    monkeypatch.setitem(sys.modules, "ultimate_upscale_fixture", module)
     spec.loader.exec_module(module)
     return module
 
@@ -227,10 +281,10 @@ def make_usdu(module, *, redraw_enabled: bool = False, seams_enabled: bool = Fal
     return usdu
 
 
-def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: Path):
+def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: Path, monkeypatch):
     module_path = ultimate_copy / "scripts" / "ultimate-upscale.py"
     state = _State()
-    module = load_usdu_module(module_path, state)
+    module = load_usdu_module(module_path, state, monkeypatch)
     usdu = make_usdu(module, redraw_enabled=True, fail=True)
 
     with pytest.raises(RuntimeError, match="redraw boom"):
@@ -239,25 +293,25 @@ def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: 
     assert state.events == ["begin"]
 
 
-def test_ultimate_upscale_patcher_idempotent_success_and_exception_lifecycle(ultimate_copy: Path):
+def test_ultimate_upscale_patcher_idempotent_success_and_exception_lifecycle(ultimate_copy: Path, monkeypatch):
     module_path = ultimate_copy / "scripts" / "ultimate-upscale.py"
     first = run_patcher(UU_PATCHER, ultimate_copy)
     patched = module_path.read_text(encoding="utf-8")
     second = run_patcher(UU_PATCHER, ultimate_copy)
 
     assert "Patched Ultimate Upscale state lifecycle" in first.stdout
-    assert "already patched" in second.stdout
+    assert "Patched" not in second.stdout and "lifecycle verified" in second.stdout
     assert module_path.read_text(encoding="utf-8") == patched
     assert patched.count("state.end()") == 1
     assert "finally:\n            state.end()" in patched
 
     success_state = _State()
-    module = load_usdu_module(module_path, success_state)
+    module = load_usdu_module(module_path, success_state, monkeypatch)
     make_usdu(module).process()
     assert success_state.events == ["begin", "end"]
 
     exception_state = _State()
-    module = load_usdu_module(module_path, exception_state)
+    module = load_usdu_module(module_path, exception_state, monkeypatch)
     usdu = make_usdu(module, redraw_enabled=True, fail=True)
     with pytest.raises(RuntimeError, match="redraw boom"):
         usdu.process()
@@ -273,7 +327,7 @@ def test_ultimate_upscale_patcher_rejects_source_drift(tmp_path: Path):
     result = run_patcher(UU_PATCHER, source, check=False)
 
     assert result.returncode != 0
-    assert "unsupported Ultimate Upscale process lifecycle implementation" in result.stderr
+    assert "unsupported or partial Ultimate Upscale state lifecycle" in result.stderr
 
 
 def test_ultimate_upscale_patcher_check_mode_and_failure_injection(tmp_path: Path):
@@ -313,11 +367,44 @@ def test_run_sh_patches_optional_tiled_extensions_after_extension_sync_before_co
     assert 'if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then' in run_sh
     assert "patch-multidiffusion-terminal-tiles.py" in run_sh
     assert 'ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"' in run_sh
-    assert 'if [[ -d "${ULTIMATE_UPSCALE_ROOT}" ]]; then' in run_sh
+    assert 'if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then' in run_sh
     assert "patch-ultimate-upscale-state-lifecycle.py" in run_sh
 
-    extension_sync = run_sh.index('sudo rsync -a --delete --delete-excluded')
+    extension_sync = run_sh.index('sudo rsync -a --checksum --delete --delete-excluded')
     multidiffusion_patch = run_sh.index("patch-multidiffusion-terminal-tiles.py")
     ultimate_patch = run_sh.index("patch-ultimate-upscale-state-lifecycle.py")
     container_start = run_sh.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}"')
     assert extension_sync < multidiffusion_patch < ultimate_patch < container_start
+
+
+def test_lifecycle_patcher_fails_closed_on_reindent_hazards_and_crlf_without_writing(tmp_path: Path):
+    # A continuation line shallower than the body (here inside a multi-line string) cannot be re-indented as text.
+    hazard = (
+        "class Fixture:\n    def process(self):\n        state.begin()\n"
+        "        self.note = \"\"\"first\n        second\"\"\"\n        state.end()\n"
+    )
+    for name, payload in (("hazard.py", hazard.encode("utf-8")), ("crlf.py", hazard.replace("\n", "\r\n").encode("utf-8"))):
+        target = tmp_path / name
+        target.write_bytes(payload)
+        result = run_patcher(UU_PATCHER, target, check=False)
+        assert result.returncode != 0, name
+        assert ("re-indentation changed its statements" if name == "hazard.py" else "line endings") in result.stderr
+        assert target.read_bytes() == payload, name
+
+
+def test_terminal_tiles_patcher_rejects_crlf_and_partial_helper_without_writing(tmp_path: Path):
+    utils = tmp_path / "tile_utils" / "utils.py"
+    utils.parent.mkdir()
+    for payload, message in (
+        (MD_MODULE.ORIGINAL.replace("\n", "\r\n").encode("utf-8"), "CRLF"),
+        (("def _gb10_terminal_tile_origins():\n    pass\n\n" + MD_MODULE.ORIGINAL).encode("utf-8"), "unsupported MultiDiffusion split_bboxes"),
+        ((MD_MODULE.PATCHED + MD_MODULE.PATCHED).encode("utf-8"), "ambiguous"),
+    ):
+        utils.write_bytes(payload)
+        result = run_patcher(MD_PATCHER, utils, check=False)
+        assert result.returncode != 0 and message in result.stderr
+        assert utils.read_bytes() == payload
+
+    utils.write_bytes(MD_MODULE.ORIGINAL.encode("utf-8"))
+    run_patcher(MD_PATCHER, utils)
+    assert utils.read_bytes() == MD_MODULE.PATCHED.encode("utf-8")

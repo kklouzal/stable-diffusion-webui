@@ -6,6 +6,7 @@ import sys
 import types
 from pathlib import Path
 import unittest
+import unittest.mock
 
 import torch
 from torch.nn import functional as F
@@ -237,6 +238,7 @@ class DynamicThresholdingLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.sd_samplers = sys.modules["modules.sd_samplers"]
         self.sd_samplers.all_samplers_map.clear()
+        self.dynamic_thresholding.Script.registered_samplers.clear()
 
         def constructor(model):
             return types.SimpleNamespace(model_wrap_cfg=types.SimpleNamespace(inner_model=model))
@@ -308,6 +310,29 @@ class DynamicThresholdingLifecycleTests(unittest.TestCase):
         self.assertEqual(p.sampler.name, "Euler")
         self.assertFalse(any(name.startswith("Euler_dynthres") for name in self.sd_samplers.all_samplers_map))
         self.assertFalse(hasattr(p, "orig_sampler_name"))
+
+    def test_next_request_unregisters_sampler_left_by_failed_generation(self):
+        script = self.dynamic_thresholding.Script()
+        args = (7.0, 100.0, "Constant", 0.0, "Constant", 0.0, 4.0, True, "MEAN", "AD", 1.0, 0, [], [], [])
+
+        def request():
+            return types.SimpleNamespace(sampler_name="Euler", sampler=None, sd_model=object(), steps=4, extra_generation_params={})
+
+        failed = request()
+        script.process_batch(failed, True, *args)  # its generation raises: postprocess_batch never runs
+        leaked = failed.sampler_name
+        self.assertIn(leaked, self.sd_samplers.all_samplers_map)
+
+        for enabled in (False, True):
+            p = request()
+            script.process_batch(p, enabled, *args)
+            with self.subTest(enabled=enabled):
+                self.assertNotIn(leaked, self.sd_samplers.all_samplers_map)
+                expected = {"Euler", p.sampler_name}
+                self.assertEqual(set(self.sd_samplers.all_samplers_map), expected)
+            script.postprocess_batch(p, enabled, *args[:-3], [])
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler"})
+        self.assertEqual(self.dynamic_thresholding.Script.registered_samplers, set())
 
 
 class CFGCombinerTests(unittest.TestCase):
@@ -900,7 +925,7 @@ class SEGBlurTests(unittest.TestCase):
             for half, heads, head_dim in self.QUERY_SHAPES:
                 output = torch.randn(2 * half, h * w, heads * head_dim, generator=gen).to(dtype)
                 geometry = dict(heads=heads, head_dim=head_dim, downscale_h=h, downscale_w=w)
-                new = self.seg._blur_seg_cond_queries(output, kernel_size=kernel_size, sigma=sigma, is_inf_blur=False, **geometry)
+                new = self.seg._blur_seg_uncond_queries(output, half, kernel_size=kernel_size, sigma=sigma, is_inf_blur=False, **geometry)
                 blur_fn = functools.partial(_legacy_gaussian_blur_2d, kernel_size=kernel_size, sigma=sigma)
                 old = _legacy_blur_seg_cond_queries(output, blur_fn=blur_fn, **geometry)
                 with self.subTest(h=h, w=w, kernel_size=kernel_size, half=half, heads=heads, head_dim=head_dim):
@@ -955,7 +980,7 @@ class SEGBlurTests(unittest.TestCase):
         geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
 
         for is_inf_blur in (False, True):
-            out = self.seg._blur_seg_cond_queries(output, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            out = self.seg._blur_seg_uncond_queries(output, 2, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
             with self.subTest(is_inf_blur=is_inf_blur):
                 self.assertEqual(out.dtype, output.dtype)
                 self.assertTrue(torch.equal(out[:2], output[:2]))
@@ -965,7 +990,7 @@ class SEGBlurTests(unittest.TestCase):
         for dtype in (torch.float32, torch.bfloat16):
             output = torch.randn(4, 6 * 5, 2 * 3).to(dtype)
             geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
-            new = self.seg._blur_seg_cond_queries(output, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
+            new = self.seg._blur_seg_uncond_queries(output, 2, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
             old = _legacy_blur_seg_cond_queries(
                 output,
                 blur_fn=lambda q: self.seg.gaussian_blur_inf(q, 1.0, 2.0**11),
@@ -973,6 +998,137 @@ class SEGBlurTests(unittest.TestCase):
             )
             with self.subTest(dtype=dtype):
                 self.assertTrue(torch.equal(new, old))
+
+    def test_attention_grid_follows_the_unet_downsample_chain(self):
+        # The old sqrt(seq * H / W) floor + divisor walk gave 30x68 for 1080x1920 (true 34x60) and 25x76
+        # for 1200x1600 (true 38x50), blurring along a wrapped grid.
+        cases = {
+            (2040, 1080, 1920): (34, 60),
+            (1900, 1200, 1600): (38, 50),
+            (1600, 1280, 1280): (40, 40),
+            (988, 832, 1216): (26, 38),
+            (135 * 240, 1080, 1920): (135, 240),
+            (48 * 48, 1024, 1024): (48, 48),  # hires pass: latent is not height x width; aspect fallback
+            (57 * 39, 1216, 832): (57, 39),
+        }
+        for (seq_len, height, width), expected in cases.items():
+            with self.subTest(seq_len=seq_len, height=height, width=width):
+                self.assertEqual(self.seg.seg_attention_grid(seq_len, height, width), expected)
+        for height in range(512, 1601, 40):
+            for width in range(512, 1601, 56):
+                rows, cols = height // 8, width // 8
+                for _level in range(3):
+                    with self.subTest(height=height, width=width, grid=(rows, cols)):
+                        self.assertEqual(self.seg.seg_attention_grid(rows * cols, height, width), (rows, cols))
+                    rows, cols = math.ceil(rows / 2), math.ceil(cols / 2)
+
+    def test_blur_operator_built_under_cpu_autocast_stays_fp32(self):
+        # The operator is first built inside the UNet forward; an active CPU autocast must not
+        # turn its conv into bf16 and cache a bf16 operator (the fp32 matmul then fails).
+        self.seg._gaussian_blur_operator.cache_clear()
+        q = torch.randn(2, 9 * 7, 4).to(torch.bfloat16)
+        try:
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                out = self.seg.gaussian_blur_queries(q, 9, 7, kernel_size=49, sigma=8.0)
+                operator = self.seg._gaussian_blur_operator(9, 7, 8.0, torch.device("cpu"))
+        finally:
+            self.seg._gaussian_blur_operator.cache_clear()
+        self.assertEqual(operator.dtype, torch.float32)
+        self.assertTrue(torch.equal(out, self.seg.gaussian_blur_queries(q, 9, 7, kernel_size=49, sigma=8.0)))
+
+    def test_uncond_blur_follows_cond_row_count_for_and_prompts(self):
+        # AND prompts: 3 cond rows + 1 uncond row. Only the uncond row is blurred; a half split
+        # would blur cond row 2 as well (guidance toward the smoothed prediction for that prompt).
+        output = torch.randn(4, 6 * 5, 2 * 3)
+        geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
+        for is_inf_blur in (False, True):
+            out = self.seg._blur_seg_uncond_queries(output, 3, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            paired = self.seg._blur_seg_uncond_queries(output[2:], 1, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            with self.subTest(is_inf_blur=is_inf_blur):
+                self.assertTrue(torch.equal(out[:3], output[:3]))
+                self.assertTrue(torch.equal(out[3], paired[1]))
+                self.assertFalse(torch.equal(out[3], output[3]))
+
+    def _hooked_seg(self, height=48, width=40):
+        class CrossAttention(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.heads = 2
+                self.to_q = torch.nn.Linear(6, 6, bias=False)
+
+        attn = CrossAttention()
+        script = self.seg.SEGExtensionScript()
+        params = self.seg.SEGStateParams()
+        params.seg_active = True
+        params.seg_blur_threshold = 10.5
+        params.crossattn_modules = [attn]
+        script.ready_hijack_forward(params, 3.0, height, width)
+        self.addCleanup(script.remove_all_hooks)
+        return script, params, attn
+
+    def _step(self, script, params, n_cond, n_uncond):
+        shared = sys.modules["modules.shared"]
+        saved = shared.opts.batch_cond_uncond
+        shared.opts.batch_cond_uncond = True
+        try:
+            step = types.SimpleNamespace(
+                sampling_step=0,
+                text_cond={"crossattn": torch.zeros(n_cond, 77, 8), "vector": torch.zeros(n_cond, 4)},
+                text_uncond={"crossattn": torch.zeros(n_uncond, 77, 8), "vector": torch.zeros(n_uncond, 4)},
+            )
+            script.on_cfg_denoiser_callback(step, params)
+        finally:
+            shared.opts.batch_cond_uncond = saved
+
+    def test_seg_hook_blurs_exactly_the_uncond_rows_of_the_full_cfg_batch(self):
+        script, params, attn = self._hooked_seg()
+        x = torch.randn(4, 6 * 5, 6)
+        with torch.no_grad():
+            plain = torch.nn.functional.linear(x, attn.to_q.weight)
+            # (2, 2) batch 2; (3, 1) AND prompts; (1, 1) with hypertile's 2 tiles per row: "(b nh nw)".
+            for n_cond, n_uncond, n_pass in ((2, 2, 2), (3, 1, 3), (1, 1, 2)):
+                self._step(script, params, n_cond, n_uncond)
+                out = attn.to_q(x)
+                with self.subTest(n_cond=n_cond, n_uncond=n_uncond):
+                    self.assertTrue(torch.equal(out[:n_pass], plain[:n_pass]))
+                    for row in range(n_pass, 4):
+                        self.assertFalse(torch.equal(out[row], plain[row]))
+
+    def test_inactive_seg_batch_clears_callback_left_by_failed_batch(self):
+        # A failed generation skips postprocess_batch; the next (SEG-off) batch must not keep its callback.
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script, params, attn = self._hooked_seg()
+        script._cfg_denoiser_callback = lambda step: script.on_cfg_denoiser_callback(step, params)
+        callbacks.append(script._cfg_denoiser_callback)
+        p = types.SimpleNamespace(extra_generation_params={}, incant_cfg_params={})
+        script.seg_process_batch(p, False, 3.0, 0, 150)
+        self.assertEqual(callbacks, [])
+        self.assertIsNone(script._cfg_denoiser_callback)
+        self.assertFalse(hasattr(attn.to_q, "seg_enable"))
+        self.assertEqual(len(attn.to_q._forward_hooks), 0)
+
+    def test_active_seg_fails_when_model_has_no_middle_attention(self):
+        # Requested SEG must not silently render without SEG (its infotext already says "SEG Active").
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.seg.SEGExtensionScript()
+        p = types.SimpleNamespace(extra_generation_params={}, incant_cfg_params={}, height=64, width=64)
+        with unittest.mock.patch.object(script, "get_cross_attn_modules", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "SEG"):
+                script.seg_process_batch(p, True, 3.0, 0, 150)
+        self.assertEqual(callbacks, [])
+
+    def test_seg_hook_skips_calls_that_are_not_the_full_cfg_batch(self):
+        # Batch 2 with cond and uncond evaluated in separate calls (token-length mismatch without
+        # padding, skip-uncond): each call has an even row count, but none of them may be split.
+        script, params, attn = self._hooked_seg()
+        self._step(script, params, 2, 2)
+        with torch.no_grad():
+            for rows in (2, 1, 3):
+                x = torch.randn(rows, 6 * 5, 6)
+                with self.subTest(rows=rows):
+                    self.assertTrue(torch.equal(attn.to_q(x), torch.nn.functional.linear(x, attn.to_q.weight)))
 
 
 class ModuleHookTests(unittest.TestCase):

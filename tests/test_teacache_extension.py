@@ -187,7 +187,7 @@ def test_session_window_and_max_consecutive_are_quality_guards():
     session.next_step()
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert session.use_cache
-    assert session.consecutive_hits == 1
+    assert session.consecutive_hits == {0: 1}
 
     session.next_step()
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
