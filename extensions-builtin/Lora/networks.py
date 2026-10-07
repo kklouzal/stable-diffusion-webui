@@ -648,6 +648,9 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                     networks_in_memory.pop(stale_key, None)
                     openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=stale_key)
                 networks_in_memory[source_key] = net
+            for source_key in source_keys:  # evict least recently used: requested sources become the newest
+                if source_key in networks_in_memory:
+                    networks_in_memory[source_key] = networks_in_memory.pop(source_key)
             if staged_publications:
                 openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="published")
                 for source_key, _net in staged_publications:

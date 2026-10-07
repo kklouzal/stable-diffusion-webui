@@ -151,8 +151,9 @@ def test_mha_in_proj_lora_merges_in_float32(bf16_lora):
     assert torch.equal(mha.in_proj_weight, expected.to(torch.bfloat16))
 
 
-def test_oft_merges_into_bf16_layer(bf16_lora):
-    """OFT's float32 rotation used to meet the bf16 weight in einsum and raise (the network was skipped)."""
+@pytest.mark.parametrize("autocast", [False, True])
+def test_oft_merges_into_bf16_layer(bf16_lora, autocast):
+    """OFT's float32 rotation used to meet the bf16 weight in einsum and raise without autocast (layer skipped)."""
     networks = bf16_lora
     g = torch.Generator().manual_seed(5)
     layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
@@ -162,7 +163,7 @@ def test_oft_merges_into_bf16_layer(bf16_lora):
     net = _add_module(networks, _net(networks, "oft"), layer, {"oft_blocks": blocks, "alpha": torch.tensor(1.0)}, networks.network_oft.NetworkModuleOFT)
 
     networks._set_loaded_networks([net])
-    with _autocast(True):
+    with _autocast(autocast):
         networks.network_apply_weights(layer)
 
     q = blocks.double() - blocks.double().transpose(1, 2)
@@ -170,7 +171,8 @@ def test_oft_merges_into_bf16_layer(bf16_lora):
     r = (eye + q) @ torch.linalg.inv(eye - q)
     expected = torch.einsum("k n m, k n i -> k m i", r, base.double().reshape(2, 4, 8)).reshape(8, 8)
     assert networks.extra_network_lora.errors == {}
-    assert (layer.weight.double() - expected).abs().max() <= 2.0 ** -8 * expected.abs().max()
+    # float32 math rounded once: within half a bf16 ulp of the fp64 rotation (one ulp of slack for float32 inverse error)
+    assert ((layer.weight.double() - expected).abs() <= 2.0 ** -8 * expected.abs() + 1e-12).all()
     assert not torch.equal(layer.weight, base)
 
 

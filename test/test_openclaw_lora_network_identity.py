@@ -248,6 +248,24 @@ def test_repeated_requested_name_reuses_cache_despite_alias_insertion_order(lora
     assert second.dyn_dim == 9
 
 
+def test_in_memory_cache_evicts_least_recently_requested(lora_networks, monkeypatch):
+    networks = lora_networks
+    disks = {name: SimpleNamespace(filename=f"{name}.safetensors", shorthash="", read_hash=lambda: None) for name in "abc"}
+    monkeypatch.setattr(networks, "available_networks", disks, raising=False)
+    monkeypatch.setattr(networks, "available_network_aliases", disks, raising=False)
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: ("sha256", os.fspath(filename)))
+    parsed = []
+    monkeypatch.setattr(networks, "load_network", lambda name, on_disk: parsed.append(name) or SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={}))
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    monkeypatch.setattr(networks.shared.opts, "lora_in_memory_limit", 2, raising=False)
+
+    for names in (["a"], ["b"], ["a"], ["c"], ["a"]):  # "a" stays in use; "b" is the stale entry
+        networks.load_networks(names)
+
+    assert parsed == ["a", "b", "c"]
+    assert [key[0].rsplit("/", 1)[-1] for key in networks.networks_in_memory] == ["c.safetensors", "a.safetensors"]
+
+
 def test_alias_switch_reuses_source_tensors_and_multiplier_owner(lora_networks, monkeypatch):
     networks = lora_networks
     base, _module, tensor_payload = _base_network(networks)
