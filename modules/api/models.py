@@ -125,10 +125,12 @@ class PydanticModelGenerator:
         ]
 
         for fields in additional_fields:
+            # pydantic 1 made a field with a None default implicitly Optional; pydantic 2 does not, so an explicit null
+            # (e.g. "mask": null from upstream clients) was a 422 although None is the field's own default.
             self._model_def.append(ModelDef(
                 field=underscore(fields["key"]),
                 field_alias=fields["key"],
-                field_type=fields["type"],
+                field_type=Optional[fields["type"]] if fields["default"] is None else fields["type"],
                 field_value=fields["default"],
                 field_exclude=fields["exclude"] if "exclude" in fields else False,
                 field_title=fields.get("title"),
