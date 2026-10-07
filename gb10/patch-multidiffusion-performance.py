@@ -270,6 +270,36 @@ def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
 """,
         ),
     ],
+    "tile_methods/mixtureofdiffusers.py": [
+        (
+            "MD-W1 precompute",
+            r"""                self.custom_weights[bbox_id] *= self.rescale_factor[bbox.slicer]
+
+    @grid_bbox
+    def get_tile_weights(self) -> Tensor:
+""",
+            r"""                self.custom_weights[bbox_id] *= self.rescale_factor[bbox.slicer]
+        # gb10 (MD-W1): the grid tile weights are fixed for the request, so build them once here (one tile_h x tile_w
+        # fp32 map per grid tile) instead of once per tile per step. Same operands and op: bit-identical.
+        self.batched_tile_weights = [[self.tile_weights * self.rescale_factor[bbox.slicer] for bbox in bboxes] for bboxes in self.batched_bboxes]
+
+    @grid_bbox
+    def get_tile_weights(self) -> Tensor:
+""",
+        ),
+        (
+            "MD-W1 use",
+            # The upstream comment line ends with a space.
+            "                for i, bbox in enumerate(bboxes):\n"
+            "                    # This weights can be calcluated in advance, but will cost a lot of vram \n"
+            "                    # when you have many tiles. So we calculate it here.\n"
+            "                    w = self.tile_weights * self.rescale_factor[bbox.slicer]\n"
+            "                    self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :] * w\n",
+            r"""                for i, bbox in enumerate(bboxes):
+                    self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :] * self.batched_tile_weights[batch_id][i]
+""",
+        ),
+    ],
 }
 
 

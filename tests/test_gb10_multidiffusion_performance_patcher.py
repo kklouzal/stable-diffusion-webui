@@ -484,3 +484,61 @@ def test_tiled_vae_decode_with_sdp_attention_matches(md_pair, import_extension, 
     # One mid-block attention per tile (2 x 3 tiles), all through the 4-D helper.
     assert webui_stubs.calls["sdpa"] == [(4, None)] * 6
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+
+
+def fake_unet(x, t, cond):
+    """Deterministic stand-in for apply_model: depends on every per-tile input the delegate assembles, and on the
+    whole tile (its mean), so overlapping tiles disagree and the blend weights matter."""
+    text = cond["crossattn"].mean(dim=(1, 2)).view(-1, 1, 1, 1)
+    vector = cond["vector"].mean(dim=1).view(-1, 1, 1, 1)
+    tile_mean = x.mean(dim=(1, 2, 3)).view(-1, 1, 1, 1)
+    return torch.tanh(x * 1.3 + cond["c_concat"][:, :4] * 0.1 + text + vector * 0.5 + tile_mean * 2.0 + t.view(-1, 1, 1, 1) * 0.01)
+
+
+def make_mixture_of_diffusers(module, *, width, height, tile, overlap, tile_batch_size):
+    p = types.SimpleNamespace(sampler_name="Euler a", width=width, height=height, disable_extra_networks=True)
+    delegate = module.MixtureOfDiffusers(p, module.KDiffusionSampler())
+    delegate.init_grid_bbox(tile, tile, overlap, tile_batch_size)
+    delegate.init_done()
+    return delegate
+
+
+@pytest.mark.parametrize("width,height,tile,overlap,tile_batch_size", [
+    (1024, 768, 64, 16, 4),
+    (1000, 744, 48, 8, 3),   # latent 125x93: terminal tiles off the stride grid
+    (512, 512, 96, 8, 4),    # one tile clamped to the latent size
+])
+def test_mixture_of_diffusers_precomputed_tile_weights_are_bit_identical(md_pair, import_extension, webui_stubs, width, height, tile, overlap, tile_batch_size):
+    original, patched = md_pair
+    webui_stubs.shared.sd_model.apply_model_original_md = fake_unet
+    (old,) = import_extension(original, "tile_methods.mixtureofdiffusers")
+    (new,) = import_extension(patched, "tile_methods.mixtureofdiffusers")
+    before = make_mixture_of_diffusers(old, width=width, height=height, tile=tile, overlap=overlap, tile_batch_size=tile_batch_size)
+    after = make_mixture_of_diffusers(new, width=width, height=height, tile=tile, overlap=overlap, tile_batch_size=tile_batch_size)
+    assert [len(weights) for weights in after.batched_tile_weights] == [len(bboxes) for bboxes in after.batched_bboxes]
+
+    torch.manual_seed(8)
+    n, h, w = 2, height // 8, width // 8
+    cond = {"crossattn": torch.randn((n, 77, 32)), "vector": torch.randn((n, 16)), "c_concat": torch.randn((n, 5, h, w))}
+    for step in range(3):
+        webui_stubs.state.sampling_step = step
+        x = torch.randn((n, 4, h, w))
+        sigma = torch.full((n,), 10.0 / (step + 1))
+        expected = before.apply_model_hijack(x, sigma, dict(cond)).clone()
+        actual = after.apply_model_hijack(x, sigma, dict(cond)).clone()
+        assert after.x_buffer is not None  # the tiled path ran, not the full-size fallback
+        assert torch.equal(actual, expected)
+
+
+def test_mixture_of_diffusers_without_grid_tiles_precomputes_nothing(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    (new,) = import_extension(patched, "tile_methods.mixtureofdiffusers")
+    p = types.SimpleNamespace(sampler_name="Euler a", width=512, height=512, disable_extra_networks=True)
+    delegate = new.MixtureOfDiffusers(p, new.KDiffusionSampler())
+    # Region control without background drawing: no grid bboxes and no tile_weights attribute at all.
+    delegate.enable_custom_bbox = True
+    delegate.draw_background = False
+    delegate.custom_bboxes = [types.SimpleNamespace(blend_mode=new.BlendMode.FOREGROUND)]
+    delegate.init_done()
+    assert delegate.batched_tile_weights == []
+    assert not hasattr(delegate, "tile_weights")
