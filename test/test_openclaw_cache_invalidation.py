@@ -196,12 +196,12 @@ def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(mo
     p.image_mask = None
     p.latent_mask = None
 
-    batch_images = np.zeros((1, 3, 8, 8), dtype=np.float32)
+    key_images = [Image.new("RGB", (8, 8))]
 
     p.inpainting_mask_weight = 0.25
-    key_low = p._img2img_init_cache_key(batch_images, None, None, False, False)
+    key_low = p._img2img_init_cache_key(key_images, True, None, None, False, False)
     p.inpainting_mask_weight = 0.75
-    key_high = p._img2img_init_cache_key(batch_images, None, None, False, False)
+    key_high = p._img2img_init_cache_key(key_images, True, None, None, False, False)
 
     assert key_low != key_high
 
@@ -217,9 +217,9 @@ def test_img2img_init_cache_bypasses_masked_requests(monkeypatch):
     bypasses = []
     p._record_img2img_init_cache_bypass = bypasses.append
 
-    batch_images = np.zeros((1, 3, 8, 8), dtype=np.float32)
+    key_images = [Image.new("RGB", (8, 8))]
 
-    assert p._img2img_init_cache_key(batch_images, None, None, False, False) is None
+    assert p._img2img_init_cache_key(key_images, True, None, None, False, False) is None
     assert bypasses == ["masked_request"]
 
 

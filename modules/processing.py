@@ -112,21 +112,16 @@ def _resize_latent_mask(image, size, round=True):
 
 
 def _image_cache_fingerprint(image):
+    """Identify a PIL image by everything its pixel conversions read: mode, size, palette, transparency and raw bytes."""
     if image is None:
         return None
+    palette = image.getpalette() if image.mode in ("P", "PA") else None
     return (
-        getattr(image, "mode", None),
-        getattr(image, "size", None),
+        image.mode,
+        image.size,
+        tuple(palette) if palette is not None else None,
+        image.info.get("transparency"),
         hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest(),
-    )
-
-
-def _array_cache_fingerprint(array):
-    array = np.ascontiguousarray(array)
-    return (
-        tuple(array.shape),
-        str(array.dtype),
-        hashlib.blake2b(array.view(np.uint8), digest_size=16).hexdigest(),
     )
 
 
@@ -1867,7 +1862,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             return "latent_noise_fill_uses_seeded_random"
         return None
 
-    def _img2img_init_cache_key(self, batch_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections):
+    def _img2img_init_cache_key(self, key_images, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections):
+        """key_images are the raw init images when key_raw_images, else the prepared (flattened/resized) ones."""
         reason = self._img2img_init_cache_bypass_reason()
         if reason is not None:
             self._record_img2img_init_cache_bypass(reason)
@@ -1883,7 +1879,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", getattr(opts, "inpainting_mask_weight", None))
 
         return (
-            _array_cache_fingerprint(batch_images),
+            "raw" if key_raw_images else "prepared",
+            tuple(_image_cache_fingerprint(image) for image in key_images),
             _image_cache_fingerprint(image_mask),
             _image_cache_fingerprint(latent_mask),
             checkpoint_key,
@@ -2014,14 +2011,14 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         add_color_corrections = opts.img2img_color_correction and self.color_corrections is None
         if add_color_corrections:
             self.color_corrections = []
-        imgs = []
-        for img in self.init_images:
 
-            # Save init image
-            if opts.save_init_img:
-                self.init_img_hash = hashlib.md5(img.tobytes()).hexdigest()
-                images.save_image(img, path=opts.outdir_init_images, basename=None, forced_filename=self.init_img_hash, save_to_dirs=False, existing_info=img.info)
+        # Without a mask, and when resize_image cannot run an upscaler, the prepared image is a
+        # pure function of the raw init image and fields already in the init cache key, so the
+        # cache is checked before flatten/resize. Upscaler resizes depend on upscaler settings
+        # the key does not cover; those requests key on the prepared image instead.
+        key_raw_images = image_mask is None and (self.resize_mode == 3 or opts.upscaler_for_img2img in (None, "None"))
 
+        def prepare_init_image(img):
             image = images.flatten(img, opts.img2img_background_color)
 
             if crop_region is None and self.resize_mode != 3:
@@ -2047,13 +2044,19 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     if self.inpainting_fill == 0:
                         self.extra_generation_params["Masked content"] = 'fill'
 
-            if add_color_corrections:
-                self.color_corrections.append(setup_color_correction(image))
+            return image
 
-            imgs.append(_image_to_chw_float32_array(image))
+        imgs = []
+        for img in self.init_images:
+
+            # Save init image
+            if opts.save_init_img:
+                self.init_img_hash = hashlib.md5(img.tobytes()).hexdigest()
+                images.save_image(img, path=opts.outdir_init_images, basename=None, forced_filename=self.init_img_hash, save_to_dirs=False, existing_info=img.info)
+
+            imgs.append(img if key_raw_images else prepare_init_image(img))
 
         if len(imgs) == 1:
-            batch_images = np.expand_dims(imgs[0], axis=0)
             repeat_init_latent = self.batch_size > 1
             if self.overlay_images is not None:
                 self.overlay_images = self.overlay_images * self.batch_size
@@ -2063,7 +2066,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         elif len(imgs) <= self.batch_size:
             self.batch_size = len(imgs)
-            batch_images = np.array(imgs)
             repeat_init_latent = False
         else:
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
@@ -2073,7 +2075,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if image_mask is not None and self.inpainting_fill == 3:
             self.extra_generation_params["Masked content"] = 'latent nothing'
 
-        init_cache_key = self._img2img_init_cache_key(batch_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections)
+        init_cache_key = self._img2img_init_cache_key(imgs, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections)
         init_cache_started = time.perf_counter()
         cache_extra_generation_params = {
             key: self.extra_generation_params[key]
@@ -2082,6 +2084,18 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         }
         if self._restore_img2img_init_cache(init_cache_key):
             return
+
+        if key_raw_images:
+            imgs = [prepare_init_image(img) for img in imgs]
+
+        if add_color_corrections:
+            self.color_corrections = [setup_color_correction(image) for image in imgs]
+            if len(imgs) == 1:
+                self.color_corrections = self.color_corrections * self.batch_size
+
+        imgs = [_image_to_chw_float32_array(image) for image in imgs]
+        # A single image stays a strided view (its NHWC memory layout reaches the VAE unchanged).
+        batch_images = np.expand_dims(imgs[0], axis=0) if len(imgs) == 1 else np.array(imgs)
 
         image = torch.from_numpy(batch_images)
         image = image.to(shared.device, dtype=devices.dtype_vae)
