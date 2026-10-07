@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime
 import functools
 import pytz
@@ -8,11 +9,12 @@ import math
 import os
 from collections import namedtuple
 import re
+import struct
 
 import numpy as np
 import piexif
 import piexif.helper
-from PIL import Image, ImageFont, ImageDraw, ImageColor, PngImagePlugin, ImageOps
+from PIL import Image, ImageFont, ImageDraw, ImageColor, PngImagePlugin, ImageOps, ExifTags
 # pillow_avif needs to be imported somewhere in code for it to work
 import pillow_avif # noqa: F401
 import string
@@ -23,7 +25,7 @@ from modules import sd_samplers, shared, script_callbacks, errors
 from modules.paths_internal import roboto_ttf_file
 from modules.shared import opts
 
-LANCZOS = (Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)
+LANCZOS = Image.Resampling.LANCZOS
 
 
 def get_font(fontsize: int):
@@ -125,15 +127,17 @@ def combine_grid(grid):
     for y, h, row in grid.tiles:
         combined_row = Image.new("RGB", (grid.image_w, h))
         for x, w, tile in row:
-            if x == 0:
-                combined_row.paste(tile, (0, 0))
+            if x <= 0:
+                # First tile, nothing to blend with. x < 0 when the image is narrower than the tile (split_grid
+                # right-aligns it); blending its overlap strip into the empty row darkened the left edge.
+                combined_row.paste(tile, (x, 0))
                 continue
 
             combined_row.paste(tile.crop((0, 0, grid.overlap, h)), (x, 0), mask=mask_w)
             combined_row.paste(tile.crop((grid.overlap, 0, w, h)), (x + grid.overlap, 0))
 
-        if y == 0:
-            combined_image.paste(combined_row, (0, 0))
+        if y <= 0:
+            combined_image.paste(combined_row, (0, y))  # y < 0: image shorter than the tile, as for x above
             continue
 
         combined_image.paste(combined_row.crop((0, 0, combined_row.width, grid.overlap)), (0, y), mask=mask_h)
@@ -165,11 +169,16 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts, margin=0):
                 lines.append(word)
         return lines
 
+    def text_width(drawing, text, font):
+        bbox = drawing.multiline_textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0]
+
     def draw_texts(drawing, draw_x, draw_y, lines, initial_fnt, initial_fontsize):
         for line in lines:
             fnt = initial_fnt
             fontsize = initial_fontsize
-            while drawing.multiline_textsize(line.text, font=fnt)[0] > line.allowed_width and fontsize > 0:
+            # ImageDraw.multiline_textsize was removed in Pillow 10; Pillow fonts must be at least 1 pt
+            while text_width(drawing, line.text, fnt) > line.allowed_width and fontsize > 1:
                 fontsize -= 1
                 fnt = get_font(fontsize)
             drawing.multiline_text((draw_x, draw_y + line.size[1] / 2), line.text, font=fnt, fill=color_active if line.is_active else color_inactive, anchor="mm", align="center")
@@ -444,9 +453,9 @@ class FilenameGenerator:
 
 
     def hasprompt(self, *args):
-        lower = self.prompt.lower()
         if self.p is None or self.prompt is None:
             return None
+        lower = self.prompt.lower()
         outres = ""
         for arg in args:
             if arg != "":
@@ -564,6 +573,15 @@ def get_next_sequence_number(path, basename):
     return result + 1
 
 
+def truncate_to_fs_bytes(name, max_bytes):
+    """Longest prefix of name whose filesystem encoding fits in max_bytes; statvfs f_namemax counts bytes,
+    and a UTF-8 prompt can take up to 4 bytes per character. Never splits a character."""
+    name = name[:max_bytes]  # every character encodes to at least one byte
+    while len(os.fsencode(name)) > max_bytes:
+        name = name[:-1]
+    return name
+
+
 def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_pnginfo=None, pnginfo_section_name='parameters'):
     """
     Saves image to filename, including geninfo as text information for generation info.
@@ -594,7 +612,8 @@ def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_p
         if image.mode == 'RGBA':
             image = image.convert("RGB")
         elif image.mode == 'I;16':
-            image = image.point(lambda p: p * 0.0038910505836576).convert("RGB" if extension.lower() == ".webp" else "L")
+            # 65535 -> 255 (1/257); + 0.5 rounds to nearest, Pillow's I;16 point transform truncates
+            image = image.point(lambda p: p * 0.0038910505836576 + 0.5).convert("RGB" if extension.lower() == ".webp" else "L")
 
         image.save(filename, format=image_format, quality=opts.jpeg_quality, lossless=opts.webp_lossless)
 
@@ -721,7 +740,13 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
         """
         temp_file_path = f"{filename_without_extension}.tmp"
 
-        save_image_with_geninfo(image_to_save, info, temp_file_path, extension, existing_pnginfo=params.pnginfo, pnginfo_section_name=pnginfo_section_name)
+        try:
+            save_image_with_geninfo(image_to_save, info, temp_file_path, extension, existing_pnginfo=params.pnginfo, pnginfo_section_name=pnginfo_section_name)
+        except BaseException:
+            # e.g. piexif.insert fails after the pixels were written: do not leave a partial .tmp file behind
+            with contextlib.suppress(OSError):
+                os.remove(temp_file_path)
+            raise
 
         filename = filename_without_extension + extension
         if shared.opts.save_images_replace_action != "Replace":
@@ -736,8 +761,8 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     if hasattr(os, 'statvfs'):
         max_name_len = os.statvfs(save_dir).f_namemax
         directory, filename_without_extension = os.path.split(fullfn_without_extension)
-        max_basename_len = max_name_len - max(4, len(extension))
-        filename_without_extension = filename_without_extension[:max_basename_len]
+        max_basename_len = max_name_len - max(4, len(os.fsencode(extension)))
+        filename_without_extension = truncate_to_fs_bytes(filename_without_extension, max_basename_len)
         fullfn_without_extension = os.path.join(directory, filename_without_extension) if directory else filename_without_extension
         params.filename = fullfn_without_extension + extension
         fullfn = params.filename
@@ -788,24 +813,36 @@ IGNORED_INFO_KEYS = {
 }
 
 
+def exif_user_comment(exif_data) -> str | None:
+    """Decoded EXIF UserComment of untrusted EXIF bytes (as in Image.info["exif"]); None if absent or unreadable.
+
+    Parsed with Pillow, whose reads are bounded by the bytes actually present. piexif.load must not see
+    uploaded data: a crafted ~90-byte IFD count makes it allocate gigabytes, and bytes it does not recognize
+    are opened as a local file *path* (a WebP EXIF chunk naming a server-side JPEG leaked its UserComment).
+    """
+    exif = Image.Exif()
+    try:
+        exif.load(exif_data)
+        comment = exif.get_ifd(ExifTags.IFD.Exif).get(ExifTags.Base.UserComment)
+    except (SyntaxError, ValueError, OSError, TypeError, struct.error):  # not EXIF bytes, or a malformed IFD
+        return None
+
+    if not isinstance(comment, bytes):
+        return None
+
+    try:
+        return piexif.helper.UserComment.load(comment)
+    except ValueError:
+        return comment.decode('utf8', errors="ignore")
+
+
 def read_info_from_image(image: Image.Image) -> tuple[str | None, dict]:
     items = (image.info or {}).copy()
 
     geninfo = items.pop('parameters', None)
 
     if "exif" in items:
-        exif_data = items["exif"]
-        try:
-            exif = piexif.load(exif_data)
-        except OSError:
-            # memory / exif was not valid so piexif tried to read from a file
-            exif = None
-        exif_comment = (exif or {}).get("Exif", {}).get(piexif.ExifIFD.UserComment, b'')
-        try:
-            exif_comment = piexif.helper.UserComment.load(exif_comment)
-        except ValueError:
-            exif_comment = exif_comment.decode('utf8', errors="ignore")
-
+        exif_comment = exif_user_comment(items["exif"])
         if exif_comment:
             geninfo = exif_comment
     elif "comment" in items: # for gif
@@ -855,6 +892,10 @@ def image_data(data):
 def flatten(img, bgcolor):
     """replaces transparency with bgcolor (example: "#ffffff"), returning an RGB mode image with no transparency"""
 
+    if img.mode != "RGBA" and img.has_transparency_data:
+        # LA/PA/La/RGBa, and P/L/RGB with a "transparency" key (palette tRNS index, colour key, GIF)
+        img = img.convert("RGBA")
+
     if img.mode == "RGBA":
         background = Image.new('RGBA', img.size, bgcolor)
         background.paste(img, mask=img)
@@ -865,6 +906,7 @@ def flatten(img, bgcolor):
 
 def read(fp, **kwargs):
     image = Image.open(fp, **kwargs)
+    image.load()  # truncated/corrupt data must fail here; fix_image swallows errors, which deferred them to first use
     image = fix_image(image)
 
     return image
