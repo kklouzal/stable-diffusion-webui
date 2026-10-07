@@ -910,7 +910,9 @@ class SdModelData:
         self.sd_model = None
         self.loaded_sd_models = []
         self.was_loaded_at_least_once = False
-        self.lock = threading.Lock()
+        # Held for every model load: the first one (get_sd_model, e.g. on the startup load thread) and every
+        # reload_model_weights. Re-entrant because a load can reach get_sd_model again (shared.sd_model) on its thread.
+        self.lock = threading.RLock()
 
     def get_sd_model(self):
         if self.was_loaded_at_least_once:
@@ -1355,6 +1357,15 @@ def reuse_model_from_already_loaded(sd_model, checkpoint_info, timer):
 
 
 def reload_model_weights(sd_model=None, info=None, forced_reload=False):
+    """Load `info` (default: the selected checkpoint) into the model, reusing or replacing it; returns the model.
+
+    Serialized with every other model load by model_data.lock: a reload that ran while another load was in progress
+    (the startup load thread, a lazy first load) could build a second model and replace model_data.sd_model under it."""
+    with model_data.lock:
+        return _reload_model_weights(sd_model, info, forced_reload)
+
+
+def _reload_model_weights(sd_model, info, forced_reload):
     checkpoint_info = info or select_checkpoint()
 
     timer = Timer()

@@ -13,6 +13,7 @@ import gradio as gr
 
 from modules.api.models import *  # noqa:F403
 from modules.api import api
+from modules import call_queue
 
 from scripts import external_code, global_state
 from scripts.logging import logger
@@ -51,9 +52,16 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
     async def version():
         return {"version": external_code.get_api_version()}
 
+    # Plain def (threadpool): these wait for queue_lock and do file system or GPU work, which must not block the
+    # event loop.
     @app.get("/controlnet/model_list")
-    async def model_list(update: bool = True):
-        up_to_date_model_list = external_code.get_models(update=update)
+    def model_list(update: bool = True):
+        if update:
+            # rebuilds the model registry in place (global_state.update_cn_models), which a generation reads
+            with call_queue.queue_lock:
+                up_to_date_model_list = external_code.get_models(update=True)
+        else:
+            up_to_date_model_list = external_code.get_models(update=False)
         logger.debug(up_to_date_model_list)
         return {"model_list": up_to_date_model_list}
 
@@ -97,7 +105,7 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
         return {"control_net_unit_count": max_models_num}
 
     @app.post("/controlnet/detect")
-    async def detect(
+    def detect(
         controlnet_module: str = Body("none", title="Controlnet Module"),
         controlnet_input_images: List[str] = Body([], title="Controlnet Input Images"),
         controlnet_processor_res: int = Body(
@@ -148,6 +156,7 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
         images = []
         poses = []
 
+        input_arrays = []
         for i, input_image in enumerate(controlnet_input_images):
             img = external_code.to_base64_nparray(input_image)
             # Has mask.
@@ -161,33 +170,38 @@ def controlnet_api(_: gr.Blocks, app: FastAPI):
                     logger.warning(
                         f"Preprocessor {controlnet_module} does not accept mask. Mask ignored"
                     )
+            input_arrays.append(img)
 
-            class JsonAcceptor:
-                def __init__(self) -> None:
-                    self.value = None
+        class JsonAcceptor:
+            def __init__(self) -> None:
+                self.value = None
 
-                def accept(self, json_dict: dict) -> None:
-                    self.value = json_dict
+            def accept(self, json_dict: dict) -> None:
+                self.value = json_dict
 
-            json_acceptor = JsonAcceptor()
-            result = preprocessor.cached_call(
-                img,
-                resolution=unit.processor_res,
-                slider_1=unit.threshold_a,
-                slider_2=unit.threshold_b,
-                json_pose_callback=json_acceptor.accept,
-                low_vram=low_vram,
-            )
-            if preprocessor.returns_image:
-                images.append(encode_to_base64(result.display_images[0]))
-            else:
-                tensors.append(encode_tensor_to_base64(result.value))
+        # The preprocessor models and their result cache are the ones a generation's ControlNet units use, and
+        # unload() releases them: run between generations, never during one.
+        with call_queue.queue_lock:
+            for img in input_arrays:
+                json_acceptor = JsonAcceptor()
+                result = preprocessor.cached_call(
+                    img,
+                    resolution=unit.processor_res,
+                    slider_1=unit.threshold_a,
+                    slider_2=unit.threshold_b,
+                    json_pose_callback=json_acceptor.accept,
+                    low_vram=low_vram,
+                )
+                if preprocessor.returns_image:
+                    images.append(encode_to_base64(result.display_images[0]))
+                else:
+                    tensors.append(encode_tensor_to_base64(result.value))
 
-            if "openpose" in controlnet_module:
-                assert json_acceptor.value is not None
-                poses.append(json_acceptor.value)
+                if "openpose" in controlnet_module:
+                    assert json_acceptor.value is not None
+                    poses.append(json_acceptor.value)
 
-        preprocessor.unload()
+            preprocessor.unload()
 
         res = {"info": "Success"}
         if poses:

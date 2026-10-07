@@ -163,6 +163,50 @@ def test_ui_batch_upload_skips_unreadable_files_before_job_count():
     assert html_log == ""
 
 
+def test_failed_postprocessing_still_ends_the_extras_job():
+    from PIL import Image
+
+    run_postprocessing = load_run_postprocessing()
+    events = []
+
+    class FakeState:
+        interrupted = stopping_generation = skipped = False
+        job_count = textinfo = None
+
+        def begin(self, job):
+            events.append(("begin", job))
+
+        def nextjob(self):
+            pass
+
+        def end(self):
+            events.append(("end",))
+
+    def failing_run(pp, args, scripts_order=None):
+        raise RuntimeError("upscaler failed to load")
+
+    run_postprocessing.__globals__.update(
+        Image=Image,
+        os=__import__("os"),
+        devices=SimpleNamespace(torch_gc=lambda: None),
+        images=SimpleNamespace(read_info_from_image=lambda image: ("", {})),
+        scripts_postprocessing=SimpleNamespace(PostprocessedImage=lambda image: SimpleNamespace(image=image)),
+        scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=failing_run)),
+        opts=SimpleNamespace(outdir_samples="", outdir_extras_samples=""),
+        shared=SimpleNamespace(state=FakeState()),
+    )
+
+    try:
+        run_postprocessing(0, Image.new("RGB", (1, 1)), None, "", "", True, save_output=False)
+    except RuntimeError as e:
+        assert str(e) == "upscaler failed to load"
+    else:
+        raise AssertionError("the postprocessing failure was swallowed")
+
+    # Before, the exception skipped state.end(): /progress kept reporting an active "extras" job.
+    assert events == [("begin", "extras"), ("end",)]
+
+
 def test_run_extras_maps_upscale_first_to_postprocessing_order():
     run_extras = load_run_extras()
     observed = []

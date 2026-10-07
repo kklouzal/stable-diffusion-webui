@@ -7,7 +7,7 @@ import network
 import networks
 import lora_patches
 import extra_networks_lora
-from modules import script_callbacks, extra_networks, shared
+from modules import call_queue, script_callbacks, extra_networks, shared
 
 
 def before_ui():
@@ -55,9 +55,12 @@ def api_networks(_: gr.Blocks, app: FastAPI):
     async def get_loras():
         return [create_lora_json(obj) for obj in networks.available_networks.values()]
 
+    # Plain def (threadpool, off the event loop): the rescan rebuilds the registries a generation resolves its
+    # <lora:...> tags from in place, so it waits for queue_lock like the core refresh endpoints.
     @app.post("/sdapi/v1/refresh-loras")
-    async def refresh_loras():
-        return networks.list_available_networks()
+    def refresh_loras():
+        with call_queue.queue_lock:
+            return networks.list_available_networks()
 
 
 script_callbacks.on_app_started(api_networks)

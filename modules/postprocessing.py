@@ -3,7 +3,7 @@ import os
 import numpy as np
 from PIL import Image
 
-from modules import shared, images, devices, scripts, scripts_postprocessing, ui_common, infotext_utils
+from modules import shared, images, scripts, scripts_postprocessing, ui_common, infotext_utils
 from modules.shared import opts
 
 
@@ -60,111 +60,111 @@ def save_caption_sidecar(image_filename, caption, action):
 
 
 def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True, scripts_order=None):
-    devices.torch_gc()
-
+    # State.begin and State.end release cached device memory (devices.torch_gc) themselves.
     shared.state.begin(job="extras")
+    try:
+        outputs = []
 
-    outputs = []
+        def get_images(extras_mode, image, image_folder, input_dir):
+            if extras_mode == 1:
+                for img in image_folder:
+                    if isinstance(img, Image.Image):
+                        image = images.fix_image(img)
+                        fn = ''
+                    else:
+                        try:
+                            image = images.read(os.path.abspath(img.name))
+                        except Exception:
+                            continue
+                        fn = os.path.splitext(img.orig_name)[0]
+                    yield image, fn
+            elif extras_mode == 2:
+                assert not shared.cmd_opts.hide_ui_dir_config, '--hide-ui-dir-config option must be disabled'
+                assert input_dir, 'input directory not selected'
 
-    def get_images(extras_mode, image, image_folder, input_dir):
-        if extras_mode == 1:
-            for img in image_folder:
-                if isinstance(img, Image.Image):
-                    image = images.fix_image(img)
-                    fn = ''
-                else:
-                    try:
-                        image = images.read(os.path.abspath(img.name))
-                    except Exception:
-                        continue
-                    fn = os.path.splitext(img.orig_name)[0]
-                yield image, fn
-        elif extras_mode == 2:
-            assert not shared.cmd_opts.hide_ui_dir_config, '--hide-ui-dir-config option must be disabled'
-            assert input_dir, 'input directory not selected'
+                image_list = shared.listfiles(input_dir)
+                for filename in image_list:
+                    yield filename, filename
+            else:
+                assert image, 'image not selected'
+                yield image, None
 
-            image_list = shared.listfiles(input_dir)
-            for filename in image_list:
-                yield filename, filename
+        if extras_mode == 2 and output_dir != '':
+            outpath = output_dir
         else:
-            assert image, 'image not selected'
-            yield image, None
+            outpath = opts.outdir_samples or opts.outdir_extras_samples
 
-    if extras_mode == 2 and output_dir != '':
-        outpath = output_dir
-    else:
-        outpath = opts.outdir_samples or opts.outdir_extras_samples
+        infotext = ''
 
-    infotext = ''
+        data_to_process = list(get_images(extras_mode, image, image_folder, input_dir))
+        shared.state.job_count = len(data_to_process)
 
-    data_to_process = list(get_images(extras_mode, image, image_folder, input_dir))
-    shared.state.job_count = len(data_to_process)
+        for image_placeholder, name in data_to_process:
+            image_data: Image.Image
 
-    for image_placeholder, name in data_to_process:
-        image_data: Image.Image
+            shared.state.nextjob()
+            shared.state.textinfo = name
+            shared.state.skipped = False
 
-        shared.state.nextjob()
-        shared.state.textinfo = name
-        shared.state.skipped = False
-
-        if shared.state.interrupted or shared.state.stopping_generation:
-            break
-
-        if isinstance(image_placeholder, str):
-            try:
-                image_data = images.read(image_placeholder)
-            except Exception:
-                continue
-        else:
-            image_data = image_placeholder
-
-        image_data = to_postprocessing_mode(image_data)
-
-        parameters, existing_pnginfo = images.read_info_from_image(image_data)
-        if parameters:
-            existing_pnginfo["parameters"] = parameters
-
-        initial_pp = scripts_postprocessing.PostprocessedImage(image_data)
-
-        scripts.scripts_postproc.run(initial_pp, args, scripts_order=scripts_order)
-
-        if shared.state.skipped:
-            continue
-
-        used_suffixes = {}
-        for pp in [initial_pp, *initial_pp.extra_images]:
-            if shared.state.skipped:
+            if shared.state.interrupted or shared.state.stopping_generation:
                 break
 
-            suffix = pp.get_suffix(used_suffixes)
-
-            if opts.use_original_name_batch and name is not None:
-                basename = os.path.splitext(os.path.basename(name))[0]
-                forced_filename = basename + suffix
+            if isinstance(image_placeholder, str):
+                try:
+                    image_data = images.read(image_placeholder)
+                except Exception:
+                    continue
             else:
-                basename = ''
-                forced_filename = None
+                image_data = image_placeholder
 
-            infotext = ", ".join([k if k == v else f'{k}: {infotext_utils.quote(v)}' for k, v in pp.info.items() if v is not None])
+            image_data = to_postprocessing_mode(image_data)
 
-            if opts.enable_pnginfo:
-                # a dict per image: sharing existing_pnginfo gave every output of this input the last one's infotext
-                pp.image.info = {**existing_pnginfo, "postprocessing": infotext}
+            parameters, existing_pnginfo = images.read_info_from_image(image_data)
+            if parameters:
+                existing_pnginfo["parameters"] = parameters
 
-            shared.state.assign_current_image(pp.image)
+            initial_pp = scripts_postprocessing.PostprocessedImage(image_data)
 
-            if save_output:
-                fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=pp.image.info if opts.enable_pnginfo else existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
+            scripts.scripts_postproc.run(initial_pp, args, scripts_order=scripts_order)
 
-                if pp.caption:
-                    save_caption_sidecar(fullfn, pp.caption, shared.opts.postprocessing_existing_caption_action)
+            if shared.state.skipped:
+                continue
 
-            if extras_mode != 2 or show_extras_results:
-                outputs.append(pp.image)
+            used_suffixes = {}
+            for pp in [initial_pp, *initial_pp.extra_images]:
+                if shared.state.skipped:
+                    break
 
-    devices.torch_gc()
-    shared.state.end()
-    return outputs, ui_common.plaintext_to_html(infotext), ''
+                suffix = pp.get_suffix(used_suffixes)
+
+                if opts.use_original_name_batch and name is not None:
+                    basename = os.path.splitext(os.path.basename(name))[0]
+                    forced_filename = basename + suffix
+                else:
+                    basename = ''
+                    forced_filename = None
+
+                infotext = ", ".join([k if k == v else f'{k}: {infotext_utils.quote(v)}' for k, v in pp.info.items() if v is not None])
+
+                if opts.enable_pnginfo:
+                    # a dict per image: sharing existing_pnginfo gave every output of this input the last one's infotext
+                    pp.image.info = {**existing_pnginfo, "postprocessing": infotext}
+
+                shared.state.assign_current_image(pp.image)
+
+                if save_output:
+                    fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=pp.image.info if opts.enable_pnginfo else existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
+
+                    if pp.caption:
+                        save_caption_sidecar(fullfn, pp.caption, shared.opts.postprocessing_existing_caption_action)
+
+                if extras_mode != 2 or show_extras_results:
+                    outputs.append(pp.image)
+
+        return outputs, ui_common.plaintext_to_html(infotext), ''
+    finally:
+        # a failed input (e.g. an upscaler that cannot load) must not leave the "extras" job active
+        shared.state.end()
 
 
 def run_extras(extras_mode, resize_mode, image, image_folder, input_dir, output_dir, show_extras_results, gfpgan_visibility, codeformer_visibility, codeformer_weight, upscaling_resize, upscaling_resize_w, upscaling_resize_h, upscaling_crop, extras_upscaler_1, extras_upscaler_2, extras_upscaler_2_visibility, upscale_first: bool, save_output: bool = True, max_side_length: int = 0):
