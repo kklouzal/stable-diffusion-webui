@@ -13,9 +13,8 @@ class LCMCompVisDenoiser(DiscreteEpsDDPMDenoiser):
         original_timesteps = 50     # LCM Original Timesteps (default=50, for current version of LCM)
         self.skip_steps = timesteps // original_timesteps
 
-        alphas_cumprod_valid = torch.zeros((original_timesteps), dtype=torch.float32, device=model.device)
-        for x in range(original_timesteps):
-            alphas_cumprod_valid[original_timesteps - 1 - x] = model.alphas_cumprod[timesteps - 1 - x * self.skip_steps]
+        # The LCM timesteps skip_steps - 1, 2 * skip_steps - 1, ..., timesteps - 1, ascending.
+        alphas_cumprod_valid = model.alphas_cumprod[self.skip_steps - 1:timesteps:self.skip_steps].to(dtype=torch.float32)
 
         super().__init__(model, alphas_cumprod_valid, quantize=None)
 
@@ -74,9 +73,8 @@ def sample_lcm(model, x, sigmas, extra_args=None, callback=None, disable=None, n
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
 
-        x = denoised
-        if sigmas[i + 1] > 0:
-            x += sigmas[i + 1] * noise_sampler(sigmas[i], sigmas[i + 1])
+        # Out of place: `denoised` is the tensor the model/CFG callbacks returned and was handed to `callback`.
+        x = denoised + sigmas[i + 1] * noise_sampler(sigmas[i], sigmas[i + 1]) if sigmas[i + 1] > 0 else denoised
     return x
 
 
