@@ -1,43 +1,41 @@
 import torch
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Callable
 
 
+# IDAttnProcessor2_0 of https://github.com/ToTheBeginning/PuLID (pulid/attention_processor.py).
 @dataclass
 class PuLIDAttnSetting:
     num_zero: int = 0
     ortho: bool = False
     ortho_v2: bool = False
 
+    def append_zero_tokens(self, id_embedding: torch.Tensor) -> torch.Tensor:
+        """The id embedding (N, T, C) followed by num_zero zero tokens, as projected by id_to_k/id_to_v."""
+        if self.num_zero == 0:
+            return id_embedding
+        zero_tensor = torch.zeros(
+            (id_embedding.size(0), self.num_zero, id_embedding.size(-1)),
+            dtype=id_embedding.dtype,
+            device=id_embedding.device,
+        )
+        return torch.cat((id_embedding, zero_tensor), dim=1)
+
     def eval(
         self,
         hidden_states: torch.Tensor,
         query: torch.Tensor,
-        id_embedding: torch.Tensor,
+        id_key: torch.Tensor,
+        id_value: torch.Tensor,
         attn_heads: int,
         head_dim: int,
-        id_to_k: Callable[[torch.Tensor], torch.Tensor],
-        id_to_v: Callable[[torch.Tensor], torch.Tensor],
     ):
+        """hidden_states: the cross-attention output (B, L, heads * head_dim) before to_out, which the
+        orthogonal modes project the id attention against; query: (B, heads, L, head_dim); id_key/id_value:
+        the projected id embedding with its zero tokens (B, T + num_zero, heads * head_dim) in the query's dtype.
+        Returns the term to add to hidden_states (before the id scale)."""
         assert hidden_states.ndim == 3
         batch_size, sequence_length, inner_dim = hidden_states.shape
-
-        if self.num_zero == 0:
-            id_key = id_to_k(id_embedding).to(query.dtype)
-            id_value = id_to_v(id_embedding).to(query.dtype)
-        else:
-            zero_tensor = torch.zeros(
-                (id_embedding.size(0), self.num_zero, id_embedding.size(-1)),
-                dtype=id_embedding.dtype,
-                device=id_embedding.device,
-            )
-            id_key = id_to_k(torch.cat((id_embedding, zero_tensor), dim=1)).to(
-                query.dtype
-            )
-            id_value = id_to_v(torch.cat((id_embedding, zero_tensor), dim=1)).to(
-                query.dtype
-            )
 
         id_key = id_key.view(batch_size, -1, attn_heads, head_dim).transpose(1, 2)
         id_value = id_value.view(batch_size, -1, attn_heads, head_dim).transpose(1, 2)
