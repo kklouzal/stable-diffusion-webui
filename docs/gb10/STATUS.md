@@ -4,7 +4,17 @@
 
 Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch base, keeping the repo reviewable, the NGC-tuned framework stack protected, and the host-mounted user-data layout intact.
 
-## Current status (2026-09-25)
+## Current status (2026-10-07)
+
+- production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `local/gb10-a1111:deploy5-293d3e2c` (`sha256:59626c7c...`), built from `latest` @293d3e2c
+- contains the 2026-10-06 static performance pass and its fixes (`docs/gb10/notes/performance-static-pass-2026-10-06.md`), plus float32 SDXL size/aesthetic conditioning and UNet/ControlNet timesteps (intentional output change) and no ControlNet image echo in API responses
+- rollback image: `local/gb10-a1111:pre-perf-20261006` (`sha256:7f954f2f...`, the 2026-09-27 deploy4 build); roll back with `IMAGE_TAG=local/gb10-a1111:pre-perf-20261006 gb10/run.sh`
+- verification at deploy: CPU test suites without new failures, GPU unit tests for the UNet/attention/graph changes, API startup and read-only endpoint smoke; no end-to-end generation was run before deploy (left to the operator)
+- dependency drift from the one-time re-resolve (BuildKit cache was pruned 2026-10-04): transformers 5.17.0 -> 5.19.0, gitpython 3.1.62 -> 3.2.0, numba 0.67.0 -> 0.68.0, llvmlite 0.49.0 -> 0.50.0, mslk 2026.9.26 -> 2026.10.7 (same pinned commit, rebuilt), plus 10 patch-level indirect bumps; NGC base layers identical
+- app-only builds now reuse the dependency closure (the wheelbuilder no longer copies the app source)
+
+## Status as of 2026-09-25
+
 
 - production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `sha256:2240717e...`, built from commit `fca55394` on `latest`
 - rollback image: `local/gb10-a1111:pre-deps-20260925` (`sha256:87340a8f...`, the 2026-09-06 build plus hot-patch layers)
