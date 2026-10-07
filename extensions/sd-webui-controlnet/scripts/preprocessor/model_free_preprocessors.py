@@ -9,6 +9,7 @@ from annotator.util import HWC3
 
 
 class PreprocessorNone(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="none")
         self.sorting_priority = 10
@@ -28,6 +29,7 @@ class PreprocessorNone(Preprocessor):
 
 
 class PreprocessorCanny(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="canny")
         self.tags = ["Canny"]
@@ -65,6 +67,7 @@ class PreprocessorCanny(Preprocessor):
 
 
 class PreprocessorInvert(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="invert")
         self._label = "invert (from white bg & black line)"
@@ -90,6 +93,7 @@ class PreprocessorInvert(Preprocessor):
 
 
 class PreprocessorBlurGaussian(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="blur_gaussian")
         self.slider_1 = PreprocessorParameter(
@@ -114,6 +118,7 @@ class PreprocessorBlurGaussian(Preprocessor):
 
 
 class PreprocessorScribbleXdog(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="scribble_xdog")
         self.slider_1 = PreprocessorParameter(

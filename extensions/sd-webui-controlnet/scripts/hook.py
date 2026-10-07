@@ -6,6 +6,8 @@ from functools import partial
 from typing import Optional, Any, List
 
 from scripts.logging import logger
+from scripts.controlnet_lllite import clear_all_lllite
+from scripts.ipadapter.plugable_ipadapter import clear_all_ip_adapter
 from scripts.enums import (
     ControlModelType,
     AutoMachine,
@@ -718,7 +720,9 @@ class UnetHook(nn.Module):
                     if mask_latent.shape[0] != batch_size:
                         mask_latent = torch.cat([mask_latent.clone() for _ in range(batch_size)], dim=0)
                     param.used_hint_inpaint_hijack = torch.cat([mask_latent, masked_latent], dim=1)
-                    param.used_hint_inpaint_hijack.to(x.dtype).to(x.device)
+                param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(
+                    device=x.device, dtype=x.dtype
+                )
                 x = torch.cat([x[:, :4, :, :], param.used_hint_inpaint_hijack], dim=1)
 
             # vram
@@ -1112,6 +1116,12 @@ class UnetHook(nn.Module):
 
     def restore(self):
         scripts.script_callbacks.remove_callbacks_for_function(self.guidance_schedule_handler)
+        clear_all_lllite()
+        clear_all_ip_adapter()
+        for param in self.control_params or []:
+            release = getattr(getattr(param, "control_model", None), "release_request_state", None)
+            if callable(release):
+                release()
 
         model = self.model
         if model is not None and getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token:

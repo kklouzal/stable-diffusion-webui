@@ -1,6 +1,7 @@
 import itertools
 import torch
 import math
+from threading import RLock
 from typing import Union, Dict, Optional, Callable
 
 from .pulid_attn import PuLIDAttnSetting
@@ -52,17 +53,20 @@ def attn_forward_hacked(self, x, context=None, **kwargs):
 
 all_hacks = {}
 current_model = None
+_all_hacks_lock = RLock()
 
 
 def hack_blk(block, function, type):
-    if not hasattr(block, "ipadapter_hacks"):
-        block.ipadapter_hacks = []
+    with _all_hacks_lock:
+        if not hasattr(block, "ipadapter_hacks"):
+            block.ipadapter_hacks = []
 
-    if len(block.ipadapter_hacks) == 0:
-        all_hacks[block] = block.forward
-        block.forward = attn_forward_hacked.__get__(block, type)
+        if len(block.ipadapter_hacks) == 0:
+            all_hacks[block] = block.forward
+            block.forward = attn_forward_hacked.__get__(block, type)
+            block._controlnet_ipadapter_owner = all_hacks
 
-    block.ipadapter_hacks.append(function)
+        block.ipadapter_hacks.append(function)
     return
 
 
@@ -83,11 +87,14 @@ def set_model_attn2_replace(
 
 def clear_all_ip_adapter():
     global all_hacks, current_model
-    for k, v in all_hacks.items():
-        k.forward = v
-        k.ipadapter_hacks = []
-    all_hacks = {}
-    current_model = None
+    with _all_hacks_lock:
+        owned, all_hacks = all_hacks, {}
+        current_model = None
+        for k, v in owned.items():
+            if getattr(k, "_controlnet_ipadapter_owner", None) is owned:
+                k.forward = v
+                k.ipadapter_hacks = []
+                del k._controlnet_ipadapter_owner
     return
 
 
@@ -99,6 +106,7 @@ class PlugableIPAdapter(torch.nn.Module):
         self.dtype = None
         self.weight: Union[float, Dict[int, float]] = 1.0
         self.cache = None
+        self.image_emb = None
         self.p_start = 0.0
         self.p_end = 1.0
         self.latent_width: int = 0
@@ -108,6 +116,13 @@ class PlugableIPAdapter(torch.nn.Module):
 
     def reset(self):
         self.cache = {}
+
+    def release_request_state(self):
+        self.reset()
+        self.image_emb = None
+        self.effective_region_mask = None
+        self.latent_width = self.latent_height = 0
+        self.pulid_attn_setting = None
 
     @torch.no_grad()
     def hook(

@@ -1,6 +1,7 @@
 # https://github.com/kohya-ss/ControlNet-LLLite-ComfyUI/blob/main/node_control_net_lllite.py
 
 import re
+from threading import RLock
 import torch
 
 
@@ -101,14 +102,18 @@ class LLLiteModule(torch.nn.Module):
 
 
 all_hack = {}
+_all_hack_lock = RLock()
 
 
 def clear_all_lllite():
     global all_hack
-    for k, v in all_hack.items():
-        k.forward = v
-        k.lllite_list = []
-    all_hack = {}
+    with _all_hack_lock:
+        owned, all_hack = all_hack, {}
+        for k, v in owned.items():
+            if getattr(k, "_controlnet_lllite_owner", None) is owned:
+                k.forward = v
+                k.lllite_list = []
+                del k._controlnet_lllite_owner
     return
 
 
@@ -166,34 +171,37 @@ class PlugableControlLLLite(torch.nn.Module):
         for module in self.modules.values():
             module.set_cond_image(cond_image)
 
-        for k, v in self.modules.items():
-            k = k.replace('middle_block', 'middle_blocks_0')
-            match = re.match("lllite_unet_(.*)_blocks_(.*)_1_transformer_blocks_(.*)_(.*)_to_(.*)", k, re.M | re.I)
-            assert match, 'Failed to load ControlLLLite!'
-            root = match.group(1)
-            block = match.group(2)
-            block_number = match.group(3)
-            attn_name = match.group(4)
-            proj_name = match.group(5)
-            if root == 'input':
-                b = model.input_blocks[int(block)][1].transformer_blocks[int(block_number)]
-            elif root == 'output':
-                b = model.output_blocks[int(block)][1].transformer_blocks[int(block_number)]
-            else:
-                b = model.middle_block[1].transformer_blocks[int(block_number)]
-            b = getattr(b, attn_name, None)
-            assert b is not None, 'Failed to load ControlLLLite!'
-            b = getattr(b, 'to_' + proj_name, None)
-            assert b is not None, 'Failed to load ControlLLLite!'
+        with _all_hack_lock:
+            owner = all_hack
+            for k, v in self.modules.items():
+                k = k.replace('middle_block', 'middle_blocks_0')
+                match = re.match("lllite_unet_(.*)_blocks_(.*)_1_transformer_blocks_(.*)_(.*)_to_(.*)", k, re.M | re.I)
+                assert match, 'Failed to load ControlLLLite!'
+                root = match.group(1)
+                block = match.group(2)
+                block_number = match.group(3)
+                attn_name = match.group(4)
+                proj_name = match.group(5)
+                if root == 'input':
+                    b = model.input_blocks[int(block)][1].transformer_blocks[int(block_number)]
+                elif root == 'output':
+                    b = model.output_blocks[int(block)][1].transformer_blocks[int(block_number)]
+                else:
+                    b = model.middle_block[1].transformer_blocks[int(block_number)]
+                b = getattr(b, attn_name, None)
+                assert b is not None, 'Failed to load ControlLLLite!'
+                b = getattr(b, 'to_' + proj_name, None)
+                assert b is not None, 'Failed to load ControlLLLite!'
 
-            if not hasattr(b, 'lllite_list'):
-                b.lllite_list = []
+                if not hasattr(b, 'lllite_list'):
+                    b.lllite_list = []
 
-            if len(b.lllite_list) == 0:
-                all_hack[b] = b.forward
-                b.forward = self.get_hacked_forward(original_forward=b.forward, model=model, blk=b)
+                if len(b.lllite_list) == 0:
+                    all_hack[b] = b.forward
+                    b.forward = self.get_hacked_forward(original_forward=b.forward, model=model, blk=b)
+                    b._controlnet_lllite_owner = owner
 
-            b.lllite_list.append((weight, start, end, v))
+                b.lllite_list.append((weight, start, end, v))
         return
 
     def get_hacked_forward(self, original_forward, model, blk):

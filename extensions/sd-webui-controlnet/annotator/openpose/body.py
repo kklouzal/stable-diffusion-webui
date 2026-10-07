@@ -62,7 +62,7 @@ class Body(object):
             paf = paf[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
             paf = util.smart_resize(paf, (oriImg.shape[0], oriImg.shape[1]))
 
-            heatmap_avg += heatmap_avg + heatmap / len(multiplier)
+            heatmap_avg += heatmap / len(multiplier)
             paf_avg += + paf / len(multiplier)
 
         all_peaks = []

@@ -198,8 +198,8 @@ class _ReachedControlNetForward(Exception):
 
 
 class _ProbeParam:
-    """Stand-in ControlParams: any attribute read beyond what hook() inspects
-    means the wrapper entered ControlNet's forward path."""
+    """Stand-in ControlParams: any attribute read beyond what hook()/restore()
+    inspect means the wrapper entered ControlNet's forward path."""
     control_model_type = None
     control_model = None
 
@@ -273,8 +273,15 @@ def _install_hook_import_stubs():
     ipadapter_pkg = types.ModuleType("scripts.ipadapter")
     ipadapter_model = types.ModuleType("scripts.ipadapter.ipadapter_model")
     ipadapter_model.ImageEmbed = object
+    plugable_ipadapter = types.ModuleType("scripts.ipadapter.plugable_ipadapter")
+    plugable_ipadapter.clear_all_ip_adapter = lambda: None
     sys.modules["scripts.ipadapter"] = ipadapter_pkg
     sys.modules["scripts.ipadapter.ipadapter_model"] = ipadapter_model
+    sys.modules["scripts.ipadapter.plugable_ipadapter"] = plugable_ipadapter
+
+    lllite_mod = types.ModuleType("scripts.controlnet_lllite")
+    lllite_mod.clear_all_lllite = lambda: None
+    sys.modules["scripts.controlnet_lllite"] = lllite_mod
 
     sparsectrl_mod = types.ModuleType("scripts.controlnet_sparsectrl")
     sparsectrl_mod.SparseCtrl = object
