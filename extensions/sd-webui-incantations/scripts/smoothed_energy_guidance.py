@@ -1,6 +1,7 @@
 import logging
 import time
 from os import environ
+import functools
 import math
 
 import modules.scripts as scripts
@@ -48,19 +49,25 @@ class SEGStateParams:
                 self.openclaw_extension_timings = {}
 
 
-def _blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, blur_fn):
-        """Blur the legacy SEG tail half, preserving tuned GB10 generation behavior."""
+def _blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, kernel_size, sigma, is_inf_blur):
+        """Blur the legacy SEG tail half, preserving tuned GB10 generation behavior.
+
+        output is the to_q result (batch, H*W, heads*head_dim) with seq index h*W + w.
+        """
         output_batch = output.shape[0]
         half_batch = output_batch // 2
-        seq_len = downscale_h * downscale_w
         q_passthrough, q_blur = output.split(half_batch, dim=0)
-        q_blur = q_blur.view(half_batch, -1, heads, head_dim).transpose(1, 2)
-        q_blur = q_blur.permute(0, 1, 3, 2).reshape(
-                half_batch * heads, head_dim, downscale_h, downscale_w
-        )
-        q_blur = blur_fn(q_blur)
-        q_blur = q_blur.reshape(half_batch, heads, head_dim, seq_len)
-        q_blur = q_blur.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
+        if is_inf_blur:
+                seq_len = downscale_h * downscale_w
+                q_blur = q_blur.view(half_batch, -1, heads, head_dim).transpose(1, 2)
+                q_blur = q_blur.permute(0, 1, 3, 2).reshape(
+                        half_batch * heads, head_dim, downscale_h, downscale_w
+                )
+                q_blur = gaussian_blur_inf(q_blur, 1.0, sigma)
+                q_blur = q_blur.reshape(half_batch, heads, head_dim, seq_len)
+                q_blur = q_blur.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
+        else:
+                q_blur = gaussian_blur_queries(q_blur, downscale_h, downscale_w, kernel_size, sigma)
         return torch.cat((q_passthrough, q_blur), dim=0)
 
 
@@ -234,18 +241,15 @@ class SEGExtensionScript(UIWrapper):
                                 )
                                 return
 
-                        def blur_fn(q):
-                                if is_inf_blur:
-                                        return gaussian_blur_inf(q, 1.0, blur_sigma_exp)
-                                return gaussian_blur_2d(q, kernel_size, blur_sigma_exp)
-
                         return _blur_seg_cond_queries(
                                 output,
                                 heads=h,
                                 head_dim=head_dim,
                                 downscale_h=downscale_h,
                                 downscale_w=downscale_w,
-                                blur_fn=blur_fn,
+                                kernel_size=kernel_size,
+                                sigma=blur_sigma_exp,
+                                is_inf_blur=is_inf_blur,
                         )
 
                 # Create hooks and keep RemovableHandles so cleanup does not need
@@ -306,31 +310,45 @@ class SEGExtensionScript(UIWrapper):
 
 
 # Gaussian blur
-# taken from https://github.com/SusungHong/SEG-SDXL/blob/master/pipeline_seg.py
-_GAUSSIAN_KERNEL_CACHE = {}
+# Separable form of the reflect-padded depthwise blur in
+# https://github.com/SusungHong/SEG-SDXL/blob/master/pipeline_seg.py
+@functools.lru_cache(maxsize=16)
+def _gaussian_blur_operator(n, kernel_size, sigma, device):
+        """(n, n) fp32 matrix A with A @ x == 1-D Gaussian conv of F.pad(x, mode='reflect') along x's first axis.
+
+        Built by blurring the identity, so taps that reflect onto the same source
+        pixel are summed exactly as in the padded convolution. The tensor is
+        shared by the cache; callers must not mutate it.
+        """
+        ksize_half = (kernel_size - 1) * 0.5
+        x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, dtype=torch.float32)
+        pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+        taps = pdf / pdf.sum()
+        pad = kernel_size // 2
+        unit_pixels = F.pad(torch.eye(n, dtype=torch.float32).unsqueeze(1), [pad, pad], mode="reflect")
+        # Row j of the conv output is the response to unit pixel j, i.e. column j of A.
+        return F.conv1d(unit_pixels, taps.view(1, 1, kernel_size)).squeeze(1).T.contiguous().to(device)
 
 
-def gaussian_blur_2d(img, kernel_size, sigma):
-        min_spatial = min(img.shape[-2:])
-        max_reflect_kernel = min_spatial - (min_spatial % 2 - 1)
-        kernel_size = min(kernel_size, max_reflect_kernel)
-        channels = img.shape[-3]
-        key = (img.device, img.dtype, channels, kernel_size, float(sigma))
-        kernel2d = _GAUSSIAN_KERNEL_CACHE.get(key)
-        if kernel2d is None:
-                ksize_half = (kernel_size - 1) * 0.5
-                x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=img.device, dtype=torch.float32)
-                pdf = torch.exp(-0.5 * (x / sigma).pow(2))
-                x_kernel = (pdf / pdf.sum()).to(dtype=img.dtype)
-                base_kernel = torch.mm(x_kernel[:, None], x_kernel[None, :])
-                kernel2d = base_kernel.expand(channels, 1, base_kernel.shape[0], base_kernel.shape[1]).contiguous()
-                _GAUSSIAN_KERNEL_CACHE[key] = kernel2d
+def gaussian_blur_queries(q, height, width, kernel_size, sigma):
+        """Reflect-padded Gaussian blur of (batch, height*width, channels) queries over their (height, width) grid.
 
-        padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
-        img = F.pad(img, padding, mode="reflect")
-        img = F.conv2d(img, kernel2d, groups=channels)
-
-        return img
+        Same math as the reference k x k outer-product depthwise conv, done as two
+        small GEMMs on the native query layout without permute copies. Taps and
+        accumulation are fp32, where the reference rounded its 2-D taps to the
+        query dtype; with TF32 matmul (devices.enable_tf32) the taps still keep
+        more mantissa bits than bf16.
+        """
+        min_spatial = min(height, width)
+        kernel_size = min(kernel_size, min_spatial - (min_spatial % 2 - 1))
+        blur_h = _gaussian_blur_operator(height, kernel_size, float(sigma), q.device)
+        blur_w = _gaussian_blur_operator(width, kernel_size, float(sigma), q.device)
+        batch, _, channels = q.shape
+        # Autocast would otherwise run these matmuls in bf16, rounding the taps and the intermediate.
+        with torch.autocast(q.device.type, enabled=False):
+                q_blur = blur_h @ q.float().reshape(batch, height, width * channels)
+                q_blur = blur_w @ q_blur.view(batch * height, width, channels)
+        return q_blur.view(batch, height * width, channels).to(q.dtype)
 
 
 def gaussian_blur_inf(img, kernel_size, sigma):

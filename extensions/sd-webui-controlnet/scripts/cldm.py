@@ -382,32 +382,45 @@ class ControlNet(nn.Module):
     def make_zero_conv(self, channels):
         return TimestepEmbedSequential(zero_module(conv_nd(self.dims, channels, channels, 1, padding=0)))
 
-    def forward(self, x, hint, timesteps, context, y=None, control_type: List[int] = None, **kwargs):
-        original_type = x.dtype
+    def compute_guided_hint(self, hint, control_type: List[int] = None):
+        """Hint embedding added after the first input block.
 
-        x = x.to(self.dtype)
-        hint = hint.to(self.dtype)
-        timesteps = timesteps.to(self.dtype)
-        context = context.to(self.dtype)
-
-        if y is not None:
-            y = y.to(self.dtype)
-
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(self.dtype)
-        emb = self.time_embed(t_emb)
-
-        guided_hint = None
+        A function of the hint and the union control types only: the hint block is convolutions and SiLU,
+        which TimestepEmbedSequential calls without emb/context, and the union merge mixes per-type task
+        embeddings. Callers may compute it once per hint and pass it to forward as ``guided_hint``.
+        """
+        hint = hint.to(devices.dtype_unet)
         if self.control_add_embedding is not None:
             assert control_type is not None
-
-            emb += self.control_add_embedding(control_type, emb.dtype, emb.device)
             if len(control_type) > 0:
                 if len(hint.shape) < 5:
                     hint = hint.unsqueeze(dim=0)
-                guided_hint = self.union_controlnet_merge(hint, control_type, emb, context)
+                return self.union_controlnet_merge(hint, control_type, None, None)
+        return self.input_hint_block(hint, None, None)
+
+    def forward(self, x, hint, timesteps, context, y=None, control_type: List[int] = None, guided_hint=None, **kwargs):
+        original_type = x.dtype
+        # Compute in the UNet dtype the weights are converted to when the model is built
+        # (controlnet_model_guess); self.dtype is only the construction dtype and stays float32 under
+        # bfloat16, which made every input an fp32 copy that autocast cast back per layer.
+        dtype = devices.dtype_unet
+
+        x = x.to(dtype)
+        timesteps = timesteps.to(dtype)
+        context = context.to(dtype)
+
+        if y is not None:
+            y = y.to(dtype)
+
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(dtype)
+        emb = self.time_embed(t_emb)
+
+        if self.control_add_embedding is not None:
+            assert control_type is not None
+            emb += self.control_add_embedding(control_type, emb.dtype, emb.device)
 
         if guided_hint is None:
-            guided_hint = self.input_hint_block(hint, emb, context)
+            guided_hint = self.compute_guided_hint(hint, control_type)
 
         outs = []
 

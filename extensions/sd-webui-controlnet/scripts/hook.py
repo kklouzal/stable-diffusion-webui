@@ -17,9 +17,9 @@ from scripts.enums import (
 )
 from scripts.ipadapter.ipadapter_model import ImageEmbed
 from scripts.controlnet_sparsectrl import SparseCtrl
-from modules import devices, lowvram, shared, scripts
+from modules import devices, lowvram, shared, scripts, sd_unet_row_memo
 
-from ldm.modules.diffusionmodules.util import timestep_embedding, make_beta_schedule
+from ldm.modules.diffusionmodules.util import make_beta_schedule
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
@@ -417,7 +417,7 @@ class UnetHook(nn.Module):
         self._warned_outside_sampling = False
 
     @staticmethod
-    def call_vae_using_process(p, x, batch_size=None, mask=None):
+    def call_vae_using_process(p, x, mask=None):
         vae_cache = getattr(p, 'controlnet_vae_cache', None)
         if vae_cache is None:
             vae_cache = TorchCache()
@@ -454,8 +454,6 @@ class UnetHook(nn.Module):
                 vae_cache.set(x, vae_output)
                 logger.info(f'ControlNet used {str(devices.dtype_vae)} VAE to encode {vae_output.shape}.')
             latent = vae_output
-            if batch_size is not None and latent.shape[0] != batch_size:
-                latent = torch.cat([latent.clone() for _ in range(batch_size)], dim=0)
             latent = latent.type(devices.dtype_unet)
             return latent
         except Exception as e:
@@ -504,7 +502,78 @@ class UnetHook(nn.Module):
             finally:
                 outer.sampling_active = previously_active
 
-        def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+        # Control models this hook already placed on the device (outside lowvram nothing moves them back
+        # while the hook is active) and the timestep frequencies uploaded per device.
+        models_on_device = {}
+        timestep_freqs = {}
+
+        def unet_timestep_embedding(timesteps, dim, max_period=10000):
+            """ldm.modules.diffusionmodules.util.timestep_embedding without its per-call host round trip.
+
+            Same values: the frequencies are computed on the CPU exactly as there, but uploaded once per
+            device instead of a pageable host-to-device copy (a stream sync) on every forward.
+            """
+            freqs = timestep_freqs.get((dim, max_period, timesteps.device))
+            if freqs is None:
+                import math
+                half = dim // 2
+                freqs = torch.exp(
+                    -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+                ).to(device=timesteps.device)
+                timestep_freqs[(dim, max_period, timesteps.device)] = freqs
+            args = timesteps[:, None].float() * freqs[None]
+            embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+            if dim % 2:
+                embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            return embedding
+
+        def batch_rows(t, rows):
+            """Cached hint-derived tensors keep their own rows; expand a single row to the call's batch."""
+            if t.shape[0] == rows:
+                return t
+            if t.shape[0] == 1:
+                return t.expand(rows, *t.shape[1:])
+            raise RuntimeError(f"ControlNet cached tensor has {t.shape[0]} rows but the UNet call has {rows}")
+
+        def rows_are_independent(is_in_high_res_fix):
+            """Whether a call can be evaluated on a subset of its rows with identical per-row results.
+
+            PAG replays only the cond rows of main-pass calls. Units that couple rows must see the
+            whole call: StyleAlign shares attention across the batch, IP-Adapter caches its image k/v
+            at the first call's batch size, multi-image hints are row-aligned, and reference units draw
+            fresh noise over all rows of every call.
+            """
+            if batch_option_style_align:
+                return False
+            for param in outer.control_params:
+                if param.control_model_type == ControlModelType.IPAdapter:
+                    return False
+                hint = param.used_hint_cond
+                if isinstance(hint, torch.Tensor) and hint.ndim > 0 and hint.shape[0] > 1:
+                    return False
+                if param.control_model_type == ControlModelType.AttentionInjection \
+                        and not param.guidance_stopped and not param.disabled_by_hr_option(is_in_high_res_fix):
+                    return False
+            return True
+
+        def control_is_replayable():
+            """Whether a replay of a recorded call's rows may reuse its control state.
+
+            Reference/AdaIN units run a nested UNet pass and fill attention banks per call, StyleAlign
+            hacks attention across rows, and colorfix/inpaint_only post-process the output with per-call
+            tensors; such calls are always recomputed.
+            """
+            if batch_option_style_align:
+                return False
+            for param in outer.control_params:
+                if param.control_model_type == ControlModelType.AttentionInjection:
+                    return False
+                if 'colorfix' in param.preprocessor['name'] or 'inpaint_only' in param.preprocessor['name']:
+                    return False
+            return True
+
+        def prepare_control(self, x, timesteps, context, y, memo_slot):
+            """Everything the hooked forward computes before the U-Net encoder."""
             is_sdxl = y is not None and model_is_sdxl
             total_t2i_adapter_embedding = [0.0] * 4
             if is_sdxl:
@@ -517,6 +586,8 @@ class UnetHook(nn.Module):
 
             # Handle cond-uncond marker
             cond_mark, outer.current_uc_indices, outer.current_c_indices, context = unmark_prompt_context(context)
+            # Stripping the mark token leaves a strided view; copy once instead of in every k/v projection.
+            context = context.contiguous()
             outer.model.cond_mark = cond_mark
             # logger.info(str(cond_mark[:, 0, 0, 0].detach().cpu().numpy().tolist()) + ' - ' + str(outer.current_uc_indices))
 
@@ -570,8 +641,10 @@ class UnetHook(nn.Module):
 
             self.is_in_high_res_fix = is_in_high_res_fix
             outer.is_in_high_res_fix = is_in_high_res_fix
+            if memo_slot is not None and not memo_slot.replay and not rows_are_independent(is_in_high_res_fix):
+                memo_slot.rec.row_subset_ok = False
 
-            # Convert control image to latent
+            # Convert control image to latent (kept at the hint's rows; expanded per call where needed)
             for param in outer.control_params:
                 if param.used_hint_cond_latent is not None:
                     continue
@@ -579,7 +652,7 @@ class UnetHook(nn.Module):
                         and 'colorfix' not in param.preprocessor['name'] \
                         and 'inpaint_only' not in param.preprocessor['name']:
                     continue
-                param.used_hint_cond_latent = outer.call_vae_using_process(process, param.used_hint_cond, batch_size=batch_size)
+                param.used_hint_cond_latent = outer.call_vae_using_process(process, param.used_hint_cond)
 
             # vram
             for param in outer.control_params:
@@ -589,10 +662,14 @@ class UnetHook(nn.Module):
                 if param.control_model is not None:
                     if outer.lowvram and is_sdxl and hasattr(param.control_model, 'aggressive_lowvram'):
                         param.control_model.aggressive_lowvram()
+                    elif not outer.lowvram and id(param.control_model) in models_on_device:
+                        continue
                     elif hasattr(param.control_model, 'fullvram'):
                         param.control_model.fullvram()
                     elif hasattr(param.control_model, 'to'):
                         param.control_model.to(devices.get_device_for("controlnet"))
+                    if not outer.lowvram:
+                        models_on_device[id(param.control_model)] = param.control_model
 
             # handle prompt token control
             for param in outer.control_params:
@@ -631,6 +708,18 @@ class UnetHook(nn.Module):
 
                 assert param.used_hint_cond is not None, "Controlnet is enabled but no input image is given"
 
+                cond_rows = None
+                if (param.cfg_injection or param.global_average_pooling) and param.control_model_type.is_controlnet:
+                    # "ControlNet is more important" and global average pooling zero the uncond rows of the
+                    # residuals (cond_mark below), so evaluate the ControlNet on the cond rows only.
+                    # An unmarked context (e.g. hires-pass conds built after process_sample marked the
+                    # prompts) has no indices at all and cond_mark is all ones: every row is cond.
+                    c_indices = outer.current_c_indices
+                    if not c_indices and outer.current_uc_indices:
+                        continue
+                    if c_indices and len(c_indices) < batch_size and c_indices == list(range(c_indices[0], c_indices[0] + len(c_indices))):
+                        cond_rows = slice(c_indices[0], c_indices[0] + len(c_indices))
+
                 hint = param.used_hint_cond
                 if param.control_model_type == ControlModelType.InstantID:
                     assert isinstance(param.control_context_override, ImageEmbed)
@@ -638,29 +727,54 @@ class UnetHook(nn.Module):
                 else:
                     controlnet_context = context
 
+                control_type = (
+                    [
+                        t.int_value()
+                        for t in param.union_control_types
+                        if t != ControlNetUnionControlType.UNKNOWN
+                    ]
+                    if param.control_model_type == ControlModelType.ControlNetUnion
+                    else None
+                )
+
+                # The hint embedding depends only on the hint and the union control types: compute it once
+                # per used hint (a new hint or a lowres/hires switch replaces param.used_hint_cond).
+                guided_hint = None
+                guided_hint_types = None if control_type is None else tuple(control_type)
+                cached_guided_hint = getattr(param, 'used_guided_hint', None)
+                if hasattr(control_model, 'compute_guided_hint') and cached_guided_hint is not None \
+                        and cached_guided_hint[0] is param.used_hint_cond and cached_guided_hint[1] is control_model \
+                        and cached_guided_hint[2] == guided_hint_types:
+                    guided_hint = cached_guided_hint[3]
+
                 # ControlNet inpaint protocol
-                if hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
+                if guided_hint is None and hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
                     c = hint[:, 0:3, :, :]
                     m = hint[:, 3:4, :, :]
                     m = (m > 0.5).float()
                     hint = c * (1 - m) - m
 
-                control = param.control_model(
-                    x=x_in,
-                    hint=hint,
-                    timesteps=timesteps,
-                    context=controlnet_context,
-                    y=y,
-                    control_type=(
-                        [
-                            t.int_value()
-                            for t in param.union_control_types
-                            if t != ControlNetUnionControlType.UNKNOWN
-                        ]
-                        if param.control_model_type == ControlModelType.ControlNetUnion
-                        else None
-                    ),
-                )
+                control_inputs = dict(x=x_in, hint=hint, timesteps=timesteps, context=controlnet_context, y=y)
+                if hasattr(control_model, 'compute_guided_hint'):
+                    if guided_hint is None:
+                        guided_hint = control_model.compute_guided_hint(hint, control_type)
+                        param.used_guided_hint = (param.used_hint_cond, control_model, guided_hint_types, guided_hint)
+                    control_inputs['guided_hint'] = guided_hint
+                if cond_rows is not None:
+                    control_inputs = {
+                        key: value[cond_rows] if isinstance(value, torch.Tensor) and value.shape[0] == batch_size else value
+                        for key, value in control_inputs.items()
+                    }
+
+                control = param.control_model(**control_inputs, control_type=control_type)
+
+                if cond_rows is not None:
+                    control_rows = control
+                    control = []
+                    for c in control_rows:
+                        full = c.new_zeros((batch_size, *c.shape[1:]))
+                        full[cond_rows] = c
+                        control.append(full)
 
                 if is_sdxl:
                     control_scales = [param.weight] * 10
@@ -718,9 +832,8 @@ class UnetHook(nn.Module):
                             for pi, ci in enumerate(outer.current_uc_indices):
                                 if pi % len(outer.control_params) != param_index:
                                     item[ci] = 0
-                            target[idx] = item + target[idx]
-                        else:
-                            target[idx] = item + target[idx]
+                        # The first unit's residual is a fresh tensor: take it instead of adding it to 0.0.
+                        target[idx] = item if isinstance(target[idx], float) and target[idx] == 0.0 else item + target[idx]
 
             # Replace x_t to support inpaint models
             for param in outer.control_params:
@@ -734,15 +847,13 @@ class UnetHook(nn.Module):
                     mask_pixel = param.used_hint_cond[:, 3:4, :, :]
                     image_pixel = param.used_hint_cond[:, 0:3, :, :]
                     mask_pixel = (mask_pixel > 0.5).to(mask_pixel.dtype)
-                    masked_latent = outer.call_vae_using_process(process, image_pixel, batch_size, mask=mask_pixel)
+                    masked_latent = outer.call_vae_using_process(process, image_pixel, mask=mask_pixel)
                     mask_latent = torch.nn.functional.max_pool2d(mask_pixel, (8, 8))
-                    if mask_latent.shape[0] != batch_size:
-                        mask_latent = torch.cat([mask_latent.clone() for _ in range(batch_size)], dim=0)
                     param.used_hint_inpaint_hijack = torch.cat([mask_latent, masked_latent], dim=1)
                 param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(
                     device=x.device, dtype=x.dtype
                 )
-                x = torch.cat([x[:, :4, :, :], param.used_hint_inpaint_hijack], dim=1)
+                x = torch.cat([x[:, :4, :, :], batch_rows(param.used_hint_inpaint_hijack, x.shape[0])], dim=1)
 
             # vram
             for param in outer.control_params:
@@ -779,14 +890,15 @@ class UnetHook(nn.Module):
                 if param.control_model_type not in [ControlModelType.AttentionInjection]:
                     continue
 
-                ref_xt = predict_q_sample(outer.sd_ldm, param.used_hint_cond_latent, torch.round(timesteps.float()).long())
+                ref_latent = batch_rows(param.used_hint_cond_latent, x.shape[0])
+                ref_xt = predict_q_sample(outer.sd_ldm, ref_latent, torch.round(timesteps.float()).long())
 
                 # Inpaint Hijack
                 if x.shape[1] == 9:
                     ref_xt = torch.cat([
                         ref_xt,
                         torch.zeros_like(ref_xt)[:, 0:1, :, :],
-                        param.used_hint_cond_latent
+                        ref_latent
                     ], dim=1)
 
                 outer.current_style_fidelity = float(param.preprocessor['threshold_a'])
@@ -830,27 +942,88 @@ class UnetHook(nn.Module):
                 outer.attention_auto_machine = AutoMachine.Read
                 outer.gn_auto_machine = AutoMachine.Read
 
+            return is_sdxl, x, context, cond_mark, total_controlnet_embedding, total_t2i_adapter_embedding, require_inpaint_hijack, is_in_high_res_fix
+
+        def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+            memo_slot = sd_unet_row_memo.claim()
+            prefix = None
+            recorded_state = None
+            if memo_slot is not None and memo_slot.replay:
+                prefix = sd_unet_row_memo.replay_prefix(memo_slot, (outer, self), x, context, y)
+            if prefix is not None:
+                # PAG replay of recorded rows: the inputs are the recorded call's rows and nothing the
+                # control models see is perturbed, so reuse its control state instead of recomputing it.
+                state, m = prefix.state, int(x.shape[0])
+
+                def rows(t):
+                    return sd_unet_row_memo.rows_of(t, prefix.rows, m)
+
+                is_sdxl = state['is_sdxl']
+                require_inpaint_hijack = state['require_inpaint_hijack']
+                is_in_high_res_fix = state['is_in_high_res_fix']
+                x = rows(state['x'])
+                context = rows(state['context'])
+                cond_mark = rows(state['cond_mark'])
+                total_controlnet_embedding = [rows(t) for t in state['controlnet']]
+                total_t2i_adapter_embedding = [rows(t) for t in state['t2i']]
+                outer.current_c_indices = [i for i in state['c_indices'] if i < m]
+                outer.current_uc_indices = [i for i in state['uc_indices'] if i < m]
+                outer.model.cond_mark = cond_mark
+                self.is_in_high_res_fix = is_in_high_res_fix
+                outer.is_in_high_res_fix = is_in_high_res_fix
+            else:
+                raw_x, raw_context = x, context
+                (is_sdxl, x, context, cond_mark, total_controlnet_embedding, total_t2i_adapter_embedding,
+                 require_inpaint_hijack, is_in_high_res_fix) = prepare_control(self, x, timesteps, context, y, memo_slot)
+                if sd_unet_row_memo.can_record(memo_slot, raw_x) and control_is_replayable():
+                    recorded_state = dict(
+                        is_sdxl=is_sdxl,
+                        require_inpaint_hijack=require_inpaint_hijack,
+                        is_in_high_res_fix=is_in_high_res_fix,
+                        x=x,
+                        context=context,
+                        cond_mark=cond_mark,
+                        controlnet=list(total_controlnet_embedding),
+                        t2i=list(total_t2i_adapter_embedding),
+                        c_indices=list(outer.current_c_indices),
+                        uc_indices=list(outer.current_uc_indices),
+                        encoder=None,
+                    )
+                    sd_unet_row_memo.attach_prefix(memo_slot, sd_unet_row_memo.Prefix((outer, self), raw_x, raw_context, y, recorded_state))
+
             # U-Net Encoder
             hs = []
             with th.no_grad():
-                t_emb = cond_cast_unet(timestep_embedding(timesteps, self.model_channels, repeat_only=False))
-                emb = self.time_embed(t_emb)
+                encoder = prefix.state['encoder'] if prefix is not None else None
+                if encoder is not None:
+                    # Nothing before the middle block differs in a PAG replay: resume from the recorded encoder rows.
+                    hs = [rows(t) for t in encoder['hs']]
+                    emb = rows(encoder['emb'])
+                    total_t2i_adapter_embedding = [rows(t) for t in encoder['t2i']]
+                    h = hs[-1]
+                else:
+                    t_emb = cond_cast_unet(unet_timestep_embedding(timesteps, self.model_channels))
+                    emb = self.time_embed(t_emb)
 
-                if is_sdxl:
-                    assert y.shape[0] == x.shape[0]
-                    emb = emb + self.label_emb(y)
+                    if is_sdxl:
+                        assert y.shape[0] == x.shape[0]
+                        emb = emb + self.label_emb(y)
 
-                h = x
-                for i, module in enumerate(self.input_blocks):
-                    self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
-                    h = module(h, emb, context)
+                    h = x
+                    for i, module in enumerate(self.input_blocks):
+                        self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
+                        h = module(h, emb, context)
 
-                    t2i_injection = [3, 5, 8] if is_sdxl else [2, 5, 8, 11]
+                        t2i_injection = [3, 5, 8] if is_sdxl else [2, 5, 8, 11]
 
-                    if i in t2i_injection:
-                        h = aligned_adding(h, total_t2i_adapter_embedding.pop(0), require_inpaint_hijack)
+                        if i in t2i_injection:
+                            h = aligned_adding(h, total_t2i_adapter_embedding.pop(0), require_inpaint_hijack)
 
-                    hs.append(h)
+                        hs.append(h)
+
+                    # Hypertile draws tile layouts per wrapped encoder layer call; a replay must keep those draws.
+                    if recorded_state is not None and not sd_unet_row_memo.hypertile_unet_enabled(getattr(outer.sd_ldm, 'model', None)):
+                        recorded_state['encoder'] = dict(hs=list(hs), emb=emb, t2i=list(total_t2i_adapter_embedding))
 
                 self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
                 h = self.middle_block(h, emb, context)

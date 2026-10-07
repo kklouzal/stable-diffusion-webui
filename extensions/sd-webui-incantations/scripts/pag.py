@@ -1,5 +1,6 @@
 import logging
 import time
+import weakref
 from contextlib import suppress
 from os import environ
 import modules.scripts as scripts
@@ -8,8 +9,7 @@ from scripts.ui_wrapper import UIWrapper, xyz_field_setter
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
-from modules.sd_samplers_cfg_denoiser import catenate_conds, subscript_cond
-from modules import shared
+from modules import shared, sd_unet_row_memo
 from scripts.incant_utils import module_hooks, timing
 
 import math
@@ -107,15 +107,8 @@ class PAGStateParams:
                 self.max_sampling_step : int = 1
                 self.guidance_scale: int = -1 # CFG
                 self.current_noise_level: float = 100.0
-                self.x_in = None
-                self.text_cond = None
-                self.image_cond = None
-                self.sigma = None
-                self.text_uncond = None
-                self.make_condition_dict = None # callable lambda
                 self.crossattn_modules = [] # callable lambda
                 self.pag_x_out = None
-                self.batch_size = -1      # Batch size
                 self.openclaw_extension_timings = {}
                 self.noise_levels = []
                 self.cfg_schedule_values = []
@@ -134,75 +127,12 @@ def cond_batch_size(cond):
         return tensor.shape[0]
 
 
-def cond_token_count(cond):
-        tensor = cond_crossattn(cond)
-        if tensor is None:
-                raise RuntimeError("PAG conditioning is missing a cross-attention tensor")
-        return tensor.shape[1]
-
-
-def _with_crossattn(cond, crossattn):
-        if not isinstance(cond, dict):
-                return crossattn
-        copied = dict(cond)
-        copied['crossattn'] = crossattn
-        return copied
-
-
-def _pad_with_empty(cond, repeats, empty):
-        tensor = cond_crossattn(cond)
-        if tensor is None:
-                raise RuntimeError("PAG conditioning is missing a cross-attention tensor")
-        empty = empty.to(device=tensor.device, dtype=tensor.dtype)
-        padded = torch.cat([tensor, empty.repeat((tensor.shape[0], repeats, 1))], dim=1)
-        return _with_crossattn(cond, padded)
-
-
-def _pad_v0_uncond(cond, uncond):
-        cond_tokens = cond_token_count(cond)
-        uncond_vec = cond_crossattn(uncond)
-        if uncond_vec is None:
-                raise RuntimeError("PAG unconditional conditioning is missing a cross-attention tensor")
-
-        if uncond_vec.shape[1] < cond_tokens:
-                last_vector = uncond_vec[:, -1:]
-                uncond_vec = torch.cat([uncond_vec, last_vector.repeat([1, cond_tokens - uncond_vec.shape[1], 1])], dim=1)
-        elif uncond_vec.shape[1] > cond_tokens:
-                uncond_vec = uncond_vec[:, :cond_tokens]
-        return cond, _with_crossattn(uncond, uncond_vec)
-
-
-def _pad_pag_cond_uncond(cond, uncond):
-        """Mirror A1111 cond/uncond padding for PAG's hidden denoise pass.
-
-        CFGDenoiser callbacks receive text conditioning before A1111 applies
-        pad_cond_uncond / pad_cond_uncond_v0. PAG stores that callback state and
-        later runs its own hidden denoise pass, so it needs a local non-mutating
-        copy of the same padding decision to keep batching and token shapes in
-        sync with the main denoiser path.
-        """
-        if cond_token_count(cond) == cond_token_count(uncond):
-                return cond, uncond
-        if getattr(shared.opts, 'pad_cond_uncond_v0', False):
-                return _pad_v0_uncond(cond, uncond)
-        if not getattr(shared.opts, 'pad_cond_uncond', False):
-                return cond, uncond
-
-        empty = shared.sd_model.cond_stage_model_empty_prompt
-        num_repeats = (cond_token_count(cond) - cond_token_count(uncond)) // empty.shape[1]
-        if num_repeats < 0:
-                cond = _pad_with_empty(cond, -num_repeats, empty)
-        elif num_repeats > 0:
-                uncond = _pad_with_empty(uncond, num_repeats, empty)
-        return cond, uncond
-
-
 def _seg_to_q_modules():
         """Return SEG-managed to_q modules currently installed on the shared model.
 
         PAG runs an internal denoising pass to compute perturbed-attention output.
-        That pass mirrors A1111 batching and may execute cond/uncond separately; SEG
-        should not leak into it because SEG assumes a paired CFG attention batch.
+        That pass evaluates cond rows only; SEG must not leak into it because SEG
+        treats any even-sized attention batch as a paired cond/uncond CFG batch.
         """
         try:
                 mapping = getattr(shared.sd_model, 'network_layer_mapping', {}) or {}
@@ -237,39 +167,42 @@ def _restore_seg_after_pag_hidden_pass(saved):
                         to_q.seg_enable = enabled
 
 
-def pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond_in, make_condition_dict, batch_size):
-        """Run PAG's hidden denoising pass with A1111's cond/uncond batching rules.
+def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence, whole_calls=False):
+        """Run PAG's perturbed pass on the cond rows of the recorded main-pass calls.
 
-        A1111 only concatenates positive and negative conditioning when their
-        token lengths match or prompt-padding is enabled. Otherwise it runs the
-        positive batches and the unconditional batch separately. PAG's extra
-        pass must mirror that split path; blindly calling ``catenate_conds`` for
-        SDXL prompt/negative pairs with different token counts makes the
-        callback fail before ``pag_x_out`` can be produced.
+        Every PAG input row is an exact duplicate of a main-pass row and the
+        combiner reads only the cond rows, which A1111 always places first. So
+        each recorded call is replayed with its own inputs, limited to its
+        leading cond rows, in the main pass's order and chunking. A call whose
+        rows are coupled (``row_subset_ok`` cleared by the UNet forward that
+        ran it) is replayed whole, as is every call when ``whole_calls`` is
+        set. Calls holding only uncond rows are skipped unless the call
+        sequence must be preserved: hypertile draws its tile layout per UNet
+        call, and row-coupled calls may draw from the global RNG, so those
+        replays keep the previous one-call-per-main-call behavior and discard
+        the uncond output. The UNet forward serving a replay may reuse what it
+        recorded for the call (modules/sd_unet_row_memo.py).
         """
-        tensor, uncond = _pad_pag_cond_uncond(tensor, uncond)
-        if shared.opts.batch_cond_uncond and cond_token_count(tensor) == cond_token_count(uncond):
-                cond_in = catenate_conds([tensor, uncond])
-                return inner_model(x_in, sigma_in, cond=make_condition_dict(cond_in, image_cond_in))
-
-        x_out = torch.zeros_like(x_in)
-        denoise_batch_size = max(1, batch_size * 2 if shared.opts.batch_cond_uncond else batch_size)
-        for batch_offset in range(0, cond_batch_size(tensor), denoise_batch_size):
-                a = batch_offset
-                b = min(a + denoise_batch_size, cond_batch_size(tensor))
-                x_out[a:b] = inner_model(
-                        x_in[a:b],
-                        sigma_in[a:b],
-                        cond=make_condition_dict(subscript_cond(tensor, a, b), image_cond_in[a:b] if image_cond_in is not None else None),
-                )
-
-        uncond_count = cond_batch_size(uncond)
-        x_out[-uncond_count:] = inner_model(
-                x_in[-uncond_count:],
-                sigma_in[-uncond_count:],
-                cond=make_condition_dict(uncond, image_cond_in[-uncond_count:] if image_cond_in is not None else None),
-        )
-        return x_out
+        outs = []
+        covered = 0
+        for rec in memo.calls:
+                cond_rows = rec.cond_rows
+                whole = whole_calls or not rec.row_subset_ok
+                if cond_rows == 0 and not whole and not preserve_call_sequence:
+                        continue
+                rows = cond_rows if cond_rows and not whole else rec.rows
+                with sd_unet_row_memo.replaying(rec, rows):
+                        out = inner_model(
+                                rec.x[:rows],
+                                rec.sigma[:rows],
+                                cond=sd_unet_row_memo.slice_cond_rows(rec.cond, rec.rows, rows),
+                        )
+                if cond_rows:
+                        outs.append(out[:cond_rows])
+                        covered += cond_rows
+        if covered != memo.n_cond:
+                raise RuntimeError(f"PAG: the recorded main pass covers {covered} of {memo.n_cond} cond rows")
+        return outs[0] if len(outs) == 1 else torch.cat(outs)
 
 
 class PAGExtensionScript(UIWrapper):
@@ -278,6 +211,7 @@ class PAGExtensionScript(UIWrapper):
                 self._cfg_denoised_callback = None
                 self._pag_hook_handles = []
                 self._pag_hooked_modules = []
+                self._recorded_denoiser = None
 
         # Setup menu ui detail
         def setup_ui(self, is_img2img) -> list:
@@ -342,6 +276,7 @@ class PAGExtensionScript(UIWrapper):
                 # Clean previous hook handles/callbacks before registering this batch.
                 self.remove_all_hooks()
                 self.remove_callbacks()
+                self.remove_main_pass_recorder()
 
                 active = getattr(p, "pag_active", active)
                 pag_sanf = getattr(p, "pag_sanf", pag_sanf)
@@ -394,7 +329,6 @@ class PAGExtensionScript(UIWrapper):
                 pag_params.cfg_interval_schedule = cfg_schedule
                 pag_params.max_sampling_step = p.steps
                 pag_params.guidance_scale = p.cfg_scale
-                pag_params.batch_size = p.batch_size
                 pag_params.cfg_interval_scheduled_value = p.cfg_scale
 
                 pag_params.noise_levels = [calculate_noise_level(i, pag_params.max_sampling_step) for i in range(pag_params.max_sampling_step + 1)]
@@ -461,7 +395,27 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.openclaw_extension_timings = {}
                 self.remove_all_hooks()
                 self.remove_callbacks()
+                self.remove_main_pass_recorder()
                 logger.debug('Removed PAG hooks and callbacks')
+
+        def recorded_denoiser(self):
+                return self._recorded_denoiser() if self._recorded_denoiser is not None else None
+
+        def _drop_main_pass_memo(self):
+                memo = sd_unet_row_memo.disarm(self.recorded_denoiser())
+                if memo is not None:
+                        memo.clear()
+
+        def remove_main_pass_recorder(self):
+                """Release the main-pass memo and unwrap the recorded denoiser (batch end, next batch, failures)."""
+                denoiser = self.recorded_denoiser()
+                if denoiser is None:
+                        self._recorded_denoiser = None
+                        return
+                self._drop_main_pass_memo()
+                self._recorded_denoiser = None
+                if not sd_unet_row_memo.uninstall(denoiser):
+                        logger.warning("Not removing the PAG main-pass recorder because another wrapper replaced run_inner_model")
 
         def remove_callbacks(self):
                 if self._cfg_denoiser_callback is not None:
@@ -598,23 +552,19 @@ class PAGExtensionScript(UIWrapper):
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step or pag_params.pag_scale <= 0:
+                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
+                        self._drop_main_pass_memo()
                         return
 
-                if isinstance(params.text_cond, dict):
-                        pag_params.text_cond = {key: value.detach() for key, value in params.text_cond.items()}
-                        if isinstance(params.text_uncond, dict):
-                                pag_params.text_uncond = {key: value.detach() for key, value in params.text_uncond.items()}
-                        else:
-                                pag_params.text_uncond = params.text_uncond.detach()
-                else:
-                        pag_params.text_cond = params.text_cond.detach()
-                        pag_params.text_uncond = params.text_uncond.detach()
-
-                pag_params.x_in = params.x.detach()
-                pag_params.sigma = params.sigma.detach()
-                pag_params.image_cond = params.image_cond.detach() if params.image_cond is not None else None
-                pag_params.make_condition_dict = get_make_condition_dict_fn(params.text_uncond)
+                # Record this step's main-pass UNet calls; the PAG pass replays their cond rows.
+                denoiser = getattr(params, 'denoiser', None)
+                if denoiser is None:
+                        raise RuntimeError("PAG needs CFGDenoiserParams.denoiser to record the main denoiser pass")
+                if self.recorded_denoiser() is not denoiser:
+                        self.remove_main_pass_recorder()
+                        # Weak: a request that fails mid-step must not keep its denoiser and memo alive.
+                        self._recorded_denoiser = weakref.ref(denoiser)
+                sd_unet_row_memo.arm(denoiser, cond_batch_size(params.text_cond))
 
 
         def on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
@@ -636,17 +586,13 @@ class PAGExtensionScript(UIWrapper):
                 if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step or pag_params.pag_scale <= 0:
                         return
 
-                # passed from on_cfg_denoiser_callback
-                x_in = pag_params.x_in
-                if x_in is None or pag_params.text_cond is None or pag_params.text_uncond is None:
-                        logger.warning("Skipping PAG extra pass because denoiser state was not captured")
-                        return
-                tensor = pag_params.text_cond
-                uncond = pag_params.text_uncond
-                image_cond_in = pag_params.image_cond
-                sigma_in = pag_params.sigma
-
-                make_condition_dict = pag_params.make_condition_dict or get_make_condition_dict_fn(uncond)
+                memo = sd_unet_row_memo.disarm(self.recorded_denoiser())
+                if memo is None:
+                        raise RuntimeError("PAG: the main denoiser pass of this step was not recorded")
+                # TeaCache keeps per-call-lane state (cached residuals, a refresh distance averaged over all
+                # rows of the lane): its PAG lane must keep seeing the whole calls it saw before.
+                unet = getattr(getattr(shared.sd_model, 'model', None), 'diffusion_model', None)
+                whole_calls = bool(getattr(unet, '_teacache_patched', False))
 
                 # set pag_enable to True for the hooked cross attention modules
                 for module in pag_params.crossattn_modules:
@@ -656,31 +602,22 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.seg_q_modules = _seg_to_q_modules()
                 seg_saved_state = _suspend_seg_for_pag_hidden_pass(pag_params.seg_q_modules)
                 try:
-                        # get the PAG guidance (is there a way to optimize this so we don't have to calculate it twice?)
                         hidden_started = time.perf_counter()
                         try:
-                                pag_params.pag_x_out = pag_inner_model_x_out(
+                                pag_params.pag_x_out = pag_cond_rows_x_out(
                                         params.inner_model,
-                                        x_in,
-                                        sigma_in,
-                                        tensor,
-                                        uncond,
-                                        image_cond_in,
-                                        make_condition_dict,
-                                        pag_params.batch_size,
+                                        memo,
+                                        preserve_call_sequence=sd_unet_row_memo.hypertile_unet_enabled(getattr(shared.sd_model, 'model', None)),
+                                        whole_calls=whole_calls,
                                 )
                         finally:
                                 timing.record(pag_params.openclaw_extension_timings.setdefault("details", {}), "pag_hidden_denoise", time.perf_counter() - hidden_started)
                 finally:
+                        memo.clear()
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
                         # set pag_enable to False even if the hidden PAG pass raises
                         for module in pag_params.crossattn_modules:
                                 module.pag_enable = False
-                        pag_params.x_in = None
-                        pag_params.text_cond = None
-                        pag_params.text_uncond = None
-                        pag_params.image_cond = None
-                        pag_params.sigma = None
 
         def get_xyz_axis_options(self) -> list:
                 xyz_grid = scripts.loaded_script_module("xyz_grid.py")
@@ -697,21 +634,6 @@ class PAGExtensionScript(UIWrapper):
                 ]
                 return extra_axis_options
 
-
-
-# from modules/sd_samplers_cfg_denoiser.py:187-195
-def get_make_condition_dict_fn(text_uncond):
-        if shared.sd_model.model.conditioning_key == "crossattn-adm":
-                def make_condition_dict(c_crossattn, c_adm):
-                        return {"c_crossattn": [c_crossattn], "c_adm": c_adm}
-        else:
-                if isinstance(text_uncond, dict):
-                        def make_condition_dict(c_crossattn, c_concat):
-                                return {**c_crossattn, "c_concat": [c_concat]}
-                else:
-                        def make_condition_dict(c_crossattn, c_concat):
-                                return {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
-        return make_condition_dict
 
 
 def calculate_noise_level(i, N, sigma_min=0.002, sigma_max=80.0, rho=3):

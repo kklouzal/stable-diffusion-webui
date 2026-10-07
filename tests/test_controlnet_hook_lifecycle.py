@@ -427,6 +427,14 @@ def _install_hook_import_stubs():
     modules_pkg.__path__ = []
     sys.modules["modules"] = modules_pkg
 
+    import importlib.util
+
+    row_memo_spec = importlib.util.spec_from_file_location("modules.sd_unet_row_memo", ROOT / "modules" / "sd_unet_row_memo.py")
+    row_memo_mod = importlib.util.module_from_spec(row_memo_spec)
+    row_memo_spec.loader.exec_module(row_memo_mod)
+    modules_pkg.sd_unet_row_memo = row_memo_mod
+    sys.modules["modules.sd_unet_row_memo"] = row_memo_mod
+
     devices_mod = types.ModuleType("modules.devices")
     devices_mod.dtype_vae = torch.float32
     devices_mod.dtype_unet = torch.float32
