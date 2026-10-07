@@ -458,7 +458,16 @@ def test_cuda_transformer_block_is_bitwise_equal_to_autocast(default_runtime):
 @pytest.mark.parametrize("memory_format", [torch.contiguous_format, torch.channels_last], ids=["nchw", "nhwc"])
 def test_cuda_spatial_transformer_and_resblock_differ_only_by_group_norm_eps(default_runtime, memory_format):
     import copy
-    from sgm.modules.diffusionmodules.openaimodel import ResBlock
+    import importlib
+
+    # Earlier test files may leave a stub openaimodel module in sys.modules; import the real one for this test only.
+    with mock.patch.dict(sys.modules):
+        if not getattr(sys.modules.get("sgm.modules.diffusionmodules.openaimodel"), "__file__", None):
+            for name in [name for name in sys.modules if name == "sgm" or name.startswith("sgm.")]:
+                if not getattr(sys.modules[name], "__file__", None) and not getattr(sys.modules[name], "__path__", None):
+                    del sys.modules[name]
+            sys.modules.pop("sgm.modules.diffusionmodules.openaimodel", None)
+        ResBlock = importlib.import_module("sgm.modules.diffusionmodules.openaimodel").ResBlock
 
     transformer = sgm_attention.SpatialTransformer(640, 10, 64, depth=2, context_dim=2048, use_linear=True, use_checkpoint=False)
     resblock = ResBlock(640, 1280, 0.0, out_channels=640)
