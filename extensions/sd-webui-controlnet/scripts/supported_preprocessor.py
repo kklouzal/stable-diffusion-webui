@@ -104,7 +104,10 @@ class Preprocessor(ABC):
     model: Optional[torch.nn.Module] = None
     device = devices.get_device_for("controlnet")
     preprocessor_deps: List[str] = field(default_factory=list)
-    cacheable: bool = False
+    # Opt-in per class (or per instance) for results that are a pure function of
+    # _cache_identity. A ClassVar, not a dataclass field: a field default would be
+    # assigned per instance by __init__ and shadow a subclass's `cacheable = True`.
+    cacheable: ClassVar[bool] = False
     _result_cache: Optional[AtomicLRU] = field(default=None, init=False, repr=False, compare=False)
 
     all_processors: ClassVar[Dict[str, "Preprocessor"]] = {}
@@ -248,8 +251,10 @@ class Preprocessor(ABC):
         }
 
     def _cached_call(self, *args, **kwargs):
-        """Cache only deterministic calls under complete input/runtime identity."""
-        if not self.cacheable or CACHE_SIZE <= 0:
+        """Cache only deterministic calls under complete input/runtime identity.
+        Calls carrying a callable (e.g. openpose's json_pose_callback) always run:
+        the callback is a side effect a cache hit would skip."""
+        if not self.cacheable or CACHE_SIZE <= 0 or any(callable(v) for v in (*args, *kwargs.values())):
             logger.debug(f"Calling non-cacheable preprocessor {self.name}.")
             return self(*args, **kwargs)
         if self._result_cache is None:

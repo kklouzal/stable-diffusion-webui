@@ -9,7 +9,6 @@ from annotator.util import HWC3
 
 
 class PreprocessorNone(Preprocessor):
-    cacheable = True
     def __init__(self):
         super().__init__(name="none")
         self.sorting_priority = 10
@@ -67,7 +66,6 @@ class PreprocessorCanny(Preprocessor):
 
 
 class PreprocessorInvert(Preprocessor):
-    cacheable = True
     def __init__(self):
         super().__init__(name="invert")
         self._label = "invert (from white bg & black line)"

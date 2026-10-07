@@ -38,12 +38,9 @@ def apply_mlsd(input_image, thr_v, thr_d):
     assert input_image.ndim == 3
     img = input_image
     img_output = np.zeros_like(img)
-    try:
-        with torch.no_grad():
-            lines = pred_lines(img, model, [img.shape[0], img.shape[1]], thr_v, thr_d)
-            for line in lines:
-                x_start, y_start, x_end, y_end = [int(val) for val in line]
-                cv2.line(img_output, (x_start, y_start), (x_end, y_end), [255, 255, 255], 1)
-    except Exception as e:
-        pass
+    with torch.no_grad():
+        lines = pred_lines(img, model, [img.shape[0], img.shape[1]], thr_v, thr_d)
+        for line in lines:
+            x_start, y_start, x_end, y_end = [int(val) for val in line]
+            cv2.line(img_output, (x_start, y_start), (x_end, y_end), [255, 255, 255], 1)
     return img_output[:, :, 0]
