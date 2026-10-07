@@ -776,6 +776,15 @@ class CudaGraphRequestOverrideTests(unittest.TestCase):
         self.model.applied_token_merged_ratio = 0
         self.assertIsNone(self.reason())
 
+    def test_loaded_hypernetworks_bypass(self):
+        # Hypernetworks run inside every attention forward from shared.loaded_hypernetworks and their multipliers;
+        # a graph captured with or without them would replay that state for every later request.
+        shared = types.SimpleNamespace(opts=types.SimpleNamespace(), loaded_hypernetworks=[object()])
+        with mock.patch.dict(sys.modules, {"modules.shared": shared}):
+            self.assertEqual(self.reason(), "hypernetworks")
+            shared.loaded_hypernetworks = []
+            self.assertIsNone(self.reason())
+
     def test_override_bypass_runs_eager_and_records_reason(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)
         try:
@@ -954,6 +963,25 @@ class CudaGraphCaptureContractTests(unittest.TestCase):
         self.assertEqual(openclaw_cuda_graphs.status()["bypass_reasons"], {"non_default_stream": 1})
         self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
 
+    def test_runtime_branch_settings_select_their_own_graph(self):
+        # upcast_attn/lora_functional change the Python path inside the captured UNet call (override_settings sets
+        # them per request without callbacks); a replay must never serve a request with the other setting.
+        shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
+        calls = []
+        fn = self.make_fn(calls)
+        with mock.patch.dict(sys.modules, {"modules.shared": shared}):
+            self.run_shape(fn, (1,))
+            shared.opts.upcast_attn = True
+            self.run_shape(fn, (1,))
+            shared.opts.upcast_attn = False
+            shared.opts.lora_functional = True
+            self.run_shape(fn, (1,))
+            self.assertEqual(openclaw_cuda_graphs.status()["captures"], 3)
+            shared.opts.lora_functional = False
+            self.run_shape(fn, (1,))
+        self.assertEqual(openclaw_cuda_graphs.status()["captures"], 3)
+        self.assertEqual(openclaw_cuda_graphs.status()["replays"], 1)
+
 
 class CudaGraphKeyTests(unittest.TestCase):
     def setUp(self):
@@ -990,6 +1018,44 @@ class CudaGraphKeyTests(unittest.TestCase):
         quantized = FakeScheduleWrapper(self.model, self.alphas, quantize=True)
         plain = FakeScheduleWrapper(self.model, self.alphas, quantize=False)
         self.assertNotEqual(openclaw_cuda_graphs._model_signature(quantized), openclaw_cuda_graphs._model_signature(plain))
+
+    def test_key_carries_a_schedule_token_not_the_schedule_values(self):
+        # The key is hashed, compared, repr'd and digested on every denoiser call; with the 1000-entry SDXL schedule
+        # inline (3 tensors) that was ~1.5 ms of host time per call.
+        alphas = torch.linspace(0.9999, 0.0047, 1000, dtype=torch.float64).float()
+        fn = FakeScheduleWrapper(FakeModel(alphas), alphas)
+        signature = openclaw_cuda_graphs._model_signature(fn)
+        self.assertLess(len(repr(signature)), 400)
+        equal = FakeScheduleWrapper(FakeModel(alphas.clone()), alphas.clone())
+        self.assertEqual(openclaw_cuda_graphs._model_signature(equal), signature)
+        changed = alphas.clone()
+        changed[500] = changed[500].nextafter(torch.tensor(1.0))  # one ULP anywhere is a different schedule
+        self.assertNotEqual(openclaw_cuda_graphs._model_signature(FakeScheduleWrapper(FakeModel(changed), changed)), signature)
+
+    def test_schedule_tokens_are_never_reused_after_a_clear(self):
+        # A wrapper memoizes its token across a cache clear; a different schedule seen after the clear must not get
+        # the same token, or its key would match graphs captured for the old values.
+        fn = FakeScheduleWrapper(self.model, self.alphas)
+        first = openclaw_cuda_graphs._schedule_signature(fn)
+        openclaw_cuda_graphs.clear()
+        other_alphas = self.alphas * 0.5
+        other = openclaw_cuda_graphs._schedule_signature(FakeScheduleWrapper(FakeModel(other_alphas), other_alphas))
+        self.assertNotEqual(other, first)
+        self.assertIs(openclaw_cuda_graphs._schedule_signature(fn), first)
+
+    def test_runtime_branch_key_tracks_attention_forward_upcast_and_functional_lora(self):
+        attention = types.SimpleNamespace(CrossAttention=type("CrossAttention", (), {"forward": lambda self, x: x}))
+        shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
+        with mock.patch.dict(sys.modules, {"modules.shared": shared, "sgm.modules.attention": attention}):
+            base = openclaw_cuda_graphs._runtime_branch_key()
+            self.assertEqual(openclaw_cuda_graphs._runtime_branch_key(), base)
+            for name in ("upcast_attn", "lora_functional"):
+                setattr(shared.opts, name, True)
+                self.assertNotEqual(openclaw_cuda_graphs._runtime_branch_key(), base, name)
+                setattr(shared.opts, name, False)
+            # Changing cross_attention_optimization swaps the class forward through sd_hijack.redo_hijack.
+            attention.CrossAttention.forward = lambda self, x: x
+            self.assertNotEqual(openclaw_cuda_graphs._runtime_branch_key(), base)
 
     def test_attention_key_reads_active_backend_without_status_scan(self):
         optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: "flash,math", sdpa_backend_status=mock.Mock(side_effect=AssertionError("per-call status scan")))
