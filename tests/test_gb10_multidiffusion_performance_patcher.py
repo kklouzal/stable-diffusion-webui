@@ -1,12 +1,15 @@
 """gb10/patch-multidiffusion-performance.py: patcher contract plus CPU differential tests against the unpatched extension.
 
-The extension is not part of the fork. These tests copy the deployed host checkout and skip when it is not mounted.
+The extension is not part of the fork. These tests copy the installed checkout (the host deploy root, or the same
+checkout where run.sh mounts it inside a webui container) and skip when neither is present. The installed checkout
+may already be patched, so the fixture reverses the patch and asserts the patcher reproduces the installed bytes.
 """
 from __future__ import annotations
 
 import ast
 import contextlib
 import copy
+import functools
 import importlib.util
 import math
 import shutil
@@ -21,7 +24,8 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 ROOT = Path(__file__).parents[1]
 PATCHER = ROOT / "gb10" / "patch-multidiffusion-performance.py"
-INSTALLED_MD = Path("/opt/gb10/stable-diffusion/Extensions/multidiffusion-upscaler-for-automatic1111")
+EXTENSION = "multidiffusion-upscaler-for-automatic1111"
+INSTALLED_MD = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensions") / EXTENSION, ROOT / "extensions" / EXTENSION) if path.is_dir()), None)
 SGM_ROOT = ROOT / "repositories" / "generative-models"
 
 
@@ -40,15 +44,32 @@ def run_patcher(root: Path, *extra: str, check: bool = True) -> subprocess.Compl
     return subprocess.run([sys.executable, str(PATCHER), *extra, str(root)], check=check, capture_output=True, text=True)
 
 
-def copy_multidiffusion(target: Path) -> Path:
-    if not INSTALLED_MD.exists():
-        pytest.skip(f"installed MultiDiffusion fixture missing: {INSTALLED_MD}")
-    shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
-    return target
-
-
 def snapshot(root: Path) -> dict[str, bytes]:
     return {relative: (root / relative).read_bytes() for relative in TARGETS}
+
+
+def copy_multidiffusion(target: Path) -> Path:
+    """Copy of the installed checkout as run.sh hands it to this patcher (terminal-tiles patched, performance not)."""
+    if INSTALLED_MD is None:
+        pytest.skip(f"installed MultiDiffusion fixture missing: {EXTENSION}")
+    shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+    installed = snapshot(target)
+    for relative, blocks in PATCHER_MODULE.BLOCKS.items():
+        source = installed[relative].decode("utf-8")
+        if PATCHER_MODULE.file_state(relative, source) == "patched":
+            for _name, original, patched in reversed(blocks):
+                source = source.replace(patched, original, 1)
+            (target / relative).write_bytes(source.encode("utf-8"))
+    if snapshot(target) != installed:
+        # The derived tree is only a valid "original" if the patcher turns it back into the installed bytes.
+        probe = target.parent / f"{target.name}-roundtrip"
+        for relative in TARGETS:
+            (probe / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(target / relative, probe / relative)
+        run_patcher(probe)
+        assert snapshot(probe) == installed
+        shutil.rmtree(probe)
+    return target
 
 
 # ---------------------------------------------------------------- patcher contract
@@ -135,13 +156,16 @@ class NansException(Exception):
 def fork_sdpa_helper():
     """The fork's real run_scaled_dot_product_attention (and the backend parsing it uses), without importing webui."""
     source = (ROOT / "modules" / "sd_hijack_optimizations.py").read_text(encoding="utf-8")
-    wanted = {"_active_sdpa_backend", "_SDPA_BACKEND_ALIASES", "_normalize_sdpa_backend_choice", "_selected_sdpa_backends", "run_scaled_dot_product_attention"}
+    wanted = {
+        "_active_sdpa_backend", "_SDPA_BACKEND_ALIASES", "_normalize_sdpa_backend_choice", "_ALL_SDPA_BACKENDS",
+        "_sdpa_backend_selection", "_sdpa_kernel_all_backends_is_noop", "run_scaled_dot_product_attention",
+    }
     nodes = [
         node for node in ast.parse(source).body
         if getattr(node, "name", None) in wanted or any(getattr(target, "id", None) in wanted for target in getattr(node, "targets", []))
     ]
     assert len(nodes) == len(wanted)
-    namespace = {"torch": torch, "SDPBackend": SDPBackend, "sdpa_kernel": sdpa_kernel}
+    namespace = {"torch": torch, "SDPBackend": SDPBackend, "sdpa_kernel": sdpa_kernel, "functools": functools}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "sd_hijack_optimizations.py", "exec"), namespace)
     return namespace["run_scaled_dot_product_attention"]
 

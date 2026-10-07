@@ -20,7 +20,9 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 PATCHER = ROOT / "gb10" / "patch-ultimate-upscale-subcanvas.py"
-INSTALLED_UU = Path("/opt/gb10/stable-diffusion/Extensions/ultimate-upscale-for-automatic1111")
+EXTENSION = "ultimate-upscale-for-automatic1111"
+# The host deploy root, or the same checkout where run.sh mounts it inside a webui container.
+INSTALLED_UU = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensions") / EXTENSION, ROOT / "extensions" / EXTENSION) if path.is_dir()), None)
 MODULE_NAMES = ("modules", "modules.shared", "modules.processing", "modules.images", "modules.devices", "modules.scripts", "modules.masking")
 # Other tests replace these sys.modules entries with stubs and never restore them; keep the real objects we see.
 _REAL_MODULES = {name: sys.modules[name] for name in MODULE_NAMES if getattr(sys.modules.get(name), "__file__", None)}
@@ -30,14 +32,38 @@ def run_patcher(target: Path, *extra: str, check: bool = True) -> subprocess.Com
     return subprocess.run([sys.executable, str(PATCHER), str(target), *extra], check=check, capture_output=True, text=True)
 
 
+def _load_patcher():
+    spec = importlib.util.spec_from_file_location("gb10_patch_ultimate_upscale_subcanvas", PATCHER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PATCHER_MODULE = _load_patcher()
+
+
 @pytest.fixture()
 def usdu_source(tmp_path: Path) -> Path:
-    source = INSTALLED_UU / "scripts" / "ultimate-upscale.py"
-    if not source.exists():
-        pytest.skip(f"installed Ultimate Upscale fixture missing: {source}")
-    target = tmp_path / "ultimate-upscale-for-automatic1111" / "scripts" / "ultimate-upscale.py"
+    """The installed script as run.sh hands it to this patcher: lifecycle-patched, sub-canvas not.
+
+    An already deployed script is un-patched here, and the patcher must turn the result back into its exact bytes.
+    """
+    if INSTALLED_UU is None:
+        pytest.skip(f"installed Ultimate Upscale fixture missing: {EXTENSION}")
+    installed = (INSTALLED_UU / "scripts" / "ultimate-upscale.py").read_bytes()
+    text = installed.decode("utf-8")
+    if PATCHER_MODULE.MARKER in text:
+        for original, patched, count in reversed(PATCHER_MODULE.BLOCKS):
+            assert text.count(patched) == count
+            text = text.replace(patched, original)
+    target = tmp_path / EXTENSION / "scripts" / "ultimate-upscale.py"
     target.parent.mkdir(parents=True)
-    shutil.copyfile(source, target)
+    target.write_bytes(text.encode("utf-8"))
+    if PATCHER_MODULE.MARKER in installed.decode("utf-8"):
+        probe = tmp_path / "roundtrip.py"
+        probe.write_bytes(target.read_bytes())
+        run_patcher(probe)
+        assert probe.read_bytes() == installed
     return target
 
 
