@@ -1664,7 +1664,8 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 source_image = decode_first_stage(self.sd_model, samples) if self.img2img_image_conditioning_reads_source() else None
                 image_conditioning = self.img2img_image_conditioning(source_image, samples)
             else:
-                image_conditioning = self.txt2img_image_conditioning(samples)
+                # Sized from the upscaled latent: the default width/height are the first-pass dimensions.
+                image_conditioning = self.txt2img_image_conditioning(samples, samples.shape[3] * opt_f, samples.shape[2] * opt_f)
         else:
             lowres_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
@@ -1685,11 +1686,17 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             self.add_vae_encoder_generation_param()
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
 
-            image_conditioning = self.img2img_image_conditioning(decoded_samples, samples)
+            # Image conditioning reads [-1, 1] sources, as on the latent path (decode_first_stage) and in img2img.
+            source_image = decoded_samples * 2 - 1 if self.img2img_image_conditioning_reads_source() else None
+            image_conditioning = self.img2img_image_conditioning(source_image, samples)
 
         shared.state.nextjob()
 
-        samples = samples[:, :, self.truncate_y//2:samples.shape[2]-(self.truncate_y+1)//2, self.truncate_x//2:samples.shape[3]-(self.truncate_x+1)//2]
+        crop = (..., slice(self.truncate_y//2, samples.shape[2]-(self.truncate_y+1)//2), slice(self.truncate_x//2, samples.shape[3]-(self.truncate_x+1)//2))
+        if torch.is_tensor(image_conditioning) and image_conditioning.ndim == 4 and image_conditioning.shape[-2:] == samples.shape[-2:]:
+            # Spatial (inpainting-model) conditioning must cover the same latent region as the cropped samples.
+            image_conditioning = image_conditioning[crop]
+        samples = samples[crop]
 
         self.rng = rng.ImageRNG(samples.shape[1:], self.seeds, subseeds=self.subseeds, subseed_strength=self.subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w)
         noise = self.rng.next()

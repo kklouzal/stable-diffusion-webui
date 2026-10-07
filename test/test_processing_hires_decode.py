@@ -2,6 +2,7 @@
 
 import sys
 import ast
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,3 +134,76 @@ def test_every_generation_decode_uses_decoded_images_device():
     for call in calls:
         target = next(keyword.value for keyword in call.keywords if keyword.arg == "target_device")
         assert ast.unparse(target) == "decoded_images_device()"
+
+
+@pytest.mark.parametrize("kind", ["sdxl", "sdxl_inpaint", "inpaint"])
+def test_upscaler_hires_conditions_on_signed_source_image(monkeypatch, kind):
+    """The upscaler path encodes [0, 1] images but must hand [-1, 1] sources to the image conditioning, like the
+    latent path (decode_first_stage output) and img2img (image * 2 - 1)."""
+    p, calls = _make_p(monkeypatch, **MODEL_KINDS[kind])
+    monkeypatch.setattr(processing.sd_samplers, "create_sampler", lambda name, model: p.sampler)
+    monkeypatch.setattr(processing.shared, "state", SimpleNamespace(interrupted=False, nextjob=lambda: (_ for _ in ()).throw(_StopAfterConditioning())), raising=False)
+    monkeypatch.setattr(processing.shared, "device", torch.device("cpu"), raising=False)
+    monkeypatch.setattr(processing.images, "resize_image", lambda mode, image, width, height, upscaler_name=None: image.resize((width, height)))
+    encoded = []
+    monkeypatch.setattr(processing, "images_tensor_to_samples", lambda image, approximation=None, model=None: encoded.append(image) or torch.zeros(image.shape[0], 4, image.shape[2] // 8, image.shape[3] // 8))
+    p.__dict__.update(
+        hr_upscale_to_x=16, hr_upscale_to_y=16, hr_sampler_name=None, sampler_name="Euler", inpainting_mask_weight=0.5,
+        latent_scale_mode=None, hr_upscaler="Lanczos", do_not_save_samples=True,
+    )
+    decoded = torch.full((1, 3, 16, 16), -0.5)
+
+    with pytest.raises(_StopAfterConditioning):
+        p.sample_hr_pass(None, decoded, [1], [1], 0.0, [""])
+
+    unit = 64 / 255  # round(255 * (-0.5 + 1) / 2)
+    assert encoded[0].dtype == devices.dtype_vae
+    assert torch.allclose(encoded[0].double(), torch.full(encoded[0].shape, unit, dtype=torch.float64), atol=1e-3)
+    if kind == "sdxl":
+        assert calls == []
+    else:
+        source = calls[0][1]
+        assert source.dtype == devices.dtype_vae
+        assert torch.allclose(source.double(), torch.full(source.shape, unit * 2 - 1, dtype=torch.float64), atol=1e-3)
+
+
+class _StopAtSampling(Exception):
+    pass
+
+
+@pytest.mark.parametrize("kind", ["sdxl", "sdxl_inpaint", "inpaint"])
+@pytest.mark.parametrize("truncate", [(0, 0), (2, 1)])
+def test_latent_hires_conditioning_matches_the_sampled_latent(monkeypatch, kind, truncate):
+    """Inpainting-model conditioning is built at the upscaled size (not the first-pass width/height) and cropped with
+    the samples when hr_resize_x/y truncate the latent; otherwise the UNet concat fails on mismatched sizes."""
+    p, calls = _make_p(monkeypatch, **MODEL_KINDS[kind])
+    sampled = []
+
+    def sample_img2img(p_, x, noise, c, uc, steps=None, image_conditioning=None):
+        sampled.append((x, image_conditioning))
+        raise _StopAtSampling()
+
+    p.sampler.sample_img2img = sample_img2img
+    monkeypatch.setattr(processing.sd_samplers, "create_sampler", lambda name, model: p.sampler)
+    monkeypatch.setattr(processing.shared, "state", SimpleNamespace(interrupted=False, nextjob=lambda: None), raising=False)
+    monkeypatch.setattr(processing, "images_tensor_to_samples", lambda image, approximation=None, model=None: torch.zeros(image.shape[0], 4, image.shape[2] // 8, image.shape[3] // 8))
+    monkeypatch.setattr(processing.rng, "ImageRNG", lambda shape, *args, **kwargs: SimpleNamespace(next=lambda: torch.zeros(1, *shape)))
+    monkeypatch.setattr(processing.devices, "autocast", lambda disable=False: contextlib.nullcontext())
+    monkeypatch.setattr(processing.sd_models, "apply_token_merging", lambda model, ratio: None)
+    p.__dict__.update(
+        width=16, height=16, hr_upscale_to_x=48, hr_upscale_to_y=32, truncate_x=truncate[0], truncate_y=truncate[1],
+        hr_sampler_name=None, sampler_name="Euler", inpainting_mask_weight=1.0, latent_scale_mode={"mode": "nearest", "antialias": False},
+        do_not_save_samples=True, seeds=[1], subseeds=[1], subseed_strength=0.0, seed_resize_from_h=0, seed_resize_from_w=0,
+        disable_extra_networks=True, scripts=None, hr_c=None, hr_uc=None, hr_second_pass_steps=0, steps=1,
+        calculate_hr_conds=lambda: None, get_token_merging_ratio=lambda for_hr=False: 0.0,
+    )
+
+    with pytest.raises(_StopAtSampling):
+        p.sample_hr_pass(torch.randn(1, 4, 2, 2), None, [1], [1], 0.0, [""])
+
+    x, image_conditioning = sampled[0]
+    assert x.shape == (1, 4, 4 - truncate[1], 6 - truncate[0])
+    if kind == "sdxl":
+        assert image_conditioning.shape == (1, 5, 1, 1)
+    else:
+        assert image_conditioning.shape == (1, 5, *x.shape[-2:])
