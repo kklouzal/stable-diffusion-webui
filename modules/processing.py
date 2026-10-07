@@ -1489,8 +1489,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         if self.hr_resize_x == 0 and self.hr_resize_y == 0:
             self.extra_generation_params["Hires upscale"] = self.hr_scale
-            self.hr_upscale_to_x = int(self.width * self.hr_scale)
-            self.hr_upscale_to_y = int(self.height * self.hr_scale)
+            # floor, not int(): a decimal scale is not an exact binary fraction and an integer product can come out a
+            # few ulp low (1600 * 1.15 == 1839.9999999999998), which would shrink the hires latent by a row/column.
+            self.hr_upscale_to_x = math.floor(self.width * self.hr_scale + 1e-9)
+            self.hr_upscale_to_y = math.floor(self.height * self.hr_scale + 1e-9)
         else:
             self.extra_generation_params["Hires resize"] = f"{self.hr_resize_x}x{self.hr_resize_y}"
 
