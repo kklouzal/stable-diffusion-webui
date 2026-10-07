@@ -573,6 +573,14 @@ class StableDiffusionProcessing:
             opts.emphasis,
             opts.use_old_emphasis_implementation,
             opts.comma_padding_backtrack,
+            # SdConditioning is a plain list for ==; SDXL reads its size and negative flag
+            # (hires conds use the hires size, not self.width/height).
+            getattr(required_prompts, "width", None),
+            getattr(required_prompts, "height", None),
+            getattr(required_prompts, "is_negative_prompt", False),
+            # The SDXL refiner conditioner embeds these.
+            opts.sdxl_refiner_low_aesthetic_score,
+            opts.sdxl_refiner_high_aesthetic_score,
         )
 
     @staticmethod
@@ -584,6 +592,7 @@ class StableDiffusionProcessing:
             "clip_skip", "sdxl_clip_skip", "checkpoint", "network_state", "extra_network_data",
             "sdxl_crop", "sdxl_crop", "dimensions", "dimensions", "fp8_storage",
             "fp16_weight_cache", "emphasis", "old_emphasis", "comma_padding_backtrack",
+            "prompt_dimensions", "prompt_dimensions", "negative_prompt", "refiner_aesthetic_score", "refiner_aesthetic_score",
         )
         changed = [label for label, before, after in zip(labels, previous_key, current_key) if before != after]
         return "changed:" + ",".join(dict.fromkeys(changed)) if changed else "evicted"
