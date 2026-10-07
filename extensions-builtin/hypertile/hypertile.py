@@ -233,7 +233,7 @@ def largest_tile_size_available(width: int, height: int) -> int:
 
 def iterative_closest_divisors(hw:int, aspect_ratio:float) -> tuple[int, int]:
     """
-    Finds h and w such that h*w = hw and h/w = aspect_ratio
+    Finds h and w such that h*w = hw and w/h = aspect_ratio (width / height)
     We check all possible divisors of hw and return the closest to the aspect ratio
     """
     divisors = [i for i in range(2, hw + 1) if hw % i == 0] # all divisors of hw
@@ -247,9 +247,13 @@ def iterative_closest_divisors(hw:int, aspect_ratio:float) -> tuple[int, int]:
 @lru_cache(maxsize=256)
 def find_hw_candidates(hw:int, aspect_ratio:float) -> tuple[int, int]:
     """
-    Finds h and w such that h*w = hw and h/w = aspect_ratio
+    Finds the token grid of a U-Net attention sequence: h rows by w columns with h*w = hw and
+    w/h = aspect_ratio (image width / height). The sequence is row-major ("b c h w -> b (h w) c"), so h is
+    the slow axis the "(nh h nw w)" tiling splits first. Upstream HyperTile computed h from hw * aspect_ratio,
+    i.e. the width, which tiled non-square images into interleaved column sets instead of rectangles and
+    disagreed with the iterative fallback below; square images are unaffected.
     """
-    h, w = round(math.sqrt(hw * aspect_ratio)), round(math.sqrt(hw / aspect_ratio))
+    h, w = round(math.sqrt(hw / aspect_ratio)), round(math.sqrt(hw * aspect_ratio))
     # find h and w such that h*w = hw and h/w = aspect_ratio
     if h * w != hw:
         w_candidate = hw / h
