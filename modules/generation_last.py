@@ -147,7 +147,107 @@ def _is_controlnet_unit(value: Any) -> bool:
     return type(value).__name__ == "ControlNetUnit"
 
 
-def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: dict[str, int]):
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Chunks that define decoded pixels/mode/transparency, plus the ICC profile that
+# the RGBA re-encode also keeps (Pillow writes info["icc_profile"]).
+_PNG_RETAINED_CHUNKS = frozenset((b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND", b"iCCP"))
+# Ancillary metadata Pillow never applies to decoded pixels and the RGBA
+# re-encode never writes; text chunks may hold prompts, which snapshots do not retain.
+_PNG_DROPPED_CHUNKS = frozenset((
+    b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME", b"pHYs", b"gAMA", b"cHRM", b"sRGB", b"sBIT", b"bKGD", b"hIST", b"sPLT",
+))
+# images.read() (API decode) applies EXIF orientation from these info keys, so
+# dropping their chunks would change replayed pixels; such inputs are re-encoded.
+_ORIENTATION_INFO_KEYS = frozenset(("exif", "Raw profile type exif", "XML:com.adobe.xmp", "xmp"))
+
+
+def _png_without_metadata(raw: bytes) -> bytes | None:
+    """Return raw (unchanged object) or a copy without _PNG_DROPPED_CHUNKS; None if raw needs re-encoding."""
+    if not raw.startswith(_PNG_SIGNATURE):
+        return None
+    view = memoryview(raw)
+    chunks = [view[:len(_PNG_SIGNATURE)]]
+    offset = len(_PNG_SIGNATURE)
+    chunk_type = None
+    dropped = False
+    while chunk_type != b"IEND":
+        if offset + 12 > len(raw):
+            return None
+        end = offset + 12 + int.from_bytes(raw[offset:offset + 4], "big")
+        chunk_type = raw[offset + 4:offset + 8]
+        if end > len(raw):
+            return None
+        if chunk_type in _PNG_RETAINED_CHUNKS:
+            chunks.append(view[offset:end])
+        elif chunk_type in _PNG_DROPPED_CHUNKS:
+            dropped = True
+        else:
+            return None  # APNG frames, private or newer chunks: keep the decoded-pixel path.
+        offset = end
+    if not dropped and offset == len(raw):
+        return raw
+    return b"".join(chunks)  # also drops data after IEND, which decoders ignore
+
+
+def _decode_inline_image(value: str):
+    """Validate bounded inline base64 image data; never resolve paths or fetch URLs.
+
+    Returns (retained_base64, None) for a PNG kept as sent minus metadata, so its
+    pixels, mode, palette and transparency replay exactly; else (None, decoded image).
+    """
+    from PIL import Image
+    import base64
+    import io
+
+    if value.startswith("data:"):
+        prefix, separator, value = value.partition(",")
+        if not separator or prefix not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"):
+            raise ValueError("Unsupported inline image encoding")
+    if len(value) > _MAX_IMAGE_BYTES:
+        raise ValueError("Encoded input exceeds image budget")
+    raw = base64.b64decode(value, validate=True)
+    with Image.open(io.BytesIO(raw)) as decoded:
+        if decoded.width > 16384 or decoded.height > 16384 or decoded.width * decoded.height > 64 * 1024 * 1024:
+            raise ValueError("Image dimensions exceed budget")
+        # Rejects truncated/corrupt data before retention and reads trailing text chunks into info.
+        decoded.load()
+    png = _png_without_metadata(raw) if _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
+    if png is None:
+        return None, decoded
+    return (value if png is raw else base64.b64encode(png).decode("ascii")), None
+
+
+def _encode_api_png(value: Any, source: str | None = None) -> str:
+    """Return PNG base64 for a PIL/numpy/inline-base64 input.
+
+    source is the API request's inline data that decoded to the PIL image value;
+    it is retained when it is an eligible PNG, else value is encoded as before.
+    """
+    from PIL import Image
+    import base64
+    import io
+
+    if source is not None:
+        try:
+            retained, _ = _decode_inline_image(source)
+        except Exception:
+            # The run accepted value through the API's own decoder; data this
+            # stricter check rejects is simply encoded from value instead.
+            retained = None
+        if retained is not None:
+            return retained
+    elif isinstance(value, str):
+        retained, value = _decode_inline_image(value)
+        if retained is not None:
+            return retained
+    if not isinstance(value, Image.Image):
+        value = Image.fromarray(value)
+    with io.BytesIO() as output:
+        value.convert("RGBA").save(output, format="PNG")
+        return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: dict[str, Any], source: str | None = None):
     """Encode a PIL/numpy API input as bounded PNG base64 without retaining paths."""
     if value is None:
         return None
@@ -158,32 +258,18 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
             _limitation(limitations, f"{path} has multiple image inputs beyond the retained-image limit.")
             return _OMIT
         value = value[0]
-    try:
-        from PIL import Image
-        import base64
-        import io
-
-        if isinstance(value, str):
-            # API/ControlNet inputs can already be encoded. Decode inline data
-            # only: never resolve paths or fetch URLs while capturing a snapshot.
-            if value.startswith("data:"):
-                prefix, separator, value = value.partition(",")
-                if not separator or prefix not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"):
-                    raise ValueError("Unsupported inline image encoding")
-            if len(value) > _MAX_IMAGE_BYTES:
-                raise ValueError("Encoded input exceeds image budget")
-            raw = base64.b64decode(value, validate=True)
-            with Image.open(io.BytesIO(raw)) as decoded:
-                if decoded.width > 16384 or decoded.height > 16384 or decoded.width * decoded.height > 64 * 1024 * 1024:
-                    raise ValueError("Image dimensions exceed budget")
-                value = decoded.convert("RGBA")
-        if not isinstance(value, Image.Image):
-            value = Image.fromarray(value)
-        image = value.convert("RGBA")
-        with io.BytesIO() as output:
-            image.save(output, format="PNG")
-            encoded = base64.b64encode(output.getvalue()).decode("ascii")
-    except Exception:
+    # One snapshot often holds the same input several times (init image,
+    # ControlNet image, unit image): encode it once, charge the budget per use.
+    # Entries keep value alive so its id() cannot be reused during the snapshot.
+    encoded_inputs = budget.setdefault("encoded", {})
+    key = value if isinstance(value, str) else id(value)
+    if key not in encoded_inputs:
+        try:
+            encoded_inputs[key] = (value, _encode_api_png(value, source))
+        except Exception:
+            encoded_inputs[key] = (value, None)
+    encoded = encoded_inputs[key][1]
+    if encoded is None:
         _limitation(limitations, f"{path} could not be encoded as API PNG base64 data.")
         return _OMIT
     encoded_bytes = len(encoded)
@@ -314,9 +400,12 @@ def _capture_img2img_assets(p: Any, parameters: dict[str, Any], limitations: lis
     if not isinstance(init_images, (list, tuple)) or not init_images:
         _limitation(limitations, "img2img replay requires init_images, but none were available from the completed generation.")
     else:
+        # The API records the request's inline data per decoded init image; it
+        # applies only while the run still uses that same image object.
+        sources = {id(image): source for image, source in getattr(p, "openclaw_api_init_image_sources", None) or ()}
         encoded_images = []
         for index, image in enumerate(init_images):
-            encoded = _image_to_api_base64(image, limitations, f"parameters.init_images[{index}]", budget)
+            encoded = _image_to_api_base64(image, limitations, f"parameters.init_images[{index}]", budget, sources.get(id(image)))
             if encoded is _OMIT or encoded is None:
                 _limitation(limitations, f"img2img replay requires parameters.init_images[{index}].")
                 continue
@@ -340,7 +429,7 @@ def _build_parameters(p, processed, *, retain_assets: bool):
     limitations: list[str] = []
     generation_type = "img2img" if p.__class__.__name__.endswith("Img2Img") else "txt2img"
     parameters: dict[str, Any] = {}
-    budget = {"images": 0}
+    budget = {"images": 0, "encoded": {}}
 
     common_fields = (
         "styles", "subseed_strength", "seed_resize_from_h", "seed_resize_from_w",

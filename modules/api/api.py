@@ -1135,6 +1135,11 @@ class Api:
                     with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
                         _attach_controlnet_remote_args(p, controlnet_remote_args)
                         p.init_images = decoded_init_images
+                        # generation_last can retain these inline PNGs instead of re-encoding (never URLs).
+                        p.openclaw_api_init_image_sources = [
+                            (image, source) for image, source in zip(decoded_init_images, init_images)
+                            if not source.startswith(("http://", "https://"))
+                        ]
                         p.is_api = True
                         p.scripts = script_runner
                         p.openclaw_script_arg_ranges = script_arg_ranges

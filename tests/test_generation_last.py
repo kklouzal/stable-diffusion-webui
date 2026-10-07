@@ -25,10 +25,16 @@ def load_generation_last(data_path: Path):
     shared.opts = types.SimpleNamespace(CLIP_stop_at_last_layers=2)
     shared.state = types.SimpleNamespace(interrupted=False, stopping_generation=False)
 
-    previous = {name: sys.modules.get(name) for name in ("modules", "modules.paths", "modules.shared", "modules.generation_last")}
+    previous = {name: sys.modules.get(name) for name in ("modules", "modules.paths", "modules.shared", "modules.persistent_artifact_cache", "modules.generation_last")}
     sys.modules["modules"] = modules_pkg
     sys.modules["modules.paths"] = paths
     sys.modules["modules.shared"] = shared
+    # Stdlib-only dependency: load the real module so the file runs in isolation.
+    cache_spec = importlib.util.spec_from_file_location("modules.persistent_artifact_cache", MODULE_PATH.parent / "persistent_artifact_cache.py")
+    artifact_cache = importlib.util.module_from_spec(cache_spec)
+    sys.modules["modules.persistent_artifact_cache"] = artifact_cache
+    cache_spec.loader.exec_module(artifact_cache)
+    modules_pkg.persistent_artifact_cache = artifact_cache
     spec = importlib.util.spec_from_file_location("modules.generation_last", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules["modules.generation_last"] = module
@@ -369,6 +375,135 @@ class GenerationLastTests(unittest.TestCase):
             limitations = []
             self.assertIs(self.module._image_to_api_base64(source, limitations, "ControlNet.image", {"images": 0}), self.module._OMIT)
             self.assertTrue(limitations)
+
+    def test_repeated_inputs_encode_once_but_charge_budget_per_occurrence(self):
+        source = Image.frombytes("RGB", (64, 64), os.urandom(64 * 64 * 3))
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [source]
+        p.control_net_enabled = True
+        p.control_net_image = source
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=2)
+        p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
+        p.script_args = [0, ControlNetUnit(enabled=True, image=source)]
+        calls = []
+        original = self.module._encode_api_png
+
+        def counting(value, source=None):
+            calls.append(value)
+            return original(value, source)
+
+        with patch.object(self.module, "_encode_api_png", counting):
+            snapshot = self.module.build_snapshot(p, self.processed)
+            self.assertTrue(snapshot["replayable"], snapshot["limitations"])
+            self.assertEqual(len(calls), 1)
+            encoded = snapshot["parameters"]["init_images"][0]
+            # Room for exactly two occurrences: the third still exceeds the total budget.
+            with patch.object(self.module, "_MAX_IMAGE_TOTAL_BYTES", 2 * len(encoded)):
+                limited = self.module.build_snapshot(p, self.processed)
+        self.assertFalse(limited["replayable"])
+        self.assertEqual(limited["parameters"]["init_images"], [encoded])
+        self.assertEqual(limited["parameters"]["control_net_image"], encoded)
+        self.assertTrue(any("ControlNet.args[0].image exceeds the total retained-image limit" in item for item in limited["limitations"]))
+
+    @staticmethod
+    def _png(image, **save_options):
+        import io
+        output = io.BytesIO()
+        image.save(output, format="PNG", **save_options)
+        return output.getvalue()
+
+    @staticmethod
+    def _api_decode(data):
+        # modules.images.read(): EXIF orientation, then palette/RGB tRNS -> RGBA.
+        import io
+        from PIL import ImageOps
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+        if image.mode in ("RGB", "P") and isinstance(image.info.get("transparency"), bytes):
+            image = image.convert("RGBA")
+        return image
+
+    def test_inline_png_is_retained_without_reencoding_or_text_metadata(self):
+        import base64
+        from PIL import PngImagePlugin
+        palette = Image.frombytes("P", (16, 16), bytes(range(256)))
+        palette.putpalette(bytes(range(256)) * 3)
+        rgb = Image.frombytes("RGB", (16, 16), os.urandom(16 * 16 * 3))
+        for image, options in ((rgb, {}), (rgb.convert("RGBA"), {}), (rgb.convert("L"), {}),
+                               (palette, {"transparency": bytes([0, 255] * 128)}),
+                               (rgb, {"transparency": (1, 2, 3)})):
+            plain = self._png(image, **options)
+            data = base64.b64encode(plain).decode("ascii")
+            for source in (data, "data:image/png;base64," + data):
+                self.assertEqual(self.module._image_to_api_base64(source, [], "image", {"images": 0}), data)
+
+            info = PngImagePlugin.PngInfo()
+            info.add_text("parameters", "private prompt")
+            info.add_itxt("comment", "private note", zip=True)
+            tagged = self._png(image, pnginfo=info, dpi=(72, 72), **options)
+            retained = self.module._image_to_api_base64(base64.b64encode(tagged).decode("ascii"), [], "image", {"images": 0})
+            stored = base64.b64decode(retained)
+            self.assertNotIn(b"private", stored)
+            self.assertEqual(stored, plain)
+            expected, actual = self._api_decode(tagged), self._api_decode(stored)
+            self.assertEqual((actual.mode, actual.tobytes()), (expected.mode, expected.tobytes()))
+
+    def test_oriented_or_non_png_inline_images_are_reencoded(self):
+        import base64
+        import io
+        rgb = Image.frombytes("RGB", (16, 8), os.urandom(16 * 8 * 3))
+        exif = Image.Exif()
+        exif[0x0112] = 6
+        jpeg = io.BytesIO()
+        rgb.save(jpeg, format="JPEG")
+        for data in (self._png(rgb, exif=exif.tobytes()), jpeg.getvalue()):
+            source = base64.b64encode(data).decode("ascii")
+            result = self.module._image_to_api_base64(source, [], "image", {"images": 0})
+            self.assertNotEqual(result, source)
+            with Image.open(io.BytesIO(base64.b64decode(result))) as decoded:
+                self.assertEqual((decoded.format, decoded.mode, decoded.size), ("PNG", "RGBA", (16, 8)))
+                self.assertNotIn("exif", decoded.info)
+                with Image.open(io.BytesIO(data)) as original:
+                    self.assertEqual(decoded.convert("RGB").tobytes(), original.convert("RGB").tobytes())
+
+    def test_corrupt_inline_png_is_rejected(self):
+        import base64
+        import struct
+        import zlib
+        valid = self._png(Image.frombytes("RGB", (32, 32), os.urandom(32 * 32 * 3)))
+        idat = valid.index(b"IDAT") - 4
+        length = struct.unpack(">I", valid[idat:idat + 4])[0]
+        garbage = bytes(length)
+        broken_stream = valid[:idat + 8] + garbage + struct.pack(">I", zlib.crc32(b"IDAT" + garbage)) + valid[idat + 12 + length:]
+        for data in (valid[:idat + 8 + length // 2], broken_stream):
+            limitations = []
+            self.assertIs(self.module._image_to_api_base64(base64.b64encode(data).decode("ascii"), limitations, "image", {"images": 0}), self.module._OMIT)
+            self.assertTrue(limitations)
+
+    def test_api_init_image_source_is_retained_only_for_the_image_the_run_used(self):
+        import base64
+        import io
+        decoded = Image.frombytes("RGB", (16, 16), os.urandom(16 * 16 * 3))
+        source = base64.b64encode(self._png(decoded)).decode("ascii")
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [decoded]
+        p.openclaw_api_init_image_sources = [(decoded, source)]
+        with patch.object(Image.Image, "save", side_effect=AssertionError("must not re-encode")):
+            snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertEqual(snapshot["parameters"]["init_images"], [source])
+
+        replacement = Image.frombytes("RGB", (16, 16), os.urandom(16 * 16 * 3))
+        p.init_images = [replacement]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        with Image.open(io.BytesIO(base64.b64decode(snapshot["parameters"]["init_images"][0]))) as stored:
+            self.assertEqual(stored.convert("RGB").tobytes(), replacement.tobytes())
+
+        # Sources the stricter snapshot decoder rejects fall back to the decoded image.
+        p.init_images = [decoded]
+        p.openclaw_api_init_image_sources = [(decoded, "data:image/gif;base64," + source)]
+        snapshot = self.module.build_snapshot(p, self.processed)
+        self.assertTrue(snapshot["replayable"], snapshot["limitations"])
+        with Image.open(io.BytesIO(base64.b64decode(snapshot["parameters"]["init_images"][0]))) as stored:
+            self.assertEqual((stored.mode, stored.convert("RGB").tobytes()), ("RGBA", decoded.tobytes()))
 
     def test_version_one_snapshot_is_available_without_new_generation(self):
         legacy = {
