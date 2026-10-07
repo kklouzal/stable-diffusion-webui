@@ -737,7 +737,11 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
     wanted_names = network_wanted_names()
 
     weights_backup = getattr(self, "network_weights_backup", None)
-    if weights_backup is None and wanted_names != ():
+    # The weight and bias backups describe the same unmodified layer, so they are taken together. A bias-less
+    # layer backs up None ("no bias"); a bias that a network created on it later must not be taken for a
+    # missing backup on the next change of the network set.
+    take_backups = weights_backup is None and wanted_names != ()
+    if take_backups:
         if current_names != () and not allowed_layer_without_weight(self):
             raise RuntimeError(f"{network_layer_name} - no backup weights found and current weights are not unchanged")
 
@@ -749,7 +753,7 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         self.network_weights_backup = weights_backup
 
     bias_backup = getattr(self, "network_bias_backup", None)
-    if bias_backup is None and wanted_names != ():
+    if take_backups:
         if isinstance(self, torch.nn.MultiheadAttention):
             # out_proj bias belongs to its separately mapped Linear lifecycle.
             bias_backup = None

@@ -195,6 +195,31 @@ def test_full_diff_bias_on_biasless_bf16_layer_creates_parameter(bf16_lora):
     assert layer.bias is None and torch.equal(layer.weight, base)
 
 
+def test_network_created_bias_is_replaced_when_the_network_set_changes(bf16_lora):
+    """A bias-less layer's backup is "no bias"; the bias a network created must not be mistaken for a missing backup
+    (which raised "no backup bias found" on the next change to another non-empty network set)."""
+    networks = bf16_lora
+    layer = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    base = layer.weight.detach().clone()
+    diff, diff_b = torch.full((4, 4), 0.25, dtype=torch.float16), torch.arange(4, dtype=torch.float16)
+    first = _add_module(networks, _net(networks, "full_a"), layer, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+    second = _add_module(networks, _net(networks, "full_b", 0.5), layer, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+
+    networks._set_loaded_networks([first])
+    networks.network_apply_weights(layer)
+    assert torch.equal(layer.bias, diff_b.to(torch.bfloat16))
+
+    networks._set_loaded_networks([second])
+    networks.network_apply_weights(layer)
+    assert torch.equal(layer.bias, (diff_b * 0.5).to(torch.bfloat16))
+    assert torch.equal(layer.weight, (base.double() + 0.125).to(torch.bfloat16))
+
+    networks._set_loaded_networks([])
+    networks.network_apply_weights(layer)
+    assert layer.bias is None and torch.equal(layer.weight, base)
+
+
 def test_functional_generic_forward_uses_input_dtype(bf16_lora):
     networks = bf16_lora
     layer = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
