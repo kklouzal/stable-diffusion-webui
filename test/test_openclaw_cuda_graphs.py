@@ -123,7 +123,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
         openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
         openclaw_cuda_graphs._KEY_LOCKS[("stale",)] = object()
         openclaw_cuda_graphs._FAILED_KEYS.add(("failed",))
-        openclaw_cuda_graphs._SEEN_KEYS.add(("seen",))
 
     def test_invalidate_records_reason_only_when_state_is_cleared(self):
         status = openclaw_cuda_graphs.invalidate("model_changed", "empty")
@@ -135,7 +134,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
         self.assertEqual(status["cache_size"], 0)
         self.assertEqual(openclaw_cuda_graphs._KEY_LOCKS, {})
         self.assertEqual(openclaw_cuda_graphs._FAILED_KEYS, set())
-        self.assertEqual(openclaw_cuda_graphs._SEEN_KEYS, set())
         self.assertEqual(status["invalidations"], 1)
         self.assertEqual(status["invalidation_reasons"], {"model_changed": 1})
         self.assertEqual(status["last_invalidation_reason"], "model_changed")
@@ -185,13 +183,10 @@ class CudaGraphInvalidationTests(unittest.TestCase):
 class CudaGraphCacheSizeTests(unittest.TestCase):
     def setUp(self):
         self.previous_max_cache_size = openclaw_cuda_graphs._MAX_CACHE_SIZE
-        self.previous_min_key_hits = openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE
-        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = 2
         openclaw_cuda_graphs.set_enabled(False, clear=True)
 
     def tearDown(self):
         openclaw_cuda_graphs._MAX_CACHE_SIZE = self.previous_max_cache_size
-        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = self.previous_min_key_hits
         openclaw_cuda_graphs.set_enabled(False, clear=True)
 
     def test_zero_max_cache_size_clears_existing_cache_entries(self):
@@ -256,6 +251,7 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
             return x_arg
 
         with mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
+             mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True), \
              mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False), \
              mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, FakeTensor)):
             openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
@@ -264,12 +260,11 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         self.assertEqual(len(openclaw_cuda_graphs._KEY_LOCKS), 1)
 
 
-    def test_capture_returns_first_eager_warmup_result(self):
+    def test_first_capture_returns_graph_replay_after_single_side_stream_warmup(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for capture return-equivalence test")
 
         openclaw_cuda_graphs._MAX_CACHE_SIZE = 1
-        openclaw_cuda_graphs._MIN_KEY_HITS_BEFORE_CAPTURE = 1
         openclaw_cuda_graphs.set_enabled(True, clear=True)
         x = torch.zeros(1, device="cuda")
         calls = []
@@ -280,7 +275,9 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
 
         out = openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
 
-        self.assertTrue(torch.equal(out.cpu(), torch.ones(1)))
+        # One side-stream warm-up (+1), then the capture (+2) whose replay is returned; no extra eager warm.
+        self.assertEqual(calls, [1, 2])
+        self.assertTrue(torch.equal(out.cpu(), torch.full((1,), 2.0)))
 
     def test_model_invalidation_waits_for_inflight_replay_and_clone(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)
@@ -340,6 +337,7 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
 
         with mock.patch.object(openclaw_cuda_graphs, "_cache_key", return_value=key), \
              mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None), \
+             mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True), \
              mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
              mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))), \
              mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False):
@@ -437,16 +435,15 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         transposed = x.transpose(2, 3)
 
         with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 1),)):
-            base = self.graphs._key(model_a, x, 0, "decode")
-            self.assertNotEqual(base, self.graphs._key(model_b, x, 0, "decode"))
-            self.assertNotEqual(base, self.graphs._key(model_a, transposed, 0, "decode"))
-            self.assertNotEqual(base, self.graphs._key(model_a, x, 0, "encode"))
+            base = self.graphs._key(model_a, x, 0)
+            self.assertNotEqual(base, self.graphs._key(model_b, x, 0))
+            self.assertNotEqual(base, self.graphs._key(model_a, transposed, 0))
             with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 2),)):
-                self.assertNotEqual(base, self.graphs._key(model_a, x, 0, "decode"))
+                self.assertNotEqual(base, self.graphs._key(model_a, x, 0))
 
         clone = x.clone()
         if torch.cuda.is_available():
-            self.assertNotEqual(base, self.graphs._key(model_a, clone.cuda(), 0, "decode"))
+            self.assertNotEqual(base, self.graphs._key(model_a, clone.cuda(), 0))
         self.assertNotEqual(self.graphs._tensor_key(x), self.graphs._tensor_key(x.to(torch.float64)))
 
     def test_parameter_mutation_and_callable_replacement_change_identity(self):
@@ -580,8 +577,10 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
             mock.patch.object(self.graphs.torch.cuda, "stream", return_value=StreamContext()),
             mock.patch.object(self.graphs.torch.cuda, "CUDAGraph", return_value=Graph()),
             mock.patch.object(self.graphs.torch.cuda, "graph", return_value=GraphContext()),
+            mock.patch.object(self.graphs.torch.cuda, "synchronize"),
+            mock.patch.object(self.graphs.torch.cuda, "graph_pool_handle", return_value=("pool",)),
         )
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9]:
             cold = self.graphs.run(object(), source)
             source.value = 4.0
             hit = self.graphs.run(object(), source)
@@ -636,6 +635,500 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         self.graphs.set_enabled(True, clear_cache=True)
         self.assertIsNone(self.graphs.run(object(), object(), approximation=1))
         self.assertEqual(self.graphs.status()["bypass_reasons"].get("vae_approximation"), 1)
+
+
+class FakeScheduleWrapper(torch.nn.Module):
+    """k-diffusion CompVisDenoiser stand-in: own sigma buffers, the model as `inner_model`, a `quantize` flag."""
+
+    def __init__(self, model, alphas_cumprod, quantize=False):
+        super().__init__()
+        self.inner_model = model
+        sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
+        self.register_buffer("sigmas", sigmas)
+        self.register_buffer("log_sigmas", sigmas.log())
+        self.quantize = quantize
+
+    def forward(self, x, sigma, cond=None):
+        return x + 1
+
+
+class FakeModel(torch.nn.Module):
+    def __init__(self, alphas_cumprod):
+        super().__init__()
+        self.alphas_cumprod = alphas_cumprod
+        self.model = torch.nn.Module()
+        self.model.diffusion_model = torch.nn.Linear(1, 1)
+
+    def apply_model(self, x, t, cond=None):
+        return x
+
+
+def unmasked_denoiser(model=None):
+    denoiser = make_denoiser(active=False)
+    if model is not None:
+        denoiser.p.sd_model = model
+    return denoiser
+
+
+class CudaGraphRequestOverrideTests(unittest.TestCase):
+    """Per-request Python overrides that a replay would skip must keep the call eager (TD-G1, B1, B2)."""
+
+    def setUp(self):
+        self.alphas = torch.linspace(0.99, 0.01, 8)
+        self.model = FakeModel(self.alphas)
+        self.fn = FakeScheduleWrapper(self.model, self.alphas)
+
+    def reason(self, denoiser=None, fn=None):
+        return openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser or unmasked_denoiser(self.model), fn or self.fn)
+
+    def test_plain_request_is_graphable(self):
+        self.assertIsNone(self.reason())
+
+    def test_multidiffusion_inner_model_forward_override_bypasses(self):
+        self.fn.forward = lambda x, sigma, cond=None: x  # MultiDiffusion: inner_model.forward = delegate.kdiff_forward
+        self.assertEqual(self.reason(), "python_forward_override")
+
+    def test_demofusion_denoiser_forward_override_bypasses(self):
+        denoiser = unmasked_denoiser(self.model)
+        denoiser.forward = lambda *args, **kwargs: None
+        self.assertEqual(self.reason(denoiser), "python_forward_override")
+
+    def test_mixture_of_diffusers_apply_model_override_bypasses_for_wrapper_or_processing_model(self):
+        delegate = FakeModel(self.alphas)
+        self.model.apply_model = delegate.apply_model  # bound to another object: real override
+        self.assertEqual(self.reason(), "python_forward_override")
+        # p.sd_model is checked even when the wrapper wraps a different object.
+        other = FakeModel(self.alphas)
+        other.apply_model = lambda *args, **kwargs: None
+        self.assertEqual(
+            openclaw_cuda_graphs._graph_denoiser_bypass_reason(unmasked_denoiser(other), FakeScheduleWrapper(FakeModel(self.alphas), self.alphas)),
+            "python_forward_override",
+        )
+
+    def test_unet_or_wrapper_instance_forward_override_bypasses(self):
+        self.model.model.diffusion_model.forward = lambda *args, **kwargs: None
+        self.assertEqual(self.reason(), "python_forward_override")
+        del self.model.model.diffusion_model.forward
+        self.model.model.forward = lambda *args, **kwargs: None
+        self.assertEqual(self.reason(), "python_forward_override")
+
+    def test_restored_bound_class_methods_are_not_overrides(self):
+        # Extension restore paths (MixtureOfDiffusers, ControlNet, TeaCache, Tiled VAE) assign the saved bound class
+        # method back onto the instance; that calls exactly the class method and must not disable graphs forever.
+        self.fn.forward = self.fn.forward
+        self.model.apply_model = self.model.apply_model
+        self.model.model.diffusion_model.forward = self.model.model.diffusion_model.forward
+        self.assertIn("forward", vars(self.fn))
+        self.assertIsNone(self.reason())
+
+    def test_instance_overrides_contract(self):
+        module = torch.nn.Linear(1, 1)
+        other = torch.nn.Linear(1, 1)
+        self.assertFalse(openclaw_cuda_graphs.instance_overrides(module, "forward"))
+        self.assertFalse(openclaw_cuda_graphs.instance_overrides(None, "forward"))
+        module.forward = module.forward
+        self.assertFalse(openclaw_cuda_graphs.instance_overrides(module, "forward"))
+        module.forward = other.forward
+        self.assertTrue(openclaw_cuda_graphs.instance_overrides(module, "forward"))
+        module.forward = lambda x: x
+        self.assertTrue(openclaw_cuda_graphs.instance_overrides(module, "forward"))
+
+    def test_active_unet_hypertile_bypasses(self):
+        setattr(self.model.model, "__webui_hypertile_enabled", True)
+        self.assertEqual(self.reason(), "hypertile_unet")
+        setattr(self.model.model, "__webui_hypertile_enabled", False)
+        self.assertIsNone(self.reason())
+
+    def test_hypertile_hook_model_publishes_enabled_summary(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extensions-builtin", "hypertile")
+        sys.path.insert(0, root)
+        try:
+            import hypertile
+        finally:
+            sys.path.remove(root)
+        wrapper = torch.nn.Module()
+        parent = wrapper
+        for name in "input_blocks.4.1.transformer_blocks.0".split("."):
+            child = torch.nn.Module()
+            parent.add_module(name, child)
+            parent = child
+        parent.add_module("attn1", torch.nn.Linear(1, 1))
+
+        hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=False)
+        self.assertFalse(getattr(wrapper, "__webui_hypertile_enabled", False))  # never hooked
+        hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=True, max_depth=3, is_sdxl=True)
+        self.assertTrue(getattr(wrapper, "__webui_hypertile_enabled"))
+        hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=True, max_depth=-1, is_sdxl=True)
+        self.assertFalse(getattr(wrapper, "__webui_hypertile_enabled"))  # hooked, every layer above max depth
+        hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=False)
+        self.assertFalse(getattr(wrapper, "__webui_hypertile_enabled"))
+
+    def test_token_merging_bypasses(self):
+        self.model.applied_token_merged_ratio = 0.3
+        self.assertEqual(self.reason(), "token_merging")
+        self.model.applied_token_merged_ratio = 0
+        self.assertIsNone(self.reason())
+
+    def test_override_bypass_runs_eager_and_records_reason(self):
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        try:
+            self.fn.forward = lambda x, sigma, cond=None: x * 3
+            x = torch.ones(1)
+            out = openclaw_cuda_graphs.run(self.fn, x, x, cond={}, denoiser=unmasked_denoiser(self.model))
+            status = openclaw_cuda_graphs.status()
+        finally:
+            openclaw_cuda_graphs.set_enabled(False, clear=True)
+        self.assertTrue(torch.equal(out, torch.full((1,), 3.0)))
+        self.assertEqual(status["bypass_reasons"], {"python_forward_override": 1})
+        self.assertEqual(status["cache_size"], 0)
+
+
+class FakeCudaTensor:
+    """Just enough tensor surface for run() on a CPU-only host; values live in `value`."""
+
+    dtype = torch.float32
+    device = types.SimpleNamespace(type="cuda")
+    requires_grad = False
+
+    def __init__(self, value=0.0, shape=(1,)):
+        self.value = value
+        self.shape = shape
+
+    def stride(self):
+        return (1,)
+
+    def detach(self):
+        return self
+
+    def clone(self):
+        return FakeCudaTensor(self.value, self.shape)
+
+    def copy_(self, other, non_blocking=False):
+        self.value = other.value
+        return self
+
+
+class CudaGraphCaptureContractTests(unittest.TestCase):
+    """Capture path with faked CUDA objects: one warm-up, shared pool, LRU, entry ownership (G2, G3, BUG-G1)."""
+
+    def setUp(self):
+        self.previous_max = openclaw_cuda_graphs._MAX_CACHE_SIZE
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        self.pools = []
+        self.graph_calls = []
+        real_is_tensor = torch.is_tensor
+
+        class Graph:
+            def __init__(graph):
+                graph.replays = 0
+
+            def replay(graph):
+                graph.replays += 1
+
+        class Context:
+            def __enter__(ctx):
+                return None
+
+            def __exit__(ctx, *args):
+                return False
+
+        def graph(cuda_graph, pool=None):
+            self.graph_calls.append(pool)
+            return Context()
+
+        def pool_handle():
+            self.pools.append(("pool", len(self.pools)))
+            return self.pools[-1]
+
+        stream = types.SimpleNamespace(wait_stream=lambda other: None)
+        self.patches = [
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True),
+            mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True),
+            mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False),
+            mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda v: isinstance(v, FakeCudaTensor) or real_is_tensor(v)),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "Stream", return_value=stream),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "current_stream", return_value=stream),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "stream", return_value=Context()),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "CUDAGraph", side_effect=Graph),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "graph", side_effect=graph),
+            mock.patch.object(openclaw_cuda_graphs.torch.cuda, "graph_pool_handle", side_effect=pool_handle),
+        ]
+        for patch in self.patches:
+            patch.start()
+        self.alphas = torch.linspace(0.99, 0.01, 8)
+        self.model = FakeModel(self.alphas)
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = self.previous_max
+        openclaw_cuda_graphs.set_enabled(False, clear=True)
+
+    def make_fn(self, calls):
+        fn = FakeScheduleWrapper(self.model, self.alphas)
+
+        def forward(x, sigma, cond=None):
+            calls.append(x.shape)
+            return FakeCudaTensor(x.value + 1, x.shape)
+
+        fn.forward = forward
+        return fn
+
+    def run_shape(self, fn, shape):
+        x = FakeCudaTensor(0.0, shape)
+        # Instance forward stands in for the class forward here; skip the override bypass this test is not about.
+        with mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None):
+            return openclaw_cuda_graphs.run(fn, x, FakeCudaTensor(), cond={"c": FakeCudaTensor()}, denoiser=unmasked_denoiser(self.model))
+
+    def test_new_key_runs_one_warmup_then_capture_and_returns_replay(self):
+        calls = []
+        fn = self.make_fn(calls)
+        out = self.run_shape(fn, (1,))
+        self.assertEqual(len(calls), 2)  # side-stream warm-up + capture; no extra eager run
+        self.assertEqual(out.value, 1.0)
+        entry = next(iter(openclaw_cuda_graphs._CACHE.values()))
+        self.assertEqual(entry["graph"].replays, 1)
+        self.run_shape(fn, (1,))
+        self.assertEqual(len(calls), 2)  # hit: replay only
+        self.assertEqual(entry["graph"].replays, 2)
+
+    def test_entry_owns_wrapper_and_schedule_tensors(self):
+        fn = self.make_fn([])
+        self.run_shape(fn, (1,))
+        entry = next(iter(openclaw_cuda_graphs._CACHE.values()))
+        self.assertIs(entry["fn"], fn)
+        held = entry["schedule"]
+        self.assertTrue(any(tensor is fn.log_sigmas for tensor in held))
+        self.assertTrue(any(tensor is fn.sigmas for tensor in held))
+        self.assertTrue(any(tensor is self.model.alphas_cumprod for tensor in held))
+
+    def test_captures_share_one_pool_until_the_cache_is_cleared(self):
+        fn = self.make_fn([])
+        for shape in ((1,), (2,), (3,)):
+            self.run_shape(fn, shape)
+        self.assertEqual(self.graph_calls, [self.pools[0]] * 3)
+        openclaw_cuda_graphs.invalidate("model_changed")
+        self.run_shape(fn, (1,))
+        self.assertEqual(self.graph_calls[-1], self.pools[1])
+        self.assertEqual(len(self.pools), 2)
+
+    def test_eviction_is_least_recently_used(self):
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = 2
+        fn = self.make_fn([])
+        self.run_shape(fn, (1,))
+        self.run_shape(fn, (2,))
+        self.run_shape(fn, (1,))  # hit refreshes (1,)
+        self.run_shape(fn, (3,))  # evicts (2,), the least recently used
+        shapes = [key[1][1] for key in openclaw_cuda_graphs._CACHE]
+        self.assertEqual(shapes, [(1,), (3,)])
+
+    def test_equal_schedules_share_a_graph_and_changed_schedules_do_not(self):
+        calls = []
+        first = self.make_fn(calls)
+        self.run_shape(first, (1,))
+        second = self.make_fn(calls)  # the next request's wrapper, same alpha schedule
+        self.run_shape(second, (1,))
+        self.assertEqual(openclaw_cuda_graphs.status()["captures"], 1)
+        self.assertEqual(openclaw_cuda_graphs.status()["replays"], 1)
+        self.model.alphas_cumprod = self.alphas.clone()
+        self.model.alphas_cumprod[-1] = 0.0  # e.g. zero-terminal-SNR rescale for this request
+        third = FakeScheduleWrapper(self.model, self.model.alphas_cumprod.clamp_min(1e-4))
+        third.forward = second.forward
+        self.run_shape(third, (1,))
+        self.assertEqual(openclaw_cuda_graphs.status()["captures"], 2)
+
+    def test_non_default_stream_bypasses(self):
+        calls = []
+        fn = self.make_fn(calls)
+        with mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=False):
+            out = self.run_shape(fn, (1,))
+        self.assertEqual(out.value, 1.0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(openclaw_cuda_graphs.status()["bypass_reasons"], {"non_default_stream": 1})
+        self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
+
+
+class CudaGraphKeyTests(unittest.TestCase):
+    def setUp(self):
+        self.alphas = torch.linspace(0.99, 0.01, 8)
+        self.model = FakeModel(self.alphas)
+
+    def test_lora_signature_uses_loaded_source_key_without_touching_files(self):
+        net = types.SimpleNamespace(name="a", mentioned_name="a-alias", te_multiplier=1.0, unet_multiplier=0.5, dyn_dim=None, source_key=("/loras/a.safetensors", ("sha256", "ab"), "lora-source-v2"))
+
+        def no_file_reads(*args, **kwargs):
+            raise AssertionError("LoRA files must not be re-read per denoiser call")
+
+        networks_stub = types.SimpleNamespace(loaded_networks=[net], network_file_signature=no_file_reads, network_lora_source_signature=no_file_reads)
+        with mock.patch.dict(sys.modules, {"networks": networks_stub}):
+            signature = openclaw_cuda_graphs._lora_signature()
+        self.assertEqual(signature, (("a", "a-alias", 1.0, 0.5, None, net.source_key),))
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("networks", None)
+            self.assertIsNone(openclaw_cuda_graphs._lora_signature())
+
+    def test_schedule_signature_is_read_once_per_wrapper_and_tracks_mutation(self):
+        fn = FakeScheduleWrapper(self.model, self.alphas)
+        first = openclaw_cuda_graphs._schedule_signature(fn)
+        self.assertIs(openclaw_cuda_graphs._schedule_signature(fn), first)  # memoized: no new host read
+        self.assertEqual(first, openclaw_cuda_graphs._schedule_signature(FakeScheduleWrapper(FakeModel(self.alphas.clone()), self.alphas.clone())))
+        with torch.no_grad():
+            fn.log_sigmas.add_(1)  # in-place mutation bumps the version
+        mutated = openclaw_cuda_graphs._schedule_signature(fn)
+        self.assertNotEqual(mutated, first)
+        self.model.alphas_cumprod = self.alphas.half().float()  # replaced model schedule (alpha-bar downcast)
+        self.assertNotEqual(openclaw_cuda_graphs._schedule_signature(fn), mutated)
+
+    def test_wrapper_scalars_enter_the_key(self):
+        quantized = FakeScheduleWrapper(self.model, self.alphas, quantize=True)
+        plain = FakeScheduleWrapper(self.model, self.alphas, quantize=False)
+        self.assertNotEqual(openclaw_cuda_graphs._model_signature(quantized), openclaw_cuda_graphs._model_signature(plain))
+
+    def test_attention_key_reads_active_backend_without_status_scan(self):
+        optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: "flash,math", sdpa_backend_status=mock.Mock(side_effect=AssertionError("per-call status scan")))
+        with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
+            self.assertEqual(openclaw_cuda_graphs._attention_key(), "flash,math")
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("modules.sd_hijack_optimizations", None)
+            self.assertIsNone(openclaw_cuda_graphs._attention_key())
+
+
+class CudaGraphSharedPoolDeviceTests(unittest.TestCase):
+    """GPU-only: graphs sharing one pool replay in any order with eager-identical outputs."""
+
+    def test_alternating_replays_of_pool_sharing_graphs_match_eager(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for shared-pool replay")
+        torch.manual_seed(0)
+        net = torch.nn.Sequential(torch.nn.Conv2d(4, 32, 3, padding=1), torch.nn.SiLU(), torch.nn.Conv2d(32, 4, 3, padding=1)).cuda().eval()
+
+        def fn(x, sigma, cond=None):
+            return net(x * sigma.view(-1, 1, 1, 1)) + cond["c"].view(-1, 1, 1, 1)
+
+        previous_max = openclaw_cuda_graphs._MAX_CACHE_SIZE
+        openclaw_cuda_graphs._MAX_CACHE_SIZE = 4
+        openclaw_cuda_graphs.set_enabled(True, clear=True)
+        try:
+            with torch.no_grad():
+                for step in range(4):
+                    for size in (16, 24):
+                        x = torch.randn(2, 4, size, size, device="cuda")
+                        sigma = torch.rand(2, device="cuda") + 0.5
+                        cond = {"c": torch.randn(2, device="cuda")}
+                        out = openclaw_cuda_graphs.run(fn, x, sigma, cond)
+                        self.assertTrue(torch.equal(out, fn(x, sigma, cond)), (step, size))
+            status = openclaw_cuda_graphs.status()
+            self.assertEqual(status["captures"], 2)
+            self.assertEqual(status["replays"], 6)
+            self.assertEqual(status["failures"], 0)
+        finally:
+            openclaw_cuda_graphs._MAX_CACHE_SIZE = previous_max
+            openclaw_cuda_graphs.set_enabled(False, clear=True)
+
+
+class VaeDecodeGraphSafetyTests(unittest.TestCase):
+    def setUp(self):
+        from modules import openclaw_vae_decode_graphs
+
+        self.graphs = openclaw_vae_decode_graphs
+        self.graphs.set_enabled(True, clear_cache=True)
+        # The module under test imports `shared`/`lowvram` lazily; other test modules may have replaced either, so
+        # patch exactly what `from modules import ...` resolves.
+        self.shared = types.SimpleNamespace(opts=types.SimpleNamespace(sd_vae_decode_method="Full", hypertile_enable_vae=False, lora_functional=False))
+        vae = torch.nn.Module()
+        vae.decoder = torch.nn.Linear(1, 1)
+        vae.eval()
+        self.vae = vae
+        self.model = types.SimpleNamespace(first_stage_model=vae, decode_first_stage=lambda x: x, lowvram=False)
+        self.x = types.SimpleNamespace(is_cuda=True, ndim=4, shape=(1, 4, 8, 8), device="cuda:0")
+        import modules
+
+        lowvram = types.SimpleNamespace(is_enabled=lambda model: model.lowvram)
+        self.patches = [
+            mock.patch.dict(sys.modules, {"modules.lowvram": lowvram, "modules.shared": self.shared}),
+            mock.patch.object(modules, "lowvram", lowvram, create=True),
+            mock.patch.object(modules, "shared", self.shared, create=True),
+            mock.patch.object(self.graphs.torch, "is_tensor", return_value=True),
+            mock.patch.object(self.graphs, "on_default_stream", return_value=True),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.graphs.set_enabled(False, clear_cache=True)
+
+    def test_plain_decode_is_graphable(self):
+        self.assertIsNone(self.graphs._bypass_reason(self.model, self.x, 0))
+
+    def test_tiled_vae_decoder_forward_override_bypasses(self):
+        self.vae.decoder.forward = lambda z: z  # Tiled VAE: decoder.forward = VAEHook(...)
+        self.assertEqual(self.graphs._bypass_reason(self.model, self.x, 0), "vae_forward_override")
+        self.assertIsNone(self.graphs.run(self.model, self.x))
+        self.assertEqual(self.graphs.status()["failed_key_count"], 0)  # no failed-key latch for later plain decodes
+
+    def test_restored_decoder_forward_is_not_an_override(self):
+        self.vae.decoder.forward = self.vae.decoder.forward  # Tiled VAE restore: original_forward written back
+        self.assertIsNone(self.graphs._bypass_reason(self.model, self.x, 0))
+
+    def test_non_default_stream_bypasses(self):
+        with mock.patch.object(self.graphs, "on_default_stream", return_value=False):
+            self.assertEqual(self.graphs._bypass_reason(self.model, self.x, 0), "non_default_stream")
+
+    def test_lora_epoch_enters_vae_key_only_when_lora_can_reach_the_vae(self):
+        with mock.patch.object(self.graphs.openclaw_cache_epochs, "epoch_subset", side_effect=lambda dims: tuple((dim, 0) for dim in dims)):
+            plain = dict(self.graphs._mutation_epochs())
+            self.shared.opts.lora_functional = True
+            functional = dict(self.graphs._mutation_epochs())
+        self.assertNotIn("lora_applied_epoch", plain)
+        self.assertIn("vae_object_epoch", plain)
+        self.assertIn("lora_applied_epoch", functional)
+
+    def test_vae_captures_share_one_pool(self):
+        pools = []
+        graph_pools = []
+
+        class Context:
+            def __enter__(ctx):
+                return None
+
+            def __exit__(ctx, *args):
+                return False
+
+        class Static:
+            def __init__(static, value=0.0):
+                static.value = value
+
+            def copy_(static, other, non_blocking=False):
+                static.value = other.value
+
+            def clone(static):
+                return Static(static.value)
+
+        def source(value):
+            item = Static(value)
+            item.detach = lambda: item
+            item.contiguous = lambda: item
+            item.device = "cuda:0"
+            return item
+
+        stream = types.SimpleNamespace(wait_stream=lambda other: None)
+        with mock.patch.object(self.graphs, "_bypass_reason", return_value=None), \
+             mock.patch.object(self.graphs, "_execute", side_effect=lambda model, static: static), \
+             mock.patch.object(self.graphs.torch.cuda, "Stream", return_value=stream), \
+             mock.patch.object(self.graphs.torch.cuda, "current_stream", return_value=stream), \
+             mock.patch.object(self.graphs.torch.cuda, "stream", return_value=Context()), \
+             mock.patch.object(self.graphs.torch.cuda, "CUDAGraph", return_value=types.SimpleNamespace(replay=lambda: None)), \
+             mock.patch.object(self.graphs.torch.cuda, "graph", side_effect=lambda graph, pool=None: graph_pools.append(pool) or Context()), \
+             mock.patch.object(self.graphs.torch.cuda, "graph_pool_handle", side_effect=lambda: pools.append(object()) or pools[-1]), \
+             mock.patch.object(self.graphs.torch.cuda, "synchronize"):
+            for index in range(3):
+                with mock.patch.object(self.graphs, "_key", return_value=("key", index)):
+                    self.assertEqual(self.graphs.run(self.model, source(float(index))).value, float(index))
+        self.assertEqual(len(pools), 1)
+        self.assertEqual(graph_pools, [pools[0]] * 3)
+
 
 if __name__ == "__main__":
     unittest.main()

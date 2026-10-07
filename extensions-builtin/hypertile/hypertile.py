@@ -340,6 +340,7 @@ def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_
 
     aspect_ratio = width / height
     tile_size = min(largest_tile_size_available(width, height), tile_size_max)
+    any_enabled = False
 
     for layer_name, module in model.named_modules():
         if layer_name in hypertile_layers:
@@ -349,3 +350,8 @@ def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_
             params.swap_size = swap_size
             params.aspect_ratio = aspect_ratio
             params.enabled = enable and params.depth <= max_depth
+            any_enabled = any_enabled or params.enabled
+
+    # O(1) summary of the per-layer flags for callers that must not run while tiling is active (CUDA graph
+    # capture in modules/openclaw_cuda_graphs.py would freeze the per-call random tiling).
+    model.__webui_hypertile_enabled = any_enabled

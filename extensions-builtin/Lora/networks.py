@@ -847,22 +847,6 @@ def network_wanted_names():
     return tuple(network_loaded_weight_signature(x) for x in loaded_networks)
 
 
-def network_lora_source_signature(network_on_disk, net=None):
-    filename = getattr(network_on_disk, "filename", None)
-    stat_sig = None
-    if filename:
-        try:
-            stat_sig = network_file_signature(filename)
-        except OSError:
-            stat_sig = "missing"
-    return (
-        filename,
-        getattr(network_on_disk, "shorthash", None),
-        getattr(net, "mtime", None),
-        stat_sig,
-    )
-
-
 # TorchAO-quantized (MXFP8/NVFP4) LoRA support. Each backend keeps its own state under
 # network_<backend.name>_* attributes: per managed Linear module the immutable BF16
 # base_weight/base_bias masters and merged_lora_applied; per model the managed_modules
@@ -889,13 +873,15 @@ def network_quant_active_config_signature(backend):
 
     loras = []
     for net in loaded_networks:
-        network_on_disk = getattr(net, "network_on_disk", None)
         loras.append((
             net.name,
             net.te_multiplier,
             net.unet_multiplier,
             net.dyn_dim,
-            network_lora_source_signature(network_on_disk, net),
+            # Immutable identity of the bytes this network was parsed from (stamped by load_networks); re-hashing
+            # the file on disk here cost a full read per LoRA per request and could only differ from the loaded
+            # weights, never describe them better.
+            net.source_key,
         ))
 
     return (checkpoint_key, coverage, backend.config_name, tuple(loras))

@@ -929,3 +929,21 @@ def test_identical_load_is_physical_noop_and_semantic_changes_invalidate(lora_ne
     assert networks.load_networks(["alpha"], [0.6], [0.5], [4])
     assert networks.unload_networks()
     assert networks.load_networks(["alpha"], [0.5], [0.5], [None])
+
+
+def test_quant_active_config_signature_keys_on_loaded_source_key_without_file_reads(lora_networks, monkeypatch):
+    networks = lora_networks
+
+    def no_file_reads(_filename):
+        raise AssertionError("LoRA files must not be re-hashed per request")
+
+    monkeypatch.setattr(networks, "network_file_signature", no_file_reads)
+    monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(sd_checkpoint_info=None), raising=False)
+    source_key = ("alpha.safetensors", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION)
+    net = SimpleNamespace(name="alpha", te_multiplier=1.0, unet_multiplier=0.5, dyn_dim=None, source_key=source_key, network_on_disk=SimpleNamespace(filename="alpha.safetensors"))
+    networks.loaded_networks[:] = [net]
+
+    signature = networks.network_quant_active_config_signature(MXFP8)
+
+    assert signature[-1] == (("alpha", 1.0, 0.5, None, source_key),)
+    assert not hasattr(networks, "network_lora_source_signature")
