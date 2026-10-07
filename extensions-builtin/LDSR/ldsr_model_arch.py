@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 import safetensors.torch
 
 from ldm.models.diffusion.ddim import DDIMSampler
-from ldm.util import instantiate_from_config, ismap
+from ldm.util import instantiate_from_config
 from modules import shared, sd_hijack, devices
 
 cached_ldsr_model: torch.nn.Module = None
@@ -143,7 +143,9 @@ class LDSR:
         pad_w, pad_h = np.max(((2, 2), np.ceil(np.array(im_og.size) / 64).astype(int)), axis=0) * 64 - im_og.size
         im_padded = Image.fromarray(np.pad(np.array(im_og), ((0, pad_h), (0, pad_w), (0, 0)), mode='edge'))
 
-        logs = self.run(model["model"], im_padded, diffusion_steps, eta)
+        # Like the other upscalers, run in the model's own dtype even inside the hires-fix sampler's autocast.
+        with devices.without_autocast():
+            logs = self.run(model["model"], im_padded, diffusion_steps, eta)
 
         sample = logs["sample"]
         sample = sample.detach().cpu()
@@ -204,32 +206,18 @@ def make_convolutional_sample(batch, model, custom_steps=None, eta=1.0, quantize
                               corrector_kwargs=None, x_T=None, ddim_use_x0_pred=False):
     log = {}
 
-    z, c, x, xrec, xc = model.get_input(batch, model.first_stage_key,
-                                        return_first_stage_outputs=True,
-                                        force_c_encode=not (hasattr(model, 'split_input_params')
-                                                            and model.cond_stage_key == 'coordinates_bbox'),
-                                        return_original_cond=True)
+    # Only the decoded sample is consumed: skip the first-stage reconstruction of the input and the unquantized
+    # second decode, each a full tiled decode at the output resolution.
+    z, c = model.get_input(batch, model.first_stage_key,
+                           return_first_stage_outputs=False,
+                           force_c_encode=not (hasattr(model, 'split_input_params')
+                                               and model.cond_stage_key == 'coordinates_bbox'))
 
     if custom_shape is not None:
         z = torch.randn(custom_shape)
         print(f"Generating {custom_shape[0]} samples of shape {custom_shape[1:]}")
 
     z0 = None
-
-    log["input"] = x
-    log["reconstruction"] = xrec
-
-    if ismap(xc):
-        log["original_conditioning"] = model.to_rgb(xc)
-        if hasattr(model, 'cond_stage_key'):
-            log[model.cond_stage_key] = model.to_rgb(xc)
-
-    else:
-        log["original_conditioning"] = xc if xc is not None else torch.zeros_like(x)
-        if model.cond_stage_model:
-            log[model.cond_stage_key] = xc if xc is not None else torch.zeros_like(x)
-            if model.cond_stage_key == 'class_label':
-                log[model.cond_stage_key] = xc[model.cond_stage_key]
 
     with model.ema_scope("Plotting"):
         t0 = time.time()
@@ -245,13 +233,6 @@ def make_convolutional_sample(batch, model, custom_steps=None, eta=1.0, quantize
             sample = intermediates['pred_x0'][-1]
 
     x_sample = model.decode_first_stage(sample)
-
-    try:
-        x_sample_noquant = model.decode_first_stage(sample, force_not_quantize=True)
-        log["sample_noquant"] = x_sample_noquant
-        log["sample_diff"] = torch.abs(x_sample_noquant - x_sample)
-    except Exception:
-        pass
 
     log["sample"] = x_sample
     log["time"] = t1 - t0
