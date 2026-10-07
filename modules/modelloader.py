@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import collections
 import importlib
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -172,3 +174,55 @@ def load_spandrel_model(
         arch, path, device, half, dtype,
     )
     return model_descriptor
+
+
+_SPANDREL_MODEL_CACHE_SIZE = 2
+_spandrel_model_cache: collections.OrderedDict[tuple, spandrel.ModelDescriptor] = collections.OrderedDict()
+_spandrel_model_cache_lock = threading.Lock()
+
+
+def load_cached_spandrel_model(
+    path: str | os.PathLike,
+    *,
+    device: str | torch.device,
+    load_device: str | torch.device | None = None,
+    prefer_half: bool = False,
+    dtype: str | torch.dtype | None = None,
+    expected_architecture: str | None = None,
+) -> spandrel.ModelDescriptor:
+    """
+    `load_spandrel_model` on `load_device` (default: `device`), then moved to `device`, reusing the
+    last `_SPANDREL_MODEL_CACHE_SIZE` results.
+
+    The returned descriptor is shared between calls: run it only through its `__call__` (spandrel
+    runs that under `torch.inference_mode`) and never move, cast or train it. Entries are keyed by
+    the file identity (real path, mtime, size) and every load argument, so a replaced file is
+    reloaded; a failed load raises and is not cached.
+    """
+    real_path = os.path.realpath(path)
+    stat = os.stat(real_path)
+    device = torch.device(device)
+    load_device = device if load_device is None else torch.device(load_device)
+    key = (real_path, stat.st_mtime_ns, stat.st_size, str(load_device), str(device), bool(prefer_half), str(dtype) if dtype else None, expected_architecture)
+    with _spandrel_model_cache_lock:
+        model_descriptor = _spandrel_model_cache.get(key)
+        if model_descriptor is not None:
+            _spandrel_model_cache.move_to_end(key)
+            return model_descriptor
+        model_descriptor = load_spandrel_model(
+            real_path,
+            device=load_device,
+            prefer_half=prefer_half,
+            dtype=dtype,
+            expected_architecture=expected_architecture,
+        )
+        model_descriptor.to(device)
+        stat_after = os.stat(real_path)
+        if (stat_after.st_mtime_ns, stat_after.st_size) != (stat.st_mtime_ns, stat.st_size):
+            return model_descriptor  # replaced while loading; do not file it under the old identity
+        for stale_key in [k for k in _spandrel_model_cache if k[0] == real_path and k[1:3] != key[1:3]]:
+            del _spandrel_model_cache[stale_key]
+        _spandrel_model_cache[key] = model_descriptor
+        while len(_spandrel_model_cache) > _SPANDREL_MODEL_CACHE_SIZE:
+            _spandrel_model_cache.popitem(last=False)
+        return model_descriptor

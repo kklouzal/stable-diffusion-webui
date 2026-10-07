@@ -36,7 +36,7 @@ class UpscalerRealESRGAN(Upscaler):
             errors.report(f"Unable to load RealESRGAN model {path}", exc_info=True)
             return img
 
-        model_descriptor = modelloader.load_spandrel_model(
+        model_descriptor = modelloader.load_cached_spandrel_model(
             info.local_data_path,
             device=self.device,
             prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),

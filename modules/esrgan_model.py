@@ -32,7 +32,6 @@ class UpscalerESRGAN(Upscaler):
         except Exception:
             errors.report(f"Unable to load ESRGAN model {selected_model}", exc_info=True)
             return img
-        model.to(devices.device_esrgan)
         return esrgan_upscale(model, img)
 
     def load_model(self, path: str):
@@ -46,9 +45,11 @@ class UpscalerESRGAN(Upscaler):
         else:
             filename = path
 
-        return modelloader.load_spandrel_model(
+        # Loaded on the CPU (spandrel's default device), then moved to device_esrgan.
+        return modelloader.load_cached_spandrel_model(
             filename,
-            device=('cpu' if devices.device_esrgan.type == 'mps' else None),
+            load_device='cpu',
+            device=devices.device_esrgan,
             expected_architecture='ESRGAN',
         )
 
