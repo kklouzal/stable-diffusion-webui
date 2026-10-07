@@ -180,8 +180,9 @@ class SEGExtensionScript(UIWrapper):
                 # Get all the qv modules
                 self_attn_modules = self.get_cross_attn_modules()
                 if len(self_attn_modules) == 0:
-                        logger.error("No self attention modules found, cannot proceed with SEG")
-                        return
+                        # The request asked for SEG and its infotext already says "SEG Active"; never render
+                        # without it. (module_hooks.get_modules returns [] for a model without a layer mapping.)
+                        raise RuntimeError("SEG: no middle-block self-attention modules found on the loaded model")
                 seg_params.crossattn_modules = self_attn_modules
 
                 self.remove_callbacks()

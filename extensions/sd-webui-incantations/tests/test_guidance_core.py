@@ -6,6 +6,7 @@ import sys
 import types
 from pathlib import Path
 import unittest
+import unittest.mock
 
 import torch
 from torch.nn import functional as F
@@ -1106,6 +1107,17 @@ class SEGBlurTests(unittest.TestCase):
         self.assertIsNone(script._cfg_denoiser_callback)
         self.assertFalse(hasattr(attn.to_q, "seg_enable"))
         self.assertEqual(len(attn.to_q._forward_hooks), 0)
+
+    def test_active_seg_fails_when_model_has_no_middle_attention(self):
+        # Requested SEG must not silently render without SEG (its infotext already says "SEG Active").
+        callbacks = sys.modules["modules.script_callbacks"].callback_registry
+        callbacks.clear()
+        script = self.seg.SEGExtensionScript()
+        p = types.SimpleNamespace(extra_generation_params={}, incant_cfg_params={}, height=64, width=64)
+        with unittest.mock.patch.object(script, "get_cross_attn_modules", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "SEG"):
+                script.seg_process_batch(p, True, 3.0, 0, 150)
+        self.assertEqual(callbacks, [])
 
     def test_seg_hook_skips_calls_that_are_not_the_full_cfg_batch(self):
         # Batch 2 with cond and uncond evaluated in separate calls (token-length mismatch without
