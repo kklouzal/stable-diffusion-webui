@@ -98,6 +98,25 @@ def _tensor_signature(tensor: Optional[torch.Tensor]):
     return (tuple(tensor.shape), str(tensor.dtype), str(tensor.device))
 
 
+def _conditioning_change(stored: tuple, current: tuple):
+    """Whether a lane's conditioning differs from the conditioning its cached residual was computed with.
+
+    Returns False, True (decided without touching tensor values), or a 0-dim bool tensor on the
+    conditioning device, folded into the single refresh sync. SDXL's first block (conv + ResBlock) never
+    sees the cross-attention context, so the first-block distance cannot notice a prompt-schedule switch
+    or a lane whose call order shifted onto a same-shaped call with different conditioning.
+    """
+    changed = False
+    for previous, value in zip(stored, current):
+        if previous is None and value is None:
+            continue
+        if previous is None or value is None or previous.shape != value.shape:
+            return True
+        differs = torch.ne(previous, value).any()
+        changed = differs if changed is False else torch.logical_or(changed, differs)
+    return changed
+
+
 def _call_signature(
     h: torch.Tensor,
     timesteps: Optional[torch.Tensor],
@@ -121,8 +140,28 @@ def _call_original_forward(unet, x, timesteps=None, context=None, y=None, **kwar
     return original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
 
 
+def _teacache_patch_is_live(unet) -> bool:
+    """True when ``unet.forward`` is TeaCache's own bound patch, i.e. nothing was installed above it.
+
+    Recognized by the function marker rather than identity so a patch bound by an earlier load of this
+    script module (script reload after a failed generation) is still recognized as TeaCache-owned.
+    """
+    forward = getattr(unet, "forward", None)
+    return (
+        getattr(getattr(forward, "__func__", None), "_openclaw_teacache_patch", False)
+        and getattr(forward, "__self__", None) is unet
+    )
+
+
 def _restore_patched_unet(unet, original_forward=None) -> None:
     if unet is None or not getattr(unet, "_teacache_patched", False):
+        return
+    if not _teacache_patch_is_live(unet):
+        # A failed generation skips postprocess, so the patch can still be installed when the next request's
+        # ControlNet hook captures it as its baseline and wraps above it. Writing unet.forward here would drop that
+        # wrapper (ControlNet silently not applied) and strand its ownership markers (every later ControlNet hook
+        # raises). Leave the pass-through patch in place; it delegates while it is not on top, and a later
+        # process()/postprocess() restores it once the wrapper above has restored its own baseline.
         return
     original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or original_forward
     if original_forward is not None:
@@ -136,16 +175,21 @@ def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
     return any(getattr(p, name, None) is not None for name in ("mask", "nmask", "image_mask"))
 
 
-def _has_external_unet_forward_hook(p: processing.StableDiffusionProcessing) -> bool:
-    unet = getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None)
+def _unet_has_external_forward_hook(unet) -> bool:
     # ControlNet's owner-scoped wrapper deliberately no longer uses the legacy
     # _original_forward attribute. Treat its live ownership marker as an
     # external hook too, so TeaCache never wraps above ControlNet and later
-    # restores across its ownership boundary.
+    # restores across its ownership boundary. A TeaCache patch that is no longer
+    # on top means some other callable wraps it: never re-patch over that either.
     return (
         getattr(unet, "_original_forward", None) is not None
         or getattr(unet, "_controlnet_forward_hook_owner", None) is not None
+        or (getattr(unet, "_teacache_patched", False) and not _teacache_patch_is_live(unet))
     )
+
+
+def _has_external_unet_forward_hook(p: processing.StableDiffusionProcessing) -> bool:
+    return _unet_has_external_forward_hook(getattr(getattr(getattr(p, "sd_model", None), "model", None), "diffusion_model", None))
 
 
 class TeaCacheSession:
@@ -158,13 +202,19 @@ class TeaCacheSession:
         self.disabled_reason = disabled_reason
 
         self.current_step = initial_step
+        # Per-call-lane state, keyed by the UNet call's index within the denoiser step (call_index).
         self.call_index = 0
         self.residuals: dict[int, tuple[tuple, torch.Tensor]] = {}
+        # (context, y) the lane's cached residual was computed with; a lane missing here was stored without them.
+        self.residual_conditioning: dict[int, tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = {}
         self.previous_fb: dict[int, torch.Tensor] = {}
         self.distances: dict[int, torch.Tensor] = {}
         self._threshold_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
         self._coefficient_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
-        self.consecutive_hits = 0
+        # Consecutive cache hits per lane: every lane decides on its own distance, so max_consecutive must bound
+        # each lane's staleness. A shared lane-0 counter, advanced or reset by lane 0 before later lanes checked
+        # it, put those lanes (e.g. PAG's identical-input replay) out of refresh phase with lane 0.
+        self.consecutive_hits: dict[int, int] = {}
         self.use_cache = True
 
     def _device_scalar(self, value: float, reference: torch.Tensor, cache: dict[tuple[str, torch.dtype], torch.Tensor]) -> torch.Tensor:
@@ -183,42 +233,56 @@ class TeaCacheSession:
             self._coefficient_tensors[key] = coeffs
         return coeffs
 
-    def update_condition(self, first_block_residual: torch.Tensor, signature: tuple):
+    def update_condition(
+        self,
+        first_block_residual: torch.Tensor,
+        signature: tuple,
+        context: Optional[torch.Tensor] = None,
+        y: Optional[torch.Tensor] = None,
+    ):
         current_fb = first_block_residual.detach()
+        lane = self.call_index
         self.use_cache = not self.disabled_reason
         # check step range
         progress = self.current_step / max(1, self.steps)
         if not (self.start < progress <= self.end):
             self.use_cache = False
-        # check max consecutive cache hits
-        if self.max_consecutive > 0 and self.consecutive_hits >= self.max_consecutive:
+        # check max consecutive cache hits of this lane
+        hits = self.consecutive_hits.get(lane, 0)
+        if self.max_consecutive > 0 and hits >= self.max_consecutive:
             self.use_cache = False
         # check cached value exists for this exact UNet call shape/conditioning lane
-        previous_fb = self.previous_fb.get(self.call_index)
-        cached = self.residuals.get(self.call_index)
+        previous_fb = self.previous_fb.get(lane)
+        cached = self.residuals.get(lane)
         if previous_fb is None or cached is None or cached[0] != signature:
             self.use_cache = False
+        conditioning_changed = False
+        if self.use_cache:
+            conditioning_changed = _conditioning_change(self.residual_conditioning.get(lane, (None, None)), (context, y))
+            if conditioning_changed is True:
+                self.use_cache = False
 
         if self.use_cache:
             # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
-            distance = self.distances.get(self.call_index)
+            distance = self.distances.get(lane)
             if distance is None or distance.device != current_fb.device:
                 distance = current_fb.new_zeros(())
             relative_distance = relative_l1_distance(previous_fb, current_fb)
             distance = distance + sdxl_polynomial_distance(relative_distance, self._coefficient_tensor(relative_distance))
             threshold = self._device_scalar(self.threshold, distance, self._threshold_tensors)
             should_refresh = torch.logical_or(torch.logical_not(torch.isfinite(distance)), torch.ge(distance, threshold))
+            if conditioning_changed is not False:
+                should_refresh = torch.logical_or(should_refresh, conditioning_changed.to(should_refresh.device))
             # Intentional sync point: Python must choose cached vs full UNet branch.
             # The relative-distance and polynomial math above remain on GPU.
             if bool(should_refresh):
                 self.use_cache = False
-                self.distances[self.call_index] = distance.detach().zero_()
+                self.distances[lane] = distance.detach().zero_()
             else:
-                self.distances[self.call_index] = distance.detach()
-                if self.call_index == 0:
-                    self.consecutive_hits += 1
+                self.distances[lane] = distance.detach()
+                self.consecutive_hits[lane] = hits + 1
 
-        self.previous_fb[self.call_index] = current_fb.clone()
+        self.previous_fb[lane] = current_fb.clone()
 
     def next_step(self):
         self.current_step += 1
@@ -234,9 +298,20 @@ class TeaCacheSession:
     def reset_current_distance(self, reference: torch.Tensor):
         self.distances[self.call_index] = reference.detach().new_zeros(())
 
-    def store_current_residual(self, signature: tuple, residual: torch.Tensor):
+    def store_current_residual(
+        self,
+        signature: tuple,
+        residual: torch.Tensor,
+        context: Optional[torch.Tensor] = None,
+        y: Optional[torch.Tensor] = None,
+    ):
         residual = residual.detach()
         self.residuals[self.call_index] = (signature, residual.clone())
+        # Copies: the producer may reuse or edit its conditioning buffers after this call returns.
+        self.residual_conditioning[self.call_index] = tuple(
+            None if value is None else value.detach().clone() for value in (context, y)
+        )
+        self.consecutive_hits[self.call_index] = 0
         self.reset_current_distance(residual)
 
 
@@ -381,7 +456,7 @@ def _patched_forward_inner(
         self.num_classes is not None
     ), "must specify y if and only if the model is class-conditional"
 
-    if cache is None or cache.disabled_reason or kwargs or getattr(self, "_original_forward", None) is not None:
+    if cache is None or cache.disabled_reason or kwargs or _unet_has_external_forward_hook(self):
         return _call_original_forward(self, x, timesteps=timesteps, context=context, y=y, **kwargs)
 
     hs = []
@@ -403,7 +478,7 @@ def _patched_forward_inner(
 
     signature = _call_signature(h, timesteps, context, y, kwargs)
     first_block_residual = h - original_h
-    cache.update_condition(first_block_residual, signature)
+    cache.update_condition(first_block_residual, signature, context, y)
 
     # use cache or call full model
     cached_residual = cache.current_residual(signature)
@@ -423,9 +498,7 @@ def _patched_forward_inner(
             cache.reset_current_distance(original_h)
             raise
 
-        if cache.call_index == 0:
-            cache.consecutive_hits = 0
-        cache.store_current_residual(signature, h - original_h)
+        cache.store_current_residual(signature, h - original_h, context, y)
 
     cache.call_index += 1
 
@@ -449,6 +522,10 @@ def patched_forward(
             _restore_patched_unet(self)
             _set_cache(None)
         raise
+
+
+# Marks the function every TeaCache UNet patch is bound from (see _teacache_patch_is_live).
+patched_forward._openclaw_teacache_patch = True
 
 
 def next_step(*args):

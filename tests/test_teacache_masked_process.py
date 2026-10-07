@@ -94,10 +94,11 @@ def test_masked_enabled_process_cleans_stale_owned_patch(monkeypatch):
     teacache = _load_teacache(monkeypatch)
     original_forward = object()
     stale_unet = SimpleNamespace(
-        forward="patched-forward",
         _teacache_patched=True,
         _openclaw_teacache_original_forward=original_forward,
     )
+    # The live patch TeaCache installs; restore only ever replaces TeaCache's own forward.
+    stale_unet.forward = teacache.patched_forward.__get__(stale_unet)
     p = _processing_with_unet(stale_unet, image_mask=object())
 
     script = teacache.TeaCacheScript()
