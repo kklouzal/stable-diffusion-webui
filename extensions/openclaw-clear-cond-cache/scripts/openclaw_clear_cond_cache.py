@@ -46,6 +46,9 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
             [model_hijack.get_prompt_lengths(prompt) for prompt in prompts],
             key=lambda args: args[0],
         )
+        if not isinstance(token_count, int):
+            # get_prompt_lengths returns ("-", "-") while no text encoder is hijacked (e.g. mid model load).
+            return {"ok": False, "error": "no text encoder is loaded", "token_count": None, "max_length": None}
 
         return {"ok": True, "token_count": token_count, "max_length": max_length}
     except Exception as exc:
@@ -544,6 +547,13 @@ def _clear_cond_cache_locked(targets: Any | None) -> dict:
         return clear_cond_cache(targets)
 
 
+def _cudnn_benchmark_locked(enabled: bool) -> dict[str, Any]:
+    # cuDNN reads the flag at every conv dispatch, so flipping it mid-generation would switch
+    # conv algorithms (and their rounding) between steps of one image.
+    with call_queue.queue_lock:
+        return apply_cudnn_benchmark(enabled)
+
+
 def _torch_compile_locked(data: dict[str, Any]) -> dict[str, Any]:
     target = data.get("target")
     with call_queue.queue_lock:
@@ -600,7 +610,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark(request: Request):
         data = await request.json()
-        return apply_cudnn_benchmark(bool(data.get("enabled")))
+        return await run_in_threadpool(_cudnn_benchmark_locked, bool(data.get("enabled")))
 
     @app.get("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark_status():

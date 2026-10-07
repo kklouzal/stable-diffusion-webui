@@ -102,8 +102,19 @@ class IncantBaseExtensionScript(scripts.Script):
                         _timed_module_call(p, m.module, "process_batch", m.module.process_batch, p, *self.m_args(m, *args), **kwargs)
 
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
+                # Each submodule releases its own per-batch hooks, callbacks and
+                # combine_denoised wrapper here, so one failing must not skip the
+                # cleanup of the submodules after it. Failures still propagate.
+                failures = []
                 for m in submodules:
-                        _timed_module_call(p, m.module, "postprocess_batch", m.module.postprocess_batch, p, *self.m_args(m, *args), **kwargs)
+                        try:
+                                _timed_module_call(p, m.module, "postprocess_batch", m.module.postprocess_batch, p, *self.m_args(m, *args), **kwargs)
+                        except Exception as e:
+                                failures.append(e)
+                if len(failures) == 1:
+                        raise failures[0]
+                if failures:
+                        raise ExceptionGroup("Incantations postprocess_batch cleanup failed", failures)
 
         def m_args(self, module: SubmoduleInfo, *args):
                 return args[module.arg_idx:module.arg_idx + module.num_args]

@@ -9,6 +9,10 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+# Imported before load_probe() patches sys.modules: the patch drops modules first imported inside it, and
+# re-importing torch's C extension in the same process crashes.
+import torch
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "openclaw_conditioning_probe.py"
 
 
@@ -70,6 +74,27 @@ class SnapshotEndpointTests(unittest.TestCase):
         self.assertEqual(handler(label="before"), {"label": "before"})
         self.assertEqual(seen, [("before", True)])
         self.assertFalse(lock.held)
+
+
+class TensorDigestTests(unittest.TestCase):
+    def setUp(self):
+        self.probe = load_probe(RecordingLock())
+
+    def test_zero_dim_tensor_is_hashed(self):
+        scale = torch.tensor(1.5)
+        meta = self.probe._tensor(scale)
+
+        self.assertNotIn("error", meta)
+        self.assertEqual(meta["shape"], [])
+        self.assertEqual(meta["sha256"], self.probe._sha_bytes(bytes.fromhex("0000c03f")))
+        self.assertEqual(meta["sum"], 1.5)
+
+    def test_digest_covers_the_tensor_bytes_in_order(self):
+        weight = torch.arange(6, dtype=torch.bfloat16).reshape(2, 3)
+        meta = self.probe._tensor(weight.t())
+
+        # numpy has no bfloat16; the int16 view carries the same bytes.
+        self.assertEqual(meta["sha256"], self.probe._sha_bytes(weight.t().contiguous().view(torch.int16).numpy().tobytes()))
 
 
 if __name__ == "__main__":

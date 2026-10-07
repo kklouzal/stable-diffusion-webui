@@ -15,7 +15,8 @@ def _tensor(t):
         except Exception: pass
         try:
             y=x.to(device="cpu").contiguous()
-            meta["sha256"]=_sha_bytes(y.view(torch.uint8).numpy().tobytes())
+            # reshape(-1): a 0-dim tensor (e.g. a per-tensor quant scale) cannot be viewed as bytes directly.
+            meta["sha256"]=_sha_bytes(y.reshape(-1).view(torch.uint8).numpy().tobytes())
             if y.is_floating_point():
                 z=y.float(); meta.update(min=float(z.min()) if z.numel() else None,max=float(z.max()) if z.numel() else None,sum=float(z.double().sum()))
         except Exception as e: meta["error"]=repr(e)
