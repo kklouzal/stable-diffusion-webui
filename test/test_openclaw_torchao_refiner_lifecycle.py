@@ -1,4 +1,5 @@
 import dataclasses
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,7 @@ class ModelDataStub:
         self.sd_model = model
         self.loaded_sd_models = [model]
         self.set_calls = []
+        self.lock = threading.RLock()  # reload_model_weights holds it, as SdModelData's
 
     def set_sd_model(self, model):
         self.set_calls.append(model)
