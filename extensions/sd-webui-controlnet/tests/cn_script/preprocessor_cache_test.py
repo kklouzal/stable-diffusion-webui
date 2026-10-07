@@ -60,6 +60,13 @@ class TestLegacyResultCache(unittest.TestCase):
         self.call(self.image, resolution=640)
         self.assertEqual(self.calls, [512, 512, 640])
 
+    def test_the_units_controlnet_model_is_not_part_of_the_key(self):
+        """Switching the ControlNet model (or the CLIP-on-CPU flag) with the same input reuses the depth map."""
+        first = self.call(self.image)
+        second = self.preprocessor.cached_call(self.image, resolution=512, slider_1=0.0, slider_2=0.0, model="other", low_vram=True).value
+        self.assertEqual(self.calls, [512])
+        np.testing.assert_array_equal(first, second)
+
     def test_calls_with_a_callback_always_run(self):
         seen = []
         for _ in range(2):
