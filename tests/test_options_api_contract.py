@@ -57,6 +57,20 @@ def test_api_set_accepts_values_of_the_option_type(options_module):
     assert (opts.enable_feature, opts.clip_skip, opts.strength, opts.vae, opts.checkpoint) == (True, 2, 1, None, "model.safetensors")
 
 
+def test_onchange_failure_restores_the_value_and_propagates(options_module):
+    opts = make_opts(options_module)
+
+    def reload_vae():
+        raise RuntimeError("VAE reload failed")
+
+    opts.data_labels["vae"].onchange = reload_vae
+
+    with pytest.raises(RuntimeError, match="VAE reload failed"):
+        opts.set("vae", "other.safetensors", is_api=True)
+
+    assert opts.vae == "Automatic"
+
+
 def test_save_failure_leaves_the_settings_file_intact(options_module, tmp_path):
     opts = make_opts(options_module)
     settings_file = tmp_path / "config.json"

@@ -151,7 +151,8 @@ class Options:
 
         An API value (is_api=True: /sdapi/v1/options and request override_settings) must have the type of the option's
         default, with int and float interchangeable and None accepted (same_type()); any other value raises ValueError
-        rather than being stored, because e.g. the JSON string "false" stored in a bool option reads as True."""
+        rather than being stored, because e.g. the JSON string "false" stored in a bool option reads as True.
+        If the onchange callback raises, the previous value is restored and the exception propagates to the caller."""
 
         oldval = self.data.get(key, None)
         if oldval == value:
@@ -175,10 +176,9 @@ class Options:
         if run_callbacks and option.onchange is not None:
             try:
                 option.onchange()
-            except Exception as e:
-                errors.display(e, f"changing setting {key} to {value}")
+            except Exception:
                 setattr(self, key, oldval)
-                return False
+                raise
 
         return True
 
