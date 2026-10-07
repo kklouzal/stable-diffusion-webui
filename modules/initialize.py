@@ -1,3 +1,4 @@
+import gc
 import logging
 import warnings
 from threading import Thread
@@ -65,6 +66,26 @@ def initialize():
     initialize_rest()
 
 
+def freeze_startup_heap():
+    """
+    Moves every object alive after imports and script/upscaler loading into the GC's permanent generation,
+    so the explicit full collections on the request path (ControlNet postprocess, Tiled VAE, MultiDiffusion)
+    stop walking that ~850k-object heap (~160 ms per gc.collect()). Lifetimes are unchanged: refcounting still
+    frees frozen objects; only cycle detection skips them.
+
+    Must run before the startup model load: anything frozen is never cycle-collected, and the model/hijack/hook
+    objects created afterwards have to stay collectable when a checkpoint is replaced.
+    """
+    from modules import sd_models
+
+    if sd_models.model_data.loaded_sd_models:
+        print("Not freezing the startup heap: a checkpoint was loaded during script loading, and frozen objects would never be cycle-collected.")
+        return
+
+    gc.collect()
+    gc.freeze()
+
+
 def initialize_rest():
     from modules.shared_cmd_options import cmd_opts
 
@@ -113,6 +134,9 @@ def initialize_rest():
     from modules import sd_unet
     sd_unet.list_unets()
     startup_timer.record("scripts list_unets")
+
+    freeze_startup_heap()
+    startup_timer.record("freeze startup heap")
 
     def load_model():
         """
