@@ -764,7 +764,7 @@ class UniPC:
 
     def sample(self, x, steps=20, t_start=None, t_end=None, order=3, skip_type='time_uniform',
         method='singlestep', lower_order_final=True, denoise_to_zero=False, solver_type='dpm_solver',
-        atol=0.0078, rtol=0.05, corrector=False,
+        atol=0.0078, rtol=0.05, corrector=False, disable=False,
     ):
         t_0 = 1. / self.noise_schedule.total_N if t_end is None else t_end
         t_T = self.noise_schedule.T if t_start is None else t_start
@@ -778,7 +778,7 @@ class UniPC:
                 vec_t = timesteps[0].expand((x.shape[0]))
                 model_prev_list = [self.model_fn(x, vec_t)]
                 t_prev_list = [vec_t]
-                with tqdm.tqdm(total=steps) as pbar:
+                with tqdm.tqdm(total=steps, disable=disable) as pbar:
                     # Init the first `order` values by lower order multistep DPM-Solver.
                     for init_order in range(1, order):
                         vec_t = timesteps[init_order].expand(x.shape[0])
