@@ -33,4 +33,10 @@ def mask_basic_image_base64() -> str:
 
 @pytest.fixture(scope="session")
 def initialize() -> None:
-    import webui  # noqa: F401
+    from modules import shared
+
+    # webui's import runs initialize.imports(), whose shared_init.initialize() builds a new shared.opts (and state,
+    # ...). When an earlier test module already initialized shared, modules imported since keep the objects they
+    # bound with `from modules.shared import opts`, so options later tests set on shared.opts would not reach them.
+    if getattr(shared, "opts", None) is None:
+        import webui  # noqa: F401
