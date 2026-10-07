@@ -4,8 +4,11 @@ The extension is not part of the fork. These tests copy the deployed host checko
 """
 from __future__ import annotations
 
+import ast
 import contextlib
+import copy
 import importlib.util
+import math
 import shutil
 import subprocess
 import sys
@@ -14,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 ROOT = Path(__file__).parents[1]
 PATCHER = ROOT / "gb10" / "patch-multidiffusion-performance.py"
@@ -128,6 +132,20 @@ class NansException(Exception):
     pass
 
 
+def fork_sdpa_helper():
+    """The fork's real run_scaled_dot_product_attention (and the backend parsing it uses), without importing webui."""
+    source = (ROOT / "modules" / "sd_hijack_optimizations.py").read_text(encoding="utf-8")
+    wanted = {"_active_sdpa_backend", "_SDPA_BACKEND_ALIASES", "_normalize_sdpa_backend_choice", "_selected_sdpa_backends", "run_scaled_dot_product_attention"}
+    nodes = [
+        node for node in ast.parse(source).body
+        if getattr(node, "name", None) in wanted or any(getattr(target, "id", None) in wanted for target in getattr(node, "targets", []))
+    ]
+    assert len(nodes) == len(wanted)
+    namespace = {"torch": torch, "SDPBackend": SDPBackend, "sdpa_kernel": sdpa_kernel}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "sd_hijack_optimizations.py", "exec"), namespace)
+    return namespace["run_scaled_dot_product_attention"]
+
+
 @pytest.fixture()
 def webui_stubs(monkeypatch):
     """Minimal webui/ldm/k-diffusion stand-ins for importing the extension; records torch_gc and approximation calls."""
@@ -160,9 +178,11 @@ def webui_stubs(monkeypatch):
         calls["approx"] += 1
         return sample[:3] * 0.5 + 0.25
 
-    def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, sdpa_backend_override=None):
-        calls["sdpa"].append((q.dim(), sdpa_backend_override))
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
+    fork_run_sdpa = fork_sdpa_helper()
+
+    def run_scaled_dot_product_attention(q, k, v, **kwargs):
+        calls["sdpa"].append((q.dim(), kwargs.get("sdpa_backend_override")))
+        return fork_run_sdpa(q, k, v, **kwargs)
 
     state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
     sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"))
@@ -383,3 +403,84 @@ def test_tiled_vae_main_loop_nan_check_still_raises(tilevae_pair, webui_stubs):
     for module in (old, new):
         with pytest.raises(NansException):
             run_hook(module, decoder, z.clone(), is_decoder=True, tile_size=12, fast=True)
+
+
+@pytest.fixture()
+def attn_pair(md_pair, import_extension):
+    original, patched = md_pair
+    (old,) = import_extension(original, "tile_utils.attn")
+    (new,) = import_extension(patched, "tile_utils.attn")
+    return old, new
+
+
+def attn_block(channels, dtype=torch.float32):
+    from sgm.modules.diffusionmodules.model import AttnBlock
+
+    torch.manual_seed(4)
+    return AttnBlock(channels).eval().to(dtype)
+
+
+def reference_attention(block, h):
+    """Independent float64 oracle: proj_out(softmax(q k^T / sqrt(c)) v), without the residual (Tiled VAE adds it)."""
+    block = copy.deepcopy(block).double()
+    x = h.double()
+    q, k, v = block.q(x), block.k(x), block.v(x)
+    b, c, height, width = q.shape
+    q, k, v = (t.reshape(b, c, height * width) for t in (q, k, v))
+    scores = torch.softmax(q.transpose(1, 2) @ k / math.sqrt(c), dim=-1)
+    return block.proj_out((v @ scores.transpose(1, 2)).reshape(b, c, height, width))
+
+
+@pytest.mark.parametrize("forward,backend_override", [("sdp_attnblock_forward", None), ("sdp_no_mem_attnblock_forward", "flash,math")])
+@pytest.mark.parametrize("channels_last", [False, True])
+def test_tiled_vae_sdp_attention_is_4d_and_numerically_equivalent(attn_pair, webui_stubs, forward, backend_override, channels_last):
+    old, new = attn_pair
+    block = attn_block(64)
+    torch.manual_seed(5)
+    h = torch.randn((2, 64, 9, 11))
+    if channels_last:
+        block = block.to(memory_format=torch.channels_last)
+        h = h.to(memory_format=torch.channels_last)
+
+    with torch.no_grad():
+        expected = reference_attention(block, h)
+        before = getattr(old, forward)(block, h)
+        assert webui_stubs.calls["sdpa"] == []
+        after = getattr(new, forward)(block, h)
+
+    assert webui_stubs.calls["sdpa"] == [(4, backend_override)]
+    assert after.shape == before.shape == h.shape and after.dtype == before.dtype
+    torch.testing.assert_close(before.double(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(after.double(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(after, before, rtol=1e-5, atol=1e-5)
+
+
+def test_tiled_vae_sdp_attention_upcast_keeps_dtype(attn_pair, webui_stubs):
+    old, new = attn_pair
+    webui_stubs.shared.opts.upcast_attn = True
+    block = attn_block(64, torch.bfloat16)
+    torch.manual_seed(6)
+    h = torch.randn((1, 64, 8, 8), dtype=torch.bfloat16)
+    with torch.no_grad():
+        expected = reference_attention(block, h)
+        before = old.sdp_attnblock_forward(block, h)
+        after = new.sdp_attnblock_forward(block, h)
+    assert before.dtype == after.dtype == torch.bfloat16
+    torch.testing.assert_close(after.double(), expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(after, before, rtol=1e-2, atol=1e-2)
+
+
+def test_tiled_vae_decode_with_sdp_attention_matches(md_pair, import_extension, webui_stubs):
+    original, patched = md_pair
+    webui_stubs.hijack.model_hijack.optimization_method = "sdp"
+    (old,) = import_extension(original, "scripts/tilevae.py")
+    (new,) = import_extension(patched, "scripts/tilevae.py")
+    _encoder, decoder = tiny_vae()
+    torch.manual_seed(7)
+    z = torch.randn((1, 4, 40, 48))
+    expected = run_hook(old, decoder, z.clone(), is_decoder=True, tile_size=12, fast=False)
+    assert webui_stubs.calls["sdpa"] == []
+    actual = run_hook(new, decoder, z.clone(), is_decoder=True, tile_size=12, fast=False)
+    # One mid-block attention per tile (2 x 3 tiles), all through the 4-D helper.
+    assert webui_stubs.calls["sdpa"] == [(4, None)] * 6
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)

@@ -211,6 +211,65 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
 """,
         ),
     ],
+    "tile_utils/attn.py": [
+        (
+            "TV-ATTN import",
+            r"""from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, sub_quad_attention
+""",
+            r"""from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, run_scaled_dot_product_attention, sub_quad_attention
+""",
+        ),
+        (
+            "TV-ATTN 4-D SDPA",
+            r"""def sdp_no_mem_attnblock_forward(self, x):
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+        return sdp_attnblock_forward(self, x)
+
+def sdp_attnblock_forward(self, h_):
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = map(lambda t: rearrange(t, 'b c h w -> b (h w) c'), (q, k, v))
+    dtype = q.dtype
+    if shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+    out = out.to(dtype)
+    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = self.proj_out(out)
+    return out
+""",
+            r"""def sdp_no_mem_attnblock_forward(self, x):
+    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+
+def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
+    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
+    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
+    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
+    # different valid kernel: numerically equivalent.
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
+    dtype = q.dtype
+    if shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = out.transpose(-1, -2).reshape(b, c, h, w)
+    out = self.proj_out(out)
+    return out
+""",
+        ),
+    ],
 }
 
 
