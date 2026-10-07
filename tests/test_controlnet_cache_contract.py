@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-MODULE_PATH = Path(__file__).parents[1] / "gb10/controlnet_cache_contract.py"
+CONTROLNET = Path(__file__).parents[1] / "extensions/sd-webui-controlnet"
+MODULE_PATH = CONTROLNET / "internal_controlnet/cache_contract.py"
 spec = importlib.util.spec_from_file_location("controlnet_cache_contract", MODULE_PATH)
 cache_contract = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = cache_contract
@@ -174,18 +175,31 @@ def test_forced_clean_equivalence_for_deterministic_array_result():
     assert np.array_equal(cache.get_or_compute(key, preprocess, clone=True), forced_clean)
 
 
-def test_cache_helper_is_installed_outside_scanned_scripts_root():
-    patcher = (Path(__file__).parents[1] / "gb10/patch-controlnet-cache-correctness.py").read_text()
-    patch = (Path(__file__).parents[1] / "gb10/controlnet-cache-correctness.patch").read_text()
-    assert 'internal_controlnet/cache_contract.py' in patcher
-    assert 'scripts/cache_contract.py' not in patcher
-    assert 'from internal_controlnet.cache_contract import' in patch
-    assert 'from scripts.cache_contract import' not in patch
+def test_cache_helper_lives_outside_scanned_scripts_root():
+    # A1111 executes every module under an extension's scripts/ as a script.
+    assert not (CONTROLNET / "scripts/cache_contract.py").exists()
+    for rel in ("scripts/controlnet.py", "scripts/supported_preprocessor.py"):
+        source = (CONTROLNET / rel).read_text(encoding="utf-8")
+        assert "from internal_controlnet.cache_contract import" in source
+        assert "from scripts.cache_contract import" not in source
 
 
-def test_controlnet_correctness_patch_assigns_inpaint_conversion_and_openpose_average():
-    patch = (Path(__file__).parents[1] / "gb10/controlnet-cache-correctness.patch").read_text()
-    assert "param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(" in patch
-    assert "device=x.device, dtype=x.dtype" in patch
-    assert "heatmap_avg += heatmap / len(multiplier)" in patch
-    assert "+            heatmap_avg += heatmap_avg +" not in patch
+def test_controlnet_correctness_fixes_live_in_tracked_source():
+    hook = (CONTROLNET / "scripts/hook.py").read_text(encoding="utf-8")
+    assert "param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(" in hook
+    assert "device=x.device, dtype=x.dtype" in hook
+    body = (CONTROLNET / "annotator/openpose/body.py").read_text(encoding="utf-8")
+    assert "heatmap_avg += heatmap / len(multiplier)" in body
+    assert "heatmap_avg += heatmap_avg +" not in body
+
+
+def test_deploy_time_cache_patch_is_retired_and_settings_survive():
+    root = Path(__file__).parents[1]
+    assert not (root / "gb10/controlnet-cache-correctness.patch").exists()
+    assert not (root / "gb10/patch-controlnet-cache-correctness.py").exists()
+    assert not (root / "gb10/controlnet_cache_contract.py").exists()
+    assert "patch-controlnet-cache-correctness" not in (root / "gb10/run.sh").read_text(encoding="utf-8")
+    # The retired patch's settings hunk dropped this option at deploy time.
+    controlnet = (CONTROLNET / "scripts/controlnet.py").read_text(encoding="utf-8")
+    assert controlnet.count('add_option("control_net_modules_path"') == 1
+    assert controlnet.count('add_option("control_net_preprocessor_models_path"') == 1

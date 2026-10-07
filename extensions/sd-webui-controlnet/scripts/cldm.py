@@ -15,13 +15,46 @@ except ImportError:
     using_sgm = False
 
 
+def _loaded_value(value, expected_dtype, dtype):
+    """`value` bit for bit as the former path left it: copied into a parameter
+    of `expected_dtype` by load_state_dict, then Module.to(dtype)."""
+    value = value.to(expected_dtype)
+    if dtype is not None and expected_dtype.is_floating_point:
+        value = value.to(dtype)
+    return value
+
+
+def controlnet_from_state_dict(config, state_dict, dtype=None):
+    """Build ControlNet(**config) holding exactly the checkpoint's weights, cast
+    as ControlNet(**config) + load_state_dict + .to(dtype) did, without the
+    random init of ~1.25B fp32 parameters and the extra full copies. The
+    checkpoint must match the architecture guessed from it key for key."""
+    with torch.device("meta"):
+        model = ControlNet(**config)
+    expected = model.state_dict()
+    missing = sorted(expected.keys() - state_dict.keys())
+    unexpected = sorted(state_dict.keys() - expected.keys())
+    if missing or unexpected:
+        raise RuntimeError(
+            "ControlNet checkpoint does not match the architecture guessed from it: "
+            f"{len(missing)} missing keys {missing[:8]}, {len(unexpected)} unexpected keys {unexpected[:8]}")
+    model.load_state_dict(
+        {key: _loaded_value(value, expected[key].dtype, dtype) for key, value in state_dict.items()},
+        strict=True, assign=True)
+    unloaded = [name for name, tensor in (*model.named_parameters(), *model.named_buffers()) if tensor.is_meta]
+    if unloaded:
+        raise RuntimeError(f"ControlNet tensors not provided by the checkpoint: {unloaded[:8]}")
+    return model
+
+
 class PlugableControlModel(nn.Module):
-    def __init__(self, config, state_dict=None):
+    def __init__(self, config, state_dict=None, dtype=None):
         super().__init__()
         self.config = config
-        self.control_model = ControlNet(**self.config).cpu()
-        if state_dict is not None:
-            self.control_model.load_state_dict(state_dict, strict=False)
+        if state_dict is None:
+            self.control_model = ControlNet(**self.config).cpu()
+        else:
+            self.control_model = controlnet_from_state_dict(self.config, state_dict, dtype)
         self.gpu_component = None
         self.is_control_lora = False
 

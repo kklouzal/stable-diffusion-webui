@@ -100,10 +100,10 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
 done
 
 # sd-webui-controlnet is repo-owned and was mirrored above, so every patch target exists.
-# Its ZoeDepth, UNet hook-lifecycle, Pydantic 2 and TEED/geffnet (no torch.jit.script) fixes live in the tracked source.
+# Its ZoeDepth, UNet hook-lifecycle, Pydantic 2, TEED/geffnet (no torch.jit.script), result/model cache and
+# retained-state (LLLite/IP-Adapter ownership) fixes live in the tracked source.
 CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-preprocessor-path.py" "${CONTROLNET_ROOT}"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-cache-correctness.py" "${CONTROLNET_ROOT}"
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"

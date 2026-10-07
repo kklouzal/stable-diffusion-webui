@@ -33,9 +33,29 @@ from ...supported_preprocessor import Preprocessor, PreprocessorParameter
 ###
 
 
+# Legacy preprocessors whose result is a pure function of the result-cache key
+# (input image, resolution, sliders, ControlNet options, device/dtype): no RNG,
+# no other global settings, weights from fixed files. Checked per annotator.
+# Excluded on purpose: depth_leres++ (reads opts.depthmap_script_boost_rmax),
+# depth_hand_refiner (external package not audited), identity-like and cheap
+# ones (reference_*, tile_*, recolor_*, threshold, color: hashing the input costs
+# about as much as the work), and the clip/face-embedding ones (tensor results).
+DETERMINISTIC_LEGACY_PREPROCESSORS = frozenset((
+    "depth", "depth_leres", "depth_zoe", "depth_anything", "depth_anything_v2",
+    "normal_map", "normal_bae",
+    "lineart", "lineart_coarse", "lineart_anime", "lineart_anime_denoise", "lineart_standard",
+    "mlsd",
+    "hed", "hed_safe", "scribble_hed", "pidinet", "pidinet_safe", "pidinet_sketch", "pidinet_scribble",
+    "segmentation", "oneformer_ade20k", "oneformer_coco", "anime_face_segment",
+    "openpose", "openpose_face", "openpose_faceonly", "openpose_full", "openpose_hand",
+    "dw_openpose_full", "animal_openpose", "densepose", "densepose_parula",
+))
+
+
 class LegacyPreprocessor(Preprocessor):
     def __init__(self, name: str, legacy_dict):
         super().__init__(name)
+        self.cacheable = name in DETERMINISTIC_LEGACY_PREPROCESSORS
         self._label = legacy_dict["label"]
         self.call_function = legacy_dict["call_function"]
         self.unload_function = legacy_dict["unload_function"]
@@ -113,6 +133,9 @@ class LegacyPreprocessor(Preprocessor):
 
         return result
 
+
+unknown = DETERMINISTIC_LEGACY_PREPROCESSORS - legacy_preprocessors.keys()
+assert not unknown, f"cacheable legacy preprocessors not registered: {sorted(unknown)}"
 
 for name, data in legacy_preprocessors.items():
     p = LegacyPreprocessor(name, data)

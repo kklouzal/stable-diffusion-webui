@@ -28,6 +28,7 @@ class PreprocessorNone(Preprocessor):
 
 
 class PreprocessorCanny(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="canny")
         self.tags = ["Canny"]
@@ -90,6 +91,7 @@ class PreprocessorInvert(Preprocessor):
 
 
 class PreprocessorBlurGaussian(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="blur_gaussian")
         self.slider_1 = PreprocessorParameter(
@@ -114,6 +116,7 @@ class PreprocessorBlurGaussian(Preprocessor):
 
 
 class PreprocessorScribbleXdog(Preprocessor):
+    cacheable = True
     def __init__(self):
         super().__init__(name="scribble_xdog")
         self.slider_1 = PreprocessorParameter(

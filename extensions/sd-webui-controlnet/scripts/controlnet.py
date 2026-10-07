@@ -2,10 +2,10 @@ import gc
 import tracemalloc
 import os
 import logging
-from collections import OrderedDict
 from copy import copy, deepcopy
-from typing import Dict, Optional, Tuple, List
+from typing import Optional, Tuple, List
 import modules.scripts as scripts
+from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
 from modules import shared, devices, script_callbacks, processing, masking, images
 import gradio as gr
 import time
@@ -49,7 +49,7 @@ import torch
 from PIL import Image, ImageFilter, ImageOps
 from scripts.lvminthin import lvmin_thin, nake_nms
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
-from scripts.hook import torch_dfs
+from scripts.hook import restore_secondary_hijacks
 
 
 # Gradio 3.32 bug fix
@@ -59,16 +59,7 @@ os.makedirs(gradio_tempfile_path, exist_ok=True)
 
 
 def clear_all_secondary_control_models(m):
-    all_modules = torch_dfs(m)
-
-    for module in all_modules:
-        _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
-        original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
-        if _original_inner_forward_cn_hijack is not None:
-            module._forward = _original_inner_forward_cn_hijack
-        if original_forward_cn_hijack is not None:
-            module.forward = original_forward_cn_hijack
-
+    restore_secondary_hijacks(m)
     clear_all_lllite()
     clear_all_ip_adapter()
 
@@ -176,18 +167,23 @@ def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
         return None
 
 
-def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
-    # A very safe method to make sure that Apple/Mac works
-    y = x
+# v / 255 for every uint8 v, divided on the CPU in float32 exactly like the
+# former per-pixel path. (On CUDA a division by a Python scalar multiplies by
+# the reciprocal, which can differ in the last bit, so it is not used.)
+_UINT8_TO_UNIT = torch.arange(256, dtype=torch.float32) / 255.0
 
-    # below is very boring but do not change these. If you change these Apple or Mac may fail.
-    y = torch.from_numpy(y)
-    y = y.float() / 255.0
-    y = rearrange(y, 'h w c -> 1 c h w')
-    y = y.clone()
-    y = y.to(devices.get_device_for("controlnet"))
-    y = y.clone()
-    return y
+
+def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
+    """HWC array -> 1CHW float32 in [0, 1] on the ControlNet device. uint8 maps
+    upload as uint8 (a quarter of the float bytes) and are expanded on the device
+    by exact table lookup; the result's values and strides equal the former
+    convert-on-CPU path."""
+    device = devices.get_device_for("controlnet")
+    if x.dtype == np.uint8:
+        y = _UINT8_TO_UNIT.to(device)[torch.from_numpy(x).to(device).long()]
+    else:
+        y = (torch.from_numpy(x).float() / 255.0).to(device)
+    return rearrange(y, 'h w c -> 1 c h w')
 
 
 def get_control(
@@ -295,7 +291,7 @@ def get_control(
 class Script(scripts.Script, metaclass=(
     utils.TimeMeta if logger.level == logging.DEBUG else type)):
 
-    model_cache: Dict[str, ControlModel] = OrderedDict()
+    model_load_cache = AtomicLRU(2, "controlnet-model")
 
     def __init__(self) -> None:
         super().__init__()
@@ -405,60 +401,82 @@ class Script(scripts.Script, metaclass=(
         return tuple(controls)
 
     @staticmethod
-    def clear_control_model_cache():
-        Script.model_cache.clear()
+    def clear_control_model_cache(reason="explicit"):
+        Script.model_load_cache.clear(reason)
         gc.collect()
         devices.torch_gc()
 
     @staticmethod
-    def load_control_model(p, unet, model) -> ControlModel:
-        if model in Script.model_cache:
-            logger.info(f"Loading model from cache: {model}")
-            control_model = Script.model_cache[model]
-            if control_model.type == ControlModelType.Controlllite:
-                # Falls through to load Controlllite model fresh.
-                # TODO Fix context sharing issue for Controlllite.
-                pass
-            elif not control_model.type.allow_context_sharing:
-                # Creates a shallow-copy of control_model so that configs/inputs
-                # from different units can be bind correctly. While heavy objects
-                # of the underlying nn.Module is not copied.
-                return ControlModel(copy(control_model.model), control_model.type)
-            else:
-                return control_model
+    def _resolve_model_path(model):
+        model_path = global_state.cn_models.get(model, None)
+        resolved_model = model
+        if model_path is None:
+            resolved_model = find_closest_lora_model_name(model)
+            model_path = global_state.cn_models.get(resolved_model, None)
+        if model_path is None:
+            raise RuntimeError(f"model not found: {model}")
+        model_path = model_path.strip('"')
+        if not os.path.exists(model_path):
+            raise ValueError(f"file not found: {model_path}")
+        return resolved_model, os.path.realpath(model_path)
 
-        # Remove model from cache to clear space before building another model
-        if len(Script.model_cache) > 0 and len(Script.model_cache) >= shared.opts.data.get("control_net_model_cache_size", 2):
-            Script.model_cache.popitem(last=False)
-            gc.collect()
-            devices.torch_gc()
+    @staticmethod
+    def _model_cache_key(p, unet, model):
+        resolved_model, model_path = Script._resolve_model_path(model)
+        stat = os.stat(model_path)
+        source_revision = (
+            model_path, stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns,
+        )
+        sd_model = p.sd_model
+        base_revision = (
+            type(unet).__module__, type(unet).__qualname__, id(unet),
+            getattr(sd_model, "sd_checkpoint_info", None) and
+            getattr(sd_model.sd_checkpoint_info, "sha256", None),
+        )
+        loader_options = {
+            key: value for key, value in shared.opts.data.items()
+            if key.startswith("control_net") or key.startswith("controlnet")
+        }
+        return (
+            "controlnet-model", 1, resolved_model, source_revision, base_revision,
+            str(sd_model.dtype), str(getattr(devices, "dtype_unet", None)),
+            str(getattr(devices, "device", None)), runtime_identity(torch),
+            callable_identity(build_model_by_guess), freeze(loader_options),
+        )
 
-        control_model = Script.build_control_model(p, unet, model)
-
-        if shared.opts.data.get("control_net_model_cache_size", 2) > 0:
-            Script.model_cache[model] = control_model
-
+    @staticmethod
+    def _return_cached_model(control_model):
+        if control_model.type == ControlModelType.Controlllite:
+            return None
+        if not control_model.type.allow_context_sharing:
+            return ControlModel(copy(control_model.model), control_model.type)
         return control_model
+
+    @staticmethod
+    def load_control_model(p, unet, model) -> ControlModel:
+        max_size = shared.opts.data.get("control_net_model_cache_size", 2)
+        Script.model_load_cache.set_max_size(max_size)
+        key = Script._model_cache_key(p, unet, model)
+
+        def build():
+            return Script.build_control_model(p, unet, model)
+
+        control_model = Script.model_load_cache.get_or_compute(key, build)
+        if control_model.type == ControlModelType.Controlllite:
+            # Mutable per-unit context is not equivalent across requests.
+            Script.model_load_cache.discard(key, "volatile-controlllite")
+            return control_model
+        cached = Script._return_cached_model(control_model)
+        logger.info(f"ControlNet model cache lookup: {Script.model_load_cache.info()['last_lookup']['reason']}")
+        return cached
 
     @staticmethod
     def build_control_model(p, unet, model) -> ControlModel:
         if model is None or model == 'None':
             raise RuntimeError("You have not selected any ControlNet Model.")
 
-        model_path = global_state.cn_models.get(model, None)
-        if model_path is None:
-            model = find_closest_lora_model_name(model)
-            model_path = global_state.cn_models.get(model, None)
-
-        if model_path is None:
-            raise RuntimeError(f"model not found: {model}")
-
-        # trim '"' at start/end
-        if model_path.startswith("\"") and model_path.endswith("\""):
-            model_path = model_path[1:-1]
-
-        if not os.path.exists(model_path):
-            raise ValueError(f"file not found: {model_path}")
+        model, model_path = Script._resolve_model_path(model)
 
         logger.info(f"Loading model: {model}")
         state_dict = load_state_dict(model_path)
@@ -926,6 +944,9 @@ class Script(scripts.Script, metaclass=(
 
         setattr(p, 'controlnet_control_loras', [])
 
+        # A failed generation skips postprocess, and its hook may belong to the
+        # other (txt2img/img2img) Script instance; heal the shared UNet first.
+        UnetHook.restore_leaked(unet)
         if self.latest_network is not None:
             # always restore (~0.05s)
             self.latest_network.restore()
@@ -1368,8 +1389,8 @@ class Script(scripts.Script, metaclass=(
         self.latest_network = None
         self.detected_map.clear()
 
-        gc.collect()
-        devices.torch_gc()
+        # No gc.collect()/torch_gc() here: request-end memory release is the core
+        # pipeline's policy; forcing it again per request only churns the allocator.
         if getattr(shared.cmd_opts, 'controlnet_tracemalloc', False):
             logger.info("After generation:")
             for stat in tracemalloc.take_snapshot().compare_to(self.malloc_begin, "lineno")[:10]:
@@ -1467,6 +1488,11 @@ def on_ui_settings():
     shared.opts.add_option("controlnet_control_type_dropdown", shared.OptionInfo(
         False, "Display control type as dropdown",
         gr.Checkbox, {"interactive": True}, section=section).needs_reload_ui())
+
+
+def clear_controlnet_caches_for_reload():
+    Script.clear_control_model_cache("extension-reload")
+    Preprocessor.clear_all_caches("extension-reload")
 
 
 batch_hijack.instance.do_hijack()

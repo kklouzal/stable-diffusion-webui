@@ -7,7 +7,7 @@ import torch
 from modules import shared, devices
 from scripts.enums import ControlNetUnionControlType
 from scripts.logging import logger
-from scripts.utils import ndarray_lru_cache
+from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
 
 
 CACHE_SIZE = getattr(shared.cmd_opts, "controlnet_preprocessor_cache_size", 0)
@@ -104,6 +104,11 @@ class Preprocessor(ABC):
     model: Optional[torch.nn.Module] = None
     device = devices.get_device_for("controlnet")
     preprocessor_deps: List[str] = field(default_factory=list)
+    # Opt-in per class (or per instance) for results that are a pure function of
+    # _cache_identity. A ClassVar, not a dataclass field: a field default would be
+    # assigned per instance by __init__ and shadow a subclass's `cacheable = True`.
+    cacheable: ClassVar[bool] = False
+    _result_cache: Optional[AtomicLRU] = field(default=None, init=False, repr=False, compare=False)
 
     all_processors: ClassVar[Dict[str, "Preprocessor"]] = {}
     all_processors_by_name: ClassVar[Dict[str, "Preprocessor"]] = {}
@@ -178,6 +183,11 @@ class Preprocessor(ABC):
         return set([tag] + filters_aliases.get(tag, []) + union_tags)
 
     @classmethod
+    def clear_all_caches(cls, reason="extension-reload"):
+        for processor in cls.all_processors.values():
+            processor.clear_cache(reason)
+
+    @classmethod
     def unload_unused(cls, active_processors: Set["Preprocessor"]):
         logger.debug(
             f"Unload unused preprocessors. Active: {[p.name for p in active_processors]}"
@@ -204,11 +214,56 @@ class Preprocessor(ABC):
                 display_images=[result if self.returns_image else input_image],
             )
 
-    @ndarray_lru_cache(max_size=CACHE_SIZE)
+    def _cache_identity(self, args, kwargs):
+        model = self.model
+        model_parameters = []
+        if model is not None and hasattr(model, "parameters"):
+            try:
+                model_parameters = [
+                    (tuple(parameter.shape), str(parameter.dtype), str(parameter.device))
+                    for parameter in model.parameters()
+                ]
+            except Exception:
+                model_parameters = [("unavailable",)]
+        semantic_options = {
+            key: value for key, value in shared.opts.data.items()
+            if key.startswith("control_net") or key.startswith("controlnet")
+        }
+        return (
+            "controlnet-preprocessor", 1, self.name, self.label,
+            callable_identity(self.__call__),
+            None if model is None else (
+                id(model), callable_identity(type(model)), freeze(model_parameters),
+            ),
+            str(self.device), str(getattr(devices, "dtype", None)),
+            str(getattr(devices, "dtype_unet", None)), runtime_identity(torch),
+            freeze(semantic_options), freeze(args), freeze(kwargs),
+        )
+
+    def clear_cache(self, reason="explicit"):
+        if self._result_cache is not None:
+            self._result_cache.clear(reason)
+
+    def cache_info(self):
+        return self._result_cache.info() if self._result_cache is not None else {
+            "name": f"controlnet-preprocessor:{self.name}", "size": 0,
+            "max_size": CACHE_SIZE, "stats": {},
+        }
+
     def _cached_call(self, *args, **kwargs):
-        """The actual cached function."""
-        logger.debug(f"Calling preprocessor {self.name} outside of cache.")
-        return self(*args, **kwargs)
+        """Cache only deterministic calls under complete input/runtime identity.
+        Calls carrying a callable (e.g. openpose's json_pose_callback) always run:
+        the callback is a side effect a cache hit would skip."""
+        if not self.cacheable or CACHE_SIZE <= 0 or any(callable(v) for v in (*args, *kwargs.values())):
+            logger.debug(f"Calling non-cacheable preprocessor {self.name}.")
+            return self(*args, **kwargs)
+        if self._result_cache is None:
+            self._result_cache = AtomicLRU(CACHE_SIZE, f"controlnet-preprocessor:{self.name}")
+        self._result_cache.set_max_size(CACHE_SIZE)
+        key = self._cache_identity(args, kwargs)
+        return self._result_cache.get_or_compute(
+            key, lambda: self(*args, **kwargs), clone=True
+        )
 
     def __hash__(self):
         return hash(self.name)
@@ -230,6 +285,7 @@ class Preprocessor(ABC):
         pass
 
     def unload(self):
+        self.clear_cache("teardown")
         if self.model is not None:
             if hasattr(self.model, "unload_model"):
                 self.model.unload_model()

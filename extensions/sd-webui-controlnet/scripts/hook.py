@@ -2,10 +2,13 @@ import torch
 import hashlib
 import numpy as np
 import torch.nn as nn
+from copy import copy
 from functools import partial
 from typing import Optional, Any, List
 
 from scripts.logging import logger
+from scripts.controlnet_lllite import clear_all_lllite
+from scripts.ipadapter.plugable_ipadapter import clear_all_ip_adapter
 from scripts.enums import (
     ControlModelType,
     AutoMachine,
@@ -22,7 +25,6 @@ from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
 
 from modules.prompt_parser import MulticondLearnedConditioning, ComposableScheduledPromptConditioning, ScheduledPromptConditioning
-from modules.processing import StableDiffusionProcessing
 
 
 try:
@@ -46,16 +48,19 @@ def prompt_context_is_marked(x):
 
 
 def mark_prompt_context(x, positive):
+    """Return a marked copy of `x`; `x` itself is never mutated. The conditioning
+    objects are the persistent cond cache's entries, shared with later requests
+    that may not use ControlNet. Callers must use the return value."""
     if isinstance(x, list):
-        for i in range(len(x)):
-            x[i] = mark_prompt_context(x[i], positive)
-        return x
+        return [mark_prompt_context(item, positive) for item in x]
     if isinstance(x, MulticondLearnedConditioning):
-        x.batch = mark_prompt_context(x.batch, positive)
-        return x
+        marked = copy(x)
+        marked.batch = mark_prompt_context(x.batch, positive)
+        return marked
     if isinstance(x, ComposableScheduledPromptConditioning):
-        x.schedules = mark_prompt_context(x.schedules, positive)
-        return x
+        marked = copy(x)
+        marked.schedules = mark_prompt_context(x.schedules, positive)
+        return marked
     if isinstance(x, ScheduledPromptConditioning):
         if isinstance(x.cond, dict):
             cond = x.cond['crossattn']
@@ -79,7 +84,13 @@ disable_controlnet_prompt_warning = True
 
 
 def unmark_prompt_context(x):
-    if not prompt_context_is_marked(x):
+    # Same values as prompt_context_is_marked(x) and the per-row marks below,
+    # read back in one device->host copy (a single stream sync per UNet call).
+    t = x[..., 0, :]
+    is_marked = torch.mean(torch.abs(torch.abs(t) - POSITIVE_MARK_TOKEN))
+    row_mark = (torch.mean(torch.abs(t - NEGATIVE_MARK_TOKEN), dim=-1) > MARK_EPS).float()
+    host = torch.cat([is_marked.detach().float().reshape(1), row_mark.detach().reshape(-1)]).cpu().numpy()
+    if not float(host[0]) < MARK_EPS:
         # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
         # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
         # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
@@ -96,19 +107,11 @@ def unmark_prompt_context(x):
         mark_batch = torch.ones(size=(x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
         context = x
         return mark_batch, [], [], context
-    mark = x[:, 0, :]
     context = x[:, 1:, :]
-    mark = torch.mean(torch.abs(mark - NEGATIVE_MARK_TOKEN), dim=1)
-    mark = (mark > MARK_EPS).float()
-    mark_batch = mark[:, None, None, None].to(x.dtype).to(x.device)
-
-    mark = mark.detach().cpu().numpy().tolist()
+    mark_batch = row_mark[:, None, None, None].to(x.dtype)
+    mark = host[1:]
     uc_indices = [i for i, item in enumerate(mark) if item < 0.5]
     c_indices = [i for i, item in enumerate(mark) if not item < 0.5]
-
-    StableDiffusionProcessing.cached_c = [None, None]
-    StableDiffusionProcessing.cached_uc = [None, None]
-
     return mark_batch, uc_indices, c_indices, context
 
 
@@ -273,6 +276,20 @@ def torch_dfs(model: torch.nn.Module):
     return result
 
 
+def restore_secondary_hijacks(model):
+    """Undo the attention/GroupNorm hijacks (reference-only, StyleAlign) that
+    UnetHook.hook installed on `model`'s submodules. They are registered on the
+    model, so this needs no walk over all UNet modules."""
+    for module in getattr(model, '_controlnet_secondary_hijacks', ()):
+        _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
+        original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
+        if _original_inner_forward_cn_hijack is not None:
+            module._forward = _original_inner_forward_cn_hijack
+        if original_forward_cn_hijack is not None:
+            module.forward = original_forward_cn_hijack
+    model._controlnet_secondary_hijacks = []
+
+
 class AbstractLowScaleModel(nn.Module):
     def __init__(self):
         super(AbstractLowScaleModel, self).__init__()
@@ -393,6 +410,11 @@ class UnetHook(nn.Module):
         # wrapper carrying this opaque token. Never restore another owner.
         self._forward_hook_owner_token = object()
         self._forward_hook_wrapper = None
+        # True only while this hook's process.sample() runs. Every ControlNet
+        # UNet call happens inside it; outside it the wrapper is a pass-through,
+        # so a hook leaked by a failed generation can never touch a later one.
+        self.sampling_active = False
+        self._warned_outside_sampling = False
 
     @staticmethod
     def call_vae_using_process(p, x, batch_size=None, mask=None):
@@ -467,11 +489,20 @@ class UnetHook(nn.Module):
             # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
             # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
             # After you mark the prompts, the mismatch errors will disappear.
-            mark_prompt_context(kwargs.get('conditioning', []), positive=True)
-            mark_prompt_context(kwargs.get('unconditional_conditioning', []), positive=False)
-            mark_prompt_context(getattr(process, 'hr_c', []), positive=True)
-            mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
-            return process.sample_before_CN_hack(*args, **kwargs)
+            # Marked copies only: the originals are persistent cond cache entries.
+            for key, positive in (('conditioning', True), ('unconditional_conditioning', False)):
+                if key in kwargs:
+                    kwargs[key] = mark_prompt_context(kwargs[key], positive=positive)
+            for name, positive in (('hr_c', True), ('hr_uc', False)):
+                conds = getattr(process, name, None)
+                if conds is not None:
+                    setattr(process, name, mark_prompt_context(conds, positive=positive))
+            previously_active = outer.sampling_active
+            outer.sampling_active = True
+            try:
+                return process.sample_before_CN_hack(*args, **kwargs)
+            finally:
+                outer.sampling_active = previously_active
 
         def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
             is_sdxl = y is not None and model_is_sdxl
@@ -708,7 +739,9 @@ class UnetHook(nn.Module):
                     if mask_latent.shape[0] != batch_size:
                         mask_latent = torch.cat([mask_latent.clone() for _ in range(batch_size)], dim=0)
                     param.used_hint_inpaint_hijack = torch.cat([mask_latent, masked_latent], dim=1)
-                    param.used_hint_inpaint_hijack.to(x.dtype).to(x.device)
+                param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(
+                    device=x.device, dtype=x.dtype
+                )
                 x = torch.cat([x[:, :4, :, :], param.used_hint_inpaint_hijack], dim=1)
 
             # vram
@@ -904,6 +937,14 @@ class UnetHook(nn.Module):
             # without forwarding the wrapper's bound self a second time.
             if not outer.control_params:
                 return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
+            if not outer.sampling_active:
+                # Outside this hook's process.sample(): a hook leaked by a failed
+                # generation (postprocess never ran), or a caller that bypassed
+                # ControlNet's sample wrapper. Never apply stale control here.
+                if not outer._warned_outside_sampling:
+                    outer._warned_outside_sampling = True
+                    logger.warning("ControlNet: UNet called outside the hooked process.sample(); control is not applied to this call.")
+                return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
             try:
                 if shared.cmd_opts.lowvram:
                     lowvram.send_everything_to_cpu()
@@ -1012,6 +1053,10 @@ class UnetHook(nn.Module):
             model._controlnet_forward_hook_baseline = outer.original_forward
             model._controlnet_forward_hook_owner = outer._forward_hook_owner_token
             model._controlnet_forward_hook_wrapper = wrapper
+            # Restore by resource, not by Script instance: txt2img and img2img
+            # have separate Script instances, and postprocess (the normal
+            # restore point) never runs when a generation raises.
+            model._controlnet_forward_hook_restore = outer.restore
             outer._forward_hook_wrapper = wrapper
             model.forward = wrapper
 
@@ -1030,10 +1075,8 @@ class UnetHook(nn.Module):
             outer.attention_auto_machine = AutoMachine.StyleAlign
             outer.gn_auto_machine = AutoMachine.StyleAlign
 
-        all_modules = torch_dfs(model)
-
         if need_attention_hijack:
-            attn_modules = [module for module in all_modules if isinstance(module, BasicTransformerBlock) or isinstance(module, BasicTransformerBlockSGM)]
+            attn_modules = [module for module in torch_dfs(model) if isinstance(module, BasicTransformerBlock) or isinstance(module, BasicTransformerBlockSGM)]
             attn_modules = sorted(attn_modules, key=lambda x: - x.norm1.normalized_shape[0])
 
             for i, module in enumerate(attn_modules):
@@ -1073,16 +1116,12 @@ class UnetHook(nn.Module):
                 module.style_cfgs = []
                 module.gn_weight *= 2
 
+            registered = getattr(model, '_controlnet_secondary_hijacks', [])
+            model._controlnet_secondary_hijacks = list(dict.fromkeys([*registered, *attn_modules, *gn_modules]))
             outer.attn_module_list = attn_modules
             outer.gn_module_list = gn_modules
         else:
-            for module in all_modules:
-                _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
-                original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
-                if _original_inner_forward_cn_hijack is not None:
-                    module._forward = _original_inner_forward_cn_hijack
-                if original_forward_cn_hijack is not None:
-                    module.forward = original_forward_cn_hijack
+            restore_secondary_hijacks(model)
             outer.attn_module_list = []
             outer.gn_module_list = []
 
@@ -1090,6 +1129,12 @@ class UnetHook(nn.Module):
 
     def restore(self):
         scripts.script_callbacks.remove_callbacks_for_function(self.guidance_schedule_handler)
+        clear_all_lllite()
+        clear_all_ip_adapter()
+        for param in self.control_params or []:
+            release = getattr(getattr(param, "control_model", None), "release_request_state", None)
+            if callable(release):
+                release()
 
         model = self.model
         if model is not None and getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token:
@@ -1101,5 +1146,14 @@ class UnetHook(nn.Module):
                 del model._controlnet_forward_hook_baseline
                 del model._controlnet_forward_hook_owner
                 del model._controlnet_forward_hook_wrapper
+                del model._controlnet_forward_hook_restore
         self._forward_hook_wrapper = None
         self.control_params = None
+
+    @staticmethod
+    def restore_leaked(model):
+        """Restore the hook any UnetHook left on `model`, whichever Script
+        instance installed it (e.g. a generation that raised before postprocess)."""
+        restore = getattr(model, "_controlnet_forward_hook_restore", None)
+        if restore is not None:
+            restore()

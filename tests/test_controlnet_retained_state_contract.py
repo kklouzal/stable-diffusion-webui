@@ -1,31 +1,26 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PATCH = ROOT / "gb10/controlnet-cache-correctness.patch"
-PATCHER = ROOT / "gb10/patch-controlnet-cache-correctness.py"
+SCRIPTS = ROOT / "extensions/sd-webui-controlnet/scripts"
 
 
-def test_patch_covers_retained_state_owners():
-    text = PATCH.read_text()
-    assert "scripts/controlnet_lllite.py" in text
-    assert "scripts/ipadapter/plugable_ipadapter.py" in text
-    assert "scripts/hook.py" in text
-    assert "_controlnet_lllite_owner" in text
-    assert "_controlnet_ipadapter_owner" in text
-    assert "release_request_state" in text
-    assert "clear_all_lllite()" in text
-    assert "clear_all_ip_adapter()" in text
+def _source(rel):
+    return (SCRIPTS / rel).read_text(encoding="utf-8")
 
 
-def test_patcher_atomically_publishes_all_retained_contract_files():
-    text = PATCHER.read_text()
-    for rel in (
-        "scripts/controlnet_lllite.py",
-        "scripts/hook.py",
-        "scripts/ipadapter/plugable_ipadapter.py",
-    ):
-        assert rel in text
-    assert "os.replace(stage / rel, target / rel)" in text
+def test_source_covers_retained_state_owners():
+    lllite = _source("controlnet_lllite.py")
+    assert "_all_hack_lock = RLock()" in lllite
+    assert 'getattr(k, "_controlnet_lllite_owner", None) is owned' in lllite
+    ipadapter = _source("ipadapter/plugable_ipadapter.py")
+    assert "_all_hacks_lock = RLock()" in ipadapter
+    assert 'getattr(k, "_controlnet_ipadapter_owner", None) is owned' in ipadapter
+    assert "def release_request_state(self):" in ipadapter
+    hook = _source("hook.py")
+    restore = hook[hook.index("    def restore(self):"):]
+    assert "clear_all_lllite()" in restore
+    assert "clear_all_ip_adapter()" in restore
+    assert "release_request_state" in restore
 
 
 def test_owner_token_prevents_stale_cleanup_from_clobbering_new_owner():

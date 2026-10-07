@@ -60,8 +60,8 @@ class ZoeDetector:
 
             depth = depth[0, 0].cpu().numpy()
 
-            vmin = np.percentile(depth, 2)
-            vmax = np.percentile(depth, 85)
+            # Same values and dtype as two scalar-q percentile calls, one pass.
+            vmin, vmax = np.percentile(depth, np.array([2, 85], dtype=depth.dtype))
 
             depth -= vmin
             depth /= vmax - vmin
