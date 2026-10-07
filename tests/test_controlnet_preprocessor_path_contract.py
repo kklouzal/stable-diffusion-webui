@@ -74,15 +74,24 @@ def resolve_annotator_models_path(tmp_path, patched_root, opts_data, cmd_path=No
         cmd_opts=types.SimpleNamespace(controlnet_annotator_models_path=cmd_path),
         data_path=str(data_path or tmp_path / "data"),
     )
+    # The stubs live only while the module executes: a SimpleNamespace left as sys.modules["modules"] broke every
+    # later test file that imports the real webui package (or stubs only some of its submodules).
+    saved = {name: sys.modules.get(name) for name in ("modules", "modules.shared", "annotator_path")}
     sys.modules.pop("annotator_path", None)
     sys.modules["modules"] = types.SimpleNamespace(shared=shared)
     sys.modules["modules.shared"] = shared
-
-    spec = importlib.util.spec_from_file_location("annotator_path", module_path)
-    module = importlib.util.module_from_spec(spec)
-    stdout = io.StringIO()
-    with redirect_stdout(stdout):
-        spec.loader.exec_module(module)
+    try:
+        spec = importlib.util.spec_from_file_location("annotator_path", module_path)
+        module = importlib.util.module_from_spec(spec)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            spec.loader.exec_module(module)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
 
     return module.models_path, stdout.getvalue()
 

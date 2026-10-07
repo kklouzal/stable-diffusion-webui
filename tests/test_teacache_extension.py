@@ -8,6 +8,22 @@ from pathlib import Path
 import pytest
 import torch
 
+# Packages load_teacache_module() replaces with stubs; never leak them into later test files.
+_STUBBED_ROOTS = ("modules", "sgm", "teacache_under_test")
+
+
+@pytest.fixture(autouse=True)
+def _restore_stubbed_modules():
+    """Restore every sys.modules entry under the stubbed roots after each test (stubs added, real ones replaced)."""
+    def owned(name):
+        return name.split(".")[0] in _STUBBED_ROOTS
+
+    saved = {name: module for name, module in sys.modules.items() if owned(name)}
+    yield
+    for name in [name for name in sys.modules if owned(name)]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
 
 def load_teacache_module():
     root = Path(__file__).resolve().parents[1]
