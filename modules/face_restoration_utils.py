@@ -90,7 +90,8 @@ def restore_with_face_helper(
                 errors.report('Failed face-restoration inference', exc_info=True)
 
             restored_face = rgb_tensor_to_bgr_image(cropped_face_t, min_max=(-1, 1))
-            restored_face = (restored_face * 255.0).astype('uint8')
+            # Round like the reference GFPGAN/CodeFormer post-processing (basicsr tensor2img); astype truncates.
+            restored_face = (restored_face * 255.0).round().astype('uint8')
             face_helper.add_restored_face(restored_face)
 
         logger.debug("Merging restored faces into image")
@@ -146,12 +147,12 @@ class CommonFaceRestoration(face_restoration.FaceRestoration):
         np_image: np.ndarray,
         restore_face: Callable[[torch.Tensor], torch.Tensor],
     ) -> np.ndarray:
-        try:
-            if self.net is None:
+        # Fail the request: returning `np_image` would leave faces unrestored while infotext names this restorer.
+        if self.net is None:
+            try:
                 self.net = self.load_net()
-        except Exception:
-            logger.warning("Unable to load face-restoration model", exc_info=True)
-            return np_image
+            except Exception as e:
+                raise RuntimeError(f"Unable to load {self.name()} face-restoration model: {e}") from e
 
         try:
             self.send_model_to(self.get_device())

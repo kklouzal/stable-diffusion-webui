@@ -3,7 +3,7 @@ import os
 from modules.modelloader import load_file_from_url
 from modules.upscaler import Upscaler, UpscalerData
 from ldsr_model_arch import LDSR
-from modules import shared, script_callbacks, errors
+from modules import shared, script_callbacks
 import sd_hijack_autoencoder  # noqa: F401
 import sd_hijack_ddpm_v1  # noqa: F401
 
@@ -49,11 +49,11 @@ class UpscalerLDSR(Upscaler):
         return LDSR(model, yaml)
 
     def do_upscale(self, img, path):
+        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             ldsr = self.load_model(path)
-        except Exception:
-            errors.report(f"Failed loading LDSR model {path}", exc_info=True)
-            return img
+        except Exception as e:
+            raise RuntimeError(f"Unable to load LDSR model {path}: {e}") from e
         ddim_steps = shared.opts.ldsr_steps
         return ldsr.super_resolution(img, ddim_steps, self.scale)
 

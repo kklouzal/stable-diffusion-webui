@@ -21,7 +21,7 @@ import modules.sd_hijack
 from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
-from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
+from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
 import modules.paths as paths
@@ -813,16 +813,15 @@ class DecodedSamples(list):
 
 
 def samples_to_uint8_images(samples):
-    """Convert clamped CHW torch image tensors to HWC uint8 NumPy arrays.
+    """Convert clamped [0, 1] CHW torch image tensors to HWC uint8 NumPy arrays (rounded; see float_images_to_uint8).
 
-    This intentionally preserves the old per-sample semantics:
-    multiply by 255, truncate toward zero, and then cast to uint8.
+    A batch tensor is quantized in one device pass and copied out once; a list is converted per sample.
     """
 
     if isinstance(samples, torch.Tensor):
-        return (samples * 255.0).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        return float_images_to_uint8(samples).cpu().numpy()
 
-    return [(sample * 255.0).byte().permute(1, 2, 0).contiguous().cpu().numpy() for sample in samples]
+    return [float_images_to_uint8(sample).cpu().numpy() for sample in samples]
 
 
 def decoded_images_device():
@@ -1665,7 +1664,8 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 source_image = decode_first_stage(self.sd_model, samples) if self.img2img_image_conditioning_reads_source() else None
                 image_conditioning = self.img2img_image_conditioning(source_image, samples)
             else:
-                image_conditioning = self.txt2img_image_conditioning(samples)
+                # Sized from the upscaled latent: the default width/height are the first-pass dimensions.
+                image_conditioning = self.txt2img_image_conditioning(samples, samples.shape[3] * opt_f, samples.shape[2] * opt_f)
         else:
             lowres_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
@@ -1686,11 +1686,17 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             self.add_vae_encoder_generation_param()
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
 
-            image_conditioning = self.img2img_image_conditioning(decoded_samples, samples)
+            # Image conditioning reads [-1, 1] sources, as on the latent path (decode_first_stage) and in img2img.
+            source_image = decoded_samples * 2 - 1 if self.img2img_image_conditioning_reads_source() else None
+            image_conditioning = self.img2img_image_conditioning(source_image, samples)
 
         shared.state.nextjob()
 
-        samples = samples[:, :, self.truncate_y//2:samples.shape[2]-(self.truncate_y+1)//2, self.truncate_x//2:samples.shape[3]-(self.truncate_x+1)//2]
+        crop = (..., slice(self.truncate_y//2, samples.shape[2]-(self.truncate_y+1)//2), slice(self.truncate_x//2, samples.shape[3]-(self.truncate_x+1)//2))
+        if torch.is_tensor(image_conditioning) and image_conditioning.ndim == 4 and image_conditioning.shape[-2:] == samples.shape[-2:]:
+            # Spatial (inpainting-model) conditioning must cover the same latent region as the cropped samples.
+            image_conditioning = image_conditioning[crop]
+        samples = samples[crop]
 
         self.rng = rng.ImageRNG(samples.shape[1:], self.seeds, subseeds=self.subseeds, subseed_strength=self.subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w)
         noise = self.rng.next()

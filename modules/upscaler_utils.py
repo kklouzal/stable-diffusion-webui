@@ -86,7 +86,9 @@ def upscale_with_model(
         logger.debug("=> %s", output)
         return output
 
-    grid = images.split_grid(img, tile_size, tile_size, tile_overlap)
+    # A tile larger than the image would be cropped at a negative offset, i.e. padded with black that the model
+    # then blends into the image's edges; cap each tile side at the image side instead.
+    grid = images.split_grid(img, min(tile_size, img.width), min(tile_size, img.height), tile_overlap)
     newtiles = []
 
     with tqdm.tqdm(total=grid.tile_count, desc=desc, disable=not shared.opts.enable_upscale_progressbar) as p:
@@ -126,6 +128,7 @@ def tiled_upscale_2(
     # SwinIR and ScuNET.  It differs from `upscale_with_model` in that tiling and
     # weighting is done in PyTorch space, as opposed to `images.Grid` doing it in
     # Pillow space without weighting.
+    # Returns None when interrupted or skipped before every tile ran.
 
     b, c, h, w = img.size()
     tile_size = min(tile_size, h, w)
@@ -133,7 +136,7 @@ def tiled_upscale_2(
 
     if tile_size <= 0:
         logger.debug("Upscaling %s without tiling", img.shape)
-        return model(img)
+        return model(img.to(device=device))
 
     stride = tile_size - tile_overlap
     h_idx_list = list(range(0, h - tile_size, stride)) + [h - tile_size]
@@ -146,16 +149,15 @@ def tiled_upscale_2(
         device=device,
         dtype=img.dtype,
     )
-    weights = torch.zeros_like(result)
+    # Per-pixel tile count; the same for every channel, so one channel broadcast over `result` suffices.
+    weights = torch.zeros((1, 1, h * scale, w * scale), device=device, dtype=img.dtype)
     logger.debug("Upscaling %s to %s with tiles", img.shape, result.shape)
     with tqdm.tqdm(total=len(h_idx_list) * len(w_idx_list), desc=desc, disable=not shared.opts.enable_upscale_progressbar) as pbar:
         for h_idx in h_idx_list:
-            if shared.state.interrupted or shared.state.skipped:
-                break
-
             for w_idx in w_idx_list:
                 if shared.state.interrupted or shared.state.skipped:
-                    break
+                    # Pixels no tile has reached yet have weight 0; dividing would turn them into NaN.
+                    return None
 
                 # Only move this patch to the device if it's not already there.
                 in_patch = img[
@@ -172,13 +174,11 @@ def tiled_upscale_2(
                     w_idx * scale : (w_idx + tile_size) * scale,
                 ].add_(out_patch)
 
-                out_patch_mask = torch.ones_like(out_patch)
-
                 weights[
                     ...,
                     h_idx * scale : (h_idx + tile_size) * scale,
                     w_idx * scale : (w_idx + tile_size) * scale,
-                ].add_(out_patch_mask)
+                ].add_(1)
 
                 pbar.update(1)
 
@@ -198,11 +198,15 @@ def upscale_2(
 ):
     """
     Convenience wrapper around `tiled_upscale_2` that handles PIL images.
+
+    Like `upscale_with_model`, the model runs in its own dtype even when the caller (hires fix) is inside the
+    sampler's autocast, and an interrupted or skipped upscale returns `img` unchanged.
     """
     param = torch_utils.get_param(model)
-    tensor = pil_image_to_torch_bgr(img).to(dtype=param.dtype).unsqueeze(0)  # add batch dimension
 
-    with torch.inference_mode():
+    with torch.inference_mode(), devices.without_autocast():
+        # Uploaded once; bitwise the same tensor as the CPU float64 conversion followed by a per-tile copy.
+        tensor = pil_image_to_device_bgr(img, param.device, param.dtype)
         output = tiled_upscale_2(
             tensor,
             model,
@@ -212,4 +216,6 @@ def upscale_2(
             desc=desc,
             device=param.device,
         )
-    return torch_bgr_to_pil_image(output)
+        if output is None:
+            return img
+        return torch_bgr_to_pil_image(output)

@@ -1,3 +1,4 @@
+import math
 import os
 from abc import abstractmethod
 
@@ -9,6 +10,16 @@ from modules import modelloader, shared
 
 LANCZOS = (Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)
 NEAREST = (Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST)
+
+
+def scaled_size(size: int, scale: float) -> int:
+    """`int(size * scale)`, except that a product a few ULPs below an integer counts as that integer.
+
+    Callers derive `scale` from a target size (`target / size`), and the float product `size * (target / size)`
+    can land just below `target` (616 * (640 / 616) == 639.9999999999999); truncating that would make the
+    upscaler miss the requested size by a pixel, or by 8 once floored to a multiple of 8.
+    """
+    return math.floor(size * scale + 1e-6)
 
 
 class Upscaler:
@@ -53,8 +64,8 @@ class Upscaler:
 
     def upscale(self, img: PIL.Image, scale, selected_model: str = None):
         self.scale = scale
-        dest_w = int((img.width * scale) // 8 * 8)
-        dest_h = int((img.height * scale) // 8 * 8)
+        dest_w = scaled_size(img.width, scale) // 8 * 8
+        dest_h = scaled_size(img.height, scale) // 8 * 8
 
         for i in range(3):
             if img.width >= dest_w and img.height >= dest_h and (i > 0 or scale != 1):
@@ -122,7 +133,7 @@ class UpscalerLanczos(Upscaler):
     scalers = []
 
     def do_upscale(self, img, selected_model=None):
-        return img.resize((int(img.width * self.scale), int(img.height * self.scale)), resample=LANCZOS)
+        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=LANCZOS)
 
     def load_model(self, _):
         pass
@@ -137,7 +148,7 @@ class UpscalerNearest(Upscaler):
     scalers = []
 
     def do_upscale(self, img, selected_model=None):
-        return img.resize((int(img.width * self.scale), int(img.height * self.scale)), resample=NEAREST)
+        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=NEAREST)
 
     def load_model(self, _):
         pass

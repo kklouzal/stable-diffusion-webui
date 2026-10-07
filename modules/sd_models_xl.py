@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 import sgm.models.diffusion
+import sgm.modules.autoencoding.regularizers
 import sgm.modules.diffusionmodules.denoiser_scaling
 import sgm.modules.diffusionmodules.discretizer
 from modules import devices, shared, prompt_parser
@@ -116,6 +117,34 @@ def extend_sdxl(model):
     model.alphas_cumprod = torch.asarray(discretization.alphas_cumprod, device=devices.device, dtype=torch.float32)
 
     model.conditioner.wrapped = torch.nn.Module()
+
+    encode_to_posterior_mode(model.first_stage_model)
+
+
+class DiagonalGaussianMode(torch.nn.Module):
+    """sgm DiagonalGaussianRegularizer(sample=False) (as in AutoencoderKLModeOnly), returning the mean in float32.
+
+    float32 keeps the encode_first_stage result (scale_factor * z) as precise as the sampled path was, where the
+    float32 noise promoted it; the unused KL term and std/var exponentials are not computed.
+    """
+
+    def get_trainable_parameters(self):
+        yield from ()
+
+    def forward(self, z):
+        mean, _logvar = torch.chunk(z, 2, dim=1)
+        return mean.float(), {}
+
+
+def encode_to_posterior_mode(first_stage_model):
+    """Make encode_first_stage return the posterior mean instead of a sample.
+
+    AutoencoderKL samples mean + std * torch.randn(...) from the hidden global CPU generator, so img2img / hires /
+    inpaint init latents depended on earlier requests and the img2img init cache froze whichever draw came first.
+    For the SDXL VAE the scaled posterior std is ~3e-6 (max ~6e-5), far below the sampler noise added to these latents.
+    """
+    if isinstance(getattr(first_stage_model, "regularization", None), sgm.modules.autoencoding.regularizers.DiagonalGaussianRegularizer):
+        first_stage_model.regularization = DiagonalGaussianMode()
 
 
 sgm.modules.attention.print = shared.ldm_print

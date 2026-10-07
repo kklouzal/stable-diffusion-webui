@@ -21,7 +21,8 @@ def load_run_postprocessing():
     source = Path("modules/postprocessing.py").read_text()
     tree = ast.parse(source)
     module = ast.Module(
-        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_postprocessing"],
+        # run_postprocessing normalizes input modes through the module-level to_postprocessing_mode
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ("run_postprocessing", "to_postprocessing_mode")],
         type_ignores=[],
     )
     ast.fix_missing_locations(module)
@@ -436,3 +437,79 @@ def test_run_postprocessing_honors_skip_during_extra_image_output_loop():
     assert state.ended is True
     assert html_info == ""
     assert html_log == ""
+
+
+def test_run_postprocessing_gives_every_output_its_own_infotext():
+    from PIL import Image
+
+    run_postprocessing = load_run_postprocessing()
+    source = Image.new("RGB", (1, 1), color="white")
+    extra = Image.new("RGB", (1, 1), color="black")
+
+    class FakeState:
+        interrupted = False
+        stopping_generation = False
+        skipped = False
+
+        def begin(self, job):
+            pass
+
+        def nextjob(self):
+            pass
+
+        def assign_current_image(self, image):
+            pass
+
+        def end(self):
+            pass
+
+    class FakePostprocessedImage:
+        def __init__(self, image, info=None):
+            self.image = image
+            self.extra_images = []
+            self.info = info or {}
+            self.caption = None
+
+        def get_suffix(self, used_suffixes):
+            return ""
+
+    def fake_run(pp, args, scripts_order=None):
+        pp.info["Postprocess upscaler"] = "first"
+        pp.extra_images.append(FakePostprocessedImage(extra, {"Split": "second"}))
+
+    saved = []
+    run_postprocessing.__globals__.update(
+        Image=Image,
+        os=__import__("os"),
+        devices=SimpleNamespace(torch_gc=lambda: None),
+        images=SimpleNamespace(
+            fix_image=lambda image: image,
+            read_info_from_image=lambda image: ("prompt", {}),
+            save_image=lambda image, **kwargs: saved.append((image, dict(kwargs["existing_info"]))) or ("out.png", None),
+        ),
+        scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
+        scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=fake_run)),
+        opts=SimpleNamespace(
+            outdir_samples="",
+            outdir_extras_samples="",
+            use_original_name_batch=False,
+            enable_pnginfo=True,
+            samples_format="png",
+        ),
+        shared=SimpleNamespace(
+            state=FakeState(),
+            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
+            listfiles=lambda input_dir: [],
+            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
+        ),
+        ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
+        infotext_utils=SimpleNamespace(quote=lambda value: value),
+    )
+
+    outputs, _, _ = run_postprocessing(0, source, [], "", "", True, save_output=True)
+
+    assert [image.info for image in outputs] == [
+        {"parameters": "prompt", "postprocessing": "Postprocess upscaler: first"},
+        {"parameters": "prompt", "postprocessing": "Split: second"},
+    ]
+    assert [info for _, info in saved] == [image.info for image in outputs]  # saved files unchanged: same keys as before

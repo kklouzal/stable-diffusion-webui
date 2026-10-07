@@ -1,5 +1,3 @@
-import sys
-
 import PIL.Image
 
 import modules.upscaler
@@ -37,11 +35,11 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
 
     def do_upscale(self, img: PIL.Image.Image, selected_file):
         devices.torch_gc()
+        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             model = self.load_model(selected_file)
         except Exception as e:
-            print(f"ScuNET: Unable to load model from {selected_file}: {e}", file=sys.stderr)
-            return img
+            raise RuntimeError(f"Unable to load ScuNET model {selected_file}: {e}") from e
 
         img = upscaler_utils.upscale_2(
             img,
@@ -60,7 +58,7 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
             filename = modelloader.load_file_from_url(path, model_dir=self.model_download_path, file_name=modelloader.friendly_name(path))
         else:
             filename = path
-        return modelloader.load_spandrel_model(filename, device=device, expected_architecture='SCUNet')
+        return modelloader.load_cached_spandrel_model(filename, device=device, expected_architecture='SCUNet')
 
 
 def on_ui_settings():

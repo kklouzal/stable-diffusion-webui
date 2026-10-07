@@ -1,7 +1,6 @@
 import inspect
 import math
 from collections import namedtuple
-import numpy as np
 import torch
 from PIL import Image
 from modules import devices, images, sd_vae_approx, sd_vae_taesd, shared
@@ -93,14 +92,21 @@ def samples_to_images_tensor(sample, approximation=None, model=None):
     return x_sample
 
 
+def float_images_to_uint8(tensor):
+    """Quantize clamped [0, 1] CHW image tensors (one image or a batch) to HWC uint8 tensors on their device.
+
+    8-bit sRGB code values are round(255 * E') (IEC 61966-2-1); truncation biases every pixel by -0.5 code and maps
+    a quarter of exact uint8 round trips (u / 255 * 2 - 1 -> u) to u - 1. The product is formed in float32: bf16/fp16
+    cannot hold 255 * x exactly, and bf16 tensors have no NumPy dtype.
+    """
+    return tensor.float().mul(255.0).round_().to(torch.uint8).movedim(-3, -1).contiguous()
+
+
 def single_sample_to_image(sample, approximation=None):
-    x_sample = samples_to_images_tensor(sample.unsqueeze(0), approximation)[0] * 0.5 + 0.5
-
+    x_sample = samples_to_images_tensor(sample.unsqueeze(0), approximation)[0].float() * 0.5 + 0.5
     x_sample = torch.clamp(x_sample, min=0.0, max=1.0)
-    x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-    x_sample = x_sample.astype(np.uint8)
 
-    return Image.fromarray(x_sample)
+    return Image.fromarray(float_images_to_uint8(x_sample).cpu().numpy())
 
 
 def decode_first_stage(model, x):

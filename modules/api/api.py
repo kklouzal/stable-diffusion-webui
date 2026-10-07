@@ -485,17 +485,21 @@ def setUpscalers(req: dict):
 
 
 def verify_url(url):
-    """Returns True if the url refers to a global resource."""
+    """Returns True if the url refers to a global resource: every address its host resolves to is global."""
 
     import socket
     from urllib.parse import urlparse
     try:
         parsed_url = urlparse(url)
-        domain_name = parsed_url.netloc
-        host = socket.gethostbyname_ex(domain_name)
-        for ip in host[2]:
-            ip_addr = ipaddress.ip_address(ip)
-            if not ip_addr.is_global:
+        # hostname, not netloc: netloc keeps a port or userinfo, which made the lookup fail. getaddrinfo, not
+        # gethostbyname_ex: that saw only IPv4 addresses, while requests also connects to the host's IPv6 ones.
+        if not parsed_url.hostname:
+            return False
+        addresses = socket.getaddrinfo(parsed_url.hostname, parsed_url.port, type=socket.SOCK_STREAM)
+        if not addresses:
+            return False
+        for *_, sockaddr in addresses:
+            if not ipaddress.ip_address(sockaddr[0]).is_global:
                 return False
     except Exception:
         return False
@@ -503,16 +507,30 @@ def verify_url(url):
     return True
 
 
+def _get_image_url(url, headers):
+    """GET an image URL, following redirects like requests does but checking every hop with verify_url when
+    api_forbid_local_requests is set: requests' own redirect handling let a global URL redirect to a local one."""
+    with requests.Session() as session:
+        for _ in range(requests.models.DEFAULT_REDIRECT_LIMIT + 1):
+            if opts.api_forbid_local_requests and not verify_url(url):
+                raise HTTPException(status_code=500, detail="Request to local resource not allowed")
+
+            response = session.get(url, timeout=30, headers=headers, allow_redirects=False)
+            if response.next is None:
+                return response
+
+            url = response.next.url
+
+    raise HTTPException(status_code=500, detail="Invalid image url")
+
+
 def decode_base64_to_image(encoding):
     if encoding.startswith("http://") or encoding.startswith("https://"):
         if not opts.api_enable_requests:
             raise HTTPException(status_code=500, detail="Requests not allowed")
 
-        if opts.api_forbid_local_requests and not verify_url(encoding):
-            raise HTTPException(status_code=500, detail="Request to local resource not allowed")
-
         headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
-        response = requests.get(encoding, timeout=30, headers=headers)
+        response = _get_image_url(encoding, headers)
         try:
             image = images.read(BytesIO(response.content))
             return image
@@ -520,7 +538,10 @@ def decode_base64_to_image(encoding):
             raise HTTPException(status_code=500, detail="Invalid image url") from e
 
     if encoding.startswith("data:image/"):
-        encoding = encoding.split(";")[1].split(",")[1]
+        # RFC 2397 data:image/<subtype>[;<parameter>]...;base64,<data>; split(";")[1] failed on parameters
+        header, separator, encoding = encoding.partition(",")
+        if not separator or not header.lower().endswith(";base64"):
+            raise HTTPException(status_code=500, detail="Invalid encoded image")
     try:
         image = images.read(BytesIO(base64.b64decode(encoding)))
         return image

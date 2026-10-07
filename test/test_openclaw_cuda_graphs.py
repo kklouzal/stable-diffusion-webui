@@ -433,7 +433,7 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         self.assertFalse(self.graphs.status()["enabled"])
         status = self.graphs.set_enabled(True, clear_cache=True)
         self.assertTrue(status["enabled"])
-        self.assertEqual(status["contract_version"], 2)
+        self.assertEqual(status["contract_version"], 3)
 
     def test_key_contract_distinguishes_semantic_dependencies(self):
         model_a = self.fake_model("a")
@@ -1157,6 +1157,36 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
         self.assertNotIn("lora_applied_epoch", plain)
         self.assertIn("vae_object_epoch", plain)
         self.assertIn("lora_applied_epoch", functional)
+
+    def test_fast_interrupt_decode_bypasses(self):
+        # An interrupted request with live_preview_fast_interrupt decodes with the preview method; a full-VAE graph
+        # replay would silently change that output.
+        self.shared.opts.live_preview_fast_interrupt = True
+        self.assertIsNone(self.graphs._bypass_reason(self.model, self.x, 0))
+        self.shared.state = types.SimpleNamespace(interrupted=True)
+        self.assertEqual(self.graphs._bypass_reason(self.model, self.x, 0), "fast_interrupt")
+
+    def test_key_tracks_attention_implementation_and_upcast(self):
+        class AttnBlock(torch.nn.Module):
+            def forward(self, x):
+                return x
+
+        self.vae.decoder.mid = torch.nn.Module()
+        self.vae.decoder.mid.attn_1 = AttnBlock()
+        x = torch.zeros(1, 4, 8, 8)
+
+        def key(backend="cudnn"):
+            optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: backend)
+            with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
+                return self.graphs._key(self.model, x, 0)
+
+        base = key()
+        self.assertEqual(key(), base)
+        self.assertNotEqual(key("flash"), base)  # runtime SDPA backend switch
+        with mock.patch.object(AttnBlock, "forward", lambda block, x: x * 1):
+            self.assertNotEqual(key(), base)  # sd_hijack swaps AttnBlock.forward on the class
+        self.shared.opts.upcast_attn = True
+        self.assertNotEqual(key(), base)  # sdp_attnblock_forward upcasts q/k/v per call
 
     def test_vae_captures_share_one_pool(self):
         pools = []

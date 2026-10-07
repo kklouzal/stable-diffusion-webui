@@ -97,13 +97,18 @@ def refresh_vae_list():
 
     candidates = []
     for path in vae_search_paths():
-        candidates += glob.iglob(path, recursive=True)
+        # glob yields directory (scandir) order, which is filesystem-dependent; sort so that a basename present in
+        # several subdirectories resolves to the same file on every refresh.
+        candidates += sorted(glob.iglob(path, recursive=True))
 
     for filepath in candidates:
         name = get_filename(filepath)
         vae_dict[name] = filepath
 
-    vae_dict.update(dict(sorted(vae_dict.items(), key=lambda item: shared.natural_sort_key(item[0]))))
+    # Rebuild in natural name order: dict.update() on existing keys keeps their insertion order, so it cannot sort.
+    sorted_items = sorted(vae_dict.items(), key=lambda item: shared.natural_sort_key(item[0]))
+    vae_dict.clear()
+    vae_dict.update(sorted_items)
 
 
 def find_vae_near_checkpoint(checkpoint_file):

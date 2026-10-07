@@ -1,5 +1,4 @@
 import logging
-import sys
 
 import torch
 from PIL import Image
@@ -44,11 +43,11 @@ class UpscalerSwinIR(Upscaler):
         if self._cached_model_config == current_config:
             model = self._cached_model
         else:
+            # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
             try:
                 model = self.load_model(model_file)
             except Exception as e:
-                print(f"Failed loading SwinIR model {model_file}: {e}", file=sys.stderr)
-                return img
+                raise RuntimeError(f"Unable to load SwinIR model {model_file}: {e}") from e
             self._cached_model = model
             self._cached_model_config = current_config
 

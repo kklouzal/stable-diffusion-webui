@@ -633,7 +633,10 @@ class Script(scripts.Script):
         zs = process_axis(z_opt, z_values, z_values_dropdown)
 
         # this could be moved to common code, but unlikely to be ever triggered anywhere else
-        Image.MAX_IMAGE_PIXELS = None  # disable check in Pillow and rely on check below to allow large custom image sizes
+        # Let Pillow open grids up to the configured size (checked below), but keep its decompression-bomb bound: setting
+        # it to None disabled the check process-wide, for every later API image decode as well.
+        if Image.MAX_IMAGE_PIXELS is not None:
+            Image.MAX_IMAGE_PIXELS = max(Image.MAX_IMAGE_PIXELS, int(opts.img_max_size_mp * 1_000_000))
         grid_mp = round(len(xs) * len(ys) * len(zs) * p.width * p.height / 1000000)
         assert grid_mp < opts.img_max_size_mp, f'Error: Resulting grid would be too large ({grid_mp} MPixels) (max configured size is {opts.img_max_size_mp} MPixels)'
 
