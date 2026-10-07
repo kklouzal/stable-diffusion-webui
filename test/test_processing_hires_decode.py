@@ -1,5 +1,7 @@
-"""Hires fix: no discarded full-size VAE decode (PL5)."""
+"""Hires fix: no discarded full-size VAE decode (PL5) and device-resident decoded images (PL7)."""
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -105,3 +107,21 @@ def test_latent_hires_decodes_only_for_models_that_read_the_image(monkeypatch, k
     else:
         assert calls == []
         assert torch.equal(results[0], torch.zeros(1, 5, 1, 1))
+
+
+def test_decoded_images_stay_on_device_unless_lowvram(monkeypatch):
+    device = torch.device("meta")
+    monkeypatch.setattr(processing.shared, "device", device, raising=False)
+    monkeypatch.setattr(processing.shared, "sd_model", SimpleNamespace(lowvram=False), raising=False)
+    assert processing.decoded_images_device() == device
+    monkeypatch.setattr(processing.shared, "sd_model", SimpleNamespace(lowvram=True), raising=False)
+    assert processing.decoded_images_device() == devices.cpu
+
+
+def test_every_generation_decode_uses_decoded_images_device():
+    tree = ast.parse((Path(processing.__file__)).read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "decode_latent_batch"]
+    assert len(calls) == 3
+    for call in calls:
+        target = next(keyword.value for keyword in call.keywords if keyword.arg == "target_device")
+        assert ast.unparse(target) == "decoded_images_device()"

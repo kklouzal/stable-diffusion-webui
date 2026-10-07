@@ -786,6 +786,12 @@ def samples_to_uint8_images(samples):
     return [(sample * 255.0).byte().permute(1, 2, 0).contiguous().cpu().numpy() for sample in samples]
 
 
+def decoded_images_device():
+    """Where decoded images are kept: on the device, so the float/clamp/uint8 conversions run there and only uint8
+    is copied out, unless lowvram/medvram offloads the models to the CPU."""
+    return devices.cpu if lowvram.is_enabled(shared.sd_model) else shared.device
+
+
 def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
     def decode_single_samples(current_batch):
         samples = DecodedSamples()
@@ -1217,8 +1223,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
                 if opts.sd_vae_decode_method != 'Full':
                     p.extra_generation_params['VAE Decoder'] = opts.sd_vae_decode_method
-                decode_target_device = devices.cpu if lowvram.is_enabled(shared.sd_model) else shared.device
-                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim, target_device=decode_target_device, check_for_nans=True)
+                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim, target_device=decoded_images_device(), check_for_nans=True)
 
             x_samples_ddim = torch.stack(x_samples_ddim).float()
             x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
@@ -1573,7 +1578,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 return samples
 
             if self.latent_scale_mode is None:
-                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)).to(dtype=torch.float32)
+                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)).to(dtype=torch.float32)
             else:
                 decoded_samples = None
 
@@ -1674,7 +1679,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         self.sampler = None
 
-        decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)
+        decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)
 
         self.is_hr_pass = False
         return decoded_samples
