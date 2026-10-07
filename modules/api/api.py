@@ -445,15 +445,16 @@ def api_infotext_value_for_field(field, params, target_type):
     if target_type == type(None):
         target_type = type(value)
 
-    if target_type is bool and isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in ("true", "1", "yes", "on"):
-            return True
-        if normalized in ("false", "0", "no", "off"):
-            return False
+    # A value that does not convert is a malformed request (422), not a server error, and never a guess:
+    # bool("garbage") is True.
+    try:
+        if target_type is bool and isinstance(value, str):
+            return openclaw_env.parse_bool(value, field.label)
 
-    if not isinstance(value, target_type):
-        value = target_type(value)
+        if not isinstance(value, target_type):
+            value = target_type(value)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"infotext field {field.label!r}: {e}") from e
 
     return value
 
