@@ -322,13 +322,17 @@ def _schedule_signature(fn: Any) -> tuple[str, int]:
     keeps them alive), so a graph may replay for another wrapper only when the values are equal. One wrapper
     exists per sampling run (update_inner_model builds a new one on a refiner switch), so the device-to-host
     read happens once per run; replacing a tensor or mutating it in place changes the identity/version check.
+    Inference tensors have no version counter: generation runs under torch.inference_mode, so the wrapper built for
+    the run owns inference buffers. They can be changed in place only inside inference mode, and nothing in the tree
+    or its extensions mutates schedule tensors in place (per-request options replace them, which the identity check
+    sees), so their identity alone keys the memo.
 
     The result is a token interned per distinct value signature (equal values, equal token), not the ~3000 floats
     themselves: the key is hashed, compared, repr'd and digested on every denoiser call, ~1.5 ms of host time per
     call with the floats inline (CPU-measured on the GB10 host).
     """
     tensors = _schedule_tensors(fn)
-    versions = tuple(tensor._version for _name, tensor in tensors)
+    versions = tuple(None if tensor.is_inference() else tensor._version for _name, tensor in tensors)
     try:
         cached = _SCHEDULE_SIGNATURES.get(fn)
     except TypeError:  # not weak-referenceable (plain callables in tests); nothing to memoize per run

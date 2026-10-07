@@ -1039,6 +1039,19 @@ class CudaGraphKeyTests(unittest.TestCase):
         self.model.alphas_cumprod = self.alphas.half().float()  # replaced model schedule (alpha-bar downcast)
         self.assertNotEqual(openclaw_cuda_graphs._schedule_signature(fn), mutated)
 
+    def test_schedule_signature_of_a_wrapper_built_in_inference_mode(self):
+        # process_images samples under torch.inference_mode, so the run's wrapper owns inference buffers, which
+        # have no version counter (reading tensor._version raises).
+        with torch.inference_mode():
+            alphas = self.alphas.clone()
+            fn = FakeScheduleWrapper(FakeModel(alphas), alphas)
+        first = openclaw_cuda_graphs._schedule_signature(fn)
+        self.assertIs(openclaw_cuda_graphs._schedule_signature(fn), first)
+        self.assertEqual(first, openclaw_cuda_graphs._schedule_signature(FakeScheduleWrapper(self.model, self.alphas)))
+        with torch.inference_mode():
+            fn.inner_model.alphas_cumprod = alphas.half().float()  # replaced, as per-request options do
+        self.assertNotEqual(openclaw_cuda_graphs._schedule_signature(fn), first)
+
     def test_wrapper_scalars_enter_the_key(self):
         quantized = FakeScheduleWrapper(self.model, self.alphas, quantize=True)
         plain = FakeScheduleWrapper(self.model, self.alphas, quantize=False)
