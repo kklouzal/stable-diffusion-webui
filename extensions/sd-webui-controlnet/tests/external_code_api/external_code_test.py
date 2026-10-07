@@ -11,7 +11,7 @@ from scripts import external_code
 from scripts import controlnet
 from scripts.enums import ResizeMode
 from internal_controlnet.external_code import ControlNetUnit
-from modules import scripts, ui, shared
+from modules import scripts, shared
 
 
 class TestExternalCodeWorking(unittest.TestCase):
@@ -21,7 +21,6 @@ class TestExternalCodeWorking(unittest.TestCase):
     def setUp(self):
         self.scripts = copy(scripts.scripts_txt2img)
         self.scripts.initialize_scripts(False)
-        ui.create_ui()
         self.cn_script = controlnet.Script()
         self.cn_script.args_from = self.args_offset
         self.cn_script.args_to = self.args_offset + self.max_models
