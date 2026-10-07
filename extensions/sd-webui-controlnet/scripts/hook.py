@@ -928,14 +928,14 @@ class UnetHook(nn.Module):
                 if is_sdxl:
                     outer.original_forward(
                         x=ref_xt.to(devices.dtype_unet),
-                        timesteps=timesteps.to(devices.dtype_unet),
+                        timesteps=timesteps.to(torch.float32),
                         context=context.to(devices.dtype_unet),
                         y=y
                     )
                 else:
                     outer.original_forward(
                         x=ref_xt.to(devices.dtype_unet),
-                        timesteps=timesteps.to(devices.dtype_unet),
+                        timesteps=timesteps.to(torch.float32),
                         context=context.to(devices.dtype_unet)
                     )
 

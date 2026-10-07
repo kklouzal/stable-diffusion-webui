@@ -483,3 +483,55 @@ def test_cuda_spatial_transformer_and_resblock_differ_only_by_group_norm_eps(def
                 norm.eps = _bf16_eps(norm.eps)
 
         assert torch.equal(_run(module, *args, native=True), _run(reference, *args, native=False))
+
+
+def test_apply_model_passes_float32_timesteps_to_a_bf16_unet(monkeypatch):
+    """bfloat16 would round t=257 to 256 and t=999 to 1000; the UNet embeds timesteps in float32 itself."""
+    seen = {}
+
+    def unet(_self, x, t, cond):
+        seen.update(x=x, t=t, cond=cond)
+        return x
+
+    monkeypatch.setattr(devices, "dtype_unet", torch.bfloat16)
+    monkeypatch.setattr(devices, "unet_needs_upcast", False)
+    monkeypatch.setattr(devices, "autocast", lambda disable=False: contextlib.nullcontext())
+    t = torch.tensor([999.0, 513.0, 257.0, 1.5])
+
+    sd_hijack_unet.apply_model(unet, None, torch.zeros(4, 4, 8, 8), t, {"c_crossattn": [torch.zeros(4, 77, 8)], "y": torch.zeros(4, 8)})
+
+    assert seen["t"].dtype == torch.float32 and torch.equal(seen["t"], t)
+    assert seen["x"].dtype == torch.bfloat16
+    assert seen["cond"]["c_crossattn"][0].dtype == torch.bfloat16 and seen["cond"]["y"].dtype == torch.bfloat16
+
+
+def test_sdxl_size_and_aesthetic_conditioning_values_stay_exact_float32(monkeypatch):
+    """SDXL embeds sizes with float32 sinusoids; a bfloat16 detour would turn 1500 into 1504."""
+    from modules import prompt_parser, sd_models_xl
+
+    captured = {}
+
+    class Conditioner:
+        embedders = []
+
+        def __call__(self, conds, force_zero_embeddings=None):
+            captured.update(conds)
+            return {}
+
+    monkeypatch.setattr(sd_models_xl.devices, "device", torch.device("cpu"))
+    monkeypatch.setattr(sd_models_xl.devices, "dtype", torch.bfloat16)
+    monkeypatch.setattr(sd_models_xl.shared, "opts", SimpleNamespace(
+        sdxl_refiner_low_aesthetic_score=2.5, sdxl_refiner_high_aesthetic_score=6.0, sdxl_crop_top=3, sdxl_crop_left=1001,
+    ))
+    batch = prompt_parser.SdConditioning(["a", "b"], width=1500, height=1217)
+
+    sd_models_xl.get_learned_conditioning(SimpleNamespace(conditioner=Conditioner()), batch)
+
+    for key, expected in {
+        "original_size_as_tuple": [[1217.0, 1500.0]] * 2,
+        "target_size_as_tuple": [[1217.0, 1500.0]] * 2,
+        "crop_coords_top_left": [[3.0, 1001.0]] * 2,
+        "aesthetic_score": [[6.0]] * 2,
+    }.items():
+        assert captured[key].dtype == torch.float32, key
+        assert torch.equal(captured[key], torch.tensor(expected)), key

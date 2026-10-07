@@ -18,7 +18,10 @@ def get_learned_conditioning(self: sgm.models.diffusion.DiffusionEngine, batch: 
     is_negative_prompt = getattr(batch, 'is_negative_prompt', False)
     aesthetic_score = shared.opts.sdxl_refiner_low_aesthetic_score if is_negative_prompt else shared.opts.sdxl_refiner_high_aesthetic_score
 
-    devices_args = dict(device=devices.device, dtype=devices.dtype)
+    # SDXL embeds these values with sinusoidal timestep embeddings computed in float32, as in the reference
+    # implementation. They must not pass through the model dtype first: bfloat16 holds only 8 significant
+    # bits, so e.g. a 1500 px size would be embedded as 1504.
+    devices_args = dict(device=devices.device, dtype=torch.float32)
 
     sdxl_conds = {
         "txt": batch,

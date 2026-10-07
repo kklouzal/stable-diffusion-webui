@@ -46,8 +46,10 @@ def apply_model(orig_func, self, x_noisy, t, cond, **kwargs):
             else:
                 cond[y] = cond[y].to(devices.dtype_unet) if isinstance(cond[y], torch.Tensor) else cond[y]
 
+    # Timesteps stay float32: the UNet embeds them with float32 sinusoids, and casting them to a half-precision
+    # UNet dtype first quantizes them (bfloat16 steps by 2 from t=256 and by 4 from t=512).
     with devices.autocast():
-        result = orig_func(self, x_noisy.to(devices.dtype_unet), t.to(devices.dtype_unet), cond, **kwargs)
+        result = orig_func(self, x_noisy.to(devices.dtype_unet), t.to(torch.float32), cond, **kwargs)
         if devices.unet_needs_upcast:
             return result.float()
         else:

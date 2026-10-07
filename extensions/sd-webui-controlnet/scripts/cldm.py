@@ -406,7 +406,8 @@ class ControlNet(nn.Module):
         dtype = devices.dtype_unet
 
         x = x.to(dtype)
-        timesteps = timesteps.to(dtype)
+        # Timesteps stay float32 like the UNet's (sd_hijack_unet.apply_model): a half-precision cast would quantize them.
+        timesteps = timesteps.to(torch.float32)
         context = context.to(dtype)
 
         if y is not None:
