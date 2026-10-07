@@ -340,7 +340,9 @@ def register_schedule(self):
     alphas_cumprod = np.cumprod(alphas, axis=0)
     alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
 
-    to_torch = partial(torch.tensor, dtype=torch.float32)
+    # On the sampling device: the q_sample/eps<->x0 helpers index these per UNet call with `.to(x)`, and a
+    # pageable host-to-device copy synchronizes the stream every time. Same float32 values.
+    to_torch = partial(torch.tensor, dtype=torch.float32, device=devices.device)
 
     setattr(self, 'betas', to_torch(betas))
     # setattr(self, 'alphas_cumprod', to_torch(alphas_cumprod))  # a1111 already has this
@@ -377,7 +379,9 @@ class TorchCache:
         self.cache = {}
 
     def hash(self, key):
-        v = key.detach().cpu().numpy().astype(np.float32)
+        # Widen before the host copy: numpy has no bfloat16 (the VAE dtype under --dtype bfloat16),
+        # and float16/bfloat16 -> float32 is exact, so float16/float32 keys hash as before.
+        v = key.detach().float().cpu().numpy()
         v = (v * 1000.0).astype(np.int32)
         v = np.ascontiguousarray(v.copy())
         sha = hashlib.sha1(v).hexdigest()
@@ -503,23 +507,24 @@ class UnetHook(nn.Module):
                 outer.sampling_active = previously_active
 
         # Control models this hook already placed on the device (outside lowvram nothing moves them back
-        # while the hook is active) and the timestep frequencies uploaded per device.
+        # while the hook is active) and the timestep frequencies computed per device.
         models_on_device = {}
         timestep_freqs = {}
 
         def unet_timestep_embedding(timesteps, dim, max_period=10000):
-            """ldm.modules.diffusionmodules.util.timestep_embedding without its per-call host round trip.
+            """The UNet's own timestep embedding (sgm util.timestep_embedding, and A1111's ldm patch of it).
 
-            Same values: the frequencies are computed on the CPU exactly as there, but uploaded once per
-            device instead of a pageable host-to-device copy (a stream sync) on every forward.
+            Same values as the unhooked forward: the frequencies are computed on the timesteps' device with
+            the same ops (a CPU exp can differ from the device exp in the last bit), once per device instead
+            of on every forward.
             """
             freqs = timestep_freqs.get((dim, max_period, timesteps.device))
             if freqs is None:
                 import math
                 half = dim // 2
                 freqs = torch.exp(
-                    -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-                ).to(device=timesteps.device)
+                    -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
+                )
                 timestep_freqs[(dim, max_period, timesteps.device)] = freqs
             args = timesteps[:, None].float() * freqs[None]
             embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -539,9 +544,10 @@ class UnetHook(nn.Module):
             """Whether a call can be evaluated on a subset of its rows with identical per-row results.
 
             PAG replays only the cond rows of main-pass calls. Units that couple rows must see the
-            whole call: StyleAlign shares attention across the batch, IP-Adapter caches its image k/v
-            at the first call's batch size, multi-image hints are row-aligned, and reference units draw
-            fresh noise over all rows of every call.
+            whole call: StyleAlign shares attention across the batch, multi-image hints are row-aligned,
+            and reference units draw fresh noise over all rows of every call. IP-Adapter now picks its
+            image k/v per row by cond_mark, but its calls stay whole until a cond-row replay with it is
+            verified against the full call.
             """
             if batch_option_style_align:
                 return False
@@ -626,7 +632,13 @@ class UnetHook(nn.Module):
                     _, _, h_hr, w_hr = param.hr_hint_cond.shape
                     _, _, h, w = x.shape
                     h, w = h * 8, w * 8
-                    if abs(h - h_lr) < abs(h - h_hr):
+                    lr_distance = abs(h - h_lr) + abs(w - w_lr)
+                    hr_distance = abs(h - h_hr) + abs(w - w_hr)
+                    if lr_distance == hr_distance:
+                        # Same-size hints (hires fix at scale 1, or a resize that keeps the size): the latent
+                        # cannot tell the passes apart, A1111's pass flag can.
+                        lr_distance, hr_distance = (1, 0) if getattr(process, 'is_hr_pass', False) else (0, 1)
+                    if lr_distance < hr_distance:
                         is_in_high_res_fix = False
                         if param.used_hint_cond is not param.hint_cond:
                             param.used_hint_cond = param.hint_cond
@@ -722,8 +734,18 @@ class UnetHook(nn.Module):
 
                 hint = param.used_hint_cond
                 if param.control_model_type == ControlModelType.InstantID:
-                    assert isinstance(param.control_context_override, ImageEmbed)
-                    controlnet_context = param.control_context_override.eval(cond_mark).to(x.device, dtype=x.dtype)
+                    embed = param.control_context_override
+                    assert isinstance(embed, ImageEmbed)
+                    # ImageEmbed.eval(cond_mark) per row, without its round trip through the embeds' (CPU)
+                    # device on every call: the embeds are cast once per request and rows picked on the device.
+                    # cond_mark is exactly 0/1, so the selection equals eval's blend, then the same cast.
+                    cached = getattr(param, 'control_context_device', None)
+                    if cached is None or cached[0] is not embed or cached[1] != (x.device, x.dtype):
+                        cached = (embed, (x.device, x.dtype),
+                                  embed.cond_emb.to(device=x.device, dtype=x.dtype),
+                                  embed.uncond_emb.to(device=x.device, dtype=x.dtype))
+                        param.control_context_device = cached
+                    controlnet_context = torch.where(cond_mark[:, :, :, 0] > 0.5, cached[2], cached[3])
                 else:
                     controlnet_context = context
 
@@ -809,6 +831,14 @@ class UnetHook(nn.Module):
                     if param.soft_injection or high_res_fix_forced_soft_injection:
                         logger.warning("Advanced weighting overwrites soft_injection effect.")
                     control_scales = param.advanced_weighting
+                    # zip() below would silently drop the residuals past the last weight (SDXL's middle
+                    # block first) or apply another layout's weights (13 SD1.5 weights on SDXL's 10).
+                    # T2I-Adapter keeps accepting extra trailing weights (the documented SD1.5 count is 5).
+                    if len(control_scales) < len(control) or (
+                            param.control_model_type.is_controlnet and len(control_scales) != len(control)):
+                        raise ValueError(
+                            f"ControlNet advanced_weighting has {len(control_scales)} weights, but the "
+                            f"{param.control_model_type.name} model returns {len(control)} control outputs")
 
                 control = [
                     param.apply_effective_region_mask(c * scale)
@@ -1044,6 +1074,13 @@ class UnetHook(nn.Module):
             h = h.type(x.dtype)
             h = self.out(h)
 
+            # The post-processing below converts eps -> x0 -> eps with the DDPM coefficients (about 14.6 at
+            # t=999, where x0 = 14.6 * x_t - 14.6 * eps cancels). It runs in float32, like the sampler's own
+            # eps/x0 conversions on its float32 latents, and rounds once to the UNet output dtype; in a
+            # half-precision UNet dtype the rounded coefficients and products would perturb eps even where
+            # x0 is left unchanged.
+            out_dtype = h.dtype
+
             # Post-processing for color fix
             for param in outer.control_params:
                 if param.used_hint_cond_latent is None:
@@ -1056,11 +1093,12 @@ class UnetHook(nn.Module):
                     k *= 2
 
                 # Inpaint hijack
-                xt = x[:, :4, :, :]
+                xt = x[:, :4, :, :].float()
+                eps = h.float()
 
-                x0_origin = param.used_hint_cond_latent
+                x0_origin = param.used_hint_cond_latent.float()
                 t = torch.round(timesteps.float()).long()
-                x0_prd = predict_start_from_noise(outer.sd_ldm, xt, t, h)
+                x0_prd = predict_start_from_noise(outer.sd_ldm, xt, t, eps)
                 x0 = x0_prd - blur(x0_prd, k) + blur(x0_origin, k)
 
                 if '+sharp' in param.preprocessor['name']:
@@ -1071,7 +1109,7 @@ class UnetHook(nn.Module):
                 eps_prd = predict_noise_from_start(outer.sd_ldm, xt, t, x0)
 
                 w = max(0.0, min(1.0, float(param.weight)))
-                h = eps_prd * w + h * (1 - w)
+                h = (eps_prd * w + eps * (1 - w)).to(out_dtype)
 
             # Post-processing for restore
             for param in outer.control_params:
@@ -1083,19 +1121,20 @@ class UnetHook(nn.Module):
                     continue
 
                 # Inpaint hijack
-                xt = x[:, :4, :, :]
+                xt = x[:, :4, :, :].float()
+                eps = h.float()
 
-                mask = param.used_hint_cond[:, 3:4, :, :]
+                mask = param.used_hint_cond[:, 3:4, :, :].float()
                 mask = torch.nn.functional.max_pool2d(mask, (10, 10), stride=(8, 8), padding=1)
 
-                x0_origin = param.used_hint_cond_latent
+                x0_origin = param.used_hint_cond_latent.float()
                 t = torch.round(timesteps.float()).long()
-                x0_prd = predict_start_from_noise(outer.sd_ldm, xt, t, h)
+                x0_prd = predict_start_from_noise(outer.sd_ldm, xt, t, eps)
                 x0 = x0_prd * mask + x0_origin * (1 - mask)
                 eps_prd = predict_noise_from_start(outer.sd_ldm, xt, t, x0)
 
                 w = max(0.0, min(1.0, float(param.weight)))
-                h = eps_prd * w + h * (1 - w)
+                h = (eps_prd * w + eps * (1 - w)).to(out_dtype)
 
             return h
 
