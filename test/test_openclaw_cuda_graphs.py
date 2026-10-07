@@ -1095,6 +1095,15 @@ class CudaGraphKeyTests(unittest.TestCase):
             attention.CrossAttention.forward = lambda self, x: x
             self.assertNotEqual(openclaw_cuda_graphs._runtime_branch_key(), base)
 
+    def test_runtime_branch_key_tracks_the_nhwc_group_norm_switch(self):
+        # A captured UNet graph freezes which GroupNorm kernels and layouts ran (modules/openclaw_nhwc_groupnorm.py).
+        switch = types.SimpleNamespace(state_key=lambda: ())
+        shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
+        with mock.patch.dict(sys.modules, {"modules.shared": shared, "modules.openclaw_nhwc_groupnorm": switch}):
+            off = openclaw_cuda_graphs._runtime_branch_key()
+            switch.state_key = lambda: ("silu", "unet")
+            self.assertNotEqual(openclaw_cuda_graphs._runtime_branch_key(), off)
+
     def test_attention_key_reads_active_backend_without_status_scan(self):
         optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: "flash,math", sdpa_backend_status=mock.Mock(side_effect=AssertionError("per-call status scan")))
         with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
@@ -1225,6 +1234,14 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
             self.assertNotEqual(key(), base)  # sd_hijack swaps AttnBlock.forward on the class
         self.shared.opts.upcast_attn = True
         self.assertNotEqual(key(), base)  # sdp_attnblock_forward upcasts q/k/v per call
+
+    def test_key_tracks_the_nhwc_group_norm_switch(self):
+        x = torch.zeros(1, 4, 8, 8)
+        switch = types.SimpleNamespace(state_key=lambda: ())
+        with mock.patch.dict(sys.modules, {"modules.openclaw_nhwc_groupnorm": switch}):
+            off = self.graphs._key(self.model, x, 0)
+            switch.state_key = lambda: ("silu", "vae")  # the VAE GroupNorm kernel and fused swish a capture freezes
+            self.assertNotEqual(self.graphs._key(self.model, x, 0), off)
 
     def test_vae_captures_share_one_pool(self):
         pools = []

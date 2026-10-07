@@ -49,6 +49,13 @@ def _package(name, path=(), **attrs):
     return module
 
 
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @contextlib.contextmanager
 def isolated_modules(replacements, prefixes):
     """Import with ``replacements`` in sys.modules and other modules under ``prefixes`` hidden.
@@ -377,6 +384,8 @@ class Harness:
             "modules.devices": self.modules["modules.devices"],
             "modules.lowvram": _module("modules.lowvram", send_everything_to_cpu=lambda: None),
             "modules.scripts": _module("modules.scripts", script_callbacks=self.script_callbacks),
+            # cldm keeps ControlNet weights' layout with the NHWC GroupNorm switch (real module: torch-only, off here).
+            "modules.openclaw_nhwc_groupnorm": _load_module("modules.openclaw_nhwc_groupnorm", ROOT / "modules" / "openclaw_nhwc_groupnorm.py"),
             "ldm": _package("ldm"),
             "ldm.modules": _package("ldm.modules"),
             "ldm.modules.diffusionmodules": _package("ldm.modules.diffusionmodules"),
@@ -387,7 +396,7 @@ class Harness:
             "ldm.models.diffusion": _package("ldm.models.diffusion"),
             "ldm.models.diffusion.ddpm": _module("ldm.models.diffusion.ddpm", extract_into_tensor=extract_into_tensor),
         })
-        for name in ("devices", "lowvram", "scripts"):
+        for name in ("devices", "lowvram", "scripts", "openclaw_nhwc_groupnorm"):
             setattr(cn_modules["modules"], name, cn_modules[f"modules.{name}"])
         with isolated_modules(cn_modules, {"modules", "scripts", "ldm"}):
             self.hook = importlib.import_module("scripts.hook")

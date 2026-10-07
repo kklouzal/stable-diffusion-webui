@@ -130,10 +130,12 @@ def test_unet_norms_get_the_dispatching_classes_without_changing_state_dict_or_i
 
 
 def test_vae_and_clip_norms_keep_their_classes():
-    for vae in (sgm_vae, ldm_vae):
+    # The bf16-native path never reaches VAE norms. sgm's carry the NHWC GroupNorm switch's VaeGroupNorm, which runs the
+    # plain class-level GroupNorm.forward while the switch is off (test/test_openclaw_nhwc_groupnorm.py).
+    for vae, norm_class in ((sgm_vae, sd_hijack_unet.VaeGroupNorm), (ldm_vae, torch.nn.GroupNorm)):
         encoder = vae.Encoder(ch=32, out_ch=3, ch_mult=(1, 2), num_res_blocks=1, attn_resolutions=[4], in_channels=3, resolution=8, z_channels=4, double_z=False)
         norms = [m for m in encoder.modules() if isinstance(m, torch.nn.GroupNorm)]
-        assert norms and all(type(m) is torch.nn.GroupNorm for m in norms)
+        assert norms and all(type(m) is norm_class for m in norms)
 
     open_clip_transformer = pytest.importorskip("open_clip.transformer")
     block = open_clip_transformer.ResidualAttentionBlock(64, 2)

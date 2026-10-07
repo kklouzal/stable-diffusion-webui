@@ -2,7 +2,7 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from modules import devices
+from modules import devices, openclaw_nhwc_groupnorm, shared
 from scripts.controlnet_core.controlnet_union import ControlAddEmbedding, ResBlockUnionControlnet
 
 try:
@@ -72,6 +72,8 @@ class PlugableControlModel(nn.Module):
         model (this model object is cached across requests), not once per call.
         """
         self.to('cpu')
+        # Low-VRAM units keep the checkpoint's NCHW weights (restored if a full-VRAM request converted them).
+        openclaw_nhwc_groupnorm.apply_controlnet_layout(self, channels_last=False)
         self.gpu_component = None
         if self.lowvram_hooks is not None:
             return
@@ -102,6 +104,11 @@ class PlugableControlModel(nn.Module):
             self.lowvram_hooks = None
             self.gpu_component = None
         self.to(devices.get_device_for("controlnet"))
+        # NHWC GroupNorm switch, controlnet scope: channels_last weights like the --opt-channelslast SD model's, so the
+        # ControlNet's activations stay NHWC; restores the checkpoint layout (bit for bit) once the scope is off.
+        # Control-LoRA models patch their layers' weights per forward and keep their layout.
+        channels_last = not self.is_control_lora and bool(getattr(shared.cmd_opts, "opt_channelslast", False))
+        openclaw_nhwc_groupnorm.apply_controlnet_layout(self, channels_last=channels_last)
         return
 
 

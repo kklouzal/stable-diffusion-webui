@@ -401,15 +401,18 @@ def _runtime_branch_key() -> tuple[Any, ...]:
     - upcast_attn: the attention forwards run float32 attention with autocast off;
     - lora_functional: the Lora extension's per-layer functional path instead of merged weights, and the UNet
       norms' bf16-native eligibility (sd_hijack_unet.bf16_native_norm_eligible).
+    - the NHWC GroupNorm switch (modules/openclaw_nhwc_groupnorm.py): which GroupNorm kernels and layouts run.
     Request override_settings set these without callbacks, so they must be part of the key.
     """
     shared = sys.modules.get("modules.shared")
     opts = getattr(shared, "opts", None)
     cross_attention = getattr(sys.modules.get("sgm.modules.attention"), "CrossAttention", None)
+    nhwc_group_norm = sys.modules.get("modules.openclaw_nhwc_groupnorm")
     return (
         getattr(cross_attention, "forward", None),
         bool(getattr(opts, "upcast_attn", False)),
         bool(getattr(opts, "lora_functional", False)),
+        nhwc_group_norm.state_key() if nhwc_group_norm is not None else None,
     )
 
 
