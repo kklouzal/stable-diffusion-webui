@@ -46,7 +46,7 @@ def test_c_uc_namespaces_and_bounded_atomic_cache_contract_are_explicit():
     assert "conditioning_cache_lock = threading.RLock()" in source
     assert "with openclaw_cache_epochs.epoch_transaction():" in source
     assert "capacity=4" in source
-    assert "cache[:] = [cached_params, computed]" in source
+    assert "cache[:] = [cached_params, computed, infotext]" in source
 
 
 def test_miss_telemetry_reports_dependency_class_without_hot_path_tensor_work():

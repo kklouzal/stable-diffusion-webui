@@ -14,14 +14,14 @@ def test_conditioning_key_contract_and_isolation():
         assert f'get_conds_with_caching({namespace}' in src
     assert 'seed' not in src[src.index('def cached_params'):src.index('def active_lora_cond_signature')]
     assert 'sampler_name' not in src[src.index('def cached_params'):src.index('def active_lora_cond_signature')]
-    assert 'cache[:] = [cached_params, computed]' in src
-    assert src.index('computed = function') < src.index('cache[:] = [cached_params, computed]')
+    assert 'cache[:] = [cached_params, computed, infotext]' in src
+    assert src.index('computed = function') < src.index('cache[:] = [cached_params, computed, infotext]')
 
 def test_conditioning_exception_cannot_publish():
     src=text('modules/processing.py')
     block=src[src.index('def get_conds_with_caching'):src.index('def setup_conds')]
     assert 'except Exception:' in block and 'raise' in block
-    assert block.index('except Exception:') < block.index('cache[:] = [cached_params, computed]')
+    assert block.index('except Exception:') < block.index('cache[:] = [cached_params, computed, infotext]')
 
 def test_token_memo_is_call_local_and_sanitized():
     src=text('modules/sd_hijack_clip.py')
@@ -127,7 +127,7 @@ def test_ti_and_clear_commits_use_epoch_first_lock_order():
     transaction = cache_block.index('with openclaw_cache_epochs.epoch_transaction():')
     cache_lock = cache_block.index('with StableDiffusionProcessing.conditioning_cache_lock:')
     capture = cache_block.index('cached_params = self.cached_params')
-    publish = cache_block.index('cache[:] = [cached_params, computed]')
+    publish = cache_block.index('cache[:] = [cached_params, computed, infotext]')
     assert transaction < capture < cache_lock < publish
 
     ti = text('modules/textual_inversion/textual_inversion.py')

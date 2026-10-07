@@ -141,6 +141,18 @@ def _clone_cache_value(value):
     return value
 
 
+def _replay_conditioning_infotext(target, written):
+    """Apply the infotext entries a conditioning computation wrote to model_hijack.extra_generation_params.
+
+    Text encoders write them only while they run ("TI hashes", "Emphasis" in sd_hijack_clip), so the cond cache
+    captures them in an empty dict and applies them on misses and hits alike. As in sd_hijack_clip, "TI hashes" is
+    prepended to an existing value; other entries are assigned.
+    """
+    for key, value in written.items():
+        previous = target.get(key) if key == "TI hashes" else None
+        target[key] = f"{value}, {previous}" if previous else value
+
+
 def _cache_stats(**extra):
     return {"hits": 0, "misses": 0, "compute_seconds": 0.0, **extra}
 
@@ -581,6 +593,8 @@ class StableDiffusionProcessing:
             # The SDXL refiner conditioner embeds these.
             opts.sdxl_refiner_low_aesthetic_score,
             opts.sdxl_refiner_high_aesthetic_score,
+            # Decides the "TI hashes" infotext that cache hits replay.
+            opts.textual_inversion_add_hashes_to_infotext,
         )
 
     @staticmethod
@@ -593,6 +607,7 @@ class StableDiffusionProcessing:
             "sdxl_crop", "sdxl_crop", "dimensions", "dimensions", "fp8_storage",
             "fp16_weight_cache", "emphasis", "old_emphasis", "comma_padding_backtrack",
             "prompt_dimensions", "prompt_dimensions", "negative_prompt", "refiner_aesthetic_score", "refiner_aesthetic_score",
+            "ti_hashes_infotext",
         )
         changed = [label for label, before, after in zip(labels, previous_key, current_key) if before != after]
         return "changed:" + ",".join(dict.fromkeys(changed)) if changed else "evicted"
@@ -619,19 +634,25 @@ class StableDiffusionProcessing:
                 if cache[0] is not None and cached_params == cache[0]:
                     _record_cache_stats_hit(stats)
                     openclaw_cache_epochs.observe("E05", "hit", reason="cache_hit", semantic_key=semantic_key)
+                    _replay_conditioning_infotext(model_hijack.extra_generation_params, cache[2])
                     return cache[1]
 
                 reason = self._conditioning_cache_miss_reason(cache[0], cached_params)
                 openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
                 started = time.perf_counter()
+                infotext = model_hijack.extra_generation_params
+                model_hijack.extra_generation_params = {}
                 try:
                     with devices.autocast():
                         computed = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
                 except Exception:
                     openclaw_cache_epochs.observe("E05", "reject", reason="rejected", semantic_key=semantic_key)
                     raise
+                finally:
+                    infotext, model_hijack.extra_generation_params = model_hijack.extra_generation_params, infotext
 
-                cache[:] = [cached_params, computed]
+                _replay_conditioning_infotext(model_hijack.extra_generation_params, infotext)
+                cache[:] = [cached_params, computed, infotext]
                 _record_cache_stats_miss(stats, started)
                 openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
                 openclaw_cache_epochs.set_size(
