@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import traceback
 import weakref
@@ -13,7 +14,7 @@ from modules import openclaw_cache_epochs, openclaw_env
 from modules.openclaw_cuda_graphs import instance_overrides, on_default_stream
 
 _ENABLED = False
-_GRAPH_CONTRACT_VERSION = 2
+_GRAPH_CONTRACT_VERSION = 3
 # lora_applied_epoch is added only while LoRA can reach the VAE; see _lora_reaches_vae().
 _EPOCH_DIMENSIONS = (
     "checkpoint_object_epoch",
@@ -197,12 +198,27 @@ def _option_identity(approximation: int) -> tuple[Any, ...]:
             approximation,
             getattr(opts, "sd_vae_decode_method", None),
             bool(getattr(opts, "hypertile_enable_vae", False)),
+            # sdp_attnblock_forward reads it per call; a capture freezes the branch taken.
+            bool(getattr(opts, "upcast_attn", False)),
             bool(getattr(cmd_opts, "no_half_vae", False)),
             bool(getattr(cmd_opts, "upcast_sampling", False)),
             bool(getattr(cmd_opts, "precision", None) == "full"),
         )
     except Exception:
-        return (approximation, None, None, None, None, None)
+        return (approximation, None, None, None, None, None, None)
+
+
+def _attention_identity(vae: Any) -> tuple[Any, ...]:
+    """The attention implementation a capture freezes into the graph.
+
+    sd_hijack installs the VAE AttnBlock.forward on the class (cross-attention optimization), and the SDPA backend can
+    be switched at runtime (/sdapi/v1/openclaw/sdpa-backend); neither is visible in the module's parameters or hooks.
+    """
+    attention_block = getattr(getattr(getattr(vae, "decoder", None), "mid", None), "attn_1", None)
+    forward = _callable_identity(getattr(type(attention_block), "forward", None)) if attention_block is not None else None
+    # Same lookup as the UNet graph key: no backend selection exists until sd_hijack_optimizations is imported.
+    optimizations = sys.modules.get("modules.sd_hijack_optimizations")
+    return (forward, optimizations.active_sdpa_backend() if optimizations is not None else None)
 
 
 def _runtime_identity(model: Any) -> tuple[Any, ...]:
@@ -292,6 +308,9 @@ def _bypass_reason(model: Any, x: Any, approximation: int) -> str | None:
             return "hypertile_vae"
         if lowvram.is_enabled(model):
             return "lowvram"
+        # samples_to_images_tensor then decodes with the live-preview method instead of the full VAE.
+        if getattr(opts, "live_preview_fast_interrupt", False) and getattr(getattr(shared, "state", None), "interrupted", False):
+            return "fast_interrupt"
     except Exception:
         return "state_probe_failed"
     vae = getattr(model, "first_stage_model", None)
@@ -315,6 +334,7 @@ def _key(model: Any, x: torch.Tensor, approximation: int) -> tuple[Any, ...]:
         _runtime_identity(model),
         _tensor_key(x),
         _option_identity(approximation),
+        _attention_identity(getattr(model, "first_stage_model", None)),
         _mutation_epochs(),
         _graph_runtime_identity(),
     )
