@@ -1,9 +1,12 @@
 import sys
 import textwrap
+import threading
 import traceback
 
 
 exception_records = []
+"""The 5 newest recorded exceptions (format_exception() dicts), oldest first; guarded by exception_records_lock."""
+exception_records_lock = threading.Lock()
 
 
 def format_traceback(tb):
@@ -15,24 +18,24 @@ def format_exception(e, tb):
 
 
 def get_exceptions():
-    try:
+    with exception_records_lock:
         return list(reversed(exception_records))
-    except Exception as e:
-        return str(e)
 
 
 def record_exception():
-    _, e, tb = sys.exc_info()
+    """Records the exception being handled, unless it repeats the newest record: report() or display() followed by
+    print_error_explanation() (or another report) for one exception records it once."""
+    e = sys.exception()
     if e is None:
         return
 
-    if exception_records and exception_records[-1] == e:
-        return
+    record = format_exception(e, e.__traceback__)
+    with exception_records_lock:
+        if exception_records and exception_records[-1] == record:
+            return
 
-    exception_records.append(format_exception(e, tb))
-
-    if len(exception_records) > 5:
-        exception_records.pop(0)
+        exception_records.append(record)
+        del exception_records[:-5]
 
 
 def report(message: str, *, exc_info: bool = False) -> None:
