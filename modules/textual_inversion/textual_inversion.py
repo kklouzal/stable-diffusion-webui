@@ -264,6 +264,9 @@ class EmbeddingDatabase:
         with openclaw_cache_epochs.epoch_transaction():
             old_signature = self._snapshot_signature(self.word_embeddings, self.skipped_embeddings)
             if new_signature == old_signature:
+                with self._publication_lock:
+                    # the loaded model can change what fits even when the folder contents produce the same maps
+                    self.expected_shape = staged.expected_shape
                 for embdir in self.embedding_dirs.values():
                     embdir.update()
                 openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped", semantic_key=new_signature)
@@ -335,8 +338,14 @@ def create_embedding_from_data(data, name, filename='unknown embedding file', fi
         vectors = vec.shape[0]
     elif type(data) == dict and 'clip_g' in data and 'clip_l' in data:  # SDXL embedding
         vec = {k: v.detach().to(devices.device, dtype=torch.float32) for k, v in data.items()}
-        shape = data['clip_g'].shape[-1] + data['clip_l'].shape[-1]
-        vectors = data['clip_g'].shape[0]
+        vec = {k: v.unsqueeze(0) if k in ('clip_l', 'clip_g') and v.dim() == 1 else v for k, v in vec.items()}
+        # EmbeddingsWithFixes places the same number of rows into each encoder's token embeddings (768 wide for
+        # clip_l, 1280 for clip_g); anything else would misplace vectors or fail inside the text encoder.
+        clip_l, clip_g = vec['clip_l'], vec['clip_g']
+        if clip_l.dim() != 2 or clip_g.dim() != 2 or clip_l.shape[0] != clip_g.shape[0] or (clip_l.shape[1], clip_g.shape[1]) != (768, 1280):
+            raise Exception(f"{filename}: SDXL embedding needs clip_l [n, 768] and clip_g [n, 1280], got {tuple(clip_l.shape)} and {tuple(clip_g.shape)}")
+        shape = clip_g.shape[-1] + clip_l.shape[-1]
+        vectors = clip_g.shape[0]
     elif type(data) == dict and type(next(iter(data.values()))) == torch.Tensor:  # diffuser concepts
         assert len(data.keys()) == 1, 'embedding file has multiple terms in it'
 

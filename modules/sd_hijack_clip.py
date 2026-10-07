@@ -1,6 +1,7 @@
 import math
 from collections import namedtuple
 
+import ftfy
 import torch
 
 from modules import prompt_parser, devices, sd_hijack, sd_emphasis, openclaw_cache_epochs
@@ -148,13 +149,17 @@ class TextConditionalModel(torch.nn.Module):
 
                     reloc_tokens = chunk.tokens[break_location:]
                     reloc_mults = chunk.multipliers[break_location:]
+                    # textual inversion fixes move with their placeholder tokens
+                    reloc_fixes = [PromptChunkFix(fix.offset - break_location, fix.embedding) for fix in chunk.fixes if fix.offset >= break_location]
 
                     chunk.tokens = chunk.tokens[:break_location]
                     chunk.multipliers = chunk.multipliers[:break_location]
+                    chunk.fixes = [fix for fix in chunk.fixes if fix.offset < break_location]
 
                     next_chunk()
                     chunk.tokens = reloc_tokens
                     chunk.multipliers = reloc_mults
+                    chunk.fixes = reloc_fixes
 
                 if len(chunk.tokens) == self.chunk_length:
                     next_chunk()
@@ -245,9 +250,11 @@ class TextConditionalModel(torch.nn.Module):
                 hashes.append(f"{name}: {shorthash}")
 
             if hashes:
-                if self.hijack.extra_generation_params.get("TI hashes"):
-                    hashes.append(self.hijack.extra_generation_params.get("TI hashes"))
-                self.hijack.extra_generation_params["TI hashes"] = ", ".join(hashes)
+                # SDXL runs this for clip_l and clip_g with the same embeddings: keep each entry once
+                previous = self.hijack.extra_generation_params.get("TI hashes")
+                if previous:
+                    hashes += previous.split(", ")
+                self.hijack.extra_generation_params["TI hashes"] = ", ".join(dict.fromkeys(hashes))
 
         if any(x for x in texts if "(" in x or "[" in x) and opts.emphasis != "Original":
             self.hijack.extra_generation_params["Emphasis"] = opts.emphasis
@@ -351,7 +358,10 @@ class FrozenCLIPEmbedderWithCustomWords(FrozenCLIPEmbedderWithCustomWordsBase):
         self.id_pad = self.id_end
 
     def tokenize(self, texts):
-        tokenized = self.wrapped.tokenizer(texts, truncation=False, add_special_tokens=False)["input_ids"]
+        # The CLIP tokenizer SD/SDXL were trained with applied ftfy.fix_text (uncurls quotes, folds full-width
+        # characters, repairs mojibake, unescapes HTML) before BPE, as open_clip still does for SDXL's clip_g.
+        # transformers 5's CLIPTokenizer (tokenizers backend) only does NFC, whitespace and lowercase.
+        tokenized = self.wrapped.tokenizer([ftfy.fix_text(text) for text in texts], truncation=False, add_special_tokens=False)["input_ids"]
 
         return tokenized
 

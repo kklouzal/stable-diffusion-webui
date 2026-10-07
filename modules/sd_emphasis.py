@@ -38,12 +38,15 @@ class EmphasisOriginal(Emphasis):
     description = "the original emphasis implementation"
 
     def after_transformers(self):
-        original_mean = self.z.mean()
-        self.z = self.z * self.multipliers.reshape(self.multipliers.shape + (1,)).expand(self.z.shape)
+        # In float32: a bf16 original_mean is rounded (up to 2**-9 relative), which rescaled every chunk even when
+        # all multipliers are 1. The result was already float32 through promotion with the float32 multipliers.
+        z = self.z.float()
+        original_mean = z.mean()
+        z = z * self.multipliers.reshape(self.multipliers.shape + (1,))
 
         # restoring original mean is likely not correct, but it seems to work well to prevent artifacts that happen otherwise
-        new_mean = self.z.mean()
-        self.z = self.z * (original_mean / new_mean)
+        new_mean = z.mean()
+        self.z = z * (original_mean / new_mean)
 
 
 class EmphasisOriginalNoNorm(EmphasisOriginal):
