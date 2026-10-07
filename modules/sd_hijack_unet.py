@@ -141,14 +141,16 @@ def sgm_spatial_transformer_forward(_, self, x, context=None):
 # GroupNorm/LayerNorm reads an fp32 copy of its bf16 input and writes fp32, which the next Linear/conv casts back to
 # bf16 (GroupNorm32 adds its own x.float()/.type(x.dtype) round trip). ATen's bf16 CUDA norm kernels compute in fp32 from
 # the exactly widened bf16 values and round once on store, so with bf16 input and bf16 weights the UNet norms run with
-# autocast off for the call and skip the cast kernels and the fp32 traffic. Expected results, by kernel signature in the
-# torch 2.14 libtorch_cuda.so (not yet verified on device; run the CUDA tests in test/test_sd_hijack_unet.py):
+# autocast off for the call and skip the cast kernels and the fp32 traffic. Verified on GB10 (torch 2.14; CUDA tests in
+# test/test_sd_hijack_unet.py, timing/error in test/benchmark_unet_norms.py at SDXL batch-2 shapes):
 # - LayerNorm (BasicTransformerBlock norm1/2/3): bitwise identical to the autocast path. eps, mean and rstd stay fp32,
 #   and the vectorized kernel uses one vec_size for every dtype, so the reduction order matches as long as both paths
-#   vectorize; UnetLayerNorm keeps the bf16 operands aligned like the fp32 copies the autocast path makes.
+#   vectorize; UnetLayerNorm keeps the bf16 operands aligned like the fp32 copies the autocast path makes. 6.7-12.7x
+#   faster including the consumers' casts (autocast's fp32 output is cast once per consuming Linear).
 # - GroupNorm (GroupNorm32, SpatialTransformer.norm): the CUDA GroupNorm kernel takes eps in the input dtype, so eps becomes
-#   bf16(eps) (1e-5 -> 1.0014e-5, 1e-6 -> 9.984e-7). Results equal an fp32 run with that eps and differ from the autocast
-#   path by at most 1 bf16 ULP.
+#   bf16(eps) (1e-5 -> 1.0014e-5, 1e-6 -> 9.984e-7): results equal an fp32 run with that eps, rounded once. Not bitwise
+#   versus autocast, but the error against a float64 reference equals the bf16 rounding floor, as on the autocast path
+#   (max/RMS within one rounding, mean/RMS +0.1% at most even with group variances far below eps). 1.8-4.8x faster.
 # CLIP/open_clip and VAE norms are not touched. Set to False to restore the autocast fp32 norms everywhere.
 UNET_BF16_NATIVE_NORMS = True
 

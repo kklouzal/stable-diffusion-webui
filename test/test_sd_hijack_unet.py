@@ -26,7 +26,34 @@ for _repo in ("generative-models", "stable-diffusion-stability-ai"):
 pytest.importorskip("sgm.modules.attention")
 pytest.importorskip("ldm.modules.attention")
 
-from modules import devices, sd_hijack_unet  # noqa: E402
+
+def _import_runtime_modules():
+    """Import devices/sd_hijack_unet against the real modules.shared.
+
+    Some test modules (test_openclaw_cuda_graphs.py) leave a minimal modules.shared stub in sys.modules; devices cannot
+    import against it. Load the real module for these imports only and put the stub back for its owner."""
+    import importlib
+    import modules
+
+    stub = sys.modules.get("modules.shared")
+    if stub is None or getattr(stub, "__file__", None) is not None:
+        from modules import devices, sd_hijack_unet
+        return devices, sd_hijack_unet
+    package_attribute = modules.__dict__.pop("shared", None)
+    del sys.modules["modules.shared"]
+    try:
+        importlib.import_module("modules.shared")
+        from modules import devices, sd_hijack_unet
+    finally:
+        sys.modules["modules.shared"] = stub
+        if package_attribute is None:
+            modules.__dict__.pop("shared", None)
+        else:
+            modules.shared = package_attribute
+    return devices, sd_hijack_unet
+
+
+devices, sd_hijack_unet = _import_runtime_modules()
 import ldm.modules.attention as ldm_attention  # noqa: E402
 import ldm.modules.diffusionmodules.model as ldm_vae  # noqa: E402
 import ldm.modules.diffusionmodules.util as ldm_util  # noqa: E402
@@ -308,15 +335,25 @@ def test_sgm_spatial_transformer_single_context_feeds_every_block():
     assert len(seen) == 3 and all(c is context for c in seen)
 
 
-# --- CUDA: numerical claims (bf16 GroupNorm == fp32 GroupNorm with bf16(eps); LayerNorm bitwise) ---
+# --- CUDA: numerical contract (path taken, dtype, error vs a float64 reference; LayerNorm bitwise) ---
+# Distances in bf16 ULPs are meaningless for outputs near zero, where the affine terms cancel; errors are measured
+# against a float64 reference relative to the output RMS, as consumed downstream (rounded to bf16).
 
-def _ordered_bf16_bits(t):
-    bits = t.contiguous().view(torch.int16).to(torch.int32)
-    return torch.where(bits < 0, -(bits + 32768), bits)
+def _error_over_rms(output, reference):
+    """(max, mean) |output - reference| / rms(reference)."""
+    diff = (output.double() - reference).abs()
+    rms = reference.pow(2).mean().sqrt()
+    return (diff.max() / rms).item(), (diff.mean() / rms).item()
 
 
-def _max_ulp_distance(a, b):
-    return int((_ordered_bf16_bits(a) - _ordered_bf16_bits(b)).abs().max())
+def _assert_native_error_within_autocast_plus_rounding(native, autocast, reference):
+    """The native output may not be worse than the autocast path's (both as consumed, i.e. rounded to bf16) by more
+    than the reference's own bf16 rounding error."""
+    native_max, native_mean = _error_over_rms(native, reference)
+    autocast_max, autocast_mean = _error_over_rms(autocast.to(BF16), reference)
+    floor_max, floor_mean = _error_over_rms(reference.to(BF16), reference)
+    assert native_max <= autocast_max + floor_max, (native_max, autocast_max, floor_max)
+    assert native_mean <= autocast_mean + 0.01 * floor_mean, (native_mean, autocast_mean, floor_mean)
 
 
 def _bf16_eps(eps):
@@ -358,7 +395,7 @@ def _run(module, *args, native, **kwargs):
 @pytest.mark.parametrize("channels,size", [(320, 128), (640, 64), (1280, 32)])
 @pytest.mark.parametrize("memory_format", [torch.contiguous_format, torch.channels_last], ids=["nchw", "nhwc"])
 @pytest.mark.parametrize("kind", ["GroupNorm32", "SpatialTransformer.norm"])
-def test_cuda_bf16_group_norm_equals_fp32_with_bf16_eps(default_runtime, channels, size, memory_format, kind):
+def test_cuda_bf16_group_norm_native_path_matches_float64_like_autocast(default_runtime, channels, size, memory_format, kind):
     if kind == "GroupNorm32":
         norm = sgm_util.normalization(channels)
     else:
@@ -373,16 +410,17 @@ def test_cuda_bf16_group_norm_equals_fp32_with_bf16_eps(default_runtime, channel
     autocast = _run(norm, x, native=False)
     with torch.no_grad():
         oracle = F.group_norm(x.float(), 32, norm.weight.float(), norm.bias.float(), _bf16_eps(norm.eps)).to(BF16)
+        reference = F.group_norm(x.double(), 32, norm.weight.double(), norm.bias.double(), norm.eps)
 
-    assert native.dtype == BF16
-    assert torch.equal(native, oracle)
-    assert _max_ulp_distance(native, autocast.to(BF16)) <= 1
+    assert native.dtype == BF16  # the native path ran (autocast leaves fp32 for SpatialTransformer.norm)
+    assert torch.equal(native, oracle)  # ATen's bf16 kernel: fp32 math with eps cast to bf16, one rounding
+    _assert_native_error_within_autocast_plus_rounding(native, autocast, reference)
 
 
 @needs_cuda
 @pytest.mark.parametrize("channels,tokens", [(640, 4096), (1280, 1024)])
 @pytest.mark.parametrize("offset", [0, 2, 4, 8])
-def test_cuda_bf16_layer_norm_is_bitwise_equal_to_autocast(default_runtime, channels, tokens, offset):
+def test_cuda_bf16_layer_norm_is_bitwise_equal_to_autocast_when_aligned(default_runtime, channels, tokens, offset):
     norm = torch.nn.LayerNorm(channels)
     norm.__class__ = sd_hijack_unet.UnetLayerNorm
     norm = _randomize(norm).to("cuda", BF16)
@@ -390,12 +428,21 @@ def test_cuda_bf16_layer_norm_is_bitwise_equal_to_autocast(default_runtime, chan
     storage = torch.empty(full.numel() + offset, device="cuda", dtype=BF16)
     x = storage[offset:].view_as(full)
     x.copy_(full)
+    aligned = x.data_ptr() % 16 == 0
 
     native = _run(norm, x, native=True)
     autocast = _run(norm, x, native=False)
+    with torch.no_grad():
+        reference = F.layer_norm(x.double(), (channels,), norm.weight.double(), norm.bias.double(), norm.eps)
 
-    assert native.dtype == BF16 and autocast.dtype == torch.float32
-    assert torch.equal(native, autocast.to(BF16))  # the consumer Linear's autocast cast
+    assert autocast.dtype == torch.float32
+    if aligned:
+        assert native.dtype == BF16  # the native path ran
+        assert torch.equal(native, autocast.to(BF16))  # the consumer Linear's autocast cast
+        _assert_native_error_within_autocast_plus_rounding(native, autocast, reference)
+    else:
+        # A misaligned bf16 operand would vectorize differently from autocast's aligned fp32 copy: keep autocast.
+        assert native.dtype == torch.float32 and torch.equal(native, autocast)
 
 
 @needs_cuda
