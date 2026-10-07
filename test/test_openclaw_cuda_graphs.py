@@ -7,17 +7,42 @@ import types
 import unittest
 from unittest import mock
 
-# A1111 parses sys.argv during shared import; keep unittest flags out of it.
-sys.argv = [sys.argv[0]]
+import torch
+
+import modules
+from modules import openclaw_cuda_graphs
 
 shared_stub = types.ModuleType("modules.shared")
 shared_stub.opts = types.SimpleNamespace(batch_cond_uncond=True)
 shared_stub.sd_model = None
-sys.modules["modules.shared"] = shared_stub
 
-import torch
+# The graph modules resolve `shared` at call time (sys.modules / `from modules import shared`). Install the stub
+# only while this file's tests run: left in sys.modules it replaced the real modules.shared for every test file
+# collected after this one (tests/test_inpainting_geometry_contract.py failed on a missing cmd_opts).
+# (Only this key is swapped and restored: mock.patch.dict(sys.modules) would also drop every module imported meanwhile.)
+_MISSING = object()
+_saved_shared_module = _MISSING
+_module_patches = [
+    mock.patch.object(modules, "shared", shared_stub, create=True),
+    mock.patch.object(sys, "argv", [sys.argv[0]]),  # a real shared import must not parse unittest flags
+]
 
-from modules import openclaw_cuda_graphs
+
+def setUpModule():
+    global _saved_shared_module
+    _saved_shared_module = sys.modules.get("modules.shared", _MISSING)
+    sys.modules["modules.shared"] = shared_stub
+    for patch in _module_patches:
+        patch.start()
+
+
+def tearDownModule():
+    for patch in reversed(_module_patches):
+        patch.stop()
+    if _saved_shared_module is _MISSING:
+        sys.modules.pop("modules.shared", None)
+    else:
+        sys.modules["modules.shared"] = _saved_shared_module
 
 
 def make_denoiser(*, active=True, start=0, end=4, total_steps=5, hooks=True, blur_sigma=11.0):
