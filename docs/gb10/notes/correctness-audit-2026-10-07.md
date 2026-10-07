@@ -20,7 +20,10 @@ The guidance D = U + s(C - U) + (s - 1)(U - U') has the right sign, and Dynamic 
 non-negative factors. The likely cause is the sampler: "Multi: oi" (`Euler a[Exponential] -> DPM++ 2M SDE[AYS]`) never
 ran for these img2img requests before this deploy (before 2026-09-27 the name fell back to the default sampler; from
 then until the multi-sampler splice fix every such request produced an all-NaN latent), so no earlier SEG image used it.
-Settling experiment (GPU): fixed seed, PAG off — "Multi: oi" with SEG off/on, and DPM++ 2M + AYS with SEG off/on.
+Live result (deploy7, fixed seed, PAG off, captured img2img settings with a neutral prompt): with DPM++ 2M + AYS, SEG
+sigma 3 adds fine texture and keeps contrast; with "Multi: oi" the same SEG makes the image hazier, lighter and lower in
+contrast. The look follows SEG combined with the ancestral/SDE chain, not a code change
+(`~/audit-artifacts/gb10-a1111-correctness-20261007/live/seg-neutral-abcd.png`).
 
 ## Contract changes
 
@@ -96,11 +99,22 @@ when they are 'difference' models.
   generation); taking the lock would make the controller's 30 s timeout fire behind long generations.
 - `PYTORCH_ALLOC_CONF=expandable_segments:True` (fragmentation on shared unified memory) needs a GPU measurement.
 
+## Live verification (deploy7-490eac83, 2026-10-07)
+
+- Found only on the live server and fixed: (1) every CUDA-graph-eligible request (no SEG/ControlNet/TeaCache/...
+  bypass) answered 500 since the 2026-10-06 deploy: generation runs under `torch.inference_mode`, and the graph key read
+  the version counter of the run wrapper's inference-tensor schedule buffers; (2) since the pydantic 2 migration an
+  explicit `null` for img2img `mask` (and `script_name`/`infotext`/`force_task_id`) answered 422.
+- Upstream live-server API tests (test_txt2img/img2img/extras/utils): 34/34 pass.
+- CUDA graphs: fixed-seed txt2img and img2img (1024², 12 steps) are bit-identical eager vs capture vs replay;
+  5.4 s -> 4.3 s per request. Hypertile, SEG, ControlNet and TeaCache requests bypass graphs as designed.
+- Captured img2img workload shape (1280², Multi: oi + AYS 15 steps, ControlNet depth_zoe, PAG, SEG, Dynamic
+  Thresholding, Detail Daemon, TeaCache): 14.08-14.15 s per request warm, identical outputs across runs (deterministic
+  img2img encode). txt2img 1024² with the same extensions 8.9-9.7 s; hires fix 19.7 s; Tiled VAE and Tiled Diffusion OK.
+- Fail-closed contract: Dynamic Thresholding + UniPC answers 500 naming the hook/script; the next normal request
+  reproduces its reference image bit for bit (failure cleanup leaves no state).
+
 ## GPU verification still owed
 
-1. SEG settling experiment above.
-2. One request per alwayson extension (ControlNet depth_zoe, PAG, SEG, Dynamic Thresholding, TeaCache, multi-sampler,
-   Detail Daemon, Tiled Diffusion/VAE, hypertile) to confirm none raises in normal use under the fail-closed contract;
-   a deliberately failing request (Dynamic Thresholding + UniPC) followed by a normal one matching a fresh-process image.
-3. Image A/B of the output-changing fixes on the captured workloads; LoRA merge time with fp32 math.
-4. The live-server API tests (test/test_txt2img.py, test_img2img.py, test_extras.py, test_utils.py).
+1. Image A/B of the output-changing fixes against the operator's own references; LoRA merge time with fp32 math.
+2. IP-Adapter/PuLID/T2I/LLLite and reference/inpaint ControlNet units (no local checkpoints for the first group).

@@ -7,7 +7,7 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 ## Current status (2026-10-07)
 
 - `latest` adds the 2026-10-07 correctness audit (`docs/gb10/notes/correctness-audit-2026-10-07.md`): image-changing fixes (rounded uint8 decode, deterministic SDXL VAE encode, fp32 LoRA merges, emphasis/tokenizer, schedulers, ControlNet/SEG row handling) and API contract changes (extension hook errors, LoRA tag errors and wrong-typed settings fail the request; mutating endpoints wait for `queue_lock`); CPU suites only, GPU verification list in the note
-- production was stopped by the operator at 12:54 local; the audit build is not deployed yet
+- production `gb10-a1111-latest` runs `local/gb10-a1111:deploy7-490eac83` (`sha256:db261255...`) = `latest` @490eac83 with the audit; previous: `deploy5-293d3e2c`; live API tests 34/34, CUDA graphs bit-identical to eager, captured img2img workload 14.1 s warm
 - production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `local/gb10-a1111:deploy5-293d3e2c` (`sha256:59626c7c...`), built from `latest` @293d3e2c
 - contains the 2026-10-06 static performance pass and its fixes (`docs/gb10/notes/performance-static-pass-2026-10-06.md`), plus float32 SDXL size/aesthetic conditioning and UNet/ControlNet timesteps (intentional output change) and no ControlNet image echo in API responses
 - rollback image: `local/gb10-a1111:pre-perf-20261006` (`sha256:7f954f2f...`, the 2026-09-27 deploy4 build); roll back with `IMAGE_TAG=local/gb10-a1111:pre-perf-20261006 gb10/run.sh`
