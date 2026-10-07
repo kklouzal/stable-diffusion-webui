@@ -421,6 +421,14 @@ class UnetHook(nn.Module):
         self._warned_outside_sampling = False
 
     @staticmethod
+    def mark_hires_conds(process):
+        """Replace process.hr_c/hr_uc with marked copies (conds already marked are kept as they are)."""
+        for name, positive in (('hr_c', True), ('hr_uc', False)):
+            conds = getattr(process, name, None)
+            if conds is not None:
+                setattr(process, name, mark_prompt_context(conds, positive=positive))
+
+    @staticmethod
     def call_vae_using_process(p, x, mask=None):
         vae_cache = getattr(p, 'controlnet_vae_cache', None)
         if vae_cache is None:
@@ -495,10 +503,9 @@ class UnetHook(nn.Module):
             for key, positive in (('conditioning', True), ('unconditional_conditioning', False)):
                 if key in kwargs:
                     kwargs[key] = mark_prompt_context(kwargs[key], positive=positive)
-            for name, positive in (('hr_c', True), ('hr_uc', False)):
-                conds = getattr(process, name, None)
-                if conds is not None:
-                    setattr(process, name, mark_prompt_context(conds, positive=positive))
+            # Hires conds that exist already (hires_fix_use_firstpass_conds, lowvram); the others are computed
+            # inside sample_hr_pass and marked by Script.before_hr.
+            UnetHook.mark_hires_conds(process)
             previously_active = outer.sampling_active
             outer.sampling_active = True
             try:

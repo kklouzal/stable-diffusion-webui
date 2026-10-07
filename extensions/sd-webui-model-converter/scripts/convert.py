@@ -14,7 +14,7 @@ import safetensors.torch
 import torch
 from torch import Tensor
 
-from modules import paths, sd_models, sd_vae, shared
+from modules import sd_models, sd_vae, shared
 
 OPENCLAW_CONVERTER_VERSION = "2026-05-10.4"
 FLOAT8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -456,25 +456,29 @@ def safetensors_metadata(path: str) -> dict[str, str]:
         return {str(k): str(v) for k, v in (f.metadata() or {}).items()}
 
 
-def lora_dir() -> str:
-    return os.path.join(paths.models_path, "Lora")
+def lora_roots() -> list[str]:
+    """The directories the built-in Lora extension lists (networks.list_available_networks): --lora-dir and
+    --lyco-dir-backcompat (extensions-builtin/Lora/preload.py; defaults models/Lora and models/LyCORIS)."""
+    return list(dict.fromkeys((shared.cmd_opts.lora_dir, shared.cmd_opts.lyco_dir_backcompat)))
 
 
 def list_loras() -> list[dict[str, str]]:
-    root = lora_dir()
+    # Walked like A1111's walk_files (followlinks=True), so every path /sdapi/v1/loras reports -- which the
+    # controller sends back as the source -- is listed here, including files under symlinked subdirectories.
     out = []
-    if not os.path.isdir(root):
-        return out
-    for dirpath, _, filenames in os.walk(root):
-        for filename in filenames:
-            if not filename.lower().endswith((".safetensors", ".ckpt", ".pt")):
-                continue
-            path = os.path.join(dirpath, filename)
-            rel = os.path.relpath(path, root)
-            name = os.path.splitext(rel)[0].replace(os.sep, "/")
-            out.append(
-                {"name": name, "title": name, "filename": filename, "path": path}
-            )
+    for root in lora_roots():
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root, followlinks=True):
+            for filename in filenames:
+                if not filename.lower().endswith((".safetensors", ".ckpt", ".pt")):
+                    continue
+                path = os.path.join(dirpath, filename)
+                rel = os.path.relpath(path, root)
+                name = os.path.splitext(rel)[0].replace(os.sep, "/")
+                out.append(
+                    {"name": name, "title": name, "filename": filename, "path": path}
+                )
     return sorted(out, key=lambda item: item["title"].lower())
 
 

@@ -1,4 +1,5 @@
 import gc
+import math
 import tracemalloc
 import os
 import logging
@@ -933,19 +934,28 @@ class Script(scripts.Script, metaclass=(
             and getattr(p, 'enable_hr', False)
         )
         if high_res_fix:
-            # The final hires size of StableDiffusionProcessingTxt2Img.calculate_target_resolution (after its
-            # latent truncation when both resize dimensions are given).
+            # The hires latent size (in pixels) that StableDiffusionProcessingTxt2Img.calculate_target_resolution and
+            # sample_hr_pass produce. This runs in process(), before p.init() computes hr_upscale_to_*/truncate_*, so it
+            # repeats that arithmetic: the upscale target (a scaled size is floored with the core's 1e-9 slack, since
+            # e.g. 800 * 1.15 == 919.9999999999999), the latent of that target, minus the latent rows/columns the
+            # core truncates when both resize dimensions are given (which keeps ceil(requested / 8) latents).
+            truncate_y = truncate_x = 0
             if p.hr_resize_x == 0 and p.hr_resize_y == 0:
-                hr_y = int(p.height * p.hr_scale)
-                hr_x = int(p.width * p.hr_scale)
+                hr_y = math.floor(p.height * p.hr_scale + 1e-9)
+                hr_x = math.floor(p.width * p.hr_scale + 1e-9)
             elif p.hr_resize_y == 0:
                 hr_y, hr_x = p.hr_resize_x * p.height // p.width, p.hr_resize_x
             elif p.hr_resize_x == 0:
                 hr_y, hr_x = p.hr_resize_y, p.hr_resize_y * p.width // p.height
             else:
-                hr_y, hr_x = p.hr_resize_y, p.hr_resize_x
-            hr_y = align_dim_latent(hr_y)
-            hr_x = align_dim_latent(hr_x)
+                if p.width / p.height < p.hr_resize_x / p.hr_resize_y:
+                    hr_y, hr_x = p.hr_resize_x * p.height // p.width, p.hr_resize_x
+                else:
+                    hr_y, hr_x = p.hr_resize_y, p.hr_resize_y * p.width // p.height
+                truncate_y = (hr_y - p.hr_resize_y) // 8
+                truncate_x = (hr_x - p.hr_resize_x) // 8
+            hr_y = align_dim_latent(hr_y) - truncate_y * 8
+            hr_x = align_dim_latent(hr_x) - truncate_x * 8
         else:
             hr_y = h
             hr_x = w
@@ -1342,6 +1352,15 @@ class Script(scripts.Script, metaclass=(
         if Script.process_has_sdxl_refiner(p):
             self.controlnet_hack(p)
         return
+
+    def before_hr(self, p, *args, **kwargs):
+        # sample_hr_pass computes p.hr_c/p.hr_uc (calculate_hr_conds) after the hook's process_sample marked the
+        # first pass's conds -- always unless hires_fix_use_firstpass_conds -- and runs this right before sampling
+        # with them. Unmarked, unmark_prompt_context reads every hires row as cond: cond-only control
+        # ("ControlNet is more important"), IP-Adapter/InstantID uncond embeds and reference style fidelity
+        # would treat the uncond rows as cond rows.
+        if self.latest_network is not None and self.latest_network.sampling_active:
+            UnetHook.mark_hires_conds(p)
 
     def postprocess_batch(self, p, *args, **kwargs):
         images = kwargs.get('images', [])

@@ -199,6 +199,14 @@ class TestHiresTargetDimensions(unittest.TestCase):
             (1024, 768, 1.0, 0, 1152),     # height only
             (1024, 1024, 1.0, 1536, 1024),  # both: upscaled, then truncated to the requested size
             (832, 1216, 2.0, 0, 0),
+            # The core floors a scaled size with 1e-9 slack: int(800 * 1.15) == 919, the hires latent is 920 px.
+            (800, 800, 1.15, 0, 0),
+            (1320, 1320, 1.4, 0, 0),
+            (1440, 1440, 1.15, 0, 0),
+            # Both dimensions, not multiples of 8: the truncation keeps ceil(requested / 8) latents.
+            (1024, 1024, 1.0, 1536, 1020),
+            (1024, 1024, 1.0, 1028, 1040),
+            (1024, 768, 1.0, 1500, 1000),
         ]
         for width, height, hr_scale, hr_resize_x, hr_resize_y in cases:
             p = StableDiffusionProcessingTxt2Img.__new__(StableDiffusionProcessingTxt2Img)
@@ -207,6 +215,66 @@ class TestHiresTargetDimensions(unittest.TestCase):
             h, w, hr_y, hr_x = Script.get_target_dimensions(p)
             self.assertEqual((h, w), (height, width))
             self.assertEqual((hr_y, hr_x), a1111_hires_size(width, height, hr_scale, hr_resize_x, hr_resize_y), (width, height, hr_scale, hr_resize_x, hr_resize_y))
+
+
+class _FakeUNet:
+    def __init__(self):
+        self.forward = lambda x, **kwargs: x
+
+    def children(self):
+        return []
+
+
+class TestHiresCondsMarked(unittest.TestCase):
+    """sample_hr_pass computes p.hr_c/p.hr_uc after process.sample started (hires_fix_use_firstpass_conds off, the
+    default and the GB10 config) and runs scripts.before_hr right before sampling with them."""
+
+    def test_hires_conds_computed_inside_sample_reach_the_unet_marked(self):
+        from modules import prompt_parser as pp
+        from scripts.hook import unmark_prompt_context
+
+        gen = torch.Generator().manual_seed(0)
+
+        def leaf():
+            return pp.ScheduledPromptConditioning(end_at_step=20, cond={
+                "crossattn": torch.randn(77, 8, generator=gen), "vector": torch.randn(16, generator=gen)})
+
+        hr_c = pp.MulticondLearnedConditioning(shape=(1,), batch=[[pp.ComposableScheduledPromptConditioning([leaf()], weight=1.0)]])
+        hr_uc = [[leaf()]]
+        script = Script.__new__(Script)
+        seen = {}
+
+        class Txt2Img:
+            hr_c = hr_uc = None
+
+            def sample(self, conditioning, unconditional_conditioning, **kwargs):
+                # sample_hr_pass: calculate_hr_conds(), scripts.before_hr(p), sampler.sample_img2img(p.hr_c, p.hr_uc)
+                self.hr_c, self.hr_uc = hr_c, hr_uc
+                script.before_hr(self)
+                seen.update(c=self.hr_c, uc=self.hr_uc)
+
+        process = Txt2Img()
+        script.latest_network = UnetHook()
+        script.latest_network.hook(_FakeUNet(), types.SimpleNamespace(is_sdxl=False), [], process)
+        try:
+            process.sample(conditioning=[], unconditional_conditioning=[])
+        finally:
+            script.latest_network.restore()
+
+        cond = seen["c"].batch[0][0].schedules[0].cond["crossattn"]
+        uncond = seen["uc"][0][0].cond["crossattn"]
+        _, uc_indices, c_indices, context = unmark_prompt_context(torch.stack([cond, uncond]))
+        self.assertEqual((c_indices, uc_indices), ([0], [1]))
+        self.assertTrue(torch.equal(context[0], hr_c.batch[0][0].schedules[0].cond["crossattn"]))
+        # The cond cache's own objects stay unmarked.
+        self.assertEqual(hr_uc[0][0].cond["crossattn"].shape[0], 77)
+
+        # Conds marked before sampling (hires_fix_use_firstpass_conds) are not marked twice.
+        process.hr_c, process.hr_uc = seen["c"], seen["uc"]
+        script.latest_network.sampling_active = True
+        script.before_hr(process)
+        self.assertEqual(process.hr_uc[0][0].cond["crossattn"].shape[0], 78)
+        self.assertIs(process.hr_uc[0][0], seen["uc"][0][0])
 
 
 if __name__ == "__main__":
