@@ -82,21 +82,24 @@ def stat_source(filename: str, *, identity_trusted: bool = True) -> dict:
     }
 
 
-def file_identity_matches(filename: str, metadata: dict | None) -> bool:
-    if not metadata:
-        return False
+_IDENTITY_KEYS = ("path", "device", "inode", "size", "mtime_ns", "ctime_ns")
 
-    identity = file_identity(filename)
-    required = ("path", "device", "inode", "size", "mtime_ns", "ctime_ns")
-    return all(identity.get(key) == metadata.get(key) for key in required)
+
+def _same_identity(identity: dict, metadata: dict) -> bool:
+    return all(identity.get(key) == metadata.get(key) for key in _IDENTITY_KEYS)
 
 
 def file_metadata_matches(filename: str, metadata: dict | None) -> bool:
+    """True when `filename` has the bytes `metadata["sha256"]` describes; re-hashes only after its identity changed.
+
+    On a re-hash match, `metadata` takes the identity observed *before* hashing: a file replaced while it was being
+    hashed then fails the identity check next time and is hashed again, instead of being trusted under the new identity.
+    """
     if not metadata or not metadata.get("sha256"):
         return False
 
     current = file_identity(filename)
-    if file_identity_matches(filename, metadata):
+    if _same_identity(current, metadata):
         # Fast path: unchanged path/device/inode/size/mtime/ctime identity matches a previously
         # strong-hashed file. The recorded SHA-256 remains part of the trusted
         # metadata, so this path skips repeat hashing but never accepts metadata
@@ -109,7 +112,7 @@ def file_metadata_matches(filename: str, metadata: dict | None) -> bool:
     if sha256_file(filename) != metadata.get("sha256"):
         return False
 
-    metadata.update(file_identity(filename))
+    metadata.update(current)
     metadata["identity_trusted"] = True
     return True
 
@@ -207,13 +210,14 @@ def load_sidecar(cache_path: str, suffix: str) -> Optional[dict]:
         return None
 
 
-def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> bool:
+def verified_sidecar(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> Optional[dict]:
+    """Return the sidecar of `cache_path` if it matches this request and the current source and artifact bytes, else None."""
     if not os.path.exists(cache_path):
-        return False
+        return None
 
     sidecar = load_sidecar(cache_path, sidecar_suffix)
     if not sidecar:
-        return False
+        return None
 
     sidecar_source = sidecar.get("source")
     sidecar_cache = sidecar.get("cache")
@@ -234,13 +238,32 @@ def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_n
 
     expected_coverage = sorted(coverage) if coverage is not None else None
     coverage_matches = coverage is None or sidecar.get("coverage") in (None, expected_coverage)
-    return (
+    matches = (
         sidecar.get("cache_version") == cache_version
         and sidecar.get("config") == config_name
         and contract_matches(sidecar.get("contract"), artifact_contract(config_name, coverage))
         and source_matches
         and coverage_matches
         and cache_matches
+    )
+    return sidecar if matches else None
+
+
+def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> bool:
+    return verified_sidecar(filename, cache_path, cache_version, config_name, sidecar_suffix, coverage) is not None
+
+
+def payload_source_matches(payload_source, verified_source: dict) -> bool:
+    """True when the payload was built from the bytes `verified_source` (a sidecar source just verified) describes.
+
+    The sidecar check already proved the current file has `verified_source["sha256"]` (re-hashing it if its identity
+    changed), so comparing digests here is as strong as hashing the file again, which the payload's own identity
+    would otherwise force on every load once the file's metadata changes (the payload is never rewritten).
+    """
+    return (
+        isinstance(payload_source, dict)
+        and bool(verified_source.get("sha256"))
+        and all(payload_source.get(key) == verified_source.get(key) for key in ("path", "size", "sha256"))
     )
 
 
@@ -279,7 +302,10 @@ def load_into_model(
     sidecar_suffix, label, is_quant_tensor = backend.sidecar_suffix, backend.label, backend.is_quant_tensor
     register_safe_globals = backend.register_safe_globals
     cache_path = cache_path_for(source_path, cache_dir_name)
-    if cache_path is None or source_path is None or not sidecar_matches(source_path, cache_path, cache_version, config_name, sidecar_suffix, coverage):
+    if cache_path is None or source_path is None:
+        return False
+    sidecar = verified_sidecar(source_path, cache_path, cache_version, config_name, sidecar_suffix, coverage)
+    if sidecar is None:
         return False
 
     print(f"Loading {label} cache for {source_path} from {cache_path}", flush=True)
@@ -302,7 +328,7 @@ def load_into_model(
         payload.get("cache_version") == cache_version
         and payload.get("config") == config_name
         and contract_matches(payload.get("contract"), artifact_contract(config_name, coverage))
-        and file_metadata_matches(source_path, payload.get("source"))
+        and payload_source_matches(payload.get("source"), sidecar["source"])
         and payload_coverage_matches
     ):
         print(f"Ignoring stale {label} cache {cache_path}: payload metadata does not match requested source/config/coverage")
@@ -343,7 +369,8 @@ def load_into_model(
     with torch.no_grad():
         for fqn, module in eligible_modules:
             entry = tensors[fqn]
-            module._parameters["weight"] = entry["weight"]
+            # The same frozen Parameter wrapper quantize_() installs, so a cached load leaves the module as a fresh one.
+            module._parameters["weight"] = torch.nn.Parameter(entry["weight"], requires_grad=False)
             bias = entry.get("bias")
             if bias is not None:
                 module._parameters["bias"] = parameter_on_device(bias, device)
