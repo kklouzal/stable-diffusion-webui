@@ -20,7 +20,7 @@ def former_get_pytorch_control(x):
     y = y.float() / 255.0
     y = rearrange(y, 'h w c -> 1 c h w')
     y = y.clone()
-    y = y.to("cpu")
+    y = y.to(controlnet.devices.get_device_for("controlnet"))
     return y.clone()
 
 
