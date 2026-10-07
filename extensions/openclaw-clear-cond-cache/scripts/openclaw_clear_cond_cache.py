@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 
-from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, openclaw_cache_epochs
+from modules import call_queue, extra_networks, extras, openclaw_env, prompt_parser, script_callbacks, sd_models, openclaw_cache_epochs
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 from modules.sd_hijack import model_hijack
 from modules.textual_inversion import textual_inversion
@@ -382,6 +382,21 @@ def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
 
 
 
+def _body_flag(data: Any, key: str, default: bool = False) -> bool:
+    """A boolean field of a JSON body: missing -> default; true/false, 0/1, null (False), or openclaw_env's text grammar
+    ("false" is False); anything else raises ValueError. bool() made every non-empty string, "false" included, True."""
+    if not isinstance(data, dict) or key not in data:
+        return default
+    value = data[key]
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return openclaw_env.parse_bool(value, key)
+    raise ValueError(f"{key}={value!r} is not a boolean")
+
+
 def _model_merge_config_source_value(value: Any) -> str:
     choices = ["A, B or C", "B", "C", "Don't"]
     if isinstance(value, int) and 0 <= value < len(choices):
@@ -417,6 +432,14 @@ def _run_openclaw_model_merge(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"Metadata JSON is invalid: {exc}"}
 
     try:
+        save_as_half = _body_flag(payload, "save_as_half")
+        save_metadata = _body_flag(payload, "save_metadata", True)
+        add_merge_recipe = _body_flag(payload, "add_merge_recipe", True)
+        copy_metadata_fields = _body_flag(payload, "copy_metadata_fields", True)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    try:
         with call_queue.queue_lock:
             outputs = extras.run_modelmerger(
                 None,
@@ -425,15 +448,15 @@ def _run_openclaw_model_merge(payload: dict[str, Any]) -> dict[str, Any]:
                 tertiary,
                 method,
                 float(payload.get("multiplier") if payload.get("multiplier") is not None else 0.3),
-                bool(payload.get("save_as_half", False)),
+                save_as_half,
                 str(payload.get("custom_name") or "").strip(),
                 checkpoint_format,
                 _model_merge_config_source_value(payload.get("config_source")),
                 str(payload.get("bake_in_vae") or "None").strip() or "None",
                 str(payload.get("discard_weights") or ""),
-                bool(payload.get("save_metadata", True)),
-                bool(payload.get("add_merge_recipe", True)),
-                bool(payload.get("copy_metadata_fields", True)),
+                save_metadata,
+                add_merge_recipe,
+                copy_metadata_fields,
                 metadata_json,
             )
         message = str((outputs or [""])[-1] or "")
@@ -555,11 +578,12 @@ def _cudnn_benchmark_locked(enabled: bool) -> dict[str, Any]:
 
 
 def _torch_compile_locked(data: dict[str, Any]) -> dict[str, Any]:
-    target = data.get("target")
+    try:
+        vae = data.get("target") == "vae-only" or _body_flag(data, "vae") or _body_flag(data, "enabled")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     with call_queue.queue_lock:
-        if target == "vae-only":
-            return apply_torch_compile_settings(vae=True)
-        return apply_torch_compile_settings(vae=bool(data.get("vae") or data.get("enabled")))
+        return apply_torch_compile_settings(vae=vae)
 
 
 def on_app_started(_: object, app: FastAPI) -> None:
@@ -610,7 +634,11 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark(request: Request):
         data = await request.json()
-        return await run_in_threadpool(_cudnn_benchmark_locked, bool(data.get("enabled")))
+        try:
+            enabled = _body_flag(data, "enabled")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return await run_in_threadpool(_cudnn_benchmark_locked, enabled)
 
     @app.get("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark_status():

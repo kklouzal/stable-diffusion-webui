@@ -72,6 +72,10 @@ def install_a1111_stubs() -> None:
     processing_mod.StableDiffusionProcessingImg2Img = StableDiffusionProcessingImg2Img
     processing_mod.StableDiffusionProcessingTxt2Img = StableDiffusionProcessingTxt2Img
     openclaw_cache_epochs_mod = types.ModuleType("modules.openclaw_cache_epochs")
+    # the real boolean grammar (the module has no A1111 dependencies)
+    openclaw_env_spec = importlib.util.spec_from_file_location("modules.openclaw_env", EXT_ROOT.parents[1] / "modules" / "openclaw_env.py")
+    openclaw_env_mod = importlib.util.module_from_spec(openclaw_env_spec)
+    openclaw_env_spec.loader.exec_module(openclaw_env_mod)
     textual_inversion_pkg = types.ModuleType("modules.textual_inversion")
     textual_inversion_mod = types.ModuleType("modules.textual_inversion.textual_inversion")
     textual_inversion_pkg.textual_inversion = textual_inversion_mod
@@ -83,6 +87,7 @@ def install_a1111_stubs() -> None:
     modules_pkg.script_callbacks = script_callbacks_mod
     modules_pkg.sd_models = sd_models_mod
     modules_pkg.openclaw_cache_epochs = openclaw_cache_epochs_mod
+    modules_pkg.openclaw_env = openclaw_env_mod
 
     sys.modules.update(
         {
@@ -91,6 +96,7 @@ def install_a1111_stubs() -> None:
             "modules.extra_networks": extra_networks_mod,
             "modules.extras": extras_mod,
             "modules.openclaw_cache_epochs": openclaw_cache_epochs_mod,
+            "modules.openclaw_env": openclaw_env_mod,
             "modules.prompt_parser": prompt_parser_mod,
             "modules.processing": processing_mod,
             "modules.script_callbacks": script_callbacks_mod,
@@ -231,6 +237,47 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.module.apply_cudnn_benchmark = apply
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": True}), {"ok": True, "cudnn_benchmark": True})
         self.assertEqual(calls, [True])
+
+    def test_boolean_fields_parse_text_instead_of_truth_testing_it(self):
+        cudnn_calls, compile_calls = [], []
+
+        def apply_cudnn(enabled):
+            cudnn_calls.append(enabled)
+            return self._record({"ok": True}, expect_lock=True)()
+
+        def apply_compile(vae=False):
+            compile_calls.append(vae)
+            return self._record({"ok": True}, expect_lock=True)()
+
+        self.module.apply_cudnn_benchmark = apply_cudnn
+        self.module.apply_torch_compile_settings = apply_compile
+        self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": "false"})
+        self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": "on"})
+        self._call("POST", "/sdapi/v1/openclaw/torch-compile", {"vae": "false"})
+        # bool("false") was True: these turned cuDNN benchmark and VAE compile on.
+        self.assertEqual(cudnn_calls, [False, True])
+        self.assertEqual(compile_calls, [False])
+
+        rejected = asyncio.run(self.app.routes[("POST", "/sdapi/v1/openclaw/cudnn-benchmark")](_FakeRequest({"enabled": "maybe"})))
+        self.assertEqual(rejected["ok"], False)
+        self.assertIn("not a boolean", rejected["error"])
+        self.assertEqual(self.module._torch_compile_locked({"enabled": [1]})["ok"], False)
+        self.assertEqual((cudnn_calls, compile_calls), ([False, True], [False]))
+
+    def test_model_merge_flags_parse_text_and_keep_their_defaults(self):
+        merges = []
+        self.module.extras.run_modelmerger = lambda *args: merges.append(args[6:7] + args[12:15]) or ["merged"]
+        self.module.call_queue.queue_lock = _ThreadRecordingLock()
+        request = {"primary_model_name": "a", "secondary_model_name": "b"}
+        self.assertEqual(self.module._run_openclaw_model_merge(request)["ok"], True)
+        self.assertEqual(self.module._run_openclaw_model_merge({**request, "save_as_half": "true", "save_metadata": "false", "add_merge_recipe": 0, "copy_metadata_fields": None})["ok"], True)
+        # save_as_half, save_metadata, add_merge_recipe, copy_metadata_fields
+        self.assertEqual(merges, [(False, True, True, True), (True, False, False, False)])
+
+        rejected = self.module._run_openclaw_model_merge({**request, "save_metadata": "maybe"})
+        self.assertEqual(rejected["ok"], False)
+        self.assertIn("not a boolean", rejected["error"])
+        self.assertEqual(len(merges), 2)
 
     def test_model_merge_runs_in_the_threadpool(self):
         self.module._run_openclaw_model_merge = self._record({"ok": True, "message": "merged"}, expect_lock=False)
