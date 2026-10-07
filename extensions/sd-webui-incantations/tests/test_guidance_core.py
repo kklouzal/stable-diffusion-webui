@@ -299,6 +299,8 @@ class CFGCombinerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         install_a1111_stubs()
+        # Rebind to the stubs installed above even if another test class imported the module first.
+        sys.modules.pop("scripts.cfg_combiner", None)
         cls.cfg_combiner = importlib.import_module("scripts.cfg_combiner")
 
     def test_no_pag_delegates_to_original(self):

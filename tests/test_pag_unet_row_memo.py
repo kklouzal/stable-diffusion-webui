@@ -336,7 +336,7 @@ class Harness:
         self.controlnet_calls = 0
         self.captured = {}
 
-    def install_controlnet(self, weight=0.7, cfg_injection=False, global_average_pooling=False, seed=1):
+    def install_controlnet(self, weight=0.7, cfg_injection=False, global_average_pooling=False, seed=1, preprocessor="depth_zoe", hint_channels=3, reference=False):
         real = real_modules()
         logger = types.SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
         ldm_util = real["ldm.modules.diffusionmodules.util"]
@@ -390,25 +390,36 @@ class Harness:
 
         self.controlnet.control_model.register_forward_pre_hook(count, with_kwargs=True)
         gen = torch.Generator().manual_seed(seed + 1)
+        hint = torch.rand(1, hint_channels, 64, 64, generator=gen)
+        if hint_channels == 4:
+            hint[:, 3] = (hint[:, 3] > 0.5).float()  # inpaint mask channel
+
+        def fake_vae_latent(p, x, mask=None):
+            # Deterministic stand-in for the VAE encode: one latent row per hint row.
+            pixels = x[:, :3] * 2.0 - 1.0
+            return torch.nn.functional.avg_pool2d(torch.cat([pixels, pixels[:, :1]], dim=1), 8)
+
+        self.hook.UnetHook.call_vae_using_process = staticmethod(fake_vae_latent)
         self.control_param = self.hook.ControlParams(
-            control_model=self.controlnet,
-            preprocessor={"name": "depth_zoe", "threshold_a": 0.5, "threshold_b": 0.5},
-            hint_cond=torch.rand(1, 3, 64, 64, generator=gen),
+            control_model=None if reference else self.controlnet,
+            preprocessor={"name": preprocessor, "threshold_a": 0.5, "threshold_b": 0.5},
+            hint_cond=hint,
             weight=weight,
             guidance_stopped=False,
             start_guidance_percent=0.0,
             stop_guidance_percent=1.0,
             advanced_weighting=None,
-            control_model_type=self.enums.ControlModelType.ControlNet,
+            control_model_type=self.enums.ControlModelType.AttentionInjection if reference else self.enums.ControlModelType.ControlNet,
             hr_hint_cond=None,
             global_average_pooling=global_average_pooling,
             soft_injection=False,
             cfg_injection=cfg_injection,
         )
+        self.sd_ldm = types.SimpleNamespace(is_sdxl=True, model=self.sd_model.model)
         self.unet_hook = self.hook.UnetHook(lowvram=False)
         self.unet_hook.hook(
             model=self.unet,
-            sd_ldm=types.SimpleNamespace(is_sdxl=True, model=self.sd_model.model),
+            sd_ldm=self.sd_ldm,
             control_params=[self.control_param],
             process=types.SimpleNamespace(sample=lambda *a, **k: None),
         )
@@ -838,3 +849,41 @@ def test_controlnet_unet_dtype_compute_is_bitwise_identical_under_bf16_autocast(
     assert all(o.dtype == torch.bfloat16 for o in current)
     assert all(torch.equal(a, b) for a, b in zip(legacy, current))
     assert all(torch.equal(a, b) for a, b in zip(legacy, with_guided))
+
+
+def test_inpaint_only_pag_cond_rows_use_row_agnostic_cached_latents():
+    """I5: hint latents cached at the hint's rows serve the 2-row main call and the 1-row PAG replay."""
+    inputs = make_inputs(1, [1], marked=True)
+    harness = make_harness("unet")
+    harness.install_controlnet(preprocessor="inpaint_only", hint_channels=4)
+    harness.enable_pag()
+    harness.capture()
+    harness.run(*inputs)
+    main_calls = [call for call in harness.unet_calls if not call[3]]
+    pag_calls = [call for call in harness.unet_calls if call[3]]
+    assert [call[0].shape[0] for call in main_calls] == [2]
+    assert [call[0].shape[0] for call in pag_calls] == [1]
+    assert harness.control_param.used_hint_cond_latent.shape[0] == 1
+    # inpaint_only post-processes with per-call tensors: never reused, recomputed on the cond row.
+    assert harness.controlnet_calls == 2
+    torch.testing.assert_close(harness.pag_params.pag_x_out, oracle_pag_cond_rows(harness, main_calls, 1), rtol=1e-5, atol=1e-6)
+
+
+def test_reference_only_calls_are_replayed_whole_and_never_reused():
+    """Reference units draw noise over all rows per call: PAG keeps the old full-row call."""
+    inputs = make_inputs(1, [1], marked=True)
+    harness = make_harness("base")
+    harness.install_controlnet(preprocessor="reference_only", reference=True)
+    harness.sd_ldm.sqrt_alphas_cumprod = torch.linspace(0.99, 0.05, 1000)
+    harness.sd_ldm.sqrt_one_minus_alphas_cumprod = (1 - harness.sd_ldm.sqrt_alphas_cumprod ** 2).sqrt()
+    harness.enable_pag()
+    harness.capture()
+    harness.run(*inputs)
+    main_calls = [call for call in harness.unet_calls if not call[3]]
+    pag_calls = [call for call in harness.unet_calls if call[3]]
+    assert [call[0].shape[0] for call in main_calls] == [2]
+    assert [call[0].shape[0] for call in pag_calls] == [2]
+    # Main and PAG calls each ran the nested reference pass and their own encoder (nothing reused).
+    assert harness.encoder_calls == 4
+    assert harness.pag_params.pag_x_out.shape[0] == 1
+    assert torch.isfinite(harness.pag_params.pag_x_out).all()
