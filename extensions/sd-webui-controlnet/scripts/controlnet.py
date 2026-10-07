@@ -4,7 +4,7 @@ import tracemalloc
 import os
 import logging
 from copy import copy, deepcopy
-from typing import Optional, Tuple, List
+from typing import Any, List, NamedTuple, Optional, Tuple
 import modules.scripts as scripts
 from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
 from modules import shared, devices, script_callbacks, processing, masking, images
@@ -289,6 +289,13 @@ def get_control(
     return controls, hr_controls, detected_maps
 
 
+class BuiltControlModel(NamedTuple):
+    """A model_load_cache entry: the built model and, for a 'difference' model, the checkpoint revision
+    (Script._checkpoint_revision) whose UNet weights its build added; None for models independent of it."""
+    control_model: ControlModel
+    base_revision: Any
+
+
 class Script(scripts.Script, metaclass=(
     utils.TimeMeta if logger.level == logging.DEBUG else type)):
 
@@ -430,20 +437,9 @@ class Script(scripts.Script, metaclass=(
             stat.st_mtime_ns, stat.st_ctime_ns,
         )
         sd_model = p.sd_model
-        # 'difference' ControlNets add the UNet's weights at build time. Checkpoint switches load in place
-        # (same unet object) and --no-hashing leaves sha256 None, so the checkpoint file identifies them.
-        checkpoint_info = getattr(sd_model, "sd_checkpoint_info", None)
-        checkpoint_file = getattr(checkpoint_info, "filename", None)
-        checkpoint_revision = None
-        if checkpoint_file and os.path.isfile(checkpoint_file):
-            checkpoint_stat = os.stat(checkpoint_file)
-            checkpoint_revision = (
-                os.path.realpath(checkpoint_file), checkpoint_stat.st_size, checkpoint_stat.st_mtime_ns,
-            )
-        base_revision = (
-            type(unet).__module__, type(unet).__qualname__, id(unet),
-            getattr(checkpoint_info, "sha256", None), checkpoint_revision,
-        )
+        # The loaded checkpoint is not part of the key: only 'difference' models depend on it, and
+        # load_control_model rebuilds those when it changes (see _checkpoint_revision).
+        base_revision = (type(unet).__module__, type(unet).__qualname__, id(unet))
         loader_options = {
             key: value for key, value in shared.opts.data.items()
             if key.startswith("control_net") or key.startswith("controlnet")
@@ -464,15 +460,33 @@ class Script(scripts.Script, metaclass=(
         return control_model
 
     @staticmethod
+    def _checkpoint_revision(sd_model):
+        """Identity of the checkpoint whose weights the UNet holds: its sha256, and its file (path, size, mtime),
+        since checkpoint switches load in place into the same UNet object and --no-hashing leaves sha256 None."""
+        checkpoint_info = getattr(sd_model, "sd_checkpoint_info", None)
+        checkpoint_file = getattr(checkpoint_info, "filename", None)
+        file_revision = None
+        if checkpoint_file and os.path.isfile(checkpoint_file):
+            checkpoint_stat = os.stat(checkpoint_file)
+            file_revision = (os.path.realpath(checkpoint_file), checkpoint_stat.st_size, checkpoint_stat.st_mtime_ns)
+        return getattr(checkpoint_info, "sha256", None), file_revision
+
+    @staticmethod
     def load_control_model(p, unet, model) -> ControlModel:
         max_size = shared.opts.data.get("control_net_model_cache_size", 2)
         Script.model_load_cache.set_max_size(max_size)
         key = Script._model_cache_key(p, unet, model)
+        checkpoint_revision = Script._checkpoint_revision(p.sd_model)
 
         def build():
-            return Script.build_control_model(p, unet, model)
+            return Script.build_control_model(p, unet, model, checkpoint_revision)
 
-        control_model = Script.model_load_cache.get_or_compute(key, build)
+        built = Script.model_load_cache.get_or_compute(key, build)
+        if built.base_revision is not None and built.base_revision != checkpoint_revision:
+            # A 'difference' model holds the UNet weights of the checkpoint it was built against.
+            Script.model_load_cache.discard(key, "checkpoint-changed")
+            built = Script.model_load_cache.get_or_compute(key, build)
+        control_model = built.control_model
         if control_model.type == ControlModelType.Controlllite:
             # Mutable per-unit context is not equivalent across requests.
             Script.model_load_cache.discard(key, "volatile-controlllite")
@@ -482,7 +496,7 @@ class Script(scripts.Script, metaclass=(
         return cached
 
     @staticmethod
-    def build_control_model(p, unet, model) -> ControlModel:
+    def build_control_model(p, unet, model, checkpoint_revision=None) -> "BuiltControlModel":
         if model is None or model == 'None':
             raise RuntimeError("You have not selected any ControlNet Model.")
 
@@ -490,10 +504,12 @@ class Script(scripts.Script, metaclass=(
 
         logger.info(f"Loading model: {model}")
         state_dict = load_state_dict(model_path)
+        # build_model_by_guess adds the UNet's current weights to a 'difference' model's deltas.
+        depends_on_checkpoint = 'difference' in state_dict and unet is not None
         control_model = build_model_by_guess(state_dict, unet, model_path)
         control_model.model.to('cpu', dtype=p.sd_model.dtype)
         logger.info(f"ControlNet model {model}({control_model.type}) loaded.")
-        return control_model
+        return BuiltControlModel(control_model, checkpoint_revision if depends_on_checkpoint else None)
 
     @staticmethod
     def normalize_remote_resize_mode(value, default):

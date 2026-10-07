@@ -14,7 +14,11 @@ utils = importlib.import_module("extensions.sd-webui-controlnet.tests.utils", "u
 from modules import devices  # noqa: E402
 from modules.processing import StableDiffusionProcessingTxt2Img  # noqa: E402
 from scripts.cldm import PlugableControlModel  # noqa: E402
+import scripts.controlnet as controlnet_script  # noqa: E402
+from internal_controlnet.cache_contract import AtomicLRU  # noqa: E402
 from scripts.controlnet import Script  # noqa: E402
+from scripts.controlnet_model_guess import ControlModel  # noqa: E402
+from scripts.enums import ControlModelType  # noqa: E402
 from scripts.hook import TorchCache, UnetHook, register_schedule  # noqa: E402
 
 
@@ -152,31 +156,60 @@ class TestAggressiveLowVram(unittest.TestCase):
             self.assertTrue(torch.isfinite(guided).all())
 
 
-class TestModelCacheKeyCheckpointIdentity(unittest.TestCase):
-    """'difference' ControlNets bake the UNet's weights in at build time. With --no-hashing the checkpoint
-    sha256 is None and checkpoint switches load in place into the same UNet object, so the key must carry
-    the checkpoint file's identity."""
+class TestModelCacheCheckpointDependence(unittest.TestCase):
+    """'difference' ControlNets bake the UNet's weights in at build time; other models do not depend on the loaded
+    checkpoint. With --no-hashing the checkpoint sha256 is None and checkpoint switches load in place into the same
+    UNet object, so the checkpoint file identifies the build a 'difference' model needs. Other models must stay
+    cached across checkpoint switches (a rebuild keeps a second multi-GB copy alive on unified memory)."""
 
-    def test_key_changes_with_the_checkpoint_file(self):
+    def run_loads(self, state_dict, checkpoints):
         with tempfile.TemporaryDirectory() as tmp:
             cn_path = os.path.join(tmp, "control.safetensors")
-            ckpt_a, ckpt_b = os.path.join(tmp, "a.safetensors"), os.path.join(tmp, "b.safetensors")
-            for path in (cn_path, ckpt_a, ckpt_b):
+            paths = {name: os.path.join(tmp, f"{name}.safetensors") for name in set(checkpoints)}
+            for path in (cn_path, *paths.values()):
                 with open(path, "wb") as f:
                     f.write(b"x")
             unet = torch.nn.Identity()
+            builds = []
 
-            def key(checkpoint):
-                info = types.SimpleNamespace(filename=checkpoint, sha256=None)
+            def build_model_by_guess(sd, unet_arg, model_path):
+                builds.append(dict(sd))
+                return ControlModel(torch.nn.Linear(1, 1), ControlModelType.ControlNet)
+
+            models = []
+            with mock.patch.object(Script, "_resolve_model_path", staticmethod(lambda model: (model, cn_path))), \
+                    mock.patch.object(Script, "model_load_cache", AtomicLRU(2, "test-controlnet-model")), \
+                    mock.patch.object(controlnet_script, "load_state_dict", lambda path: dict(state_dict)), \
+                    mock.patch.object(controlnet_script, "build_model_by_guess", build_model_by_guess):
+                for name in checkpoints:
+                    info = types.SimpleNamespace(filename=paths[name], sha256=None)
+                    p = types.SimpleNamespace(sd_model=types.SimpleNamespace(sd_checkpoint_info=info, dtype=torch.float32))
+                    models.append(Script.load_control_model(p, unet, "control"))
+            return builds, models
+
+    def test_difference_model_is_rebuilt_for_another_checkpoint(self):
+        builds, _ = self.run_loads({"difference": torch.zeros(0), "w": torch.zeros(1)}, ["a", "a", "b", "b", "a"])
+        self.assertEqual(len(builds), 3)  # a, b, then a again
+
+    def test_other_models_survive_checkpoint_switches(self):
+        builds, models = self.run_loads({"w": torch.zeros(1)}, ["a", "b", "a"])
+        self.assertEqual(len(builds), 1)
+        self.assertIs(models[0].model, models[2].model)
+
+    def test_key_ignores_the_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cn_path = os.path.join(tmp, "control.safetensors")
+            with open(cn_path, "wb") as f:
+                f.write(b"x")
+            unet = torch.nn.Identity()
+
+            def key(checkpoint, sha256):
+                info = types.SimpleNamespace(filename=os.path.join(tmp, checkpoint), sha256=sha256)
                 p = types.SimpleNamespace(sd_model=types.SimpleNamespace(sd_checkpoint_info=info, dtype=torch.bfloat16))
                 with mock.patch.object(Script, "_resolve_model_path", staticmethod(lambda model: (model, cn_path))):
                     return Script._model_cache_key(p, unet, "control")
 
-            self.assertEqual(key(ckpt_a), key(ckpt_a))
-            self.assertNotEqual(key(ckpt_a), key(ckpt_b))
-            before = key(ckpt_a)
-            os.utime(ckpt_a, ns=(1, 1))
-            self.assertNotEqual(before, key(ckpt_a))
+            self.assertEqual(key("a.safetensors", "aa"), key("b.safetensors", "bb"))
 
 
 def a1111_hires_size(width, height, hr_scale, hr_resize_x, hr_resize_y):
