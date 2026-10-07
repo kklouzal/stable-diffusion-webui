@@ -27,7 +27,7 @@ from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
 from modules.textual_inversion.textual_inversion import create_embedding, train_embedding
 from modules.hypernetworks.hypernetwork import create_hypernetwork, train_hypernetwork
-from PIL import PngImagePlugin
+from PIL import Image, PngImagePlugin
 from modules.sd_models_config import find_checkpoint_config_near_filename
 from modules.realesrgan_model import get_realesrgan_models
 from modules import devices
@@ -518,7 +518,9 @@ def setUpscalers(req: dict):
 
 
 def verify_url(url):
-    """Returns True if the url refers to a global resource: every address its host resolves to is global."""
+    """The addresses the url's host resolves to when every one of them is global, else [] (also for a url without a
+    usable host). The request must then connect to one of these addresses: resolving the host again could answer
+    with a local one (DNS rebinding)."""
 
     import socket
     from urllib.parse import urlparse
@@ -527,46 +529,110 @@ def verify_url(url):
         # hostname, not netloc: netloc keeps a port or userinfo, which made the lookup fail. getaddrinfo, not
         # gethostbyname_ex: that saw only IPv4 addresses, while requests also connects to the host's IPv6 ones.
         if not parsed_url.hostname:
-            return False
-        addresses = socket.getaddrinfo(parsed_url.hostname, parsed_url.port, type=socket.SOCK_STREAM)
-        if not addresses:
-            return False
-        for *_, sockaddr in addresses:
-            if not ipaddress.ip_address(sockaddr[0]).is_global:
-                return False
+            return []
+        addresses = list(dict.fromkeys(sockaddr[0] for *_, sockaddr in socket.getaddrinfo(parsed_url.hostname, parsed_url.port, type=socket.SOCK_STREAM)))
+        if not addresses or not all(ipaddress.ip_address(address).is_global for address in addresses):
+            return []
     except Exception:
-        return False
+        return []
 
-    return True
+    return addresses
 
 
-def _get_image_url(url, headers):
-    """GET an image URL, following redirects like requests does but checking every hop with verify_url when
-    api_forbid_local_requests is set: requests' own redirect handling let a global URL redirect to a local one."""
-    with requests.Session() as session:
+class _PinnedAddressAdapter(requests.adapters.HTTPAdapter):
+    """Connects to `address` (one verify_url returned) instead of resolving the url's host again. The request still
+    names the url's host: in the Host header and, for https, as the TLS server name (SNI) that the certificate is
+    verified against."""
+
+    address = None
+
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(request, verify, cert)
+        if host_params["scheme"] == "https":
+            pool_kwargs["server_hostname"] = host_params["host"]
+        host_params["host"] = self.address
+        return host_params, pool_kwargs
+
+    def send(self, request, *args, **kwargs):
+        from urllib3.util import parse_url
+        url = parse_url(request.url)
+        request.headers["Host"] = url.host if url.port in (None, {"http": 80, "https": 443}[url.scheme]) else f"{url.host}:{url.port}"
+        return super().send(request, *args, **kwargs)
+
+
+class _ImageUrlSession(requests.Session):
+    def resolve_redirects(self, *args, **kwargs):
+        """Follows no redirect: _get_image_url follows them itself, hop by hop. requests' resolver reads the whole
+        body of a redirect response, without a size limit and even for a streamed request, before it yields the next hop."""
+        return iter(())
+
+
+def _get_image_url(url, headers, max_bytes):
+    """GET an image URL into a BytesIO, following redirects like requests does. With api_forbid_local_requests every
+    hop must pass verify_url (requests' own redirect handling let a global URL redirect to a local one) and connects to
+    an address verify_url checked, trying them in order as urllib3 does. A body longer than max_bytes answers 413: a
+    declared Content-Length is checked before reading, and the body is counted as it is read (decoded), since a
+    chunked or compressed body declares nothing useful."""
+    from urllib.parse import urljoin
+    with _ImageUrlSession() as session:
+        pinned = _PinnedAddressAdapter()
+        if opts.api_forbid_local_requests:
+            session.mount("http://", pinned)
+            session.mount("https://", pinned)
+
         for _ in range(requests.models.DEFAULT_REDIRECT_LIMIT + 1):
-            if opts.api_forbid_local_requests and not verify_url(url):
-                raise HTTPException(status_code=500, detail="Request to local resource not allowed")
+            addresses = [None]
+            if opts.api_forbid_local_requests:
+                addresses = verify_url(url)
+                if not addresses:
+                    raise HTTPException(status_code=500, detail="Request to local resource not allowed")
 
-            response = session.get(url, timeout=30, headers=headers, allow_redirects=False)
-            if response.next is None:
-                return response
+            for i, address in enumerate(addresses):
+                pinned.address = address
+                try:
+                    response = session.get(url, timeout=30, headers=headers, allow_redirects=False, stream=True)
+                    break
+                except requests.exceptions.ConnectionError:
+                    if i == len(addresses) - 1:
+                        raise
 
-            url = response.next.url
+            with response:
+                location = session.get_redirect_target(response)
+                if location is None:
+                    declared = response.headers.get("Content-Length", "")
+                    if declared.isdigit() and int(declared) > max_bytes:
+                        raise HTTPException(status_code=413, detail=f"Image url response is larger than {max_bytes} bytes")
+                    body = BytesIO()
+                    for chunk in response.iter_content(chunk_size=1 << 20):
+                        body.write(chunk)
+                        if body.tell() > max_bytes:
+                            raise HTTPException(status_code=413, detail=f"Image url response is larger than {max_bytes} bytes")
+                    body.seek(0)
+                    return body
+
+            url = urljoin(response.url, location)
 
     raise HTTPException(status_code=500, detail="Invalid image url")
 
 
 def decode_base64_to_image(encoding):
+    """Decodes an API input image: an http(s) URL (if api_enable_requests), an RFC 2397 data URL or plain base64.
+    An image of more than img_max_size_mp megapixels answers 413 once its header is read, before its pixels are
+    decoded. A URL download may be as long as an image of that many pixels stored uncompressed as 8-bit RGBA (4 bytes
+    per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit."""
+    max_pixels = int(opts.img_max_size_mp * 1_000_000)
+
     if encoding.startswith("http://") or encoding.startswith("https://"):
         if not opts.api_enable_requests:
             raise HTTPException(status_code=500, detail="Requests not allowed")
 
         headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
-        response = _get_image_url(encoding, headers)
+        body = _get_image_url(encoding, headers, max_bytes=4 * max_pixels)
         try:
-            image = images.read(BytesIO(response.content))
+            image = images.read(body, max_pixels=max_pixels)
             return image
+        except Image.DecompressionBombError as e:
+            raise HTTPException(status_code=413, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(status_code=500, detail="Invalid image url") from e
 
@@ -576,8 +642,10 @@ def decode_base64_to_image(encoding):
         if not separator or not header.lower().endswith(";base64"):
             raise HTTPException(status_code=500, detail="Invalid encoded image")
     try:
-        image = images.read(BytesIO(base64.b64decode(encoding)))
+        image = images.read(BytesIO(base64.b64decode(encoding)), max_pixels=max_pixels)
         return image
+    except Image.DecompressionBombError as e:
+        raise HTTPException(status_code=413, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
 

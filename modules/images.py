@@ -908,8 +908,13 @@ def flatten(img, bgcolor):
     return img.convert('RGB')
 
 
-def read(fp, **kwargs):
+def read(fp, *, max_pixels=None, **kwargs):
+    """Opens and decodes an image. An image of more than max_pixels pixels raises Image.DecompressionBombError once
+    its header is read, before its pixel data is decoded."""
     image = Image.open(fp, **kwargs)
+    if max_pixels is not None and image.width * image.height > max_pixels:
+        image.close()
+        raise Image.DecompressionBombError(f"Image size ({image.width}x{image.height} pixels) exceeds the limit of {max_pixels} pixels")
     image.load()  # truncated/corrupt data must fail here; fix_image swallows errors, which deferred them to first use
     image = fix_image(image)
 
