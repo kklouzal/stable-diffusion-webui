@@ -208,12 +208,13 @@ def _pillow_png(image, text, extra=None):
 def test_png_saves_use_the_parallel_writer_unless_disabled(images, tmp_path, monkeypatch):
     calls = []
     encode = images.png_writer.encode
-    monkeypatch.setattr(images.png_writer, "encode", lambda *args: calls.append(args) or encode(*args))
+    monkeypatch.setattr(images.png_writer, "encode", lambda *args: calls.append(encode(*args)) or calls[-1])
     image = _random_rgb(300, 200, seed=3)
     text = "a cat, Steps: 20, \xfcn\xefc\xf6d\xe9 \u2713"
 
     images.save_image_with_geninfo(image, text, str(tmp_path / "parallel.png"), existing_pnginfo={"extra": "x"})
-    assert len(calls) == 1
+    assert len(calls) == 1 and calls[0] is not None  # the parallel writer covered the image and wrote the file
+    assert (tmp_path / "parallel.png").read_bytes() == calls[0]
     monkeypatch.setattr(images.opts, "png_parallel_encoder", False)
     images.save_image_with_geninfo(image, text, str(tmp_path / "pillow.png"), existing_pnginfo={"extra": "x"})
     assert len(calls) == 1

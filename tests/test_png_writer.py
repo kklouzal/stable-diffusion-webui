@@ -11,6 +11,11 @@ import numpy as np
 import pytest
 from PIL import Image, PngImagePlugin
 
+try:
+    import cv2  # OpenCV's libpng decoder: an implementation independent of Pillow and zlib's Python binding
+except ImportError:
+    cv2 = None
+
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("png_writer_under_test", ROOT / "modules" / "png_writer.py")
 png_writer = importlib.util.module_from_spec(_spec)
@@ -100,7 +105,8 @@ def assert_equivalent(image, pnginfo=None, **encode_kwargs):
         assert decoded.tobytes() == image.tobytes()
         assert decoded.info == expected.info and decoded.text == expected.text
 
-    cv2 = pytest.importorskip("cv2")
+    if cv2 is None:  # present in the target image; elsewhere only the independent-decoder check is skipped
+        return ours, reference
     independent = cv2.imdecode(np.frombuffer(ours, np.uint8), cv2.IMREAD_UNCHANGED)
     if independent.ndim == 2:
         independent = independent[..., None]
