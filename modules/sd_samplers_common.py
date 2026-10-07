@@ -191,6 +191,9 @@ def apply_refiner(cfg_denoiser, sigma=None):
         completed_ratio = cfg_denoiser.step / cfg_denoiser.total_steps
         cfg_denoiser.p.extra_generation_params["Refiner switch by sampling steps"] = True
 
+    elif cfg_denoiser.p.refiner_checkpoint_info is None:
+        return False  # no refiner: skip the per-step sigma argmin, which only feeds the switch decision
+
     else:
         # torch.max(sigma) only to handle rare case where we might have different sigmas in the same batch
         try:
