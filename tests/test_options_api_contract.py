@@ -65,9 +65,11 @@ def test_onchange_failure_restores_the_value_and_propagates(options_module):
 
     opts.data_labels["vae"].onchange = reload_vae
 
-    with pytest.raises(RuntimeError, match="VAE reload failed"):
+    with pytest.raises(options_module.OptionChangeFailed, match="VAE reload failed") as raised:
         opts.set("vae", "other.safetensors", is_api=True)
 
+    assert isinstance(raised.value, RuntimeError)
+    assert str(raised.value.__cause__) == "VAE reload failed"
     assert opts.vae == "Automatic"
 
 

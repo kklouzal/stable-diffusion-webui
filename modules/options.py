@@ -79,6 +79,10 @@ def options_section(section_identifier, options_dict):
 
 options_builtin_fields = {"data_labels", "data", "restricted_opts", "typemap"}
 
+
+class OptionChangeFailed(RuntimeError):
+    """An option's onchange callback raised; the option keeps its previous value (the cause is chained)."""
+
 _save_lock = threading.Lock()
 """Serializes Options.save(): API requests save the settings file from concurrent threads."""
 
@@ -152,7 +156,8 @@ class Options:
         An API value (is_api=True: /sdapi/v1/options and request override_settings) must have the type of the option's
         default, with int and float interchangeable and None accepted (same_type()); any other value raises ValueError
         rather than being stored, because e.g. the JSON string "false" stored in a bool option reads as True.
-        If the onchange callback raises, the previous value is restored and the exception propagates to the caller."""
+        If the onchange callback raises, the previous value is restored and OptionChangeFailed (from the callback's
+        exception) propagates to the caller."""
 
         oldval = self.data.get(key, None)
         if oldval == value:
@@ -176,9 +181,9 @@ class Options:
         if run_callbacks and option.onchange is not None:
             try:
                 option.onchange()
-            except Exception:
+            except Exception as e:
                 setattr(self, key, oldval)
-                raise
+                raise OptionChangeFailed(f"changing setting {key} to {value!r} failed and was reverted: {type(e).__name__}: {e}") from e
 
         return True
 
