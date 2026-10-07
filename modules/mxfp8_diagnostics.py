@@ -55,6 +55,13 @@ def _jsonable(value: Any) -> Any:
 
 
 def _timed_cuda(fn, warmup: int = 5, iters: int = 20) -> dict[str, Any]:
+    # Time in inference mode, as generation runs: a bf16 Linear with requires_grad parameters would otherwise record
+    # autograd state on every call while the quantized one does not, skewing the comparison.
+    with torch.inference_mode():
+        return _timed_cuda_inference(fn, warmup, iters)
+
+
+def _timed_cuda_inference(fn, warmup: int, iters: int) -> dict[str, Any]:
     if not torch.cuda.is_available():
         start = time.perf_counter()
         for _ in range(max(1, iters)):
