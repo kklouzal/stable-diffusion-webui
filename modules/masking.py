@@ -1,4 +1,3 @@
-import math
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageFilter, ImageOps
@@ -52,12 +51,10 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
 
     x1, y1, x2, y2 = crop_region
 
-    ratio_crop_region = (x2 - x1) / (y2 - y1)
-    ratio_processing = processing_width / processing_height
-
-    if ratio_crop_region > ratio_processing:
-        desired_height = (x2 - x1) / ratio_processing
-        desired_height_diff = math.ceil(desired_height - (y2-y1))
+    # Aspect comparison and ceil() in exact integer arithmetic: with float ratios an exact quotient could come out a few
+    # ulp high and ceil() then grew the region by a pixel off the processing aspect.
+    if (x2 - x1) * processing_height > (y2 - y1) * processing_width:
+        desired_height_diff = -(((y2 - y1) * processing_width - (x2 - x1) * processing_height) // processing_width)
         y1 -= desired_height_diff//2
         y2 += desired_height_diff - desired_height_diff//2
         if y2 >= image_height:
@@ -70,8 +67,7 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
         if y2 >= image_height:
             y2 = image_height
     else:
-        desired_width = (y2 - y1) * ratio_processing
-        desired_width_diff = math.ceil(desired_width - (x2-x1))
+        desired_width_diff = -(((x2 - x1) * processing_height - (y2 - y1) * processing_width) // processing_height)
         x1 -= desired_width_diff//2
         x2 += desired_width_diff - desired_width_diff//2
         if x2 >= image_width:

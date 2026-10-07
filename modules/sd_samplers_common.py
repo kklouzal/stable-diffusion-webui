@@ -1,4 +1,5 @@
 import inspect
+import math
 from collections import namedtuple
 import numpy as np
 import torch
@@ -41,14 +42,24 @@ class SamplerData(SamplerDataTuple):
         return steps
 
 
+def _floor_step_count(value):
+    """floor() of a step count computed from a decimal denoising strength.
+
+    Decimal strengths are not exact binary fractions, so a quotient or product that is mathematically an integer can
+    come out a few ulp below it (33 / 0.55 == 59.99999999999999, 0.29 * 100 == 28.999999999999996) and int() would
+    drop a whole step. Any value within 1e-9 of an integer is that integer: genuine fractions of these step counts are
+    at least ~1e-3 away from one, and the float64 error stays far below 1e-9."""
+    return math.floor(value + 1e-9)
+
+
 def setup_img2img_steps(p, steps=None):
     if opts.img2img_fix_steps or steps is not None:
         requested_steps = (steps or p.steps)
-        steps = int(requested_steps / min(p.denoising_strength, 0.999)) if p.denoising_strength > 0 else 0
+        steps = _floor_step_count(requested_steps / min(p.denoising_strength, 0.999)) if p.denoising_strength > 0 else 0
         t_enc = requested_steps - 1
     else:
         steps = p.steps
-        t_enc = int(min(p.denoising_strength, 0.999) * steps)
+        t_enc = _floor_step_count(min(p.denoising_strength, 0.999) * steps)
 
     return steps, t_enc
 

@@ -129,7 +129,9 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
 
         if p.sampler_noise_scheduler_override:
             openclaw_generation_profile.bypass("sampler_noise_scheduler_override")
-            return p.sampler_noise_scheduler_override(steps).cpu()
+            # The override is asked for the extra step too, so it needs the same discard as the built-in schedules.
+            sigmas = p.sampler_noise_scheduler_override(steps)
+            return (torch.cat([sigmas[:-2], sigmas[-1:]]) if discard_next_to_last_sigma else sigmas).cpu()
 
         sigmas_kwargs = None
         if scheduler is not None and scheduler.function is not None:

@@ -111,6 +111,14 @@ def _resize_latent_mask(image, size, round=True):
     return latmask
 
 
+def _latent_blend_masks(latmask, channels):
+    """Return (mask, nmask) for blending the init latent back in: nmask = latmask weights the sampled latent and
+    mask = 1 - nmask the init latent. Both stay float32 like the latents they blend (they never reach the UNet); in a
+    16-bit model dtype a soft mask is quantized and mask + nmask misses 1 by up to 2**-9 (bfloat16)."""
+    nmask = torch.from_numpy(latmask).to(device=shared.device, dtype=torch.float32).unsqueeze(0).expand(channels, -1, -1)
+    return 1.0 - nmask, nmask
+
+
 def _image_cache_fingerprint(image):
     """Identify a PIL image by everything its pixel conversions read: mode, size, palette, transparency and raw bytes."""
     if image is None:
@@ -1481,8 +1489,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         if self.hr_resize_x == 0 and self.hr_resize_y == 0:
             self.extra_generation_params["Hires upscale"] = self.hr_scale
-            self.hr_upscale_to_x = int(self.width * self.hr_scale)
-            self.hr_upscale_to_y = int(self.height * self.hr_scale)
+            # floor, not int(): a decimal scale is not an exact binary fraction and an integer product can come out a
+            # few ulp low (1600 * 1.15 == 1839.9999999999998), which would shrink the hires latent by a row/column.
+            self.hr_upscale_to_x = math.floor(self.width * self.hr_scale + 1e-9)
+            self.hr_upscale_to_y = math.floor(self.height * self.hr_scale + 1e-9)
         else:
             self.extra_generation_params["Hires resize"] = f"{self.hr_resize_x}x{self.hr_resize_y}"
 
@@ -1943,6 +1953,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             getattr(self.sampler, "conditioning_key", None),
             self.width,
             self.height,
+            # apply_circular(p.tiling) also switches the VAE encoder's convolutions to circular padding.
+            bool(self.tiling),
             self.resize_mode,
             self.batch_size,
             bool(repeat_init_latent),
@@ -2160,11 +2172,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if image_mask is not None:
             init_mask = latent_mask
             latmask = _resize_latent_mask(init_mask, (self.init_latent.shape[3], self.init_latent.shape[2]), self.mask_round)
-            latmask = torch.from_numpy(latmask).to(device=shared.device, dtype=devices.dtype)
-            latmask = latmask.unsqueeze(0).expand(self.init_latent.shape[1], -1, -1)
-
-            self.mask = 1.0 - latmask
-            self.nmask = latmask
+            self.mask, self.nmask = _latent_blend_masks(latmask, self.init_latent.shape[1])
 
             # this needs to be fixed to be done in sample() using actual seeds for batches
             if self.inpainting_fill == 2:

@@ -271,6 +271,29 @@ class KDiffusionSigmasCacheTests(unittest.TestCase):
         finally:
             profile._MAX_SIZE = previous
 
+    def test_schedule_override_gets_the_penultimate_sigma_discard(self):
+        module, _shared, profile = load_kdiffusion_module()
+        sampler = make_sampler(module)
+        sampler.config = types.SimpleNamespace(name="DPM2", options={"discard_next_to_last_sigma": True})
+        requested = []
+
+        def override(steps):
+            requested.append(steps)
+            return torch.cat([torch.linspace(float(steps), 1.0, steps), torch.zeros(1)])
+
+        p = make_processing()
+        p.sampler_noise_scheduler_override = override
+
+        sigmas = sampler.get_sigmas(p, 4)
+
+        # Asked for 5 steps (4 + the discarded one), returned the 4-step schedule without its penultimate sigma.
+        self.assertEqual(requested, [5])
+        torch.testing.assert_close(sigmas, torch.tensor([5.0, 4.0, 3.0, 2.0, 0.0]))
+        self.assertEqual(profile.status()["stores"], 0)
+
+        sampler.config = types.SimpleNamespace(name="Euler", options={})
+        torch.testing.assert_close(sampler.get_sigmas(p, 4), torch.tensor([4.0, 3.0, 2.0, 1.0, 0.0]))
+
     def test_noised_img2img_latent_applies_extra_noise_after_callback(self):
         module, shared, _profile = load_kdiffusion_module()
         sampler = object.__new__(module.KDiffusionSampler)

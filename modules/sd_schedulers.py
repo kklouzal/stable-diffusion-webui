@@ -89,27 +89,34 @@ def get_align_your_steps_sigmas(n, sigma_min, sigma_max, device):
         # Default to SD 1.5 sigmas.
         base_sigmas = [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029]
 
-    sigmas = torch.as_tensor(base_sigmas, device=device, dtype=torch.float32)
+    # Interpolate in float64 and round once: the reference (NVIDIA's how-to, upstream np.interp) works in float64, and
+    # float32 log/interpolate/exp drifts up to 16 ulp from it.
+    sigmas = torch.as_tensor(base_sigmas, device=device, dtype=torch.float64)
     if n != sigmas.numel():
         sigmas = _loglinear_interp_sigmas(sigmas, n)
 
-    return _append_zero(sigmas)
+    return _append_zero(sigmas.to(torch.float32))
 
 
 def kl_optimal(n, sigma_min, sigma_max, device):
+    """KL-optimal schedule (Sabour et al., "Align Your Steps", arXiv:2404.14507): n sigmas from sigma_max to sigma_min,
+    evenly spaced in arctan(sigma), then the terminal 0 every k-diffusion schedule ends with, so that the last step
+    denoises to sigma 0 instead of returning a latent that still carries sigma_min noise."""
     n = _validate_step_count(n)
     alpha_min = torch.arctan(_as_sigma(sigma_min, device))
     alpha_max = torch.arctan(_as_sigma(sigma_max, device))
-    step_indices = torch.arange(n + 1, device=device)
-    sigmas = torch.tan(step_indices / n * alpha_min + (1.0 - step_indices / n) * alpha_max)
-    return sigmas
+    ramp = torch.arange(n, device=device, dtype=torch.float32) / max(n - 1, 1)
+    sigmas = torch.tan(ramp * alpha_min + (1.0 - ramp) * alpha_max)
+    return _append_zero(sigmas)
 
 
 def simple_scheduler(n, sigma_min, sigma_max, inner_model, device):
     n = _validate_step_count(n)
     sigmas = torch.as_tensor(inner_model.sigmas, device=device, dtype=torch.float32)
     ss = len(inner_model.sigmas) / n
-    indices = -(1 + (torch.arange(n, device=device, dtype=torch.float32) * ss).to(torch.long))
+    # float64 like the reference loop's int(i * ss): float32 products truncate to the neighbouring table index for
+    # 112 of the step counts 1..1000 (30 among them).
+    indices = -(1 + (torch.arange(n, device=device, dtype=torch.float64) * ss).to(torch.long))
     return _append_zero(sigmas[indices])
 
 
