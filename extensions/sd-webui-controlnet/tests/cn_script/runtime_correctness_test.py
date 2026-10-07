@@ -199,6 +199,14 @@ class TestHiresTargetDimensions(unittest.TestCase):
             (1024, 768, 1.0, 0, 1152),     # height only
             (1024, 1024, 1.0, 1536, 1024),  # both: upscaled, then truncated to the requested size
             (832, 1216, 2.0, 0, 0),
+            # The core floors a scaled size with 1e-9 slack: int(800 * 1.15) == 919, the hires latent is 920 px.
+            (800, 800, 1.15, 0, 0),
+            (1320, 1320, 1.4, 0, 0),
+            (1440, 1440, 1.15, 0, 0),
+            # Both dimensions, not multiples of 8: the truncation keeps ceil(requested / 8) latents.
+            (1024, 1024, 1.0, 1536, 1020),
+            (1024, 1024, 1.0, 1028, 1040),
+            (1024, 768, 1.0, 1500, 1000),
         ]
         for width, height, hr_scale, hr_resize_x, hr_resize_y in cases:
             p = StableDiffusionProcessingTxt2Img.__new__(StableDiffusionProcessingTxt2Img)
