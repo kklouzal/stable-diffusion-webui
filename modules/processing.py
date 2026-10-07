@@ -21,7 +21,7 @@ import modules.sd_hijack
 from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
-from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
+from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
 import modules.paths as paths
@@ -813,16 +813,15 @@ class DecodedSamples(list):
 
 
 def samples_to_uint8_images(samples):
-    """Convert clamped CHW torch image tensors to HWC uint8 NumPy arrays.
+    """Convert clamped [0, 1] CHW torch image tensors to HWC uint8 NumPy arrays (rounded; see float_images_to_uint8).
 
-    This intentionally preserves the old per-sample semantics:
-    multiply by 255, truncate toward zero, and then cast to uint8.
+    A batch tensor is quantized in one device pass and copied out once; a list is converted per sample.
     """
 
     if isinstance(samples, torch.Tensor):
-        return (samples * 255.0).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        return float_images_to_uint8(samples).cpu().numpy()
 
-    return [(sample * 255.0).byte().permute(1, 2, 0).contiguous().cpu().numpy() for sample in samples]
+    return [float_images_to_uint8(sample).cpu().numpy() for sample in samples]
 
 
 def decoded_images_device():
