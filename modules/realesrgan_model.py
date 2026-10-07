@@ -1,6 +1,6 @@
 import os
 
-from modules import modelloader, errors
+from modules import modelloader
 from modules.shared import cmd_opts, opts
 from modules.upscaler import Upscaler, UpscalerData
 from modules.upscaler_utils import upscale_with_model
@@ -30,18 +30,17 @@ class UpscalerRealESRGAN(Upscaler):
         if not self.enable:
             return img
 
+        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             info = self.load_model(path)
-        except Exception:
-            errors.report(f"Unable to load RealESRGAN model {path}", exc_info=True)
-            return img
-
-        model_descriptor = modelloader.load_cached_spandrel_model(
-            info.local_data_path,
-            device=self.device,
-            prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
-            expected_architecture="ESRGAN",  # "RealESRGAN" isn't a specific thing for Spandrel
-        )
+            model_descriptor = modelloader.load_cached_spandrel_model(
+                info.local_data_path,
+                device=self.device,
+                prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
+                expected_architecture="ESRGAN",  # "RealESRGAN" isn't a specific thing for Spandrel
+            )
+        except Exception as e:
+            raise RuntimeError(f"Unable to load RealESRGAN model {path}: {e}") from e
         return upscale_with_model(
             model_descriptor,
             img,

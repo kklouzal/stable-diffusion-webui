@@ -1,4 +1,4 @@
-from modules import modelloader, devices, errors
+from modules import modelloader, devices
 from modules.shared import opts
 from modules.upscaler import Upscaler, UpscalerData
 from modules.upscaler_utils import upscale_with_model
@@ -27,11 +27,11 @@ class UpscalerESRGAN(Upscaler):
             self.scalers.append(scaler_data)
 
     def do_upscale(self, img, selected_model):
+        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             model = self.load_model(selected_model)
-        except Exception:
-            errors.report(f"Unable to load ESRGAN model {selected_model}", exc_info=True)
-            return img
+        except Exception as e:
+            raise RuntimeError(f"Unable to load ESRGAN model {selected_model}: {e}") from e
         return esrgan_upscale(model, img)
 
     def load_model(self, path: str):

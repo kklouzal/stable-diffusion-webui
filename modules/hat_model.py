@@ -1,5 +1,4 @@
 import os
-import sys
 
 from modules import modelloader, devices
 from modules.shared import opts
@@ -20,11 +19,11 @@ class UpscalerHAT(Upscaler):
             self.scalers.append(scaler_data)
 
     def do_upscale(self, img, selected_model):
+        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             model = self.load_model(selected_model)
         except Exception as e:
-            print(f"Unable to load HAT model {selected_model}: {e}", file=sys.stderr)
-            return img
+            raise RuntimeError(f"Unable to load HAT model {selected_model}: {e}") from e
         return upscale_with_model(
             model,
             img,
