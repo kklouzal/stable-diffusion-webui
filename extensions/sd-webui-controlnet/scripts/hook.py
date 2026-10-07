@@ -393,6 +393,11 @@ class UnetHook(nn.Module):
         # wrapper carrying this opaque token. Never restore another owner.
         self._forward_hook_owner_token = object()
         self._forward_hook_wrapper = None
+        # True only while this hook's process.sample() runs. Every ControlNet
+        # UNet call happens inside it; outside it the wrapper is a pass-through,
+        # so a hook leaked by a failed generation can never touch a later one.
+        self.sampling_active = False
+        self._warned_outside_sampling = False
 
     @staticmethod
     def call_vae_using_process(p, x, batch_size=None, mask=None):
@@ -471,7 +476,12 @@ class UnetHook(nn.Module):
             mark_prompt_context(kwargs.get('unconditional_conditioning', []), positive=False)
             mark_prompt_context(getattr(process, 'hr_c', []), positive=True)
             mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
-            return process.sample_before_CN_hack(*args, **kwargs)
+            previously_active = outer.sampling_active
+            outer.sampling_active = True
+            try:
+                return process.sample_before_CN_hack(*args, **kwargs)
+            finally:
+                outer.sampling_active = previously_active
 
         def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
             is_sdxl = y is not None and model_is_sdxl
@@ -904,6 +914,14 @@ class UnetHook(nn.Module):
             # without forwarding the wrapper's bound self a second time.
             if not outer.control_params:
                 return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
+            if not outer.sampling_active:
+                # Outside this hook's process.sample(): a hook leaked by a failed
+                # generation (postprocess never ran), or a caller that bypassed
+                # ControlNet's sample wrapper. Never apply stale control here.
+                if not outer._warned_outside_sampling:
+                    outer._warned_outside_sampling = True
+                    logger.warning("ControlNet: UNet called outside the hooked process.sample(); control is not applied to this call.")
+                return outer.original_forward(x, timesteps=timesteps, context=context, y=y, **kwargs)
             try:
                 if shared.cmd_opts.lowvram:
                     lowvram.send_everything_to_cpu()
@@ -1012,6 +1030,10 @@ class UnetHook(nn.Module):
             model._controlnet_forward_hook_baseline = outer.original_forward
             model._controlnet_forward_hook_owner = outer._forward_hook_owner_token
             model._controlnet_forward_hook_wrapper = wrapper
+            # Restore by resource, not by Script instance: txt2img and img2img
+            # have separate Script instances, and postprocess (the normal
+            # restore point) never runs when a generation raises.
+            model._controlnet_forward_hook_restore = outer.restore
             outer._forward_hook_wrapper = wrapper
             model.forward = wrapper
 
@@ -1101,5 +1123,14 @@ class UnetHook(nn.Module):
                 del model._controlnet_forward_hook_baseline
                 del model._controlnet_forward_hook_owner
                 del model._controlnet_forward_hook_wrapper
+                del model._controlnet_forward_hook_restore
         self._forward_hook_wrapper = None
         self.control_params = None
+
+    @staticmethod
+    def restore_leaked(model):
+        """Restore the hook any UnetHook left on `model`, whichever Script
+        instance installed it (e.g. a generation that raised before postprocess)."""
+        restore = getattr(model, "_controlnet_forward_hook_restore", None)
+        if restore is not None:
+            restore()

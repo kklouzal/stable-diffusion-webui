@@ -926,6 +926,9 @@ class Script(scripts.Script, metaclass=(
 
         setattr(p, 'controlnet_control_loras', [])
 
+        # A failed generation skips postprocess, and its hook may belong to the
+        # other (txt2img/img2img) Script instance; heal the shared UNet first.
+        UnetHook.restore_leaked(unet)
         if self.latest_network is not None:
             # always restore (~0.05s)
             self.latest_network.restore()
