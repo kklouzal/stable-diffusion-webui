@@ -212,3 +212,76 @@ def test_weighted_histogram_filter_rejects_unsupported_inputs(soft_inpainting):
         soft_inpainting.weighted_histogram_filter(img, np.ones((3, 3)), 3)
     with pytest.raises(ValueError, match="2-D image"):
         soft_inpainting.weighted_histogram_filter(np.zeros((2, 3, 3), dtype=np.float32), np.ones((3, 3)), 1)
+
+
+def _inpaint_full_res_processing(**overrides):
+    canvas = Image.new('RGB', (96, 80), (10, 20, 30))
+    p = SimpleNamespace(
+        image_mask=Image.new('L', (96, 80)),
+        nmask=torch.full((4, 8, 8), 0.25),
+        init_images=[canvas],
+        paste_to=(16, 8, 48, 48),
+        resize_mode=0,
+        width=64,
+        height=64,
+        batch_size=1,
+    )
+    for key, value in overrides.items():
+        setattr(p, key, value)
+    return p
+
+
+SETTINGS = (1, 0.5, 4, 0, 0.5, 2)
+
+
+def test_apply_masks_uncrops_to_the_overlay_size_with_inpaint_full_res(soft_inpainting):
+    script = soft_inpainting.Script()
+    p = _inpaint_full_res_processing()
+    samples = torch.zeros((1, 3, 64, 64))
+    samples.already_decoded = True
+
+    script.post_sample(p, SimpleNamespace(samples=samples), True, *SETTINGS)
+
+    assert [mask.size for mask in script.masks_for_overlay] == [(96, 80)]
+    assert [image.size for image in script.overlay_images] == [(96, 80)]
+    overlay = script.overlay_images[0]
+    # Outside the paste region the mask is empty, so the original pixels stay fully opaque.
+    assert overlay.getpixel((0, 0)) == (10, 20, 30, 255)
+    assert overlay.getpixel((95, 79)) == (10, 20, 30, 255)
+    # Inside it the 0.25 latent mask makes the original partly transparent.
+    assert overlay.getpixel((40, 32))[3] < 255
+
+    ppmo = SimpleNamespace(index=0, mask_for_overlay="core", overlay_image="core")
+    script.postprocess_maskoverlay(p, ppmo, True, *SETTINGS)
+    assert ppmo.mask_for_overlay is script.masks_for_overlay[0]
+    assert ppmo.overlay_image is script.overlay_images[0]
+
+
+def test_masks_and_overlays_never_leak_into_a_later_batch_or_request(soft_inpainting, monkeypatch):
+    script = soft_inpainting.Script()
+    p = _inpaint_full_res_processing()
+    samples = torch.zeros((1, 3, 64, 64))
+    samples.already_decoded = True
+    script.post_sample(p, SimpleNamespace(samples=samples), True, *SETTINGS)
+    assert script.masks_for_overlay is not None
+
+    # A later batch whose mask build fails must fall back to the core overlay, not reuse the previous masks.
+    def boom(**_kwargs):
+        raise RuntimeError("mask build failed")
+
+    monkeypatch.setattr(soft_inpainting, "apply_masks", boom)
+    with pytest.raises(RuntimeError, match="mask build failed"):
+        script.post_sample(p, SimpleNamespace(samples=samples), True, *SETTINGS)
+    ppmo = SimpleNamespace(index=0, mask_for_overlay="core", overlay_image="core")
+    script.postprocess_maskoverlay(p, ppmo, True, *SETTINGS)
+    assert (ppmo.mask_for_overlay, ppmo.overlay_image) == ("core", "core")
+
+    # A request without a latent mask must not see an earlier request's masks either.
+    script.masks_for_overlay, script.overlay_images = ["stale"], ["stale"]
+    script.post_sample(_inpaint_full_res_processing(nmask=None), SimpleNamespace(samples=samples), True, *SETTINGS)
+    assert (script.masks_for_overlay, script.overlay_images) == (None, None)
+
+    # The finished request releases its full-resolution overlays.
+    script.masks_for_overlay, script.overlay_images = ["done"], ["done"]
+    script.postprocess(p, SimpleNamespace(), False, *SETTINGS)
+    assert (script.masks_for_overlay, script.overlay_images) == (None, None)

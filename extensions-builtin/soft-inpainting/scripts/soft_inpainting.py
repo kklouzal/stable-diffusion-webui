@@ -228,20 +228,22 @@ def apply_masks(
     # Remove aliasing artifacts using a gaussian blur.
     converted_mask = converted_mask.filter(ImageFilter.GaussianBlur(radius=4))
 
-    # Expand the mask to fit the whole image if needed.
-    if paste_to is not None:
-        converted_mask = proc.uncrop(converted_mask,
-                                     (width, height),
-                                     paste_to)
-
     masks_for_overlay = []
 
     for i, overlay_image in enumerate(overlay_images):
-        masks_for_overlay.append(converted_mask)
+        mask_for_overlay = converted_mask
+        # Expand the mask to fit the whole image if needed. With inpaint full-res the overlay is the uncropped
+        # original, not width x height.
+        if paste_to is not None:
+            mask_for_overlay = proc.uncrop(converted_mask,
+                                           (overlay_image.width, overlay_image.height),
+                                           paste_to)
+
+        masks_for_overlay.append(mask_for_overlay)
 
         image_masked = Image.new('RGBa', (overlay_image.width, overlay_image.height))
         image_masked.paste(overlay_image.convert("RGBA").convert("RGBa"),
-                           mask=ImageOps.invert(converted_mask.convert('L')))
+                           mask=ImageOps.invert(mask_for_overlay.convert('L')))
 
         overlay_images[i] = image_masked.convert('RGBA')
 
@@ -664,6 +666,11 @@ class Script(scripts.Script):
 
     def post_sample(self, p, ps: scripts.PostSampleArgs, enabled, power, scale, detail_preservation, mask_inf,
                     dif_thresh, dif_contr):
+        # Masks and overlays belong to this batch only: a batch that builds none (or fails building them) must not
+        # composite the previous batch's or request's.
+        self.masks_for_overlay = None
+        self.overlay_images = None
+
         if not enabled:
             return
 
@@ -727,3 +734,8 @@ class Script(scripts.Script):
 
         ppmo.mask_for_overlay = self.masks_for_overlay[ppmo.index]
         ppmo.overlay_image = self.overlay_images[ppmo.index]
+
+    def postprocess(self, p, processed, *args):
+        # Release the request's full-resolution overlays.
+        self.masks_for_overlay = None
+        self.overlay_images = None
