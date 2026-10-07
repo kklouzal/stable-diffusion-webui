@@ -276,6 +276,20 @@ def torch_dfs(model: torch.nn.Module):
     return result
 
 
+def restore_secondary_hijacks(model):
+    """Undo the attention/GroupNorm hijacks (reference-only, StyleAlign) that
+    UnetHook.hook installed on `model`'s submodules. They are registered on the
+    model, so this needs no walk over all UNet modules."""
+    for module in getattr(model, '_controlnet_secondary_hijacks', ()):
+        _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
+        original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
+        if _original_inner_forward_cn_hijack is not None:
+            module._forward = _original_inner_forward_cn_hijack
+        if original_forward_cn_hijack is not None:
+            module.forward = original_forward_cn_hijack
+    model._controlnet_secondary_hijacks = []
+
+
 class AbstractLowScaleModel(nn.Module):
     def __init__(self):
         super(AbstractLowScaleModel, self).__init__()
@@ -1061,10 +1075,8 @@ class UnetHook(nn.Module):
             outer.attention_auto_machine = AutoMachine.StyleAlign
             outer.gn_auto_machine = AutoMachine.StyleAlign
 
-        all_modules = torch_dfs(model)
-
         if need_attention_hijack:
-            attn_modules = [module for module in all_modules if isinstance(module, BasicTransformerBlock) or isinstance(module, BasicTransformerBlockSGM)]
+            attn_modules = [module for module in torch_dfs(model) if isinstance(module, BasicTransformerBlock) or isinstance(module, BasicTransformerBlockSGM)]
             attn_modules = sorted(attn_modules, key=lambda x: - x.norm1.normalized_shape[0])
 
             for i, module in enumerate(attn_modules):
@@ -1104,16 +1116,12 @@ class UnetHook(nn.Module):
                 module.style_cfgs = []
                 module.gn_weight *= 2
 
+            registered = getattr(model, '_controlnet_secondary_hijacks', [])
+            model._controlnet_secondary_hijacks = list(dict.fromkeys([*registered, *attn_modules, *gn_modules]))
             outer.attn_module_list = attn_modules
             outer.gn_module_list = gn_modules
         else:
-            for module in all_modules:
-                _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
-                original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
-                if _original_inner_forward_cn_hijack is not None:
-                    module._forward = _original_inner_forward_cn_hijack
-                if original_forward_cn_hijack is not None:
-                    module.forward = original_forward_cn_hijack
+            restore_secondary_hijacks(model)
             outer.attn_module_list = []
             outer.gn_module_list = []
 

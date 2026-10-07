@@ -49,7 +49,7 @@ import torch
 from PIL import Image, ImageFilter, ImageOps
 from scripts.lvminthin import lvmin_thin, nake_nms
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
-from scripts.hook import torch_dfs
+from scripts.hook import restore_secondary_hijacks
 
 
 # Gradio 3.32 bug fix
@@ -59,16 +59,7 @@ os.makedirs(gradio_tempfile_path, exist_ok=True)
 
 
 def clear_all_secondary_control_models(m):
-    all_modules = torch_dfs(m)
-
-    for module in all_modules:
-        _original_inner_forward_cn_hijack = getattr(module, '_original_inner_forward_cn_hijack', None)
-        original_forward_cn_hijack = getattr(module, 'original_forward_cn_hijack', None)
-        if _original_inner_forward_cn_hijack is not None:
-            module._forward = _original_inner_forward_cn_hijack
-        if original_forward_cn_hijack is not None:
-            module.forward = original_forward_cn_hijack
-
+    restore_secondary_hijacks(m)
     clear_all_lllite()
     clear_all_ip_adapter()
 
@@ -176,18 +167,23 @@ def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
         return None
 
 
-def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
-    # A very safe method to make sure that Apple/Mac works
-    y = x
+# v / 255 for every uint8 v, divided on the CPU in float32 exactly like the
+# former per-pixel path. (On CUDA a division by a Python scalar multiplies by
+# the reciprocal, which can differ in the last bit, so it is not used.)
+_UINT8_TO_UNIT = torch.arange(256, dtype=torch.float32) / 255.0
 
-    # below is very boring but do not change these. If you change these Apple or Mac may fail.
-    y = torch.from_numpy(y)
-    y = y.float() / 255.0
-    y = rearrange(y, 'h w c -> 1 c h w')
-    y = y.clone()
-    y = y.to(devices.get_device_for("controlnet"))
-    y = y.clone()
-    return y
+
+def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
+    """HWC array -> 1CHW float32 in [0, 1] on the ControlNet device. uint8 maps
+    upload as uint8 (a quarter of the float bytes) and are expanded on the device
+    by exact table lookup; the result's values and strides equal the former
+    convert-on-CPU path."""
+    device = devices.get_device_for("controlnet")
+    if x.dtype == np.uint8:
+        y = _UINT8_TO_UNIT.to(device)[torch.from_numpy(x).to(device).long()]
+    else:
+        y = (torch.from_numpy(x).float() / 255.0).to(device)
+    return rearrange(y, 'h w c -> 1 c h w')
 
 
 def get_control(
