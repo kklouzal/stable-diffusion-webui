@@ -85,6 +85,14 @@ class State:
         self.job = ""
         self.job_count = 0
 
+        # The one per-job release of cached device memory. Generation phases (VAE encode,
+        # sampling, hires, decode) deliberately do not empty the cache: the caching allocator
+        # serves each phase from blocks the previous phase freed, so the in-job reserved
+        # high-water mark stays at the largest phase's need (up to allocator fragmentation),
+        # and a failed device allocation already frees the cache and retries. Emptying between
+        # phases only forced device-synchronizing frees and re-faulting of multi-GB segments.
+        # Returning memory between jobs (here) is kept because unified memory is shared with
+        # other processes.
         devices.torch_gc()
 
     def set_current_image(self):

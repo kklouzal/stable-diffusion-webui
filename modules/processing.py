@@ -1075,8 +1075,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     else:
         assert p.prompt is not None
 
-    devices.torch_gc()
-
     seed = get_fixed_seed(p.seed)
     subseed = get_fixed_seed(p.subseed)
 
@@ -1223,8 +1221,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             if lowvram.is_enabled(shared.sd_model):
                 lowvram.send_everything_to_cpu()
-
-            devices.torch_gc()
+                devices.torch_gc()
 
             state.nextjob()
 
@@ -1326,8 +1323,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             del x_samples_ddim
 
-            devices.torch_gc()
-
         if not infotexts:
             infotexts.append(Processed(p, []).infotext(p, 0))
 
@@ -1347,8 +1342,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 index_of_first_image = 1
             if opts.grid_save:
                 images.save_image(grid, p.outpath_grids, "grid", p.all_seeds[0], p.all_prompts[0], opts.grid_format, info=infotext(use_main_prompt=True), short_filename=not opts.grid_extended_filename, p=p, grid=True)
-
-    devices.torch_gc()
 
     res = Processed(
         p,
@@ -1553,7 +1546,6 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
                 samples = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
                 decoded_samples = None
-                devices.torch_gc()
 
         else:
             # here we generate an image normally
@@ -1573,8 +1565,6 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             if not self.enable_hr:
                 return samples
-
-            devices.torch_gc()
 
             if self.latent_scale_mode is None:
                 decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)).to(dtype=torch.float32)
@@ -1651,9 +1641,6 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         self.rng = rng.ImageRNG(samples.shape[1:], self.seeds, subseeds=self.subseeds, subseed_strength=self.subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w)
         noise = self.rng.next()
 
-        # GC now before running the next img2img to prevent running out of memory
-        devices.torch_gc()
-
         if not self.disable_extra_networks:
             with devices.autocast():
                 extra_networks.activate(self, self.hr_extra_network_data)
@@ -1678,7 +1665,6 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         sd_models.apply_token_merging(self.sd_model, self.get_token_merging_ratio())
 
         self.sampler = None
-        devices.torch_gc()
 
         decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)
 
@@ -2101,7 +2087,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         image = image.to(shared.device, dtype=devices.dtype_vae)
 
         self.init_latent = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
-        devices.torch_gc()
 
         if self.resize_mode == 3:
             self.init_latent = torch.nn.functional.interpolate(self.init_latent, size=(self.height // opt_f, self.width // opt_f), mode="bilinear")
@@ -2163,7 +2148,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             samples = blended_samples
 
         del x
-        devices.torch_gc()
 
         return samples
 
