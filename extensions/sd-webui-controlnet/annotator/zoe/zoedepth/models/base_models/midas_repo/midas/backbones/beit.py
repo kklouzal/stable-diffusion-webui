@@ -51,11 +51,15 @@ def _get_rel_pos_bias(self, window_size):
         [new_sub_table, old_relative_position_bias_table[old_num_relative_distance - 3:]])
 
     key = str(window_size[1]) + "," + str(window_size[0])
-    if key not in self.relative_position_indices.keys():
-        self.relative_position_indices[key] = gen_relative_position_index(window_size)
+    relative_position_index = self.relative_position_indices.get(key)
+    if relative_position_index is None or relative_position_index.device != new_relative_position_bias_table.device:
+        # Kept on the table's device: indexing a CUDA table with the CPU index copied it (~8 MB for a
+        # 512x512 input) to the device in every block of every call, a stream sync each time.
+        relative_position_index = gen_relative_position_index(window_size).to(new_relative_position_bias_table.device)
+        self.relative_position_indices[key] = relative_position_index
 
     relative_position_bias = new_relative_position_bias_table[
-        self.relative_position_indices[key].view(-1)].view(
+        relative_position_index.view(-1)].view(
         window_size[0] * window_size[1] + 1,
         window_size[0] * window_size[1] + 1, -1)  # Wh*Ww,Wh*Ww,nH
     relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
