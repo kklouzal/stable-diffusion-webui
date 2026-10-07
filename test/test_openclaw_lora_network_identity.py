@@ -184,6 +184,27 @@ def test_same_size_restored_mtime_rewrite_misses(lora_networks, tmp_path):
     assert first != second
     assert first[0] == second[0] == "sha256"
 
+def test_file_signature_is_hashed_once_per_file_revision(lora_networks, tmp_path, monkeypatch):
+    networks = lora_networks
+    hashed = []
+    real_sha256 = networks.hashlib.sha256
+    monkeypatch.setattr(networks.hashlib, "sha256", lambda: hashed.append(1) or real_sha256())
+    lora_file = tmp_path / "memo.safetensors"
+    lora_file.write_bytes(b"abcd")
+
+    first = networks.network_file_signature(lora_file)
+    assert networks.network_file_signature(str(lora_file)) == first
+    assert len(hashed) == 1  # unchanged revision: no second read of the file
+
+    stat = os.stat(lora_file)
+    lora_file.write_bytes(b"wxyz")  # same size, mtime restored: ctime still moves
+    os.utime(lora_file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    second = networks.network_file_signature(lora_file)
+    assert len(hashed) == 2 and second != first
+    assert second == ("sha256", real_sha256(b"wxyz").hexdigest())
+    assert networks.network_file_signature(tmp_path / "missing.safetensors") is None
+
+
 def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_networks, monkeypatch):
     networks = lora_networks
     base, _module, _payload = _base_network(networks)
@@ -225,6 +246,24 @@ def test_repeated_requested_name_reuses_cache_despite_alias_insertion_order(lora
     assert second.te_multiplier == 0.8
     assert second.unet_multiplier == 1.3
     assert second.dyn_dim == 9
+
+
+def test_in_memory_cache_evicts_least_recently_requested(lora_networks, monkeypatch):
+    networks = lora_networks
+    disks = {name: SimpleNamespace(filename=f"{name}.safetensors", shorthash="", read_hash=lambda: None) for name in "abc"}
+    monkeypatch.setattr(networks, "available_networks", disks, raising=False)
+    monkeypatch.setattr(networks, "available_network_aliases", disks, raising=False)
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: ("sha256", os.fspath(filename)))
+    parsed = []
+    monkeypatch.setattr(networks, "load_network", lambda name, on_disk: parsed.append(name) or SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={}))
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    monkeypatch.setattr(networks.shared.opts, "lora_in_memory_limit", 2, raising=False)
+
+    for names in (["a"], ["b"], ["a"], ["c"], ["a"]):  # "a" stays in use; "b" is the stale entry
+        networks.load_networks(names)
+
+    assert parsed == ["a", "b", "c"]
+    assert [key[0].rsplit("/", 1)[-1] for key in networks.networks_in_memory] == ["c.safetensors", "a.safetensors"]
 
 
 def test_alias_switch_reuses_source_tensors_and_multiplier_owner(lora_networks, monkeypatch):
@@ -1037,3 +1076,58 @@ def test_published_names_merge_and_restore_like_per_call_names(lora_networks):
     assert linear.network_current_names == ()
     networks.network_apply_weights(linear)  # now takes the early return
     assert torch.equal(linear.weight, base_weight)
+
+
+def test_bundled_ti_dropped_by_ti_reload_is_registered_again(lora_networks, monkeypatch):
+    """A TI reload publishes a folder-only database; the unchanged LoRA set must register its bundles again."""
+    networks = lora_networks
+    db = networks.sd_hijack.model_hijack.embedding_db
+    on_disk = SimpleNamespace(filename="alpha.safetensors", shorthash="abc", read_hash=lambda: None)
+    monkeypatch.setattr(networks, "available_networks", {"alpha": on_disk}, raising=False)
+    monkeypatch.setattr(networks, "available_network_aliases", {"alpha": on_disk}, raising=False)
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: (10, 20, "digest"))
+    hero = _embedding("hero")
+    parsed = SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={"hero": hero})
+    monkeypatch.setattr(networks, "load_network", lambda *_args: parsed)
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None])
+    assert db.word_embeddings == {"hero": hero}
+    assert not networks.load_networks(["alpha"], [1.0], [1.0], [None])
+
+    with db._publication_lock:  # what load_textual_inversion_embeddings publishes for an empty folder
+        db.ids_lookup, db.word_embeddings = {}, {}
+    before = _epochs(networks)
+
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None])
+    assert db.word_embeddings == {"hero": hero}
+    assert hero.loaded is True
+    after = _epochs(networks)
+    assert after["textual_inversion_epoch"] > before["textual_inversion_epoch"]
+    assert after["tokenizer_epoch"] > before["tokenizer_epoch"]
+    assert not networks.load_networks(["alpha"], [1.0], [1.0], [None])
+
+
+def test_lora_activation_errors_stop_generation_instead_of_dropping_every_lora(lora_networks, monkeypatch):
+    """extra_networks.activate logs non-fatal errors and then activates an empty LoRA set."""
+    import extra_networks_lora
+    from modules import extra_networks
+
+    networks = lora_networks
+    lora = extra_networks_lora.ExtraNetworkLora()
+    p = SimpleNamespace(all_prompts=["x"], comment=lambda _text: None, extra_generation_params={}, scripts=None)
+    loaded = []
+
+    def missing(*_args):
+        raise RuntimeError("one or more requested LoRA sources are unavailable")
+
+    monkeypatch.setattr(networks, "load_networks", missing)
+    monkeypatch.setattr(extra_networks, "extra_network_registry", {"lora": lora})
+    with pytest.raises(extra_networks_lora.FatalLoraPreparationError, match="unavailable"):
+        extra_networks.activate(p, {"lora": [extra_networks.ExtraNetworkParams(items=["missing", "0.8"])]})
+
+    monkeypatch.setattr(networks, "load_networks", lambda *args: loaded.append(args))
+    for items in (["alpha", "nan"], ["alpha", "1", "inf"], ["alpha", "te=-inf"], ["alpha", "abc"], ["alpha", "1", "1", "8.5"]):
+        with pytest.raises(extra_networks_lora.FatalLoraPreparationError):
+            lora.activate(p, [extra_networks.ExtraNetworkParams(items=items)])
+    assert loaded == []

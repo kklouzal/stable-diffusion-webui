@@ -68,7 +68,7 @@ class NetworkModuleOFT(network.NetworkModule):
             self.boft_b = self.block_size
 
     def calc_updown(self, orig_weight):
-        oft_blocks = self.oft_blocks.to(orig_weight.device)
+        oft_blocks = self.oft_blocks.to(orig_weight.device, dtype=torch.float32)
         eye = torch.eye(self.block_size, device=oft_blocks.device)
 
         if not self.is_R:
@@ -79,11 +79,11 @@ class NetworkModuleOFT(network.NetworkModule):
                 block_Q = block_Q * ((new_norm_Q + 1e-8) / (norm_Q + 1e-8))
             oft_blocks = torch.matmul(eye + block_Q, (eye - block_Q).float().inverse())
 
-        R = oft_blocks.to(orig_weight.device)
+        R = oft_blocks.to(orig_weight.device, dtype=torch.float32)
 
         if not self.is_boft:
             # This errors out for MultiheadAttention, might need to be handled up-stream
-            merged_weight = rearrange(orig_weight, '(k n) ... -> k n ...', k=self.num_blocks, n=self.block_size)
+            merged_weight = rearrange(orig_weight.to(R.dtype), '(k n) ... -> k n ...', k=self.num_blocks, n=self.block_size)
             merged_weight = torch.einsum(
                 'k n m, k n ... -> k m ...',
                 R,
@@ -96,7 +96,7 @@ class NetworkModuleOFT(network.NetworkModule):
             m = self.boft_m
             b = self.boft_b
             r_b = b // 2
-            inp = orig_weight
+            inp = orig_weight.to(R.dtype)
             for i in range(m):
                 bi = R[i] # b_num, b_size, b_size
                 if i == 0:

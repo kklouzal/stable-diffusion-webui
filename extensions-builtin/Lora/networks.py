@@ -21,13 +21,13 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
+from modules import cache, shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
 
 LORA_SOURCE_SCHEMA_REVISION = "lora-source-v2"
-LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v3"
+LORA_APPLIED_IMPLEMENTATION_REVISION = "lora-applied-v4"
 _network_application_lock = threading.RLock()
 _lora_steady_state_lock = threading.Lock()
 _lora_steady_state_telemetry = {
@@ -188,15 +188,40 @@ class BundledTIHash(str):
 
 
 def network_file_signature(filename):
-    """Return exact source-byte identity; stat data is deliberately not semantic."""
+    """Return exact source-byte identity: the SHA-256 of the file's bytes.
+
+    A digest is reused while the file revision (device, inode, size, mtime_ns, ctime_ns; the validity contract of
+    modules.hashes) read from the opened file is unchanged: every write or utime changes ctime, and NFS
+    close-to-open consistency revalidates attributes at open. Re-hashing cost 0.1-0.2 s per LoRA per activation
+    from page cache and seconds from the NAS. A file whose revision changes while it is read is not memoized.
+    """
+    key = os.path.realpath(os.fspath(filename))
     try:
-        digest = hashlib.sha256()
         with open(filename, "rb") as source:
+            revision = cache.file_revision(os.fstat(source.fileno()))
+            with _file_signature_lock:
+                memo = _file_signature_memo.get(key)
+            if memo is not None and memo[0] == revision:
+                return memo[1]
+            digest = hashlib.sha256()
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
-        return ("sha256", digest.hexdigest())
+            unchanged = cache.file_revision(os.fstat(source.fileno())) == revision
     except OSError:
         return None
+    signature = ("sha256", digest.hexdigest())
+    if unchanged:
+        with _file_signature_lock:
+            _file_signature_memo.pop(key, None)
+            _file_signature_memo[key] = (revision, signature)
+            while len(_file_signature_memo) > _file_signature_memo_capacity:
+                _file_signature_memo.pop(next(iter(_file_signature_memo)))
+    return signature
+
+
+_file_signature_lock = threading.Lock()
+_file_signature_memo = {}
+_file_signature_memo_capacity = 1024
 
 
 def _execution_identity():
@@ -294,6 +319,20 @@ def _bundled_embedding_plan(new_networks, emb_db, previous_bundle_embeddings):
     return planned
 
 
+def _embeddings_registered(emb_db, bundles):
+    return all(emb_db.word_embeddings.get(name) is embedding for name, embedding in bundles.items())
+
+
+def _published_bundles_current(emb_db):
+    """Whether emb_db holds exactly the bundled embeddings the published networks register.
+
+    A textual inversion reload publishes a database built from the embedding folders only, which drops bundled
+    embeddings while the applied LoRA key stays equal, so key equality alone does not prove them registered.
+    """
+    planned = _bundled_embedding_plan(loaded_networks, emb_db, loaded_bundle_embeddings)
+    return planned == loaded_bundle_embeddings and _embeddings_registered(emb_db, planned)
+
+
 def _embedding_db_snapshot(emb_db):
     return dict(emb_db.word_embeddings), {token: list(entries) for token, entries in emb_db.ids_lookup.items()}
 
@@ -331,16 +370,16 @@ def _publish_applied_state(new_networks, emb_db=None):
     wanted_key = network_applied_state_key(new_networks)
     with openclaw_cache_epochs.epoch_transaction():
         with _network_application_lock:
-            if wanted_key == _applied_state_key:
+            previous_bundles = dict(loaded_bundle_embeddings)
+            planned_bundles = _bundled_embedding_plan(new_networks, emb_db, previous_bundles)
+            bundle_changed = previous_bundles != planned_bundles or not _embeddings_registered(emb_db, planned_bundles)
+            if wanted_key == _applied_state_key and not bundle_changed:
                 openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=wanted_key)
                 return False
 
             previous_networks = list(loaded_networks)
             previous_key = _applied_state_key
-            previous_bundles = dict(loaded_bundle_embeddings)
-            planned_bundles = _bundled_embedding_plan(new_networks, emb_db, previous_bundles)
             db_snapshot = _embedding_db_snapshot(emb_db)
-            bundle_changed = previous_bundles != planned_bundles
             touched_embeddings = list({id(embedding): embedding for embedding in (*previous_bundles.values(), *planned_bundles.values())}.values())
             loaded_flags = [(embedding, embedding.loaded) for embedding in touched_embeddings]
 
@@ -564,7 +603,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     ordered = tuple((source_key, float(te).hex(), float(unet).hex(), dyn, tuple(sorted(getattr(cached_by_key.get(source_key), "modules", {}).keys()))) for source_key, te, unet, dyn in zip(source_keys, te_values, unet_values, dyn_values))
     wanted_key = (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
     with _network_application_lock:
-        if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key:
+        if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key and _published_bundles_current(emb_db):
             elapsed = (time.perf_counter() - started) * 1000.0
             _record_lora_steady_state(hit=True, reason="semantic_signature_equal", identity_ms=(identity_done-started)*1000.0, total_ms=elapsed)
             openclaw_cache_epochs.observe("E12", "hit", reason="exact", semantic_key=wanted_key)
@@ -609,6 +648,9 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                     networks_in_memory.pop(stale_key, None)
                     openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=stale_key)
                 networks_in_memory[source_key] = net
+            for source_key in source_keys:  # evict least recently used: requested sources become the newest
+                if source_key in networks_in_memory:
+                    networks_in_memory[source_key] = networks_in_memory.pop(source_key)
             if staged_publications:
                 openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="published")
                 for source_key, _net in staged_publications:
@@ -726,84 +768,115 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
     if current_names != wanted_names:
         network_restore_weights_from_backup(self)
 
-        for net in loaded_networks:
-            module = net.modules.get(network_layer_name, None)
-            if module is not None and hasattr(self, 'weight') and not isinstance(module, modules.models.sd3.mmdit.QkvLinear):
-                try:
-                    with torch.no_grad():
-                        if getattr(self, 'fp16_weight', None) is None:
-                            weight = self.weight
-                            bias = self.bias
-                        else:
-                            weight = self.fp16_weight.clone().to(self.weight.device)
-                            bias = getattr(self, 'fp16_bias', None)
-                            if bias is not None:
-                                bias = bias.clone().to(self.bias.device)
-                        updown, ex_bias = module.calc_updown(weight)
-
-                        if len(weight.shape) == 4 and weight.shape[1] == 9:
-                            # inpainting model. zero pad updown to make channel[1]  4 to 9
-                            updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
-
-                        self.weight.copy_((weight.to(dtype=updown.dtype) + updown).to(dtype=self.weight.dtype))
-                        if ex_bias is not None and hasattr(self, 'bias'):
-                            if self.bias is None:
-                                self.bias = torch.nn.Parameter(ex_bias).to(self.weight.dtype)
-                            else:
-                                self.bias.copy_((bias + ex_bias).to(dtype=self.bias.dtype))
-                except RuntimeError as e:
-                    logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                    extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
-                continue
-
-            module_q = net.modules.get(network_layer_name + "_q_proj", None)
-            module_k = net.modules.get(network_layer_name + "_k_proj", None)
-            module_v = net.modules.get(network_layer_name + "_v_proj", None)
-            if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v:
-                try:
-                    with torch.no_grad():
-                        # out_proj is applied exactly once through its separately
-                        # mapped Linear module; MHA owns combined Q/K/V only.
-                        qw, kw, vw = self.in_proj_weight.chunk(3, 0)
-                        updown_q, _ = module_q.calc_updown(qw)
-                        updown_k, _ = module_k.calc_updown(kw)
-                        updown_v, _ = module_v.calc_updown(vw)
-                        del qw, kw, vw
-                        updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
-                        self.in_proj_weight += updown_qkv
-
-                except RuntimeError as e:
-                    logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                    extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
-                continue
-
-            if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v:
-                try:
-                    with torch.no_grad():
-                        # Send "real" orig_weight into MHA's lora module
-                        qw, kw, vw = self.weight.chunk(3, 0)
-                        updown_q, _ = module_q.calc_updown(qw)
-                        updown_k, _ = module_k.calc_updown(kw)
-                        updown_v, _ = module_v.calc_updown(vw)
-                        del qw, kw, vw
-                        updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
-                        self.weight += updown_qkv
-
-                except RuntimeError as e:
-                    logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                    extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
-                continue
-
-            if module is None:
-                continue
-
-            logging.debug(f"Network {net.name} layer {network_layer_name}: couldn't find supported operation")
-            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
+        # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
+        # matmul/einsum results of calc_updown to bf16.
+        with torch.no_grad(), torch.autocast(target.device.type, enabled=False):
+            merged_weight, merged_bias = network_merge_loaded_deltas(self, network_layer_name)
+            if merged_weight is not None:
+                target.copy_(merged_weight)
+            if merged_bias is not None:
+                if self.bias is None:
+                    self.bias = torch.nn.Parameter(merged_bias.to(self.weight.dtype), requires_grad=False)
+                else:
+                    self.bias.copy_(merged_bias)
 
         self.network_current_names = wanted_names
+
+
+def network_merge_loaded_deltas(self, network_layer_name):
+    """Return float32 (weight, bias) of layer self with every loaded network applied; None for an unchanged one.
+
+    Each network's delta is added to a float32 copy of the restored base (the fp16 master when fp8 storage keeps
+    one) and the caller rounds the sum to the stored dtype once, as reference merges do (diffusers fuse_lora,
+    kohya-ss merge_lora, ComfyUI). Adding each delta into the bf16/fp8 weight in turn rounded W + delta once per
+    network, which swamps the small deltas of stacked LoRAs. A network that fails on this layer is skipped and
+    counted in extra_network_lora.errors. Callers hold no_grad and disable autocast.
+    """
+    merged_weight = None
+    merged_bias = None
+
+    for net in loaded_networks:
+        module = net.modules.get(network_layer_name, None)
+        if module is not None and hasattr(self, 'weight') and not isinstance(module, modules.models.sd3.mmdit.QkvLinear):
+            try:
+                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+                updown, ex_bias = module.calc_updown(weight)
+
+                if len(weight.shape) == 4 and weight.shape[1] == 9:
+                    # inpainting model. zero pad updown to make channel[1]  4 to 9
+                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+
+                merged_weight = weight + updown
+                if ex_bias is not None and hasattr(self, 'bias'):
+                    bias = merged_bias if merged_bias is not None else network_merge_base(self, 'bias')
+                    merged_bias = ex_bias.float() if bias is None else bias + ex_bias
+            except RuntimeError as e:
+                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
+                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+
+            continue
+
+        module_q = net.modules.get(network_layer_name + "_q_proj", None)
+        module_k = net.modules.get(network_layer_name + "_k_proj", None)
+        module_v = net.modules.get(network_layer_name + "_v_proj", None)
+        if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v:
+            try:
+                # out_proj is applied exactly once through its separately
+                # mapped Linear module; MHA owns combined Q/K/V only.
+                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'in_proj_weight')
+                qw, kw, vw = weight.chunk(3, 0)
+                updown_q, _ = module_q.calc_updown(qw)
+                updown_k, _ = module_k.calc_updown(kw)
+                updown_v, _ = module_v.calc_updown(vw)
+                del qw, kw, vw
+                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
+
+            except RuntimeError as e:
+                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
+                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+
+            continue
+
+        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v:
+            try:
+                # Send "real" orig_weight into MHA's lora module
+                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+                qw, kw, vw = weight.chunk(3, 0)
+                updown_q, _ = module_q.calc_updown(qw)
+                updown_k, _ = module_k.calc_updown(kw)
+                updown_v, _ = module_v.calc_updown(vw)
+                del qw, kw, vw
+                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
+
+            except RuntimeError as e:
+                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
+                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+
+            continue
+
+        if module is None:
+            continue
+
+        logging.debug(f"Network {net.name} layer {network_layer_name}: couldn't find supported operation")
+        extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+
+    return merged_weight, merged_bias
+
+
+def network_merge_base(self, field):
+    """Float32 copy of the restored base weight/bias `field` of layer self, on its device; None when absent.
+
+    fp8 storage with "Cache FP16 weight for LoRA" keeps an fp16 master (fp16_weight/fp16_bias) that is more
+    precise than the fp8 parameter, so merges start from it.
+    """
+    base = getattr(self, f'fp16_{field}', None)
+    if base is None:
+        base = getattr(self, field)
+    if base is None:
+        return None
+    device = self.in_proj_weight.device if isinstance(self, torch.nn.MultiheadAttention) else self.weight.device
+    return base.to(device=device, dtype=torch.float32, copy=True)
 
 
 def network_forward(org_module, input, original_forward):
@@ -1179,37 +1252,39 @@ def network_apply_quant_merged_lora(backend, self, quantize_config=None, quantiz
             raise RuntimeError(f"unsupported {label} LoRA split projection target(s): {details}")
 
         with torch.no_grad():
-            weight = base_weight.to(device=devices.device, dtype=torch.bfloat16)
+            # Sum all deltas in float32 (autocast would round matmul/einsum results to bf16) and round to the BF16
+            # effective weight once, as network_apply_weights does.
+            weight = base_weight.to(device=devices.device, dtype=torch.float32)
             base_bias = getattr(self, f'network_{name}_base_bias', None)
-            bias = base_bias.to(device=devices.device, dtype=torch.bfloat16) if base_bias is not None else None
+            bias = base_bias.to(device=devices.device, dtype=torch.float32) if base_bias is not None else None
 
-            for op_kind, net, payload in ops_for_layer:
-                if op_kind == "direct":
-                    module = payload
-                    updown, ex_bias = module.calc_updown(weight)
-                    if len(weight.shape) == 4 and weight.shape[1] == 9:
-                        updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
-                    weight = (weight.to(dtype=updown.dtype) + updown).to(dtype=torch.bfloat16)
-                    if ex_bias is not None:
-                        bias = ex_bias.to(device=devices.device, dtype=torch.bfloat16) if bias is None else (bias + ex_bias).to(dtype=torch.bfloat16)
-                    continue
+            with torch.autocast(devices.device.type, enabled=False):
+                for op_kind, net, payload in ops_for_layer:
+                    if op_kind == "direct":
+                        module = payload
+                        updown, ex_bias = module.calc_updown(weight)
+                        if len(weight.shape) == 4 and weight.shape[1] == 9:
+                            updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                        weight = weight + updown
+                        if ex_bias is not None:
+                            bias = ex_bias.to(device=devices.device, dtype=torch.float32) if bias is None else bias + ex_bias
+                        continue
 
-                if op_kind == "qkv":
-                    module_q, module_k, module_v = payload
-                    qw, kw, vw = weight.chunk(3, 0)
-                    updown_q, _ = module_q.calc_updown(qw)
-                    updown_k, _ = module_k.calc_updown(kw)
-                    updown_v, _ = module_v.calc_updown(vw)
-                    del qw, kw, vw
-                    updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
-                    weight = (weight.to(dtype=updown_qkv.dtype) + updown_qkv).to(dtype=torch.bfloat16)
-                    continue
+                    if op_kind == "qkv":
+                        module_q, module_k, module_v = payload
+                        qw, kw, vw = weight.chunk(3, 0)
+                        updown_q, _ = module_q.calc_updown(qw)
+                        updown_k, _ = module_k.calc_updown(kw)
+                        updown_v, _ = module_v.calc_updown(vw)
+                        del qw, kw, vw
+                        weight = weight + torch.vstack([updown_q, updown_k, updown_v])
+                        continue
 
-                raise RuntimeError(f"unsupported {label} LoRA operation kind: {op_kind}")
+                    raise RuntimeError(f"unsupported {label} LoRA operation kind: {op_kind}")
 
-            self.weight = torch.nn.Parameter(weight, requires_grad=False)
+            self.weight = torch.nn.Parameter(weight.to(torch.bfloat16), requires_grad=False)
             if bias is not None:
-                self.bias = torch.nn.Parameter(bias, requires_grad=False)
+                self.bias = torch.nn.Parameter(bias.to(torch.bfloat16), requires_grad=False)
             elif self.bias is not None:
                 self.bias = None
 

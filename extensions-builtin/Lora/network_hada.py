@@ -1,3 +1,5 @@
+import torch
+
 import lyco_helpers
 import network
 
@@ -27,16 +29,16 @@ class NetworkModuleHada(network.NetworkModule):
         self.t2 = weights.w.get("hada_t2")
 
     def calc_updown(self, orig_weight):
-        w1a = self.w1a.to(orig_weight.device)
-        w1b = self.w1b.to(orig_weight.device)
-        w2a = self.w2a.to(orig_weight.device)
-        w2b = self.w2b.to(orig_weight.device)
+        w1a = self.w1a.to(orig_weight.device, dtype=torch.float32)
+        w1b = self.w1b.to(orig_weight.device, dtype=torch.float32)
+        w2a = self.w2a.to(orig_weight.device, dtype=torch.float32)
+        w2b = self.w2b.to(orig_weight.device, dtype=torch.float32)
 
         output_shape = [w1a.size(0), w1b.size(1)]
 
         if self.t1 is not None:
             output_shape = [w1a.size(1), w1b.size(1)]
-            t1 = self.t1.to(orig_weight.device)
+            t1 = self.t1.to(orig_weight.device, dtype=torch.float32)
             updown1 = lyco_helpers.make_weight_cp(t1, w1a, w1b)
             output_shape += t1.shape[2:]
         else:
@@ -45,7 +47,7 @@ class NetworkModuleHada(network.NetworkModule):
             updown1 = lyco_helpers.rebuild_conventional(w1a, w1b, output_shape)
 
         if self.t2 is not None:
-            t2 = self.t2.to(orig_weight.device)
+            t2 = self.t2.to(orig_weight.device, dtype=torch.float32)
             updown2 = lyco_helpers.make_weight_cp(t2, w2a, w2b)
         else:
             updown2 = lyco_helpers.rebuild_conventional(w2a, w2b, output_shape)

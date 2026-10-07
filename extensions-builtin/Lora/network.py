@@ -3,6 +3,7 @@ import os
 from collections import namedtuple
 import enum
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -179,13 +180,27 @@ class NetworkModule:
         updown = updown.to(orig_weight.device)
 
         merged_scale1 = updown + orig_weight
-        merged_scale1_norm = (
-            merged_scale1.transpose(0, 1)
-            .reshape(merged_scale1.shape[1], -1)
-            .norm(dim=1, keepdim=True)
-            .reshape(merged_scale1.shape[1], *[1] * self.dora_norm_dims)
-            .transpose(0, 1)
-        )
+        # dora_scale holds the magnitude per output row ([out, 1, ...]: LyCORIS wd_on_out, its default since
+        # 2025-04) or per input column ([1, in, ...]); the matching norm of the merged weight is taken over the
+        # remaining axes, plus eps against all-zero rows/columns as in LyCORIS.
+        same_rank = dora_scale.dim() == merged_scale1.dim() >= 2
+        if same_rank and dora_scale.shape[0] == merged_scale1.shape[0] and dora_scale.shape[1] == 1:
+            merged_scale1_norm = (
+                merged_scale1.reshape(merged_scale1.shape[0], -1)
+                .norm(dim=1, keepdim=True)
+                .reshape(merged_scale1.shape[0], *[1] * self.dora_norm_dims)
+            )
+        elif same_rank and dora_scale.shape[0] == 1 and dora_scale.shape[1] == merged_scale1.shape[1]:
+            merged_scale1_norm = (
+                merged_scale1.transpose(0, 1)
+                .reshape(merged_scale1.shape[1], -1)
+                .norm(dim=1, keepdim=True)
+                .reshape(merged_scale1.shape[1], *[1] * self.dora_norm_dims)
+                .transpose(0, 1)
+            )
+        else:
+            raise RuntimeError(f"dora_scale shape {tuple(dora_scale.shape)} does not match weight shape {tuple(merged_scale1.shape)}")
+        merged_scale1_norm = merged_scale1_norm + torch.finfo(merged_scale1_norm.dtype).eps
 
         dora_merged = (
             merged_scale1 * (dora_scale / merged_scale1_norm)
@@ -216,6 +231,11 @@ class NetworkModule:
         return updown * self.multiplier(), ex_bias
 
     def calc_updown(self, target):
+        """Return (weight delta, extra bias or None) for the layer whose current weight is `target`.
+
+        Deltas are computed in float32 on target's device whatever the stored dtypes of the network
+        tensors and of target; merges add them to a float32 copy of the base weight and round once.
+        """
         raise NotImplementedError()
 
     def forward(self, x, y):
@@ -224,5 +244,6 @@ class NetworkModule:
             raise NotImplementedError()
         else:
             updown, ex_bias = self.calc_updown(self.sd_module.weight)
-            return y + self.ops(x, weight=updown, bias=ex_bias, **self.extra_kwargs)
+            ex_bias = ex_bias.to(x.dtype) if ex_bias is not None else None
+            return y + self.ops(x, weight=updown.to(x.dtype), bias=ex_bias, **self.extra_kwargs)
 

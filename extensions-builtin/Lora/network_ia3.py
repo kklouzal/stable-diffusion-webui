@@ -1,3 +1,5 @@
+import torch
+
 import network
 
 
@@ -17,14 +19,15 @@ class NetworkModuleIa3(network.NetworkModule):
         self.on_input = weights.w["on_input"].item()
 
     def calc_updown(self, orig_weight):
-        w = self.w.to(orig_weight.device)
+        w = self.w.to(orig_weight.device, dtype=torch.float32)
 
-        output_shape = [w.size(0), orig_weight.size(1)]
+        # LyCORIS stores one scale per input or output channel ([dim] for Linear, [1, dim, 1, 1] for Conv2d);
+        # it multiplies weight axis 1 (input) or axis 0 (output).
         if self.on_input:
-            output_shape.reverse()
+            w = w.reshape(1, -1, *[1] * (orig_weight.dim() - 2))
         else:
-            w = w.reshape(-1, 1)
+            w = w.reshape(-1, *[1] * (orig_weight.dim() - 1))
 
-        updown = orig_weight * w
+        updown = orig_weight.to(torch.float32) * w
 
-        return self.finalize_updown(updown, orig_weight, output_shape)
+        return self.finalize_updown(updown, orig_weight, orig_weight.shape)

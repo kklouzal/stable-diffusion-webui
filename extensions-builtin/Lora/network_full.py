@@ -1,3 +1,5 @@
+import torch
+
 import network
 
 
@@ -18,9 +20,9 @@ class NetworkModuleFull(network.NetworkModule):
 
     def calc_updown(self, orig_weight):
         output_shape = self.weight.shape
-        updown = self.weight.to(orig_weight.device)
+        updown = self.weight.to(orig_weight.device, dtype=torch.float32)
         if self.ex_bias is not None:
-            ex_bias = self.ex_bias.to(orig_weight.device)
+            ex_bias = self.ex_bias.to(orig_weight.device, dtype=torch.float32)
         else:
             ex_bias = None
 
