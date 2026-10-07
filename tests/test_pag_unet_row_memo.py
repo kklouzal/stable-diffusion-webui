@@ -700,3 +700,141 @@ def test_base_wrapper_main_pass_is_the_original_sgm_forward_bitwise():
             recorded = harness.unet(x, timesteps=t, context=context, y=y)
     assert rec.prefix is not None
     assert torch.equal(recorded, original)
+
+
+def legacy_controlnet_forward(harness, cn, x, hint, timesteps, context, y):
+    """cldm.ControlNet.forward before guided-hint caching and the dtype_unet compute dtype (plain ControlNet)."""
+    original_type = x.dtype
+    x = x.to(cn.dtype)
+    hint = hint.to(cn.dtype)
+    timesteps = timesteps.to(cn.dtype)
+    context = context.to(cn.dtype)
+    if y is not None:
+        y = y.to(cn.dtype)
+    t_emb = harness.cldm.timestep_embedding(timesteps, cn.model_channels, repeat_only=False).to(cn.dtype)
+    emb = cn.time_embed(t_emb)
+    guided_hint = cn.input_hint_block(hint, emb, context)
+    outs = []
+    if cn.num_classes is not None:
+        emb = emb + cn.label_emb(y)
+    h = x
+    for module, zero_conv in zip(cn.input_blocks, cn.zero_convs):
+        if guided_hint is not None:
+            h = module(h, emb, context)
+            h += guided_hint
+            guided_hint = None
+        else:
+            h = module(h, emb, context)
+        outs.append(zero_conv(h, emb, context))
+    h = cn.middle_block(h, emb, context)
+    outs.append(cn.middle_block_out(h, emb, context))
+    return [o.to(original_type) for o in outs]
+
+
+def oracle_hooked_forward(harness, x, timesteps, context, y):
+    """The original ControlNet hooked forward for one plain SDXL unit, written out independently."""
+    unet = harness.unet
+    param = harness.control_param
+    cond_mark = ((context[:, 0, :] + 1024.0).abs().mean(dim=1) > 1e-3).to(x.dtype)[:, None, None, None]
+    ctx = context[:, 1:, :]  # the strided view unmark_prompt_context returns
+    control = legacy_controlnet_forward(harness, harness.controlnet.control_model, x, param.hint_cond, timesteps, ctx, y)
+    if param.cfg_injection or param.global_average_pooling:
+        control = [c * cond_mark for c in control]
+    control = [c * param.weight for c in control]
+    if param.global_average_pooling:
+        control = [torch.mean(c, dim=(2, 3), keepdim=True) for c in control]
+    total = [0.0] * 10
+    for idx, item in enumerate(control):
+        total[idx] = item + total[idx]
+    t_emb = real_modules()["ldm.modules.diffusionmodules.util"].timestep_embedding(timesteps, unet.model_channels, repeat_only=False)
+    emb = unet.time_embed(t_emb) + unet.label_emb(y)
+    hs = []
+    h = x
+    for module in unet.input_blocks:
+        h = module(h, emb, ctx)
+        hs.append(h)
+    h = unet.middle_block(h, emb, ctx) + total.pop()
+    for module in unet.output_blocks:
+        h = torch.cat([h, hs.pop() + total.pop()], dim=1)
+        h = module(h, emb, ctx)
+    return unet.out(h.type(x.dtype))
+
+
+def unet_inputs(batch_size=2, seed=7):
+    gen = torch.Generator().manual_seed(seed)
+    x = torch.randn(batch_size, 4, 8, 8, generator=gen)
+    timesteps = torch.rand(batch_size, generator=gen) * 900
+    context = torch.randn(batch_size, 5, 16, generator=gen)
+    context[:, 0, :] = 1024.0
+    context[batch_size // 2:, 0, :] = -1024.0
+    y = torch.randn(batch_size, 12, generator=gen)
+    return x, timesteps, context, y
+
+
+@pytest.mark.parametrize("variant", ["balanced", "cfg_injection", "global_average_pooling"])
+def test_controlnet_hooked_forward_matches_original_semantics(variant):
+    harness = Harness(mode="base")
+    harness.install_controlnet(cfg_injection=variant == "cfg_injection", global_average_pooling=variant == "global_average_pooling")
+    control_rows = []
+    harness.controlnet.control_model.register_forward_pre_hook(lambda module, args, kwargs: control_rows.append(kwargs["x"].shape[0]), with_kwargs=True)
+    x, timesteps, context, y = unet_inputs()
+    with torch.no_grad():
+        out = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        expected = oracle_hooked_forward(harness, x, timesteps, context, y)
+    if variant == "balanced":
+        assert control_rows == [2]
+        assert torch.equal(out, expected)
+    else:
+        # Uncond-row residuals are zeroed by cond_mark: the ControlNet now runs on the cond row only.
+        assert control_rows == [1]
+        torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_controlnet_guided_hint_and_placement_are_computed_once_per_hint():
+    harness = Harness(mode="base")
+    harness.install_controlnet()
+    hint_block_calls = []
+    harness.controlnet.control_model.input_hint_block.register_forward_pre_hook(lambda module, args: hint_block_calls.append(1))
+    fullvram_calls = []
+    fullvram = harness.controlnet.fullvram
+    harness.controlnet.fullvram = lambda: (fullvram_calls.append(1), fullvram())[1]
+    x, timesteps, context, y = unet_inputs()
+    with torch.no_grad():
+        first = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        second = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        assert len(hint_block_calls) == 1 and len(fullvram_calls) == 1
+        assert torch.equal(first, second)
+        harness.control_param.hint_cond = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(9))
+        third = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        assert len(hint_block_calls) == 2
+        assert torch.equal(third, oracle_hooked_forward(harness, x, timesteps, context, y))
+    assert not torch.equal(first, third)
+
+
+def test_controlnet_unet_dtype_compute_is_bitwise_identical_under_bf16_autocast():
+    """CN7: computing in dtype_unet instead of the fp32 construction dtype only removes casts autocast redoes."""
+    harness = Harness(mode="unet")
+    harness.install_controlnet()
+    cn = harness.controlnet.control_model
+    # bf16 weights where autocast computes in bf16; CPU autocast has no fp32 policy for group_norm/layer_norm
+    # weights (CUDA autocast casts them), so the norms keep fp32 weights here.
+    for module in cn.modules():
+        if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
+            module.to(torch.bfloat16)
+    x, timesteps, context, y = unet_inputs()
+    x, timesteps, context, y = x.bfloat16(), timesteps.bfloat16(), context[:, 1:, :].bfloat16(), y.bfloat16()
+    hint = harness.control_param.hint_cond
+    devices = harness.cldm.devices
+    assert cn.dtype == torch.float32
+    try:
+        with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+            legacy = legacy_controlnet_forward(harness, cn, x, hint, timesteps, context, y)
+            devices.dtype_unet = torch.bfloat16
+            current = cn(x=x, hint=hint, timesteps=timesteps, context=context, y=y)
+            guided = cn.compute_guided_hint(hint)
+            with_guided = cn(x=x, hint=hint, timesteps=timesteps, context=context, y=y, guided_hint=guided)
+    finally:
+        devices.dtype_unet = torch.float32
+    assert all(o.dtype == torch.bfloat16 for o in current)
+    assert all(torch.equal(a, b) for a, b in zip(legacy, current))
+    assert all(torch.equal(a, b) for a, b in zip(legacy, with_guided))

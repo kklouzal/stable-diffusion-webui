@@ -16,7 +16,7 @@ from scripts.ipadapter.ipadapter_model import ImageEmbed
 from scripts.controlnet_sparsectrl import SparseCtrl
 from modules import devices, lowvram, shared, scripts, sd_unet_row_memo
 
-from ldm.modules.diffusionmodules.util import timestep_embedding, make_beta_schedule
+from ldm.modules.diffusionmodules.util import make_beta_schedule
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
@@ -471,6 +471,31 @@ class UnetHook(nn.Module):
             mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
             return process.sample_before_CN_hack(*args, **kwargs)
 
+        # Control models this hook already placed on the device (outside lowvram nothing moves them back
+        # while the hook is active) and the timestep frequencies uploaded per device.
+        models_on_device = {}
+        timestep_freqs = {}
+
+        def unet_timestep_embedding(timesteps, dim, max_period=10000):
+            """ldm.modules.diffusionmodules.util.timestep_embedding without its per-call host round trip.
+
+            Same values: the frequencies are computed on the CPU exactly as there, but uploaded once per
+            device instead of a pageable host-to-device copy (a stream sync) on every forward.
+            """
+            freqs = timestep_freqs.get((dim, max_period, timesteps.device))
+            if freqs is None:
+                import math
+                half = dim // 2
+                freqs = torch.exp(
+                    -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+                ).to(device=timesteps.device)
+                timestep_freqs[(dim, max_period, timesteps.device)] = freqs
+            args = timesteps[:, None].float() * freqs[None]
+            embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+            if dim % 2:
+                embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            return embedding
+
         def batch_rows(t, rows):
             """Cached hint-derived tensors keep their own rows; expand a single row to the call's batch."""
             if t.shape[0] == rows:
@@ -530,6 +555,8 @@ class UnetHook(nn.Module):
 
             # Handle cond-uncond marker
             cond_mark, outer.current_uc_indices, outer.current_c_indices, context = unmark_prompt_context(context)
+            # Stripping the mark token leaves a strided view; copy once instead of in every k/v projection.
+            context = context.contiguous()
             outer.model.cond_mark = cond_mark
             # logger.info(str(cond_mark[:, 0, 0, 0].detach().cpu().numpy().tolist()) + ' - ' + str(outer.current_uc_indices))
 
@@ -604,10 +631,14 @@ class UnetHook(nn.Module):
                 if param.control_model is not None:
                     if outer.lowvram and is_sdxl and hasattr(param.control_model, 'aggressive_lowvram'):
                         param.control_model.aggressive_lowvram()
+                    elif not outer.lowvram and id(param.control_model) in models_on_device:
+                        continue
                     elif hasattr(param.control_model, 'fullvram'):
                         param.control_model.fullvram()
                     elif hasattr(param.control_model, 'to'):
                         param.control_model.to(devices.get_device_for("controlnet"))
+                    if not outer.lowvram:
+                        models_on_device[id(param.control_model)] = param.control_model
 
             # handle prompt token control
             for param in outer.control_params:
@@ -646,6 +677,16 @@ class UnetHook(nn.Module):
 
                 assert param.used_hint_cond is not None, "Controlnet is enabled but no input image is given"
 
+                cond_rows = None
+                if (param.cfg_injection or param.global_average_pooling) and param.control_model_type.is_controlnet:
+                    # "ControlNet is more important" and global average pooling zero the uncond rows of the
+                    # residuals (cond_mark below), so evaluate the ControlNet on the cond rows only.
+                    c_indices = outer.current_c_indices
+                    if not c_indices:
+                        continue
+                    if len(c_indices) < batch_size and c_indices == list(range(c_indices[0], c_indices[0] + len(c_indices))):
+                        cond_rows = slice(c_indices[0], c_indices[0] + len(c_indices))
+
                 hint = param.used_hint_cond
                 if param.control_model_type == ControlModelType.InstantID:
                     assert isinstance(param.control_context_override, ImageEmbed)
@@ -653,29 +694,54 @@ class UnetHook(nn.Module):
                 else:
                     controlnet_context = context
 
+                control_type = (
+                    [
+                        t.int_value()
+                        for t in param.union_control_types
+                        if t != ControlNetUnionControlType.UNKNOWN
+                    ]
+                    if param.control_model_type == ControlModelType.ControlNetUnion
+                    else None
+                )
+
+                # The hint embedding depends only on the hint and the union control types: compute it once
+                # per used hint (a new hint or a lowres/hires switch replaces param.used_hint_cond).
+                guided_hint = None
+                guided_hint_types = None if control_type is None else tuple(control_type)
+                cached_guided_hint = getattr(param, 'used_guided_hint', None)
+                if hasattr(control_model, 'compute_guided_hint') and cached_guided_hint is not None \
+                        and cached_guided_hint[0] is param.used_hint_cond and cached_guided_hint[1] is control_model \
+                        and cached_guided_hint[2] == guided_hint_types:
+                    guided_hint = cached_guided_hint[3]
+
                 # ControlNet inpaint protocol
-                if hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
+                if guided_hint is None and hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
                     c = hint[:, 0:3, :, :]
                     m = hint[:, 3:4, :, :]
                     m = (m > 0.5).float()
                     hint = c * (1 - m) - m
 
-                control = param.control_model(
-                    x=x_in,
-                    hint=hint,
-                    timesteps=timesteps,
-                    context=controlnet_context,
-                    y=y,
-                    control_type=(
-                        [
-                            t.int_value()
-                            for t in param.union_control_types
-                            if t != ControlNetUnionControlType.UNKNOWN
-                        ]
-                        if param.control_model_type == ControlModelType.ControlNetUnion
-                        else None
-                    ),
-                )
+                control_inputs = dict(x=x_in, hint=hint, timesteps=timesteps, context=controlnet_context, y=y)
+                if hasattr(control_model, 'compute_guided_hint'):
+                    if guided_hint is None:
+                        guided_hint = control_model.compute_guided_hint(hint, control_type)
+                        param.used_guided_hint = (param.used_hint_cond, control_model, guided_hint_types, guided_hint)
+                    control_inputs['guided_hint'] = guided_hint
+                if cond_rows is not None:
+                    control_inputs = {
+                        key: value[cond_rows] if isinstance(value, torch.Tensor) and value.shape[0] == batch_size else value
+                        for key, value in control_inputs.items()
+                    }
+
+                control = param.control_model(**control_inputs, control_type=control_type)
+
+                if cond_rows is not None:
+                    control_rows = control
+                    control = []
+                    for c in control_rows:
+                        full = c.new_zeros((batch_size, *c.shape[1:]))
+                        full[cond_rows] = c
+                        control.append(full)
 
                 if is_sdxl:
                     control_scales = [param.weight] * 10
@@ -733,9 +799,8 @@ class UnetHook(nn.Module):
                             for pi, ci in enumerate(outer.current_uc_indices):
                                 if pi % len(outer.control_params) != param_index:
                                     item[ci] = 0
-                            target[idx] = item + target[idx]
-                        else:
-                            target[idx] = item + target[idx]
+                        # The first unit's residual is a fresh tensor: take it instead of adding it to 0.0.
+                        target[idx] = item if isinstance(target[idx], float) and target[idx] == 0.0 else item + target[idx]
 
             # Replace x_t to support inpaint models
             for param in outer.control_params:
@@ -902,7 +967,7 @@ class UnetHook(nn.Module):
                     total_t2i_adapter_embedding = [rows(t) for t in encoder['t2i']]
                     h = hs[-1]
                 else:
-                    t_emb = cond_cast_unet(timestep_embedding(timesteps, self.model_channels, repeat_only=False))
+                    t_emb = cond_cast_unet(unet_timestep_embedding(timesteps, self.model_channels))
                     emb = self.time_embed(t_emb)
 
                     if is_sdxl:
