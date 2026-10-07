@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
+import tempfile
 from pathlib import Path
 
 TARGET_RELATIVE = Path("scripts") / "ultimate-upscale.py"
@@ -251,6 +253,30 @@ def patch(source: str, target: Path) -> str:
     return source
 
 
+def replace_atomically(path: Path, text: str) -> None:
+    """Write text (UTF-8, newlines untranslated) to a temporary file next to path, fsync it, give it path's mode
+    (and owner when run as root, as run.sh does) and os.replace() path with it: a failure at any point leaves path
+    untouched and removes the temporary file. A symlinked path is written through, as an in-place write would."""
+    path = Path(os.path.realpath(path))
+    stat = path.stat()
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".gb10-tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_name, stat.st_mode & 0o7777)
+        if os.geteuid() == 0:
+            os.chown(tmp_name, stat.st_uid, stat.st_gid)
+        os.replace(tmp_name, path)
+    except BaseException as exc:
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup:
+            exc.add_note(f"could not remove the temporary file {tmp_name}: {cleanup}")
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
@@ -263,7 +289,7 @@ def main() -> int:
     if not args.check and MARKER not in source:
         source = patch(source, target)
         verify(source, target)
-        target.write_bytes(source.encode("utf-8"))
+        replace_atomically(target, source)  # verified above; atomic, keeps mode and owner
         print(f"Patched Ultimate Upscale sub-canvas tiles: {target}")
     verify(source, target)
     print(f"Ultimate Upscale sub-canvas tiles verified: {target}")

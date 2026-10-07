@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import types
@@ -170,3 +172,73 @@ def test_run_sh_applies_preprocessor_path_patch_to_mounted_controlnet_extension(
     assert 'CONTROLNET_ROOT="${HOST_ROOT}/Extensions/sd-webui-controlnet"' in run_sh
     assert "patch-controlnet-preprocessor-path.py" in run_sh
     assert run_sh.index('CONTROLNET_ROOT="') < run_sh.index("patch-controlnet-preprocessor-path.py")
+
+
+def run_patcher_with_file_size_limit(root: Path, limit: int) -> subprocess.CompletedProcess[str]:
+    """Run the patcher with RLIMIT_FSIZE=limit and SIGXFSZ ignored: a write past `limit` bytes fails with EFBIG
+    partway through, as on a full disk."""
+    def limit_file_size():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    return subprocess.run([sys.executable, str(PATCHER), str(root)], text=True, capture_output=True, preexec_fn=limit_file_size)
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_write_failing_midway_leaves_the_target_intact(tmp_path):
+    root = make_controlnet_tree(tmp_path)
+    (root / "annotator" / "annotator_path.py").chmod(0o640)
+    before = snapshot(root)
+
+    result = run_patcher_with_file_size_limit(root, 64)
+
+    assert result.returncode != 0 and "File too large" in result.stderr
+    assert snapshot(root) == before  # no truncated target, no leftover temporary file
+    run_patcher(root)
+    assert (root / "annotator" / "annotator_path.py").stat().st_mode & 0o777 == 0o640
+
+
+def test_every_target_is_validated_before_any_is_written(tmp_path):
+    root = make_controlnet_tree(tmp_path)
+    controlnet = root / "scripts" / "controlnet.py"
+    controlnet.write_text(OLD_CONTROLNET.replace("annotator model directories", "annotator directories"), encoding="utf-8")
+    before = snapshot(root)
+
+    result = subprocess.run([sys.executable, str(PATCHER), str(root)], text=True, capture_output=True)
+
+    assert snapshot(root) == before  # the patchable annotator_path.py was not written either
+    assert result.returncode != 0 and "unsupported ControlNet source" in result.stderr
+
+
+def test_crlf_and_unverifiable_results_fail_closed_without_writing(tmp_path):
+    root = make_controlnet_tree(tmp_path)
+    annotator = root / "annotator" / "annotator_path.py"
+    for payload, message in (
+        (OLD_ANNOTATOR_PATH.replace("\n", "\r\n").encode("utf-8"), "CRLF"),
+        ((OLD_ANNOTATOR_PATH + "def broken(:\n").encode("utf-8"), "invalid Python"),
+    ):
+        annotator.write_bytes(payload)
+        before = snapshot(root)
+        result = subprocess.run([sys.executable, str(PATCHER), str(root)], text=True, capture_output=True)
+        assert result.returncode != 0 and message in result.stderr, result.stderr
+        assert snapshot(root) == before
+
+
+def test_patched_tree_holds_each_new_block_once_and_no_stray_old_block(tmp_path):
+    root = make_controlnet_tree(tmp_path)
+    run_patcher(root)
+    patcher = load_patcher_module()
+    for relative, old, new in patcher.TARGETS:
+        text = (root / relative).read_text(encoding="utf-8")
+        assert text.count(new) == 1 and old not in text.replace(new, "")
+        compile(text, str(relative), "exec")
+
+
+def load_patcher_module():
+    spec = importlib.util.spec_from_file_location("gb10_patch_controlnet_preprocessor_path", PATCHER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
