@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import math
 import sys
 import types
@@ -8,6 +9,7 @@ import unittest
 import torch
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = EXT_ROOT.parents[1]
 sys.path.insert(0, str(EXT_ROOT))
 
 DynThresh = importlib.import_module("dynthres_core").DynThresh
@@ -92,6 +94,12 @@ def install_a1111_stubs():
 
     sd_samplers_kdiffusion_mod.CFGDenoiserKDiffusion = CFGDenoiserKDiffusion
 
+    # The main-pass row memo is real core code with no WebUI dependencies.
+    row_memo_spec = importlib.util.spec_from_file_location("modules.sd_unet_row_memo", REPO_ROOT / "modules" / "sd_unet_row_memo.py")
+    row_memo_mod = importlib.util.module_from_spec(row_memo_spec)
+    row_memo_spec.loader.exec_module(row_memo_mod)
+
+    modules_pkg.sd_unet_row_memo = row_memo_mod
     modules_pkg.scripts = scripts_mod
     modules_pkg.headless_ui = headless_ui_mod
     modules_pkg.script_callbacks = script_callbacks_mod
@@ -109,6 +117,7 @@ def install_a1111_stubs():
             "modules.sd_samplers": sd_samplers_mod,
             "modules.sd_samplers_common": sd_samplers_common_mod,
             "modules.sd_samplers_kdiffusion": sd_samplers_kdiffusion_mod,
+            "modules.sd_unet_row_memo": row_memo_mod,
         }
     )
 
@@ -338,6 +347,46 @@ class CFGCombinerTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (2, 4, 4, 4))
         self.assertTrue(torch.equal(out, torch.full_like(out, 6.0)))
 
+    def pag_params(self, pag_x_out):
+        return types.SimpleNamespace(
+            pag_active=True,
+            pag_x_out=pag_x_out,
+            pag_scale=2.0,
+            pag_start_step=0,
+            pag_end_step=10,
+            step=1,
+            pag_sanf=False,
+            cfg_interval_enable=False,
+            cfg_interval_scheduled_value=7.0,
+        )
+
+    def test_pag_guidance_reads_cond_rows_of_pag_output(self):
+        def original(x_out, conds_list, uncond, cond_scale):
+            return torch.zeros_like(x_out[-uncond.shape[0] :])
+
+        # AND prompt: image 0 has cond rows 0 and 1, image 1 has cond row 2; rows 3-4 are uncond.
+        x_out = torch.randn(5, 4, 2, 2)
+        pag_x_out = torch.randn(3, 4, 2, 2)
+        conds_list = [[(0, 0.5), (1, 0.5)], [(2, 1.0)]]
+        out = self.cfg_combiner.combine_denoised_pass_conds_list(
+            x_out, conds_list, torch.zeros(2, 77, 8), 6.0,
+            original_func=original, cfg_dict={"pag_params": self.pag_params(pag_x_out)},
+        )
+        expected0 = (x_out[0] - pag_x_out[0]) * 1.0 + (x_out[1] - pag_x_out[1]) * 1.0
+        torch.testing.assert_close(out[0], expected0)
+        torch.testing.assert_close(out[1], (x_out[2] - pag_x_out[2]) * 2.0)
+
+    def test_pag_guidance_fails_fast_on_wrong_pag_row_count(self):
+        def original(x_out, conds_list, uncond, cond_scale):
+            return torch.zeros_like(x_out[-uncond.shape[0] :])
+
+        x_out = torch.randn(4, 4, 2, 2)
+        with self.assertRaisesRegex(RuntimeError, "expected the 2 cond rows"):
+            self.cfg_combiner.combine_denoised_pass_conds_list(
+                x_out, [[(0, 1.0)], [(1, 1.0)]], torch.zeros(2, 77, 8), 6.0,
+                original_func=original, cfg_dict={"pag_params": self.pag_params(torch.randn(4, 4, 2, 2))},
+            )
+
     def test_cfg_combiner_process_batch_skips_inactive_callback(self):
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
@@ -434,7 +483,9 @@ class PAGBatchingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         install_a1111_stubs()
+        sys.modules.pop("scripts.pag", None)
         cls.pag = importlib.import_module("scripts.pag")
+        cls.row_memo = sys.modules["modules.sd_unet_row_memo"]
 
     def setUp(self):
         shared = sys.modules["modules.shared"]
@@ -444,166 +495,170 @@ class PAGBatchingTests(unittest.TestCase):
         shared.sd_model = types.SimpleNamespace(
             cond_stage_model_empty_prompt=torch.zeros(1, 77, 8))
 
-    def test_pag_padding_matches_main_denoiser_without_mutating_inputs(self):
-        shared = sys.modules["modules.shared"]
-        shared.opts.pad_cond_uncond = True
-        cond = {"crossattn": torch.ones(2, 539, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.zeros(1, 462, 8), "vector": torch.randn(1, 4)}
+    def record_main_pass(self, n_cond, chunks, rows=None, row_subset_ok=None):
+        """Record main-pass calls the way CFGDenoiser makes them: ordered row slices of one x_in."""
+        rows = rows if rows is not None else sum(chunks)
+        x_in = torch.randn(rows, 4, 2, 2)
+        sigma_in = torch.rand(rows)
+        cond_in = {"crossattn": torch.randn(rows, 77, 8), "vector": torch.randn(rows, 4), "c_concat": [torch.randn(rows, 1, 2, 2)]}
+        denoiser = types.SimpleNamespace(run_inner_model=lambda x, sigma, cond: x)
+        memo = self.row_memo.arm(denoiser, n_cond)
+        start = 0
+        for index, chunk in enumerate(chunks):
+            end = start + chunk
+            call_cond = {"crossattn": cond_in["crossattn"][start:end], "vector": cond_in["vector"][start:end], "c_concat": [cond_in["c_concat"][0][start:end]]}
+            denoiser.run_inner_model(x_in[start:end], sigma_in[start:end], call_cond)
+            if row_subset_ok is not None:
+                memo.calls[index].row_subset_ok = row_subset_ok[index]
+            start = end
+        self.assertIs(self.row_memo.disarm(denoiser), memo)
+        return memo, x_in, sigma_in, cond_in
 
-        padded_cond, padded_uncond = self.pag._pad_pag_cond_uncond(cond, uncond)
-
-        self.assertIs(padded_cond, cond)
-        self.assertIsNot(padded_uncond, uncond)
-        self.assertEqual(uncond["crossattn"].shape[1], 462)
-        self.assertEqual(padded_uncond["crossattn"].shape[1], 539)
-        self.assertIs(padded_uncond["vector"], uncond["vector"])
-        torch.testing.assert_close(padded_uncond["crossattn"][:, :462], uncond["crossattn"])
-
-    def test_pag_extra_pass_uses_padded_batch_when_main_denoiser_would_pad(self):
-        shared = sys.modules["modules.shared"]
-        shared.opts.batch_cond_uncond = True
-        shared.opts.pad_cond_uncond = True
+    def replay(self, memo, preserve_call_sequence=False):
         calls = []
 
-        def inner_model(x_in, sigma_in, cond):
-            calls.append((tuple(x_in.shape), cond["crossattn"].shape))
-            return torch.ones_like(x_in)
+        def inner_model(x, sigma, cond):
+            calls.append((x, sigma, cond))
+            return x + 1
 
-        def make_condition_dict(c_crossattn, c_concat):
-            return {**c_crossattn, "c_concat": [c_concat]}
+        out = self.pag.pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence)
+        return out, calls
 
-        x_in = torch.zeros(3, 4, 2, 2)
-        sigma_in = torch.zeros(3)
-        image_cond = torch.zeros(3, 1, 2, 2)
-        tensor = {"crossattn": torch.randn(2, 539, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.randn(1, 462, 8), "vector": torch.randn(1, 4)}
+    def assert_call_rows(self, call, x_in, sigma_in, cond_in, start, end):
+        x, sigma, cond = call
+        self.assertTrue(torch.equal(x, x_in[start:end]))
+        self.assertEqual(x.data_ptr(), x_in[start:end].data_ptr())
+        self.assertTrue(torch.equal(sigma, sigma_in[start:end]))
+        self.assertTrue(torch.equal(cond["crossattn"], cond_in["crossattn"][start:end]))
+        self.assertTrue(torch.equal(cond["vector"], cond_in["vector"][start:end]))
+        self.assertTrue(torch.equal(cond["c_concat"][0], cond_in["c_concat"][0][start:end]))
 
-        out = self.pag.pag_inner_model_x_out(inner_model, x_in, sigma_in, tensor, uncond, image_cond, make_condition_dict, 1)
+    def test_pag_replays_only_cond_rows_of_batched_main_call(self):
+        # batch_cond_uncond with matching (or padded) tokens: one [cond, uncond] call.
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=2, chunks=[3])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 1)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        torch.testing.assert_close(out, x_in[:2] + 1)
 
-        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
-        self.assertEqual(calls, [((3, 4, 2, 2), torch.Size([3, 539, 8]))])
+    def test_pag_mirrors_split_main_pass_and_skips_uncond_calls(self):
+        # Token mismatch without padding (AND prompt, batch_size 1): cond chunk of 2, then 1, then uncond.
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=3, chunks=[2, 1, 1])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 2)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 2, 3)
+        torch.testing.assert_close(out, x_in[:3] + 1)
 
-    def test_pag_extra_pass_splits_sdxl_cond_uncond_when_token_counts_differ(self):
-        calls = []
+    def test_pag_mirrors_batching_disabled_chunks(self):
+        # batch_cond_uncond off, batch_size 2: chunks [c0 c1] [u0 u1].
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=2, chunks=[2, 2])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 1)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        torch.testing.assert_close(out, x_in[:2] + 1)
 
-        def inner_model(x_in, sigma_in, cond):
-            calls.append(
-                (
-                    tuple(x_in.shape),
-                    cond["crossattn"].shape[1],
-                    tuple(cond["c_concat"][0].shape),
-                )
-            )
-            return torch.ones_like(x_in) * len(calls)
+    def test_pag_replays_chunks_that_straddle_the_cond_boundary(self):
+        # batch_cond_uncond off, batch_size 2, AND prompt: chunks [c0 c1] [c2 u0] [u1].
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=3, chunks=[2, 2, 1])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 2)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 2, 3)
+        torch.testing.assert_close(out, x_in[:3] + 1)
 
-        def make_condition_dict(c_crossattn, c_concat):
-            return {**c_crossattn, "c_concat": [c_concat]}
+    def test_pag_handles_skip_uncond_main_pass(self):
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=2, chunks=[2])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 1)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        torch.testing.assert_close(out, x_in[:2] + 1)
 
-        x_in = torch.zeros(3, 4, 2, 2)
-        sigma_in = torch.zeros(3)
-        image_cond = torch.zeros(3, 1, 2, 2)
-        tensor = {"crossattn": torch.randn(2, 539, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.randn(1, 462, 8), "vector": torch.randn(1, 4)}
+    def test_pag_replays_row_coupled_calls_whole(self):
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=1, chunks=[2, 2], row_subset_ok=[False, False])
+        out, calls = self.replay(memo)
+        self.assertEqual(len(calls), 2)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 2, 4)
+        torch.testing.assert_close(out, x_in[:1] + 1)
 
-        out = self.pag.pag_inner_model_x_out(
-            inner_model,
-            x_in,
-            sigma_in,
-            tensor,
-            uncond,
-            image_cond,
-            make_condition_dict,
-            1,
-        )
+    def test_pag_preserves_call_sequence_when_requested(self):
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=1, chunks=[1, 1])
+        out, calls = self.replay(memo, preserve_call_sequence=True)
+        self.assertEqual(len(calls), 2)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 1)
+        self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 1, 2)
+        torch.testing.assert_close(out, x_in[:1] + 1)
 
-        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
-        self.assertEqual(len(calls), 3)
-        self.assertEqual([call[1] for call in calls], [539, 539, 462])
+    def test_pag_fails_fast_when_main_pass_does_not_cover_cond_rows(self):
+        memo, *_ = self.record_main_pass(n_cond=3, chunks=[2], rows=2)
+        with self.assertRaisesRegex(RuntimeError, "covers 2 of 3 cond rows"):
+            self.replay(memo)
 
-    def test_pag_extra_pass_splits_equal_tokens_when_batching_disabled(self):
-        calls = []
+    def test_pag_callbacks_record_main_pass_and_restore_hook_state(self):
+        script = self.pag.PAGExtensionScript()
+        pag_params = self.pag.PAGStateParams()
+        pag_params.pag_active = True
+        pag_params.pag_scale = 3.0
+        pag_params.pag_start_step = 0
+        pag_params.pag_end_step = 10
+        pag_params.noise_levels = [1.0] * 4
+        attn = types.SimpleNamespace(pag_enable=False)
+        to_q = types.SimpleNamespace(seg_enable=True)
+        pag_params.crossattn_modules = [attn]
+        pag_params.seg_q_modules = [to_q]
 
-        def inner_model(x_in, sigma_in, cond):
-            calls.append(cond["crossattn"].shape)
-            return torch.ones_like(x_in)
+        class Denoiser(torch.nn.Module):
+            def run_inner_model(self, x, sigma, cond):
+                return x * 0
 
-        def make_condition_dict(c_crossattn, c_concat):
-            return {**c_crossattn, "c_concat": [c_concat]}
+        denoiser = Denoiser()
+        x_in = torch.randn(2, 4, 2, 2)
+        cond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
+        params = types.SimpleNamespace(sampling_step=1, denoiser=denoiser, text_cond=cond)
+        script.on_cfg_denoiser_callback(params, pag_params)
+        denoiser.run_inner_model(x_in, torch.ones(2), {"crossattn": torch.randn(2, 77, 8)})
 
-        x_in = torch.zeros(3, 4, 2, 2)
-        sigma_in = torch.zeros(3)
-        image_cond = torch.zeros(3, 1, 2, 2)
-        tensor = {"crossattn": torch.randn(2, 77, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
+        seen = {}
 
-        out = self.pag.pag_inner_model_x_out(
-            inner_model,
-            x_in,
-            sigma_in,
-            tensor,
-            uncond,
-            image_cond,
-            make_condition_dict,
-            1,
-        )
+        def inner_model(x, sigma, cond):
+            seen["state"] = (attn.pag_enable, to_q.seg_enable, x.shape[0])
+            return x - 1
 
-        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
-        self.assertEqual(calls, [torch.Size([1, 77, 8])] * 3)
+        script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=inner_model), pag_params)
+        self.assertEqual(seen["state"], (True, False, 1))
+        torch.testing.assert_close(pag_params.pag_x_out, x_in[:1] - 1)
+        self.assertFalse(attn.pag_enable)
+        self.assertTrue(to_q.seg_enable)
+        self.assertIsNone(self.row_memo.disarm(denoiser))
 
-    def test_pag_extra_pass_concatenates_when_batching_enabled_and_tokens_match(self):
-        shared = sys.modules["modules.shared"]
-        shared.opts.batch_cond_uncond = True
-        calls = []
+        # A failing PAG pass still restores hook state and releases the memo.
+        script.on_cfg_denoiser_callback(params, pag_params)
+        denoiser.run_inner_model(x_in, torch.ones(2), {"crossattn": torch.randn(2, 77, 8)})
 
-        def inner_model(x_in, sigma_in, cond):
-            calls.append(cond["crossattn"].shape)
-            return torch.ones_like(x_in)
+        def failing_inner_model(x, sigma, cond):
+            raise ValueError("unet failed")
 
-        def make_condition_dict(c_crossattn, c_concat):
-            return {**c_crossattn, "c_concat": [c_concat]}
+        with self.assertRaisesRegex(ValueError, "unet failed"):
+            script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=failing_inner_model), pag_params)
+        self.assertFalse(attn.pag_enable)
+        self.assertTrue(to_q.seg_enable)
+        self.assertIsNone(self.row_memo.disarm(denoiser))
 
-        x_in = torch.zeros(3, 4, 2, 2)
-        sigma_in = torch.zeros(3)
-        image_cond = torch.zeros(3, 1, 2, 2)
-        tensor = {"crossattn": torch.randn(2, 77, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
+        # Outside the PAG interval nothing is recorded and the recorder passes through.
+        script.on_cfg_denoiser_callback(types.SimpleNamespace(sampling_step=20, denoiser=denoiser, text_cond=cond), pag_params)
+        self.assertIsNone(self.row_memo.disarm(denoiser))
 
-        out = self.pag.pag_inner_model_x_out(
-            inner_model,
-            x_in,
-            sigma_in,
-            tensor,
-            uncond,
-            image_cond,
-            make_condition_dict,
-            1,
-        )
+        script.postprocess_batch(types.SimpleNamespace(incant_cfg_params={"pag_params": None}))
+        self.assertNotIn("run_inner_model", denoiser.__dict__)
 
-        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
-        self.assertEqual(calls, [torch.Size([3, 77, 8])])
-
-    def test_pag_extra_pass_split_allows_missing_image_conditioning(self):
-        calls = []
-
-        def inner_model(x_in, sigma_in, cond):
-            calls.append((cond["crossattn"].shape[1], cond["c_concat"][0]))
-            return torch.ones_like(x_in)
-
-        def make_condition_dict(c_crossattn, c_concat):
-            return {**c_crossattn, "c_concat": [c_concat]}
-
-        x_in = torch.zeros(3, 4, 2, 2)
-        sigma_in = torch.zeros(3)
-        tensor = {"crossattn": torch.randn(2, 847, 8), "vector": torch.randn(2, 4)}
-        uncond = {"crossattn": torch.randn(1, 770, 8), "vector": torch.randn(1, 4)}
-
-        out = self.pag.pag_inner_model_x_out(
-            inner_model, x_in, sigma_in, tensor, uncond, None, make_condition_dict, 1
-        )
-
-        self.assertEqual(tuple(out.shape), tuple(x_in.shape))
-        self.assertEqual([call[0] for call in calls], [847, 847, 770])
-        self.assertTrue(all(call[1] is None for call in calls))
+    def test_pag_denoised_callback_fails_fast_without_recorded_main_pass(self):
+        script = self.pag.PAGExtensionScript()
+        pag_params = self.pag.PAGStateParams()
+        pag_params.pag_active = True
+        pag_params.pag_scale = 3.0
+        with self.assertRaisesRegex(RuntimeError, "not recorded"):
+            script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=None), pag_params)
 
     def test_pag_noise_helpers_handle_degenerate_step_counts(self):
         self.assertEqual(self.pag.calculate_noise_level(0, 0), 0.0)

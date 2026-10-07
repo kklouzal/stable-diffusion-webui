@@ -14,7 +14,7 @@ from scripts.enums import (
 )
 from scripts.ipadapter.ipadapter_model import ImageEmbed
 from scripts.controlnet_sparsectrl import SparseCtrl
-from modules import devices, lowvram, shared, scripts
+from modules import devices, lowvram, shared, scripts, sd_unet_row_memo
 
 from ldm.modules.diffusionmodules.util import timestep_embedding, make_beta_schedule
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
@@ -395,7 +395,7 @@ class UnetHook(nn.Module):
         self._forward_hook_wrapper = None
 
     @staticmethod
-    def call_vae_using_process(p, x, batch_size=None, mask=None):
+    def call_vae_using_process(p, x, mask=None):
         vae_cache = getattr(p, 'controlnet_vae_cache', None)
         if vae_cache is None:
             vae_cache = TorchCache()
@@ -432,8 +432,6 @@ class UnetHook(nn.Module):
                 vae_cache.set(x, vae_output)
                 logger.info(f'ControlNet used {str(devices.dtype_vae)} VAE to encode {vae_output.shape}.')
             latent = vae_output
-            if batch_size is not None and latent.shape[0] != batch_size:
-                latent = torch.cat([latent.clone() for _ in range(batch_size)], dim=0)
             latent = latent.type(devices.dtype_unet)
             return latent
         except Exception as e:
@@ -473,7 +471,37 @@ class UnetHook(nn.Module):
             mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
             return process.sample_before_CN_hack(*args, **kwargs)
 
+        def batch_rows(t, rows):
+            """Cached hint-derived tensors keep their own rows; expand a single row to the call's batch."""
+            if t.shape[0] == rows:
+                return t
+            if t.shape[0] == 1:
+                return t.expand(rows, *t.shape[1:])
+            raise RuntimeError(f"ControlNet cached tensor has {t.shape[0]} rows but the UNet call has {rows}")
+
+        def rows_are_independent(is_in_high_res_fix):
+            """Whether a call can be evaluated on a subset of its rows with identical per-row results.
+
+            PAG replays only the cond rows of main-pass calls. Units that couple rows must see the
+            whole call: StyleAlign shares attention across the batch, IP-Adapter caches its image k/v
+            at the first call's batch size, multi-image hints are row-aligned, and reference units draw
+            fresh noise over all rows of every call.
+            """
+            if batch_option_style_align:
+                return False
+            for param in outer.control_params:
+                if param.control_model_type == ControlModelType.IPAdapter:
+                    return False
+                hint = param.used_hint_cond
+                if isinstance(hint, torch.Tensor) and hint.ndim > 0 and hint.shape[0] > 1:
+                    return False
+                if param.control_model_type == ControlModelType.AttentionInjection \
+                        and not param.guidance_stopped and not param.disabled_by_hr_option(is_in_high_res_fix):
+                    return False
+            return True
+
         def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+            memo_slot = sd_unet_row_memo.claim()
             is_sdxl = y is not None and model_is_sdxl
             total_t2i_adapter_embedding = [0.0] * 4
             if is_sdxl:
@@ -539,8 +567,10 @@ class UnetHook(nn.Module):
 
             self.is_in_high_res_fix = is_in_high_res_fix
             outer.is_in_high_res_fix = is_in_high_res_fix
+            if memo_slot is not None and not memo_slot.replay and not rows_are_independent(is_in_high_res_fix):
+                memo_slot.rec.row_subset_ok = False
 
-            # Convert control image to latent
+            # Convert control image to latent (kept at the hint's rows; expanded per call where needed)
             for param in outer.control_params:
                 if param.used_hint_cond_latent is not None:
                     continue
@@ -548,7 +578,7 @@ class UnetHook(nn.Module):
                         and 'colorfix' not in param.preprocessor['name'] \
                         and 'inpaint_only' not in param.preprocessor['name']:
                     continue
-                param.used_hint_cond_latent = outer.call_vae_using_process(process, param.used_hint_cond, batch_size=batch_size)
+                param.used_hint_cond_latent = outer.call_vae_using_process(process, param.used_hint_cond)
 
             # vram
             for param in outer.control_params:
@@ -703,13 +733,11 @@ class UnetHook(nn.Module):
                     mask_pixel = param.used_hint_cond[:, 3:4, :, :]
                     image_pixel = param.used_hint_cond[:, 0:3, :, :]
                     mask_pixel = (mask_pixel > 0.5).to(mask_pixel.dtype)
-                    masked_latent = outer.call_vae_using_process(process, image_pixel, batch_size, mask=mask_pixel)
+                    masked_latent = outer.call_vae_using_process(process, image_pixel, mask=mask_pixel)
                     mask_latent = torch.nn.functional.max_pool2d(mask_pixel, (8, 8))
-                    if mask_latent.shape[0] != batch_size:
-                        mask_latent = torch.cat([mask_latent.clone() for _ in range(batch_size)], dim=0)
                     param.used_hint_inpaint_hijack = torch.cat([mask_latent, masked_latent], dim=1)
                     param.used_hint_inpaint_hijack.to(x.dtype).to(x.device)
-                x = torch.cat([x[:, :4, :, :], param.used_hint_inpaint_hijack], dim=1)
+                x = torch.cat([x[:, :4, :, :], batch_rows(param.used_hint_inpaint_hijack, x.shape[0])], dim=1)
 
             # vram
             for param in outer.control_params:
@@ -746,14 +774,15 @@ class UnetHook(nn.Module):
                 if param.control_model_type not in [ControlModelType.AttentionInjection]:
                     continue
 
-                ref_xt = predict_q_sample(outer.sd_ldm, param.used_hint_cond_latent, torch.round(timesteps.float()).long())
+                ref_latent = batch_rows(param.used_hint_cond_latent, x.shape[0])
+                ref_xt = predict_q_sample(outer.sd_ldm, ref_latent, torch.round(timesteps.float()).long())
 
                 # Inpaint Hijack
                 if x.shape[1] == 9:
                     ref_xt = torch.cat([
                         ref_xt,
                         torch.zeros_like(ref_xt)[:, 0:1, :, :],
-                        param.used_hint_cond_latent
+                        ref_latent
                     ], dim=1)
 
                 outer.current_style_fidelity = float(param.preprocessor['threshold_a'])

@@ -249,6 +249,12 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                 # blend, so it cannot faithfully preserve a dynamically-thresholded base.
                 # In that case keep the previous SANF behavior rather than pretending both
                 # rescalers are fully applied.
+                if run_pag:
+                        # The PAG pass evaluates exactly the cond rows, which lead x_out.
+                        n_cond = x_out.shape[0] - uncond_tensor.shape[0]
+                        if pag_x_out.shape[0] != n_cond:
+                                raise RuntimeError(f"PAG output has {pag_x_out.shape[0]} rows, expected the {n_cond} cond rows of x_out")
+
                 use_saliency_map = pag_params.pag_sanf
                 if use_saliency_map and run_pag:
                         denoised = denoised_uncond.clone()
@@ -258,29 +264,25 @@ def combine_denoised_pass_conds_list(*args, **kwargs):
                         for cond_index, weight in conds:
                                 if not run_pag:
                                         continue
-                                try:
-                                        pag_index = cond_index if cond_index < pag_x_out.shape[0] else i
-                                        pag_delta = x_out[cond_index] - pag_x_out[pag_index]
-                                        pag_x = pag_delta * (weight * pag_scale)
+                                pag_delta = x_out[cond_index] - pag_x_out[cond_index]
+                                pag_x = pag_delta * (weight * pag_scale)
 
-                                        if not use_saliency_map:
-                                                pag_blend_started = time.perf_counter()
-                                                try:
-                                                        denoised[i] += pag_x
-                                                finally:
-                                                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_pag_blend", time.perf_counter() - pag_blend_started)
-                                                continue
-
-                                        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
-                                        sanf_started = time.perf_counter()
+                                if not use_saliency_map:
+                                        pag_blend_started = time.perf_counter()
                                         try:
-                                                model_delta = x_out[cond_index] - denoised_uncond[i]
-                                                sal_cfg = _sanf_guidance_blend(model_delta * (weight * cfg_scale), pag_x)
-                                                denoised[i] += sal_cfg
+                                                denoised[i] += pag_x
                                         finally:
-                                                timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_sanf_blend", time.perf_counter() - sanf_started)
-                                except Exception as e:
-                                        logger.exception("Exception in combine_denoised_pass_conds_list - %s", e)
+                                                timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_pag_blend", time.perf_counter() - pag_blend_started)
+                                        continue
+
+                                # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
+                                sanf_started = time.perf_counter()
+                                try:
+                                        model_delta = x_out[cond_index] - denoised_uncond[i]
+                                        sal_cfg = _sanf_guidance_blend(model_delta * (weight * cfg_scale), pag_x)
+                                        denoised[i] += sal_cfg
+                                finally:
+                                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_sanf_blend", time.perf_counter() - sanf_started)
 
                 return denoised
         return new_combine_denoised(*args)
