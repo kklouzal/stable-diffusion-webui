@@ -13,7 +13,6 @@
 import logging
 
 from modules import headless_ui as gr
-import torch
 import dynthres_core
 from modules import scripts, script_callbacks, sd_samplers, sd_samplers_common
 from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
@@ -175,10 +174,7 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
         self.main_class.step = self.step
         self.main_class.max_steps = self.total_steps
 
-        relative = torch.zeros_like(denoised_uncond)
-        for i, conds in enumerate(conds_list):
-            for cond_index, weight in conds:
-                relative[i] += (x_out[cond_index] - denoised_uncond[i]) * weight
+        relative = dynthres_core.cfg_relative(x_out, conds_list, denoised_uncond)
         return self.main_class.dynthresh_from_relative(relative, denoised_uncond, cond_scale)
 
 ######################### XYZ Plot Script Support logic #########################
