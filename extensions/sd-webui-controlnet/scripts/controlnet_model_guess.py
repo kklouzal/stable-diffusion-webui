@@ -213,6 +213,8 @@ def build_model_by_guess(state_dict, unet, model_path: str) -> ControlModel:
             unet_state_dict_keys = unet_state_dict.keys()
             final_state_dict = {}
             for key in state_dict.keys():
+                if key == 'difference':
+                    continue  # format marker, not a weight
                 p = state_dict[key]
                 if key in unet_state_dict_keys:
                     p_new = p + unet_state_dict[key].clone().cpu()
@@ -237,8 +239,7 @@ def build_model_by_guess(state_dict, unet, model_path: str) -> ControlModel:
 
         config['use_fp16'] = devices.dtype_unet == torch.float16
 
-        network = PlugableControlModel(config, state_dict)
-        network.to(devices.dtype_unet)
+        network = PlugableControlModel(config, state_dict, dtype=devices.dtype_unet)
 
         return ControlModel(network, control_model_type)
 
