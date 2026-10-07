@@ -1084,14 +1084,24 @@ def restore_processing_override_settings(stored_opts):
             sd_vae.reload_vae_weights()
 
 
-def process_images(p: StableDiffusionProcessing) -> Processed:
-    if p.scripts is not None:
-        p.scripts.before_process(p)
+def _failed_batch_images(p):
+    """The `images` a script's postprocess_batch gets when its batch failed: an empty batch of the shape the
+    decoded batch would have had."""
+    return torch.empty((0, 3, p.height, p.width), dtype=torch.float32)
 
+
+def process_images(p: StableDiffusionProcessing) -> Processed:
     p._active_extra_network_data = None
-    stored_opts = store_processing_override_settings(p)
+    stored_opts = None
+    script_runner = p.scripts
+    previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
 
     try:
+        if script_runner is not None:
+            script_runner.before_process(p)
+
+        # before_process may add override settings (e.g. the extra options section), so snapshot after it.
+        stored_opts = store_processing_override_settings(p)
         apply_processing_override_settings(p)
 
         sd_models.apply_token_merging(p.sd_model, p.get_token_merging_ratio())
@@ -1101,6 +1111,14 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 
         with profiling.Profiler():
             res = process_images_inner(p)
+
+    except BaseException as e:
+        # Scripts remove their per-request hooks (UNet/VAE patches, sampler wrappers, CFG callbacks) in
+        # postprocess_batch/postprocess, which a failed generation never reached; left installed they would
+        # change the next request. Runs before extra networks and override settings are restored, as on success.
+        if script_runner is not None:
+            script_runner.cleanup_failed_generation(p, e, lambda: _failed_batch_images(p), lambda: Processed(p, []))
+        raise
 
     finally:
         try:
@@ -1112,8 +1130,11 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             sd_models.apply_token_merging(p.sd_model, 0)
 
             # restore opts to original state
-            if p.override_settings_restore_afterwards:
+            if p.override_settings_restore_afterwards and stored_opts is not None:
                 restore_processing_override_settings(stored_opts)
+
+            if script_runner is not None:
+                script_runner.end_generation(p, previous_script_lifecycle)
 
     return res
 

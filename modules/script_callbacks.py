@@ -16,6 +16,18 @@ def report_exception(c, job):
     errors.report(f"Error executing callback {job} for {c.script}", exc_info=True)
 
 
+def _run_output_callbacks(category, job, *args):
+    """Callbacks that change what a generation produces (noise, denoiser inputs/outputs, the image grid, the
+    saved image): one that raises has not applied what its script set up for this request, so the exception
+    fails the operation instead of being logged while the output silently lacks the effect."""
+    for c in ordered_callbacks(category):
+        try:
+            c.callback(*args)
+        except Exception as e:
+            e.add_note(f"raised by {job} callback {c.name} ({c.script})")
+            raise
+
+
 class ImageSaveParams:
     def __init__(self, image, p, filename, pnginfo):
         self.image = image
@@ -284,11 +296,7 @@ def ui_settings_callback():
 
 
 def before_image_saved_callback(params: ImageSaveParams):
-    for c in ordered_callbacks('before_image_saved'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'before_image_saved_callback')
+    _run_output_callbacks('before_image_saved', 'before_image_saved_callback', params)
 
 
 def image_saved_callback(params: ImageSaveParams):
@@ -300,43 +308,23 @@ def image_saved_callback(params: ImageSaveParams):
 
 
 def extra_noise_callback(params: ExtraNoiseParams):
-    for c in ordered_callbacks('extra_noise'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'callbacks_extra_noise')
+    _run_output_callbacks('extra_noise', 'callbacks_extra_noise', params)
 
 
 def cfg_denoiser_callback(params: CFGDenoiserParams):
-    for c in ordered_callbacks('cfg_denoiser'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'cfg_denoiser_callback')
+    _run_output_callbacks('cfg_denoiser', 'cfg_denoiser_callback', params)
 
 
 def cfg_denoised_callback(params: CFGDenoisedParams):
-    for c in ordered_callbacks('cfg_denoised'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'cfg_denoised_callback')
+    _run_output_callbacks('cfg_denoised', 'cfg_denoised_callback', params)
 
 
 def cfg_after_cfg_callback(params: AfterCFGCallbackParams):
-    for c in ordered_callbacks('cfg_after_cfg'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'cfg_after_cfg_callback')
+    _run_output_callbacks('cfg_after_cfg', 'cfg_after_cfg_callback', params)
 
 
 def image_grid_callback(params: ImageGridLoopParams):
-    for c in ordered_callbacks('image_grid'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'image_grid')
+    _run_output_callbacks('image_grid', 'image_grid', params)
 
 
 def infotext_pasted_callback(infotext: str, params: dict[str, Any]):
