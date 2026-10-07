@@ -185,7 +185,6 @@ ENV PATH=/usr/lib/ccache:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin
 
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --profile minimal --default-toolchain stable
 
-COPY --from=source /opt/build/stable-diffusion-webui /opt/build/stable-diffusion-webui
 COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
 COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
 COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/build/base-python-released-floors.txt
