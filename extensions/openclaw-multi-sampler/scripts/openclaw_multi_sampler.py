@@ -537,18 +537,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
                 config = _k_sampler_config(sampler_name)
                 func, stage_funcname = _sampler_func_for(sampler_name)
                 kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, stage_steps=stage_steps)
-                # k-diffusion's sample_dpmpp_2m_sde has an h_last bookkeeping bug when
-                # it is asked to do only the final denoise transition [sigma, 0].
-                # A mid-chain split can naturally create that one-step stage, so handle
-                # it explicitly instead of rejecting useful takeover points.
-                if stage_funcname == "sample_dpmpp_2m_sde" and stage_steps == 1 and end == steps:
-                    s_in = x.new_ones([x.shape[0]])
-                    denoised = self.model_wrap_cfg(x, stage_sigmas[0] * s_in, **self.sampler_extra_args)
-                    self._callback(p, offset=offset)({"x": x, "i": 0, "sigma": stage_sigmas[0], "sigma_hat": stage_sigmas[0], "denoised": denoised})
-                    self.last_latent = denoised
-                    x = denoised
-                else:
-                    x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self._callback(p, offset=offset), **kwargs)
+                # A one-step final stage [sigma, 0] is valid for every sampler: modules/sd_samplers_extra.py makes the
+                # DPM++ 2M/3M SDE functions run it as their denoising step.
+                x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self._callback(p, offset=offset), **kwargs)
                 self.last_latent = x
             self._save_snapshot(p, x, step=steps, final=True)
             return x

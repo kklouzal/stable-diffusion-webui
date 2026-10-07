@@ -1,6 +1,35 @@
+import functools
+
 import torch
 import tqdm
 import k_diffusion.sampling
+
+
+def _terminal_step_denoises(sampler):
+    """Run a schedule whose only transition ends at sigma 0 as the plain denoising step x = denoised.
+
+    k-diffusion's DPM++ 2M SDE and 3M SDE assign `h` only on steps that do not end at sigma 0 but read it after every
+    step, so such a schedule (one-step txt2img, img2img or hires fix with t_enc 0) raises UnboundLocalError. Longer
+    schedules run the original sampler unchanged."""
+
+    @functools.wraps(sampler)
+    @torch.no_grad()
+    def sample(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+        if len(sigmas) != 2 or sigmas[1] != 0:
+            return sampler(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, **kwargs)
+
+        denoised = model(x, sigmas[0] * x.new_ones([x.shape[0]]), **({} if extra_args is None else extra_args))
+        if callback is not None:
+            callback({'x': x, 'i': 0, 'sigma': sigmas[0], 'sigma_hat': sigmas[0], 'denoised': denoised})
+        return denoised
+
+    sample.openclaw_terminal_step_denoises = True
+    return sample
+
+
+for _name in ('sample_dpmpp_2m_sde', 'sample_dpmpp_3m_sde'):
+    if not getattr(getattr(k_diffusion.sampling, _name), 'openclaw_terminal_step_denoises', False):
+        setattr(k_diffusion.sampling, _name, _terminal_step_denoises(getattr(k_diffusion.sampling, _name)))
 
 
 @torch.no_grad()

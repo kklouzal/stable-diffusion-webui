@@ -15,7 +15,12 @@ def _module(name: str, **attrs):
     return module
 
 
+sampler_calls = []
+
+
 def load_multi_sampler(monkeypatch):
+    sampler_calls.clear()
+
     class Script:
         pass
 
@@ -27,8 +32,9 @@ def load_multi_sampler(monkeypatch):
     def sample_heun(model, x, extra_args=None, disable=False, callback=None):
         return x
 
-    def sample_dpmpp_2m_sde(model, x, extra_args=None, disable=False, callback=None):
-        raise AssertionError("terminal one-step DPM++ 2M SDE should use the direct denoise path")
+    def sample_dpmpp_2m_sde(model, x, extra_args=None, disable=False, callback=None, sigmas=None, **kwargs):
+        sampler_calls.append(list(sigmas))
+        return "denoised"
 
     class SamplerData(tuple):
         def __new__(cls, name, constructor, aliases, options):
@@ -158,7 +164,8 @@ def test_multi_sampler_data_propagates_penultimate_sigma_discard(monkeypatch):
     assert data.options["discard_next_to_last_sigma"] is True
 
 
-def test_terminal_one_step_dpmpp_2m_sde_uses_direct_denoise(monkeypatch):
+def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(monkeypatch):
+    # The sampler function owns the [sigma, 0] fix (modules/sd_samplers_extra.py), so the chain must not special-case it.
     module = load_multi_sampler(monkeypatch)
 
     class FakeLatent:
@@ -202,5 +209,5 @@ def test_terminal_one_step_dpmpp_2m_sde_uses_direct_denoise(monkeypatch):
 
     assert result == "denoised"
     assert sampler.last_latent == "denoised"
-    assert sampler.model_wrap_cfg.calls[0][1] == 1
+    assert sampler_calls == [[1, 0]]
     assert p.extra_generation_params["Sampler chain"] == "Euler@0-1 -> DPM++ 2M SDE@1-2"
