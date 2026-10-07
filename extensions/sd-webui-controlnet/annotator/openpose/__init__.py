@@ -11,6 +11,7 @@ import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import threading
 import torch
 import numpy as np
 from . import util
@@ -193,6 +194,9 @@ class OpenposeDetector:
 
         self.dw_pose_estimation = None
         self.animal_pose_estimation = None
+        # The DW/animal ONNX nets are parsed once and reused (the weights files are fixed). A cv2.dnn.Net
+        # must not run forward() from two threads at once, and API/preview calls can overlap generation.
+        self.onnx_lock = threading.Lock()
 
     def load_model(self):
         """
@@ -389,11 +393,11 @@ class OpenposeDetector:
         """
         from .wholebody import Wholebody  # DW Pose
 
-        self.load_dw_model()
-
-        with torch.no_grad():
+        with self.onnx_lock:
+            if self.dw_pose_estimation is None:
+                self.load_dw_model()
             keypoints_info = self.dw_pose_estimation(oriImg.copy())
-            return Wholebody.format_result(keypoints_info)
+        return Wholebody.format_result(keypoints_info)
 
     def detect_poses_animal(self, oriImg) -> List[AnimalPoseResult]:
         """
@@ -407,9 +411,9 @@ class OpenposeDetector:
             A list of AnimalPoseResult objects containing the detected animal poses.
         """
 
-        self.load_animalpose_model()
-
-        with torch.no_grad():
+        with self.onnx_lock:
+            if self.animal_pose_estimation is None:
+                self.load_animalpose_model()
             return self.animal_pose_estimation(oriImg.copy())
 
     def __call__(

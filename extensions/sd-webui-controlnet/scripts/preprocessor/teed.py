@@ -90,7 +90,10 @@ class PreprocessorAnyline(Preprocessor):
         mteed_result = HWC3(mteed_result)
         lineart_preprocessor = Preprocessor.get_preprocessor("lineart_standard")
         assert lineart_preprocessor is not None
-        lineart_result = lineart_preprocessor(img, resolution)
+        # img is already resized and padded to multiples of 64: run lineart_standard at img's own scale so its
+        # result has mteed_result's shape. Re-resizing to `resolution` shrank it whenever resolution % 64 != 0
+        # (combine_layers then raised a broadcast error); for other resolutions the two calls are identical.
+        lineart_result = lineart_preprocessor(img, min(img.shape[:2]))
         lineart_result = get_intensity_mask(
             lineart_result, lower_bound=0, upper_bound=1
         )
