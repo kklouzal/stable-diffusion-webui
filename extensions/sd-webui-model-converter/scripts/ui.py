@@ -5,7 +5,7 @@ import traceback
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from modules import script_callbacks
+from modules import call_queue, script_callbacks
 from scripts import convert
 
 
@@ -33,10 +33,16 @@ class ConvertRequest(BaseModel):
 
 
 def on_app_started(_: object, app: FastAPI) -> None:
+    # Both routes rebuild sd_models.checkpoints_list/checkpoint_aliases and sd_vae.vae_dict in place
+    # (list_models / refresh_vae_list), and conversion drives shared.state; a generation running concurrently
+    # could resolve its checkpoint from a half-built map or have its job state reset. queue_lock serializes
+    # them with generations, as the core refresh-checkpoints endpoint does.
     @app.get("/sdapi/v1/openclaw/model-converter/options")
     def openclaw_model_converter_options():
         try:
-            return {"ok": True, **convert.converter_options()}
+            with call_queue.queue_lock:
+                options = convert.converter_options()
+            return {"ok": True, **options}
         except Exception as exc:
             return {
                 "ok": False,
@@ -49,7 +55,8 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/model-converter/convert")
     def openclaw_model_converter_convert(request: ConvertRequest):
         try:
-            result = convert.convert_single(request.model_dump())
+            with call_queue.queue_lock:
+                result = convert.convert_single(request.model_dump())
             return {"ok": True, "result": result}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}

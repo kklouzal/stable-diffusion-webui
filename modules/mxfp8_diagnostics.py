@@ -12,7 +12,7 @@ from typing import Any
 
 import torch
 
-from modules import openclaw_cache_epochs, persistent_artifact_cache
+from modules import call_queue, openclaw_cache_epochs, persistent_artifact_cache
 
 _LOCK = threading.Lock()
 _LAST_RESULT: dict[str, Any] | None = None
@@ -132,14 +132,28 @@ def _make_config(kernel_preference: str = "AUTO", scaling_mode: str | None = Non
     return MXDynamicActivationMXWeightConfig(**kwargs)
 
 
+def _probe_generator(device: str, seed: int) -> torch.Generator:
+    # The probe never touches the global RNG: generations seed and draw from it.
+    return torch.Generator(device=device).manual_seed(seed)
+
+
+def _seeded_linear(in_features: int, out_features: int, device: str, generator: torch.Generator | None) -> torch.nn.Linear:
+    """bf16 Linear with nn.Linear's default weight init drawn from `generator` (no weights drawn when None)."""
+    linear = torch.nn.utils.skip_init(torch.nn.Linear, in_features, out_features, bias=False, device=device, dtype=torch.bfloat16)
+    if generator is not None:
+        with torch.no_grad():
+            torch.nn.init.kaiming_uniform_(linear.weight, a=math.sqrt(5), generator=generator)
+    return linear.eval()
+
+
 def _quantize_linear(in_features=1024, out_features=1024, batch=64, kernel_preference="AUTO", scaling_mode: str | None = None):
     from torchao.quantization import quantize_
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.manual_seed(1234)
-    base = torch.nn.Linear(in_features, out_features, bias=False, device=device, dtype=torch.bfloat16).eval()
-    q = torch.nn.Linear(in_features, out_features, bias=False, device=device, dtype=torch.bfloat16).eval()
+    generator = _probe_generator(device, 1234)
+    base = _seeded_linear(in_features, out_features, device, generator)
+    q = _seeded_linear(in_features, out_features, device, None)
     q.load_state_dict(base.state_dict())
-    x = torch.randn(batch, in_features, device=device, dtype=torch.bfloat16)
+    x = torch.randn(batch, in_features, device=device, dtype=torch.bfloat16, generator=generator)
     with torch.no_grad():
         baseline = base(x)
     quantize_(q, _make_config(kernel_preference=kernel_preference, scaling_mode=scaling_mode), device=device)
@@ -230,9 +244,9 @@ def native_vs_emulated_detection() -> dict[str, Any]:
     result: dict[str, Any] = {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
-        torch.manual_seed(5678)
-        base = torch.nn.Linear(2048, 2048, bias=False, device=device, dtype=torch.bfloat16).eval()
-        x = torch.randn(128, 2048, device=device, dtype=torch.bfloat16)
+        generator = _probe_generator(device, 5678)
+        base = _seeded_linear(2048, 2048, device, generator)
+        x = torch.randn(128, 2048, device=device, dtype=torch.bfloat16, generator=generator)
         with torch.no_grad():
             base(x)
         result["bf16"] = _timed_cuda(lambda: base(x), warmup=5, iters=20)
@@ -253,25 +267,35 @@ def native_vs_emulated_detection() -> dict[str, Any]:
     return result
 
 
+class _SdpaCallRecorder(torch.overrides.TorchFunctionMode):
+    """Records scaled_dot_product_attention calls made on the entering thread (torch function modes are thread-local)."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[dict[str, Any]] = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch._C._nn.scaled_dot_product_attention:
+            q, k, v = (args[i] if i < len(args) else kwargs[name] for i, name in enumerate(("query", "key", "value")))
+            self.calls.append({"q_dtype": str(q.dtype), "k_dtype": str(k.dtype), "v_dtype": str(v.dtype), "q_shape": tuple(q.shape), "k_shape": tuple(k.shape), "v_shape": tuple(v.shape)})
+        return func(*args, **kwargs)
+
+
 def sdpa_coverage_check() -> dict[str, Any]:
     import torch.nn.functional as F
-    calls = []
-    orig = F.scaled_dot_product_attention
-    def wrapped(q, k, v, *args, **kwargs):
-        calls.append({"q_dtype": str(q.dtype), "k_dtype": str(k.dtype), "v_dtype": str(v.dtype), "q_shape": tuple(q.shape), "k_shape": tuple(k.shape), "v_shape": tuple(v.shape)})
-        return orig(q, k, v, *args, **kwargs)
+    recorder = _SdpaCallRecorder()
     try:
-        F.scaled_dot_product_attention = wrapped
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        q = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16)
-        k = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16)
-        v = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16)
-        out = F.scaled_dot_product_attention(q, k, v)
-        return {"ok": True, "call_count": len(calls), "calls": calls, "output_dtype": str(out.dtype), "note": "Standalone SDPA call remains bf16; MXFP8 Linear quantization does not by itself replace SDPA kernels."}
+        generator = _probe_generator(device, 4321)
+        q = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16, generator=generator)
+        k = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16, generator=generator)
+        v = torch.randn(2, 8, 64, 64, device=device, dtype=torch.bfloat16, generator=generator)
+        with recorder:
+            out = F.scaled_dot_product_attention(q, k, v)
+        return {"ok": True, "call_count": len(recorder.calls), "calls": recorder.calls, "output_dtype": str(out.dtype), "note": "Standalone SDPA call remains bf16; MXFP8 Linear quantization does not by itself replace SDPA kernels."}
     except Exception as e:
-        return {"ok": False, "error": repr(e), "calls": calls}
-    finally:
-        F.scaled_dot_product_attention = orig
+        return {"ok": False, "error": repr(e), "calls": recorder.calls}
 
 
 def a1111_integration_audit(max_names: int = 160) -> dict[str, Any]:
@@ -399,7 +423,10 @@ def run_probe_background(include_benchmarks: bool = True) -> bool:
     def worker():
         global _LAST_RUNNING, _LAST_RESULT
         try:
-            _LAST_RESULT = run_probe(include_benchmarks=include_benchmarks, save=True)
+            # The probe benchmarks with device-wide synchronizes and reads the loaded model; run it between
+            # generations, never during one.
+            with call_queue.queue_lock:
+                _LAST_RESULT = run_probe(include_benchmarks=include_benchmarks, save=True)
             print(f"MXFP8 diagnostics completed: {last_result_path()}", flush=True)
         except Exception as e:
             _LAST_RESULT = {"ok": False, "error": repr(e), "finished_at": time.time()}

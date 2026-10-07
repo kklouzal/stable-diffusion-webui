@@ -1,11 +1,9 @@
 from __future__ import annotations
-import hashlib, os, threading, time
+import hashlib, os, time
 from typing import Any
 import torch
 from fastapi import FastAPI
-from modules import script_callbacks, shared, openclaw_cache_epochs, sd_hijack
-
-_LOCK=threading.RLock()
+from modules import call_queue, script_callbacks, shared, openclaw_cache_epochs, sd_hijack
 
 def _sha_bytes(data: bytes): return hashlib.sha256(data).hexdigest()
 def _tensor(t):
@@ -95,7 +93,9 @@ def on_app_started(_:Any,app:FastAPI):
         a=torch.tensor([1.,2.,3.]); b=_tensor(a); c=_tensor(a); a[0]=4.; d=_tensor(a)
         ok=b['sha256']==c['sha256'] and b['sha256']!=d['sha256'] and b['shape']==[3]
         return {"ok":ok,"stable":b['sha256']==c['sha256'],"sensitive":b['sha256']!=d['sha256'],"sample":d}
+    # Plain def: the GPU->CPU copies and SHA-256 run in the threadpool, and queue_lock keeps a generation from
+    # mutating the model, caches or RNG mid-snapshot.
     @app.get('/sdapi/v1/openclaw/conditioning-probe/snapshot')
-    async def snap(label:str='snapshot'):
-        with _LOCK:return snapshot(label)
+    def snap(label:str='snapshot'):
+        with call_queue.queue_lock:return snapshot(label)
 script_callbacks.on_app_started(on_app_started)

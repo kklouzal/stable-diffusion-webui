@@ -1,8 +1,11 @@
+import ipaddress
 import json
 import os
 import signal
 import sys
 import re
+
+from starlette.middleware.gzip import GZipMiddleware, IdentityResponder
 
 from modules.timer import startup_timer
 
@@ -23,6 +26,25 @@ def fix_torch_version():
     if ".dev" in torch.__version__ or "+git" in torch.__version__:
         torch.__long_version__ = torch.__version__
         torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
+
+def configure_torch_threads():
+    """
+    Sizes torch's CPU thread pools to the CPUs this process may run on. Call right after importing torch,
+    before any parallel work: the inter-op size can only be set once, before that pool starts.
+
+    torch sizes its intra-op pool from the machine's core count, not the affinity mask (20 threads on the
+    10-CPU GB10 container cpuset). Nothing here launches inter-op work, so that pool is kept small.
+    An explicit OMP_NUM_THREADS/MKL_NUM_THREADS is the operator's choice and is left alone.
+    """
+    import torch
+
+    if "OMP_NUM_THREADS" in os.environ or "MKL_NUM_THREADS" in os.environ:
+        return
+
+    cpus = len(os.sched_getaffinity(0))
+    torch.set_num_threads(cpus)
+    torch.set_num_interop_threads(min(cpus, 2))
+
 
 def fix_asyncio_event_loop_policy():
     """
@@ -155,11 +177,37 @@ def configure_opts_onchange():
     startup_timer.record("opts onchange")
 
 
-def setup_middleware(app):
-    from starlette.middleware.gzip import GZipMiddleware
+def is_loopback_client(client) -> bool:
+    """True when an ASGI scope["client"] (host, port) pair is a loopback peer (127.0.0.0/8 or ::1)."""
+    if client is None:
+        return False
+    try:
+        return ipaddress.ip_address(client[0]).is_loopback
+    except ValueError:
+        return False
 
+
+class LoopbackIdentityGZipMiddleware(GZipMiddleware):
+    """
+    Starlette's GZipMiddleware, except that loopback clients are answered as if they had not offered gzip.
+
+    Generation responses are mostly base64 PNG, which deflate barely shrinks (ratio ~0.76) at ~20 ms per MB on the
+    request path, and on loopback there is no network to save. Identity is always an acceptable content-coding,
+    so the decoded body is unchanged; LAN clients keep gzip.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and is_loopback_client(scope.get("client")):
+            responder = IdentityResponder(self.app, self.minimum_size, exclude_content_types=self.exclude_content_types)
+            await responder(scope, receive, send)
+            return
+
+        await super().__call__(scope, receive, send)
+
+
+def setup_middleware(app):
     app.middleware_stack = None  # reset current middleware to allow modifying user provided list
-    app.add_middleware(GZipMiddleware, minimum_size=1000)
+    app.add_middleware(LoopbackIdentityGZipMiddleware, minimum_size=1000)
     configure_cors_middleware(app)
     app.build_middleware_stack()  # rebuild middleware stack on-the-fly
 

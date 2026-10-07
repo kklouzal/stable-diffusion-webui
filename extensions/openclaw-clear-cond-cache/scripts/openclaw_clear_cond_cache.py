@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 
 from modules import call_queue, extra_networks, extras, prompt_parser, script_callbacks, sd_models, openclaw_cache_epochs
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
@@ -538,8 +539,25 @@ def clear_cond_cache(targets: Any | None = None) -> dict:
     return {"ok": True, "cleared_at": _last_cleared_at, "cleared": cleared, "targets": sorted(normalized_targets)}
 
 
+def _clear_cond_cache_locked(targets: Any | None) -> dict:
+    with call_queue.queue_lock:
+        return clear_cond_cache(targets)
+
+
+def _torch_compile_locked(data: dict[str, Any]) -> dict[str, Any]:
+    target = data.get("target")
+    with call_queue.queue_lock:
+        if target == "vae-only":
+            return apply_torch_compile_settings(vae=True)
+        return apply_torch_compile_settings(vae=bool(data.get("vae") or data.get("enabled")))
+
+
 def on_app_started(_: object, app: FastAPI) -> None:
     _install_backend_status_hooks()
+
+    # Handlers that wait on queue_lock, merge models or run the tokenizer must not block the event loop
+    # (that would stall /progress and every other request): they parse the body on the loop as before and
+    # do the work in the threadpool, like plain `def` endpoints.
 
     @app.post("/sdapi/v1/openclaw/clear-cond-cache")
     async def _clear_cond_cache(request: Request):
@@ -549,8 +567,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
         except Exception:
             pass
         targets = data.get("targets", data.get("target")) if isinstance(data, dict) else None
-        with call_queue.queue_lock:
-            return clear_cond_cache(targets)
+        return await run_in_threadpool(_clear_cond_cache_locked, targets)
 
     @app.post("/sdapi/v1/openclaw/token-count")
     async def _token_count(request: Request):
@@ -560,7 +577,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
             steps = int(data.get("steps") or 20)
         except (TypeError, ValueError):
             steps = 20
-        return estimate_token_count(text, steps)
+        return await run_in_threadpool(estimate_token_count, text, steps)
 
     @app.post("/sdapi/v1/openclaw/token_counter")
     async def _token_counter_compat(request: Request):
@@ -570,11 +587,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile(request: Request):
         data = await request.json()
-        target = data.get("target")
-        with call_queue.queue_lock:
-            if target == "vae-only":
-                return apply_torch_compile_settings(vae=True)
-            return apply_torch_compile_settings(vae=bool(data.get("vae") or data.get("enabled")))
+        return await run_in_threadpool(_torch_compile_locked, data)
 
     @app.get("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile_status():
@@ -601,7 +614,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
     @app.post("/sdapi/v1/openclaw/model-merge")
     async def _model_merge(request: Request):
         data = await request.json()
-        return _run_openclaw_model_merge(data if isinstance(data, dict) else {})
+        return await run_in_threadpool(_run_openclaw_model_merge, data if isinstance(data, dict) else {})
 
     @app.get("/sdapi/v1/openclaw/training-templates")
     async def _training_template_choices():

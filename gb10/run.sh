@@ -146,7 +146,18 @@ sudo chown -R 2323:2323 \
   "${HOST_ROOT}/config"
 
 A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
-OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE:-${A1111_COMMIT_HASH}-torch-${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}}"
+# Inductor/Triton/driver-JIT output depends on the image's compiler stack and the host driver, not on the
+# A1111 commit, so key the namespace by those: app-only deploys then start with warm caches. Each cache also
+# hashes its own inputs, so a shared namespace never serves a stale kernel.
+if [[ -z "${OPENCLAW_COMPILE_CACHE_NAMESPACE:-}" ]]; then
+  if [[ ! -r /sys/module/nvidia/version ]]; then
+    echo "ERROR: cannot read the host NVIDIA driver version from /sys/module/nvidia/version" >&2
+    exit 1
+  fi
+  IMAGE_COMPILE_STACK="$(sudo "$DOCKER_BIN" run --rm --network none --entrypoint python "${IMAGE_TAG}" -c 'import importlib.metadata as m, os; print("torch-" + m.version("torch") + "-triton-" + m.version("triton") + "-cuda-" + os.environ["CUDA_VERSION"])')"
+  OPENCLAW_COMPILE_CACHE_NAMESPACE="${IMAGE_COMPILE_STACK}-driver-$(cat /sys/module/nvidia/version)"
+  OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE//[^a-zA-Z0-9_.-]/_}"
+fi
 A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(git -C "${PROJECT_ROOT}" describe --tags 2>/dev/null || true)}"
 
 # Namespace creation is a host-side ownership boundary. install -d is idempotent,
@@ -165,6 +176,11 @@ for cache_namespace_path in "${COMPILE_CACHE_NAMESPACE_PATHS[@]}"; do
     exit 1
   fi
 done
+# Namespaces for other stacks are kept, never pruned here; report what they hold so they can be removed by hand.
+mapfile -d '' -t OTHER_COMPILE_CACHE_NAMESPACES < <(sudo find "${OPENCLAW_COMPILE_CACHE_ROOT}/torchinductor" "${OPENCLAW_COMPILE_CACHE_ROOT}/triton" "${OPENCLAW_COMPILE_CACHE_ROOT}/cuda" -mindepth 1 -maxdepth 1 -type d ! -name "${OPENCLAW_COMPILE_CACHE_NAMESPACE}" -print0)
+if (( ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} )); then
+  echo "Compile cache: ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} other namespace dirs hold $(sudo du -csh "${OTHER_COMPILE_CACHE_NAMESPACES[@]}" | tail -n 1 | cut -f 1) under ${OPENCLAW_COMPILE_CACHE_ROOT} (kept)"
+fi
 
 DOCKER_ARGS=(
   -d

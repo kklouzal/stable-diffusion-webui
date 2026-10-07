@@ -306,9 +306,14 @@ RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
     && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
        MSLK_SOURCE_COMMIT="${MSLK_COMMIT}" \
        /usr/local/bin/gb10-a1111-render-build-manifest
+# Precompile the app's bytecode (forced: the build context can carry stale host __pycache__ files) so the
+# container never compiles at start. Timestamp pycs stay valid because nothing modifies these sources after
+# this layer; chown in the same step makes the runtime user own them.
 RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /root/.cache/pip \
     && chmod +x /usr/local/bin/gb10-a1111-entrypoint /usr/local/bin/gb10-a1111-launch \
     && mkdir -p /opt/stable-diffusion-webui/tmp /opt/stable-diffusion-webui/cache \
+    && cd /opt/stable-diffusion-webui \
+    && python -m compileall -q -f -j 0 --invalidation-mode timestamp webui.py launch.py modules scripts repositories extensions-builtin \
     && chown -R a1111:a1111 /opt/stable-diffusion-webui /home/a1111
 
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
