@@ -21,7 +21,7 @@ import string
 import json
 import hashlib
 
-from modules import sd_samplers, shared, script_callbacks, errors
+from modules import sd_samplers, shared, script_callbacks, errors, png_writer
 from modules.paths_internal import roboto_ttf_file
 from modules.shared import opts
 
@@ -606,7 +606,8 @@ def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_p
         else:
             pnginfo_data = None
 
-        image.save(filename, format=image_format, quality=opts.jpeg_quality, pnginfo=pnginfo_data)
+        if not (opts.png_parallel_encoder and save_png_parallel(image, pnginfo_data, filename)):
+            image.save(filename, format=image_format, quality=opts.jpeg_quality, pnginfo=pnginfo_data)
 
     elif extension.lower() in (".jpg", ".jpeg", ".webp"):
         if image.mode == 'RGBA':
@@ -627,6 +628,31 @@ def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_p
         image.save(filename, format=image_format, comment=geninfo)
     else:
         image.save(filename, format=image_format, quality=opts.jpeg_quality)
+
+
+def save_png_parallel(image, pnginfo, filename):
+    """Writes image to filename as modules.png_writer encodes it: the file Pillow writes for
+    image.save(filename, "PNG", pnginfo=pnginfo), with the same pixels, chunks and filtered data, deflated on all
+    available CPUs. Returns False with nothing written when png_writer does not cover the image or fails (reported),
+    so the caller saves with Pillow. Like Pillow, removes a file it created when writing it fails."""
+    try:
+        data = png_writer.encode(image, pnginfo)
+    except Exception:
+        errors.report("Parallel PNG encoder failed; saving with Pillow instead", exc_info=True)
+        return False
+    if data is None:
+        return False
+
+    created = not os.path.exists(filename)
+    try:
+        with open(filename, "wb") as file:
+            file.write(data)
+    except BaseException:
+        if created:
+            with contextlib.suppress(OSError):
+                os.remove(filename)
+        raise
+    return True
 
 
 def geninfo_to_exif_bytes(geninfo):

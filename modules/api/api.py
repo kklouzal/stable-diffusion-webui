@@ -1,4 +1,6 @@
 import base64
+import contextvars
+import functools
 import json
 import io
 import os
@@ -615,11 +617,35 @@ def _get_image_url(url, headers, max_bytes):
     raise HTTPException(status_code=500, detail="Invalid image url")
 
 
+# Inline images decoded so far in the current generation request: {(encoded text, pixel budget): private copy of the
+# decoded image}; None outside a decode_inline_images_once call.
+_request_inline_images: contextvars.ContextVar[dict | None] = contextvars.ContextVar("request_inline_images", default=None)
+
+
+def decode_inline_images_once(endpoint):
+    """Endpoint decorator: within one call, decode_base64_to_image decodes each distinct inline image text once.
+    One request often carries the same image several times (an img2img init image that is also the ControlNet unit
+    image, which ControlNet decodes again through decode_base64_to_image: ~28 ms per 1280x1280 PNG). The memo is
+    request-scoped: a context variable set for the call (processing runs synchronously in the endpoint's thread) and
+    dropped when it returns, so nothing is retained or shared across requests."""
+    @functools.wraps(endpoint)
+    def wrapper(*args, **kwargs):
+        token = _request_inline_images.set({})
+        try:
+            return endpoint(*args, **kwargs)
+        finally:
+            _request_inline_images.reset(token)
+
+    return wrapper
+
+
 def decode_base64_to_image(encoding):
     """Decodes an API input image: an http(s) URL (if api_enable_requests), an RFC 2397 data URL or plain base64.
     An image of more than img_max_size_mp megapixels answers 413 once its header is read, before its pixels are
     decoded. A URL download may be as long as an image of that many pixels stored uncompressed as 8-bit RGBA (4 bytes
-    per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit."""
+    per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit.
+    Inside decode_inline_images_once, inline data decoded earlier in the request returns a new copy of that decode
+    (URLs are always fetched: the resource may change)."""
     max_pixels = int(opts.img_max_size_mp * 1_000_000)
 
     if encoding.startswith("http://") or encoding.startswith("https://"):
@@ -636,6 +662,11 @@ def decode_base64_to_image(encoding):
         except Exception as e:
             raise HTTPException(status_code=500, detail="Invalid image url") from e
 
+    memo = _request_inline_images.get()
+    memo_key = (encoding, max_pixels)
+    if memo is not None and memo_key in memo:
+        return memo[memo_key].copy()
+
     if encoding.startswith("data:image/"):
         # RFC 2397 data:image/<subtype>[;<parameter>]...;base64,<data>; split(";")[1] failed on parameters
         header, separator, encoding = encoding.partition(",")
@@ -643,11 +674,16 @@ def decode_base64_to_image(encoding):
             raise HTTPException(status_code=500, detail="Invalid encoded image")
     try:
         image = images.read(BytesIO(base64.b64decode(encoding)), max_pixels=max_pixels)
-        return image
     except Image.DecompressionBombError as e:
         raise HTTPException(status_code=413, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
+
+    if memo is not None and type(image) is Image.Image:
+        # A private copy (~0.2 ms at 1280x1280): callers own what they get and may modify it. The copy of a plain Image
+        # (what images.read returns after fix_image) equals a fresh decode; an ImageFile's would drop its file state.
+        memo[memo_key] = image.copy()
+    return image
 
 
 def decode_extras_batch_images(image_list):
@@ -1219,6 +1255,7 @@ class Api:
         p.script_args = tuple(script_args) # Need to pass args as tuple here
         return process_images(p)
 
+    @decode_inline_images_once
     def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
         task_id = txt2imgreq.force_task_id or create_task_id("txt2img")
 
@@ -1265,6 +1302,7 @@ class Api:
 
         return models.TextToImageResponse(images=b64images, parameters=_response_parameters(txt2imgreq, include_images=False), info=processed_js_with_image_paths(processed))
 
+    @decode_inline_images_once
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
         task_id = img2imgreq.force_task_id or create_task_id("img2img")
 

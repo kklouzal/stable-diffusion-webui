@@ -14,7 +14,7 @@ import numpy as np
 import piexif
 import piexif.helper
 import pytest
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +33,7 @@ def images(monkeypatch):
         samples_filename_pattern="", save_images_add_number=False, directories_filename_pattern="", export_for_4chan=False,
         target_side_length=4000, img_downscale_threshold=4, save_txt=False, font=None, n_rows=0, grid_prevent_empty_spots=False,
         grid_background_color="#ffffff", grid_text_active_color="#000000", grid_text_inactive_color="#999999",
-        directories_max_prompt_words=8, save_images_replace_action="Replace",
+        directories_max_prompt_words=8, save_images_replace_action="Replace", png_parallel_encoder=True,
     )
     stubs = {
         "modules.shared": _module(
@@ -186,6 +186,71 @@ def test_saved_geninfo_reads_back(images, tmp_path, extension):
 
     with Image.open(path) as image:
         assert images.read_info_from_image(image)[0] == text
+
+
+# --- PNG encoder selection (tests/test_png_writer.py covers the encoder itself) -----------------------------------------
+
+def _decoded_png(path):
+    with Image.open(path) as image:
+        image.load()
+        return image.mode, image.size, image.tobytes(), image.text
+
+
+def _pillow_png(image, text, extra=None):
+    info = PngImagePlugin.PngInfo()
+    for key, value in {**(extra or {}), "parameters": text}.items():
+        info.add_text(key, value)
+    output = io.BytesIO()
+    image.save(output, format="PNG", pnginfo=info)
+    return output.getvalue()
+
+
+def test_png_saves_use_the_parallel_writer_unless_disabled(images, tmp_path, monkeypatch):
+    calls = []
+    encode = images.png_writer.encode
+    monkeypatch.setattr(images.png_writer, "encode", lambda *args: calls.append(encode(*args)) or calls[-1])
+    image = _random_rgb(300, 200, seed=3)
+    text = "a cat, Steps: 20, \xfcn\xefc\xf6d\xe9 \u2713"
+
+    images.save_image_with_geninfo(image, text, str(tmp_path / "parallel.png"), existing_pnginfo={"extra": "x"})
+    assert len(calls) == 1 and calls[0] is not None  # the parallel writer covered the image and wrote the file
+    assert (tmp_path / "parallel.png").read_bytes() == calls[0]
+    monkeypatch.setattr(images.opts, "png_parallel_encoder", False)
+    images.save_image_with_geninfo(image, text, str(tmp_path / "pillow.png"), existing_pnginfo={"extra": "x"})
+    assert len(calls) == 1
+
+    assert (tmp_path / "pillow.png").read_bytes() == _pillow_png(image, text, {"extra": "x"})
+    assert _decoded_png(tmp_path / "parallel.png") == _decoded_png(tmp_path / "pillow.png")
+    assert _decoded_png(tmp_path / "parallel.png")[3] == {"extra": "x", "parameters": text}
+
+
+def test_png_writer_failures_and_uncovered_modes_save_with_pillow(images, tmp_path, monkeypatch):
+    reports = []
+    monkeypatch.setattr(images.errors, "report", lambda *args, **kwargs: reports.append(args))
+    gray = _random_rgb(40, 30).convert("L")
+    images.save_image_with_geninfo(gray, "Steps: 20", str(tmp_path / "gray.png"))
+    assert (tmp_path / "gray.png").read_bytes() == _pillow_png(gray, "Steps: 20") and not reports
+
+    def broken(*args):
+        raise RuntimeError("encoder defect")
+
+    monkeypatch.setattr(images.png_writer, "encode", broken)
+    image = _random_rgb(40, 30)
+    images.save_image_with_geninfo(image, "Steps: 20", str(tmp_path / "x.png"))
+    assert (tmp_path / "x.png").read_bytes() == _pillow_png(image, "Steps: 20")
+    assert len(reports) == 1  # reported, not silent
+
+
+def test_png_write_failure_removes_the_file_it_created(images, tmp_path, monkeypatch):
+    class FullDisk(io.FileIO):
+        def write(self, data):
+            super().write(data[:10])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(images, "open", lambda path, mode: FullDisk(path, "w"), raising=False)
+    with pytest.raises(OSError):
+        images.save_image_with_geninfo(_random_rgb(40, 30), None, str(tmp_path / "x.png"))
+    assert list(tmp_path.iterdir()) == []
 
 
 def _tiff_with_ascii_user_comment(payload):

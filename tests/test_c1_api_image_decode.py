@@ -3,6 +3,8 @@ connections pinned to the checked address), and the byte/pixel budgets derived f
 
 import ast
 import base64
+import contextvars
+import functools
 import gzip
 import http.server
 import io
@@ -39,9 +41,12 @@ def read_image(fp, *, max_pixels=None):
 
 def load_api_functions(*, forbid_local=True, img_max_size_mp=200):
     tree = ast.parse(API_PATH.read_text(encoding="utf8"))
-    wanted = {"verify_url", "_PinnedAddressAdapter", "_ImageUrlSession", "_get_image_url", "decode_base64_to_image"}
+    wanted = {"verify_url", "_PinnedAddressAdapter", "_ImageUrlSession", "_get_image_url", "decode_inline_images_once", "decode_base64_to_image"}
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in wanted]
+    nodes += [node for node in tree.body if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "_request_inline_images"]
     namespace = {
+        "contextvars": contextvars,
+        "functools": functools,
         "base64": base64,
         "BytesIO": io.BytesIO,
         "Image": Image,
@@ -52,7 +57,7 @@ def load_api_functions(*, forbid_local=True, img_max_size_mp=200):
         "images": SimpleNamespace(read=read_image),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(API_PATH), "exec"), namespace)
-    return SimpleNamespace(**{node.name: namespace[node.name] for node in nodes}, namespace=namespace)
+    return SimpleNamespace(**{node.name: namespace[node.name] for node in nodes if hasattr(node, "name")}, namespace=namespace)
 
 
 def png_base64():
@@ -446,3 +451,147 @@ def test_pinned_https_connection_verifies_the_certificate_for_the_url_host():
     assert host_params == {"scheme": "https", "host": "2606:2800:220:1:248:1893:25c8:1946", "port": None}
     assert pool_kwargs["server_hostname"] == "img.example" and pool_kwargs["cert_reqs"] == "CERT_REQUIRED"
     assert "assert_hostname" not in pool_kwargs  # ssl checks the certificate against the server name (check_hostname)
+
+
+# --- request-scoped decode memo (decode_inline_images_once) -----------------------------------------------------------
+
+def counting_api(calls, **kwargs):
+    """API functions whose images.read is modules.images.read's contract (eager load, then fix_image: EXIF transpose,
+    which returns a plain Image copy, and RGB/P bytes transparency -> RGBA), counting decodes."""
+    from PIL import ImageOps
+
+    api = load_api_functions(**kwargs)
+
+    def read(fp, *, max_pixels=None):
+        calls.append(max_pixels)
+        image = ImageOps.exif_transpose(read_image(fp, max_pixels=max_pixels))
+        if image.mode in ("RGB", "P") and isinstance(image.info.get("transparency"), bytes):
+            image = image.convert("RGBA")
+        return image
+
+    api.namespace["images"] = SimpleNamespace(read=read)
+    api.reference_read = read
+    return api
+
+
+def memo_test_images():
+    import random
+    rng = random.Random(7)
+    rgb = Image.frombytes("RGB", (40, 24), rng.randbytes(40 * 24 * 3))
+    palette = Image.frombytes("P", (16, 16), bytes(range(256)))
+    palette.putpalette(bytes(range(256)) * 3)
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    out = {}
+    for name, image, options in (("rgb", rgb, {}), ("rgba", rgb.convert("RGBA"), {}), ("l", rgb.convert("L"), {}),
+                                 ("p", palette, {}), ("p-trns", palette, {"transparency": bytes([0, 255] * 128)}),
+                                 ("rgb-key", rgb, {"transparency": (1, 2, 3)}), ("oriented", rgb, {"exif": exif.tobytes()})):
+        data = io.BytesIO()
+        image.save(data, format="PNG", **options)
+        out[name] = base64.b64encode(data.getvalue()).decode()
+    return out
+
+
+def assert_same_image(actual, expected):
+    assert type(actual) is type(expected)
+    assert (actual.mode, actual.size, actual.info) == (expected.mode, expected.size, expected.info)
+    assert actual.tobytes() == expected.tobytes()
+    assert actual.getexif() == expected.getexif()
+    assert (actual.getpalette() if actual.mode in ("P", "PA") else None) == (expected.getpalette() if expected.mode in ("P", "PA") else None)
+
+
+def test_a_request_decodes_each_inline_image_once_into_independent_copies():
+    calls = []
+    api = counting_api(calls)
+    for name, encoding in memo_test_images().items():
+        for value in (encoding, "data:image/png;base64," + encoding):
+            expected = api.reference_read(io.BytesIO(base64.b64decode(encoding)))  # oracle: a fresh decode
+            calls.clear()
+
+            @api.decode_inline_images_once
+            def request(value=value):
+                first, second = api.decode_base64_to_image(value), api.decode_base64_to_image(value)
+                second.paste(9 if second.mode in ("P", "L") else (9,) * len(second.getbands()), (0, 0, 4, 4))
+                second.info["parameters"] = "mutated"
+                first.paste(7 if first.mode in ("P", "L") else (7,) * len(first.getbands()), (0, 0, 4, 4))
+                return first, second, api.decode_base64_to_image(value)
+
+            first, second, third = request()
+            assert len(calls) == 1, name
+            assert first is not third and second is not third
+            assert_same_image(third, expected)  # callers' changes to earlier results never reach later ones
+
+
+def test_the_memo_never_outlives_or_crosses_requests():
+    calls = []
+    api = counting_api(calls)
+    encoding = png_base64()
+    for _ in range(2):  # outside a request every call decodes
+        api.decode_base64_to_image(encoding)
+    assert len(calls) == 2
+
+    seen = []
+    request = api.decode_inline_images_once(lambda: seen.append(api.namespace["_request_inline_images"].get()) or api.decode_base64_to_image(encoding))
+    request()
+    request()
+    assert len(calls) == 4  # a later request decodes again
+    assert seen[0] is not seen[1] and api.namespace["_request_inline_images"].get() is None
+
+    @api.decode_inline_images_once
+    def request_with_thread():
+        api.decode_base64_to_image(encoding)
+        thread = threading.Thread(target=api.decode_base64_to_image, args=(encoding,))  # new thread: no request context
+        thread.start()
+        thread.join()
+        api.decode_base64_to_image(encoding)
+
+    request_with_thread()
+    assert len(calls) == 6
+
+    with pytest.raises(RuntimeError):
+        api.decode_inline_images_once(lambda: (_ for _ in ()).throw(RuntimeError("request failed")))()
+    assert api.namespace["_request_inline_images"].get() is None
+
+
+def test_memoized_decodes_keep_the_current_pixel_budget():
+    calls = []
+    encoding = base64.b64encode(png_bytes((40, 25))).decode()
+    api = counting_api(calls, img_max_size_mp=0.001)
+
+    @api.decode_inline_images_once
+    def request():
+        assert api.decode_base64_to_image(encoding).size == (40, 25)
+        assert api.decode_base64_to_image(encoding).size == (40, 25)
+        api.namespace["opts"].img_max_size_mp = 0.0009
+        with pytest.raises(HTTPException) as raised:
+            api.decode_base64_to_image(encoding)
+        assert raised.value.status_code == 413
+
+    request()
+    assert len(calls) == 2 and calls[0] == 1000 and calls[1] < 1000
+
+
+def test_failures_urls_and_image_files_are_not_memoized():
+    calls = []
+    api = counting_api(calls, forbid_local=False)
+
+    def file_read(fp, max_pixels=None):
+        calls.append(max_pixels)
+        return read_image(fp, max_pixels=max_pixels)
+
+    @api.decode_inline_images_once
+    def request(server_port):
+        for _ in range(2):
+            with pytest.raises(HTTPException):
+                api.decode_base64_to_image("data:image/png;base64,AAAA")
+        assert len(calls) == 2
+        for _ in range(2):
+            assert api.decode_base64_to_image(f"http://127.0.0.1:{server_port}/a.png").size == (3, 2)
+        assert len(calls) == 4
+        api.namespace["images"] = SimpleNamespace(read=file_read)
+        for _ in range(2):
+            assert api.decode_base64_to_image(png_base64()).format == "PNG"  # an ImageFile result stays as decoded
+        assert len(calls) == 6
+
+    with Server(serve_png(png_bytes((3, 2)))) as server:
+        request(server.port)

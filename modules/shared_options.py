@@ -55,6 +55,7 @@ options_templates.update(options_section(('saving-images', "Saving images/grids"
     "save_mask_composite": OptionInfo(False, "For inpainting, save a masked composite"),
     "jpeg_quality": OptionInfo(80, "Quality for saved jpeg and avif images", gr.Slider, {"minimum": 1, "maximum": 100, "step": 1}),
     "webp_lossless": OptionInfo(False, "Use lossless compression for webp images"),
+    "png_parallel_encoder": OptionInfo(True, "Encode saved PNG files on all CPU cores").info("same pixels, metadata and compression level as the standard encoder (file size within 0.1%); RGB/RGBA images only, others use the standard encoder"),
     "export_for_4chan": OptionInfo(True, "Save copy of large images as JPG").info("if the file size is above the limit, or either width or height are above the limit"),
     "img_downscale_threshold": OptionInfo(4.0, "File size limit for the above option, MB", gr.Number),
     "target_side_length": OptionInfo(4000, "Width/height limit for the above option, in pixels", gr.Number),

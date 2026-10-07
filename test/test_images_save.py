@@ -38,6 +38,7 @@ def load_images_module(monkeypatch):
         grid_text_inactive_color="#999999",
         directories_max_prompt_words=8,
         save_images_replace_action="Add number suffix",
+        png_parallel_encoder=True,
     )
     shared = module(
         "modules.shared",
@@ -81,6 +82,8 @@ def load_images_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "modules.script_callbacks", callbacks)
     monkeypatch.setitem(sys.modules, "modules.errors", module("modules.errors", report=lambda *a, **k: None, display=lambda *a, **k: None))
     monkeypatch.setitem(sys.modules, "modules.paths_internal", module("modules.paths_internal", roboto_ttf_file=""))
+    # numpy is stubbed above: the parallel PNG writer declines every image here, so PNG files come from Pillow.
+    monkeypatch.setitem(sys.modules, "modules.png_writer", module("modules.png_writer", encode=lambda image, pnginfo: None))
 
     spec = importlib.util.spec_from_file_location("test_loaded_images", Path("modules/images.py"))
     images = importlib.util.module_from_spec(spec)
