@@ -5,6 +5,7 @@ import types
 import warnings
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -181,6 +182,140 @@ def test_select_optimizer_resolves_an_unknown_setting_like_automatic(capsys):
     assert opt.select_optimizer("None", available, flags) is None
     assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=False)) is doggettx
     assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=True)) is None
+
+
+ALL_FOUR = [opt.SDPBackend.CUDNN_ATTENTION, opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.EFFICIENT_ATTENTION, opt.SDPBackend.MATH]
+
+
+@pytest.fixture
+def sdpa_selection(monkeypatch):
+    """Restore the active selection afterwards and keep set_sdpa_backend from patching attention classes."""
+    monkeypatch.setattr(opt.SdOptimizationSdp, "apply", lambda self: None)
+    previous = opt._active_sdpa_backend
+    yield
+    opt._active_sdpa_backend = previous
+
+
+@pytest.fixture
+def recorded_sdpa_kernel(monkeypatch):
+    entered = []
+    real_sdpa_kernel = opt.sdpa_kernel
+
+    @contextlib.contextmanager
+    def recording_sdpa_kernel(backends, *args, **kwargs):
+        entered.append(list(backends))
+        with real_sdpa_kernel(backends, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(opt, "sdpa_kernel", recording_sdpa_kernel)
+    return entered
+
+
+@pytest.fixture
+def restore_sdp_globals():
+    getters = [torch._C._get_cudnn_sdp_enabled, torch._C._get_flash_sdp_enabled, torch._C._get_mem_efficient_sdp_enabled, torch._C._get_math_sdp_enabled, torch._C._get_overrideable_sdp_enabled]
+    setters = [torch._C._set_sdp_use_cudnn, torch._C._set_sdp_use_flash, torch._C._set_sdp_use_mem_efficient, torch._C._set_sdp_use_math, torch._C._set_sdp_use_overrideable]
+    flags = [get() for get in getters]
+    order = torch._C._get_sdp_priority_order()
+    yield
+    for set_flag, flag in zip(setters, flags):
+        set_flag(flag)
+    torch._C._set_sdp_priority_order(order)
+
+
+def _qkv(seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return tuple(torch.randn(2, 2, 16, 8, generator=generator) for _ in range(3))
+
+
+def test_set_sdpa_backend_parses_once_and_keeps_status_contract(sdpa_selection, monkeypatch):
+    status = opt.set_sdpa_backend(" CUDNN+flash efficient,math ")
+    assert status["sdpa_backend"] == opt.active_sdpa_backend() == "cudnn,flash,efficient,math"
+    assert status["sdpa_backend_choices"] == opt._SDPA_BACKEND_CHOICES
+    q, k, v = _qkv()
+    opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override="flash,math")
+
+    def no_parsing(_value):
+        raise AssertionError("SDPA backend selection was re-parsed on the attention hot path")
+
+    monkeypatch.setattr(opt, "_normalize_sdpa_backend_choice", no_parsing)
+    for _ in range(3):
+        opt.run_scaled_dot_product_attention(q, k, v)
+        opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override="flash,math")
+
+
+def test_invalid_sdpa_backend_raises_at_set_time_and_keeps_selection(sdpa_selection):
+    opt.set_sdpa_backend("flash,math")
+    with pytest.raises(ValueError, match="Unsupported SDPA backend: bogus"):
+        opt.set_sdpa_backend("flash,bogus")
+    assert opt.sdpa_backend_status()["sdpa_backend"] == opt.active_sdpa_backend() == "flash,math"
+
+
+@pytest.mark.parametrize("selection", ["auto", "cudnn,flash,efficient,math", "math,efficient,flash,cudnn", "flash,cudnn,mem_efficient,math,flash"])
+def test_default_backend_set_skips_sdpa_kernel(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals, selection):
+    opt.set_sdpa_backend(selection)
+    q, k, v = _qkv()
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == []
+    with opt.sdpa_kernel(ALL_FOUR):
+        expected = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize(("selection", "override", "expected"), [
+    ("flash,math", None, [opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("cudnn,flash,math", None, [opt.SDPBackend.CUDNN_ATTENTION, opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("math", None, [opt.SDPBackend.MATH]),
+    ("auto", "flash,math", [opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("cudnn,flash,efficient,math", "math", [opt.SDPBackend.MATH]),
+])
+def test_backend_subsets_and_overrides_enter_sdpa_kernel(sdpa_selection, recorded_sdpa_kernel, selection, override, expected):
+    opt.set_sdpa_backend(selection)
+    q, k, v = _qkv(1)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override=override)
+
+    assert recorded_sdpa_kernel == [expected]
+    with opt.sdpa_kernel(expected):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
+
+
+@pytest.mark.parametrize("change", ["flash_off", "math_off", "cudnn_off", "efficient_off", "overrideable_before_math"])
+def test_full_set_keeps_sdpa_kernel_when_global_state_differs_from_default(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals, change):
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    if change == "overrideable_before_math":
+        order = torch._C._get_sdp_priority_order()
+        order.remove(int(opt.SDPBackend.OVERRIDEABLE))
+        order.insert(order.index(int(opt.SDPBackend.MATH)), int(opt.SDPBackend.OVERRIDEABLE))
+        torch._C._set_sdp_priority_order(order)
+    else:
+        {
+            "flash_off": torch._C._set_sdp_use_flash,
+            "math_off": torch._C._set_sdp_use_math,
+            "cudnn_off": torch._C._set_sdp_use_cudnn,
+            "efficient_off": torch._C._set_sdp_use_mem_efficient,
+        }[change](False)
+    q, k, v = _qkv(2)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == [ALL_FOUR]
+    with opt.sdpa_kernel(ALL_FOUR):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
+
+
+def test_full_set_skip_is_exact_when_overrideable_is_disabled(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals):
+    torch._C._set_sdp_use_overrideable(False)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    q, k, v = _qkv(3)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == []
+    with opt.sdpa_kernel(ALL_FOUR):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
 
 
 if __name__ == "__main__":
