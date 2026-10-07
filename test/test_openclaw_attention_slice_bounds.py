@@ -449,6 +449,87 @@ def test_vae_attnblock_sdxl_shape_uses_mem_efficient_kernel_close_to_legacy_math
     assert peak_delta < tokens * tokens * 4 // 4
 
 
+class _CpuWithoutAutocast:
+    """devices.without_autocast for CPU tests: the real one switches CUDA autocast off; this switches CPU autocast off."""
+
+    @staticmethod
+    def without_autocast(disable=False):
+        return torch.autocast("cpu", enabled=False) if torch.is_autocast_enabled("cpu") and not disable else contextlib.nullcontext()
+
+
+def _sdpa_cross_attention(dim=64, heads=2):
+    """TinyCrossAttention with the (Linear, Dropout) to_out pair scaled_dot_product_attention_forward indexes."""
+    attn = TinyCrossAttention(dim=dim, heads=heads)
+    attn.to_out.append(torch.nn.Dropout(0.0))
+    return attn.to(torch.bfloat16).eval()
+
+
+@pytest.fixture
+def recorded_sdpa_calls(monkeypatch):
+    """Record the q dtype and the autocast state at every scaled_dot_product_attention call.
+
+    Autocast lists scaled_dot_product_attention as a lower-precision op on CUDA and CPU alike
+    (ATen autocast_mode.h AT_FORALL_LOWER_PRECISION_FP; autocast_mode.cpp KERNEL_CPU): a float32 q/k/v reaching it
+    with autocast on is cast back to bfloat16 before the kernel runs.
+    """
+    calls = []
+    real = torch.nn.functional.scaled_dot_product_attention
+
+    def recording(q, k, v, *args, **kwargs):
+        calls.append((q.dtype, k.dtype, v.dtype, torch.is_autocast_enabled("cpu")))
+        return real(q, k, v, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", recording)
+    monkeypatch.setattr(opt, "devices", _CpuWithoutAutocast)
+    return calls
+
+
+@pytest.mark.parametrize("override", [None, "flash,math"])
+def test_upcast_attn_runs_cross_attention_sdpa_in_float32_with_autocast_off(sdpa_selection, upcast_attn, recorded_sdpa_calls, override):
+    # Before the fix the float32 q/k/v went into the kernel under autocast, which ran it in bfloat16: upcast_attn
+    # was a no-op on the SDPA path. Oracle: the same forward without any autocast, where the bfloat16 Linears give
+    # the same q/k/v and the attention really runs in float32.
+    upcast_attn(True)
+    opt.set_sdpa_backend("math")
+    torch.manual_seed(0)
+    attn = _sdpa_cross_attention()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    context = torch.randn(2, 5, 64, dtype=torch.bfloat16)
+    forward = opt.scaled_dot_product_attention_forward if override is None else opt.scaled_dot_product_no_mem_attention_forward
+    with torch.no_grad():
+        expected = forward(attn, x, context)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = forward(attn, x, context)
+    assert recorded_sdpa_calls[-1] == (torch.float32, torch.float32, torch.float32, False)
+    assert out.dtype == torch.bfloat16
+    assert torch.equal(out, expected)
+
+
+def test_without_upcast_attn_cross_attention_keeps_autocast(sdpa_selection, upcast_attn, recorded_sdpa_calls):
+    upcast_attn(False)
+    opt.set_sdpa_backend("math")
+    attn = _sdpa_cross_attention()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+        opt.scaled_dot_product_attention_forward(attn, x)
+    assert recorded_sdpa_calls == [(torch.bfloat16, torch.bfloat16, torch.bfloat16, True)]
+
+
+@pytest.mark.parametrize("forward", ["sdp_attnblock_forward", "sdp_no_mem_attnblock_forward"])
+@pytest.mark.parametrize("upcast", [False, True])
+def test_vae_attnblock_upcast_attn_turns_autocast_off_for_the_kernel(sdpa_selection, upcast_attn, recorded_sdpa_calls, forward, upcast):
+    upcast_attn(upcast)
+    opt.set_sdpa_backend("math")
+    block, x = _attnblock_case(64, torch.bfloat16, channels_last=False)
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+        out = getattr(opt, forward)(block, x)
+    if upcast:
+        assert recorded_sdpa_calls == [(torch.float32, torch.float32, torch.float32, False)]
+    else:
+        assert recorded_sdpa_calls == [(torch.bfloat16, torch.bfloat16, torch.bfloat16, True)]
+    assert out.shape == x.shape
+
+
 if __name__ == "__main__":
     test_doggettx_attention_keeps_positive_slice_when_memory_steps_exceed_tokens()
     test_sdpa_math_backend_uses_non_deprecated_torch_nn_attention_api()
