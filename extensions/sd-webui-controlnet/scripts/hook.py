@@ -2,6 +2,7 @@ import torch
 import hashlib
 import numpy as np
 import torch.nn as nn
+from copy import copy
 from functools import partial
 from typing import Optional, Any, List
 
@@ -24,7 +25,6 @@ from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
 
 from modules.prompt_parser import MulticondLearnedConditioning, ComposableScheduledPromptConditioning, ScheduledPromptConditioning
-from modules.processing import StableDiffusionProcessing
 
 
 try:
@@ -48,16 +48,19 @@ def prompt_context_is_marked(x):
 
 
 def mark_prompt_context(x, positive):
+    """Return a marked copy of `x`; `x` itself is never mutated. The conditioning
+    objects are the persistent cond cache's entries, shared with later requests
+    that may not use ControlNet. Callers must use the return value."""
     if isinstance(x, list):
-        for i in range(len(x)):
-            x[i] = mark_prompt_context(x[i], positive)
-        return x
+        return [mark_prompt_context(item, positive) for item in x]
     if isinstance(x, MulticondLearnedConditioning):
-        x.batch = mark_prompt_context(x.batch, positive)
-        return x
+        marked = copy(x)
+        marked.batch = mark_prompt_context(x.batch, positive)
+        return marked
     if isinstance(x, ComposableScheduledPromptConditioning):
-        x.schedules = mark_prompt_context(x.schedules, positive)
-        return x
+        marked = copy(x)
+        marked.schedules = mark_prompt_context(x.schedules, positive)
+        return marked
     if isinstance(x, ScheduledPromptConditioning):
         if isinstance(x.cond, dict):
             cond = x.cond['crossattn']
@@ -81,7 +84,13 @@ disable_controlnet_prompt_warning = True
 
 
 def unmark_prompt_context(x):
-    if not prompt_context_is_marked(x):
+    # Same values as prompt_context_is_marked(x) and the per-row marks below,
+    # read back in one device->host copy (a single stream sync per UNet call).
+    t = x[..., 0, :]
+    is_marked = torch.mean(torch.abs(torch.abs(t) - POSITIVE_MARK_TOKEN))
+    row_mark = (torch.mean(torch.abs(t - NEGATIVE_MARK_TOKEN), dim=-1) > MARK_EPS).float()
+    host = torch.cat([is_marked.detach().float().reshape(1), row_mark.detach().reshape(-1)]).cpu().numpy()
+    if not float(host[0]) < MARK_EPS:
         # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
         # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
         # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
@@ -98,19 +107,11 @@ def unmark_prompt_context(x):
         mark_batch = torch.ones(size=(x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
         context = x
         return mark_batch, [], [], context
-    mark = x[:, 0, :]
     context = x[:, 1:, :]
-    mark = torch.mean(torch.abs(mark - NEGATIVE_MARK_TOKEN), dim=1)
-    mark = (mark > MARK_EPS).float()
-    mark_batch = mark[:, None, None, None].to(x.dtype).to(x.device)
-
-    mark = mark.detach().cpu().numpy().tolist()
+    mark_batch = row_mark[:, None, None, None].to(x.dtype)
+    mark = host[1:]
     uc_indices = [i for i, item in enumerate(mark) if item < 0.5]
     c_indices = [i for i, item in enumerate(mark) if not item < 0.5]
-
-    StableDiffusionProcessing.cached_c = [None, None]
-    StableDiffusionProcessing.cached_uc = [None, None]
-
     return mark_batch, uc_indices, c_indices, context
 
 
@@ -474,10 +475,14 @@ class UnetHook(nn.Module):
             # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
             # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
             # After you mark the prompts, the mismatch errors will disappear.
-            mark_prompt_context(kwargs.get('conditioning', []), positive=True)
-            mark_prompt_context(kwargs.get('unconditional_conditioning', []), positive=False)
-            mark_prompt_context(getattr(process, 'hr_c', []), positive=True)
-            mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
+            # Marked copies only: the originals are persistent cond cache entries.
+            for key, positive in (('conditioning', True), ('unconditional_conditioning', False)):
+                if key in kwargs:
+                    kwargs[key] = mark_prompt_context(kwargs[key], positive=positive)
+            for name, positive in (('hr_c', True), ('hr_uc', False)):
+                conds = getattr(process, name, None)
+                if conds is not None:
+                    setattr(process, name, mark_prompt_context(conds, positive=positive))
             previously_active = outer.sampling_active
             outer.sampling_active = True
             try:
