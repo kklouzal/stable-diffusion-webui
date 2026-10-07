@@ -12,9 +12,9 @@ class ModuleTypeLora(network.ModuleType):
             return NetworkModuleLora(net, weights)
 
         if all(x in weights.w for x in ["lora_A.weight", "lora_B.weight"]):
-            w = weights.w.copy()
-            weights.w.clear()
-            weights.w.update({"lora_up.weight": w["lora_B.weight"], "lora_down.weight": w["lora_A.weight"]})
+            # Rename in place: alpha, dora_scale and the other keys of this module still apply.
+            weights.w["lora_up.weight"] = weights.w.pop("lora_B.weight")
+            weights.w["lora_down.weight"] = weights.w.pop("lora_A.weight")
 
             return NetworkModuleLora(net, weights)
 
@@ -69,13 +69,13 @@ class NetworkModuleLora(network.NetworkModule):
         return module
 
     def calc_updown(self, orig_weight):
-        up = self.up_model.weight.to(orig_weight.device)
-        down = self.down_model.weight.to(orig_weight.device)
+        up = self.up_model.weight.to(orig_weight.device, dtype=torch.float32)
+        down = self.down_model.weight.to(orig_weight.device, dtype=torch.float32)
 
         output_shape = [up.size(0), down.size(1)]
         if self.mid_model is not None:
             # cp-decomposition
-            mid = self.mid_model.weight.to(orig_weight.device)
+            mid = self.mid_model.weight.to(orig_weight.device, dtype=torch.float32)
             updown = lyco_helpers.rebuild_cp_decomposition(up, down, mid)
             output_shape += mid.shape[2:]
         else:
@@ -86,6 +86,10 @@ class NetworkModuleLora(network.NetworkModule):
         return self.finalize_updown(updown, orig_weight, output_shape)
 
     def forward(self, x, y):
+        if self.mid_model is not None or self.dora_scale is not None or self.network.dyn_dim is not None or self.bias is not None:
+            # up(down(x)) does not express CP-decomposed (lora_mid), DoRA, dyn_dim or bias deltas; apply the full delta.
+            return super().forward(x, y)
+
         self.up_model.to(device=devices.device)
         self.down_model.to(device=devices.device)
 

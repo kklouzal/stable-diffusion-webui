@@ -37,22 +37,22 @@ class NetworkModuleLokr(network.NetworkModule):
 
     def calc_updown(self, orig_weight):
         if self.w1 is not None:
-            w1 = self.w1.to(orig_weight.device)
+            w1 = self.w1.to(orig_weight.device, dtype=torch.float32)
         else:
-            w1a = self.w1a.to(orig_weight.device)
-            w1b = self.w1b.to(orig_weight.device)
+            w1a = self.w1a.to(orig_weight.device, dtype=torch.float32)
+            w1b = self.w1b.to(orig_weight.device, dtype=torch.float32)
             w1 = w1a @ w1b
 
         if self.w2 is not None:
-            w2 = self.w2.to(orig_weight.device)
+            w2 = self.w2.to(orig_weight.device, dtype=torch.float32)
         elif self.t2 is None:
-            w2a = self.w2a.to(orig_weight.device)
-            w2b = self.w2b.to(orig_weight.device)
+            w2a = self.w2a.to(orig_weight.device, dtype=torch.float32)
+            w2b = self.w2b.to(orig_weight.device, dtype=torch.float32)
             w2 = w2a @ w2b
         else:
-            t2 = self.t2.to(orig_weight.device)
-            w2a = self.w2a.to(orig_weight.device)
-            w2b = self.w2b.to(orig_weight.device)
+            t2 = self.t2.to(orig_weight.device, dtype=torch.float32)
+            w2a = self.w2a.to(orig_weight.device, dtype=torch.float32)
+            w2b = self.w2b.to(orig_weight.device, dtype=torch.float32)
             w2 = lyco_helpers.make_weight_cp(t2, w2a, w2b)
 
         output_shape = [w1.size(0) * w2.size(0), w1.size(1) * w2.size(1)]
