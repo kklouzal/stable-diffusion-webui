@@ -75,14 +75,14 @@ def harness(monkeypatch):
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init", [None, None])
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init_stats", processing._cache_stats(last_hit=False, cached=False, bypass_reason=None))
 
-    def make(init_images, *, width=64, height=48, resize_mode=0, batch_size=1):
+    def make(init_images, *, width=64, height=48, resize_mode=0, batch_size=1, tiling=False, image_mask=None, mask_round=True):
         p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
         p.__dict__.update(
             extra_generation_params={}, denoising_strength=0.5, image_cfg_scale=None, sampler_name="Euler", sd_model=model,
-            image_mask=None, latent_mask=None, color_corrections=None, overlay_images=None, init_images=init_images,
-            resize_mode=resize_mode, width=width, height=height, batch_size=batch_size, inpainting_fill=0, mask_round=True,
+            image_mask=image_mask, latent_mask=None, color_corrections=None, overlay_images=None, init_images=init_images,
+            resize_mode=resize_mode, width=width, height=height, batch_size=batch_size, inpainting_fill=0, mask_round=mask_round,
             sd_model_name="m", sd_model_hash="h", inpainting_mask_invert=False, inpaint_full_res=False,
-            inpaint_full_res_padding=0, mask_blur_x=0, mask_blur_y=0,
+            inpaint_full_res_padding=0, mask_blur_x=0, mask_blur_y=0, tiling=tiling,
         )
         p.init([""], [1], [1])
         return p
@@ -154,3 +154,42 @@ def test_color_corrections_are_computed_on_miss_and_restored_on_hit(harness, mon
     assert second.openclaw_img2img_init_cache_stats["last_hit"] is True
     assert len(second.color_corrections) == 3
     assert all(np.array_equal(item, expected) for item in second.color_corrections)
+
+
+def test_tiling_is_part_of_the_init_cache_key(harness):
+    # apply_circular(p.tiling) runs before p.init and also switches the VAE encoder's convolutions to circular padding.
+    raw = _random_image("RGB", (64, 48), 7)
+
+    harness.make([raw])
+    tiled = harness.make([raw.copy()], tiling=True)
+    assert tiled.openclaw_img2img_init_cache_stats["last_hit"] is False
+    assert len(harness.encoded) == 2
+
+    assert harness.make([raw.copy()], tiling=True).openclaw_img2img_init_cache_stats["last_hit"] is True
+    assert len(harness.encoded) == 2
+
+
+def test_soft_latent_masks_stay_float32_and_complementary(harness, monkeypatch):
+    # The masks blend float32 latents; in the 16-bit model dtype a soft mask was quantized and mask + nmask != 1.
+    monkeypatch.setattr(processing.devices, "dtype", torch.bfloat16)
+    ramp = np.tile(np.linspace(0, 255, 64).astype(np.uint8), (48, 1))
+    mask_image = Image.fromarray(ramp, "L")
+    expected_nmask = torch.from_numpy(processing._resize_latent_mask(mask_image, (8, 6), round=False))
+    assert not torch.equal(expected_nmask.to(torch.bfloat16).float(), expected_nmask)  # the old cast was lossy here
+
+    p = harness.make([_random_image("RGB", (64, 48), 8)], image_mask=mask_image, mask_round=False)
+
+    assert p.nmask.dtype == torch.float32 and p.mask.dtype == torch.float32
+    assert p.nmask.shape == (4, 6, 8)
+    assert all(torch.equal(channel, expected_nmask) for channel in p.nmask)
+    assert float((p.mask + p.nmask - 1).abs().max()) <= 2 ** -23
+
+
+def test_binary_latent_masks_are_exact(harness):
+    mask = np.zeros((48, 64), dtype=np.uint8)
+    mask[:, 32:] = 255
+
+    p = harness.make([_random_image("RGB", (64, 48), 9)], image_mask=Image.fromarray(mask, "L"))
+
+    assert torch.equal(p.nmask[0], torch.cat([torch.zeros(6, 4), torch.ones(6, 4)], dim=1))
+    assert torch.equal(p.mask + p.nmask, torch.ones(4, 6, 8))
