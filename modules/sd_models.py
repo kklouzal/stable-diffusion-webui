@@ -1,5 +1,6 @@
 import collections
 import contextlib
+import functools
 import importlib
 import os
 import sys
@@ -1003,6 +1004,39 @@ def send_model_to_cpu(m):
     devices.torch_gc()
 
 
+@functools.cache
+def _device_has_unified_memory(device):
+    """True for an integrated CUDA GPU (GB10): host and device allocations share one physical memory pool."""
+    return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
+
+
+def checkpoint_switch_in_place_on_device(m):
+    """Whether a checkpoint switch loads the new weights straight into the device-resident model `m`.
+
+    With sd_checkpoints_limit == 1 the outgoing model is never kept as a cached copy: it is either reused as the
+    container for the new weights or trashed. On unified memory, parking it on the CPU first frees no physical
+    memory; it costs a full device-to-host copy, a CPU-side load and a full host-to-device copy, briefly holding
+    both. Loading in place gives the same weights: copy_ from the CPU state_dict converts dtype on the CPU either
+    way, and the remaining load steps are layout changes, same-dtype no-ops, or round-to-nearest-even casts that
+    match the CPU bit for bit on non-NaN values. lowvram/medvram and TorchAO-quantized models keep their own
+    movement paths.
+    """
+    return (
+        m is not None
+        and shared.opts.sd_checkpoints_limit == 1
+        and not m.lowvram
+        and not model_has_torchao_quantization(m)
+        and _device_has_unified_memory(devices.device)
+    )
+
+
+def release_model_for_in_place_reload(m):
+    """send_model_to_cpu without the move: drop captured graphs before the weights are overwritten in place."""
+    with _model_acceleration_boundary("model_reload_in_place", m):
+        pass
+    devices.torch_gc()
+
+
 def model_target_device(m):
     if lowvram.is_needed(m):
         return devices.cpu
@@ -1248,7 +1282,7 @@ def reuse_model_from_already_loaded(sd_model, checkpoint_info, timer):
     if sd_model is not None and sd_model.sd_checkpoint_info.filename == checkpoint_info.filename:
         return sd_model
 
-    if shared.opts.sd_checkpoints_keep_in_cpu:
+    if shared.opts.sd_checkpoints_keep_in_cpu and not checkpoint_switch_in_place_on_device(sd_model):
         send_model_to_cpu(sd_model)
         timer.record("send model to cpu")
 
@@ -1403,7 +1437,11 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
 
     if sd_model is not None:
         sd_unet.apply_unet("None")
-        send_model_to_cpu(sd_model)
+        if checkpoint_switch_in_place_on_device(sd_model):
+            release_model_for_in_place_reload(sd_model)
+            timer.record("keep model on device")
+        else:
+            send_model_to_cpu(sd_model)
         sd_hijack.model_hijack.undo_hijack(sd_model)
 
     state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
