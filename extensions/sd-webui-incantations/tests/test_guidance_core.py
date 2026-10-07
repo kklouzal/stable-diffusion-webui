@@ -16,6 +16,21 @@ sys.path.insert(0, str(EXT_ROOT))
 
 DynThresh = importlib.import_module("dynthres_core").DynThresh
 
+# Package roots install_a1111_stubs() replaces; restored when this file finishes so later files see their own.
+_STUBBED_PACKAGES = ("modules", "scripts")
+_saved_modules = {}
+
+
+def setUpModule():
+    _saved_modules.update({key: value for key, value in sys.modules.items() if key.split(".")[0] in _STUBBED_PACKAGES})
+
+
+def tearDownModule():
+    for key in [key for key in sys.modules if key.split(".")[0] in _STUBBED_PACKAGES]:
+        del sys.modules[key]
+    sys.modules.update(_saved_modules)
+    _saved_modules.clear()
+
 
 def install_a1111_stubs():
     modules_pkg = types.ModuleType("modules")

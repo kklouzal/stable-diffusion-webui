@@ -211,7 +211,7 @@ def _assert_unchanged(c, uc, snapshot):
 
 def test_mark_prompt_context_returns_marked_copies_without_mutating_cache_entries(tmp_path):
     hook = load_hook(tmp_path)
-    pp = sys.modules["modules.prompt_parser"]
+    pp = hook.stubs["modules.prompt_parser"]
     c, uc = _conds(pp, 0)
     snapshot = _snapshot(c, uc)
 
@@ -240,7 +240,7 @@ def test_controlnet_sample_marks_copies_and_keeps_cond_cache_entries_reusable(tm
     with or without ControlNet: marking must never leak into them (this also
     covers cached_hr_c/hr_uc, which unmark's old per-forward reset missed)."""
     hook = load_hook(tmp_path)
-    pp = sys.modules["modules.prompt_parser"]
+    pp = hook.stubs["modules.prompt_parser"]
     cached_c, cached_uc = _conds(pp, 1)
     cached_hr_c, cached_hr_uc = _conds(pp, 2)
     snapshots = _snapshot(cached_c, cached_uc), _snapshot(cached_hr_c, cached_hr_uc)
@@ -378,10 +378,20 @@ def _load_hook_module(source, tmp_path):
 
     path = tmp_path / "hook_under_test.py"
     path.write_text(source, encoding="utf-8")
-    _install_hook_import_stubs()
-    spec = importlib.util.spec_from_file_location("controlnet_hook_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The stubs exist only for this import (the loaded module keeps references to them); afterwards every
+    # stubbed package goes back to what it was so later test files see the real sgm/ldm/modules/scripts.
+    stubbed = {"scripts", "modules", "ldm", "sgm"}
+    saved = {key: value for key, value in sys.modules.items() if key.split(".")[0] in stubbed}
+    try:
+        _install_hook_import_stubs()
+        spec = importlib.util.spec_from_file_location("controlnet_hook_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.stubs = {key: value for key, value in sys.modules.items() if key.split(".")[0] in stubbed}
+    finally:
+        for key in [key for key in sys.modules if key.split(".")[0] in stubbed]:
+            del sys.modules[key]
+        sys.modules.update(saved)
     return module
 
 

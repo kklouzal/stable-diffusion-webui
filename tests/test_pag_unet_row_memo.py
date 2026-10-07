@@ -2,8 +2,12 @@
 
 The real CFGDenoiser drives the main pass, the real Incantations PAG script runs its hidden pass, the real
 sgm UNetModel computes both, and optionally the real ControlNet hook with a tiny real cldm.ControlNet sits
-in front of it. The oracle replays every logged main-pass UNet call whole with the PAG perturbation
-enabled, which is what PAG computed before it was limited to cond rows.
+in front of it, entered through its hooked process.sample like in a generation. The oracle replays every
+logged main-pass UNet call whole with the PAG perturbation enabled, which is what PAG computed before it
+was limited to cond rows.
+
+Module hygiene: stubs are installed only while the code under test is imported, and the private sgm import
+this file runs on is removed (sys.modules restored) when the file finishes.
 """
 
 from __future__ import annotations
@@ -65,29 +69,41 @@ def isolated_modules(replacements, prefixes):
         sys.modules.update(hidden)
 
 
-def real_modules():
-    """Real sgm (kept installed: its modules import lazily at call time) and ldm-util modules."""
-    if not _REAL_MODULES:
-        for key in [key for key in sys.modules if key.split(".")[0] == "sgm"]:
-            del sys.modules[key]
-        sys.path.insert(0, str(SGM_ROOT))
-        try:
-            importlib.import_module("sgm.modules.diffusionmodules.openaimodel")
-            importlib.import_module("sgm.modules.diffusionmodules.video_model")
-            importlib.import_module("sgm.modules.attention")
-        finally:
-            sys.path.remove(str(SGM_ROOT))
-        _REAL_MODULES.update({key: value for key, value in sys.modules.items() if key.split(".")[0] == "sgm"})
-        with isolated_modules({}, {"ldm"}):
-            sys.path.insert(0, str(LDM_ROOT))
-            try:
-                _REAL_MODULES["ldm.modules.diffusionmodules.util"] = importlib.import_module("ldm.modules.diffusionmodules.util")
-            finally:
-                sys.path.remove(str(LDM_ROOT))
-    # Other tests replace sgm with stubs; put the real package back for this one.
-    for key in [key for key in sys.modules if key.split(".")[0] == "sgm"]:
+@pytest.fixture(scope="module", autouse=True)
+def real_sgm_modules():
+    """A private import of the real sgm package (and ldm util) for this file only.
+
+    sgm must sit in sys.modules while its UNets run (it imports lazily at call time). Other files may have
+    left stub sgm packages, or real ones the WebUI hijacks patched; this file hides both and imports its own
+    unpatched copy. On teardown every sgm/ldm entry goes back to exactly what it was, so the private copy
+    never reaches later files.
+    """
+    saved = {key: value for key, value in sys.modules.items() if key.split(".")[0] in ("sgm", "ldm")}
+    for key in [key for key in saved if key.split(".")[0] == "sgm"]:
         del sys.modules[key]
-    sys.modules.update({key: value for key, value in _REAL_MODULES.items() if key.split(".")[0] == "sgm"})
+    sys.path.insert(0, str(SGM_ROOT))
+    try:
+        for name in ("sgm.modules.diffusionmodules.openaimodel", "sgm.modules.diffusionmodules.video_model", "sgm.modules.attention"):
+            _REAL_MODULES[name] = importlib.import_module(name)
+    finally:
+        sys.path.remove(str(SGM_ROOT))
+    with isolated_modules({}, {"ldm"}):
+        sys.path.insert(0, str(LDM_ROOT))
+        try:
+            _REAL_MODULES["ldm.modules.diffusionmodules.util"] = importlib.import_module("ldm.modules.diffusionmodules.util")
+        finally:
+            sys.path.remove(str(LDM_ROOT))
+    try:
+        yield
+    finally:
+        for key in [key for key in sys.modules if key.split(".")[0] in ("sgm", "ldm")]:
+            del sys.modules[key]
+        sys.modules.update(saved)
+        _REAL_MODULES.clear()
+
+
+def real_modules():
+    assert _REAL_MODULES, "real_sgm_modules fixture is not active"
     return _REAL_MODULES
 
 
@@ -202,11 +218,13 @@ class Harness:
     install_controlnet() the ControlNet hook sits on top.
     """
 
-    def __init__(self, mode="base"):
+    def __init__(self, mode="base", device="cpu"):
         real = real_modules()
+        self.device = torch.device(device)
         self.openaimodel = real["sgm.modules.diffusionmodules.openaimodel"]
         self.unet = self.openaimodel.UNetModel(**UNET_CONFIG).eval()
         randomize(self.unet, seed=0, std=0.08)
+        self.unet.to(self.device)
 
         self.callbacks = Callbacks()
         self.unet_calls = []
@@ -268,8 +286,8 @@ class Harness:
             "modules.devices",
             dtype_unet=torch.float32,
             dtype_vae=torch.float32,
-            device=torch.device("cpu"),
-            get_device_for=lambda name: torch.device("cpu"),
+            device=self.device,
+            get_device_for=lambda name: self.device,
             cond_cast_unet=lambda x: x,
             autocast=contextlib.nullcontext,
         )
@@ -333,6 +351,7 @@ class Harness:
         self.script = None
         self.pag_params = None
         self.controlnet = None
+        self.unet_hook = None
         self.controlnet_calls = 0
         self.captured = {}
 
@@ -350,18 +369,12 @@ class Harness:
         cn_modules.update({
             "scripts": _package("scripts", [CN_SCRIPTS]),
             "scripts.logging": _module("scripts.logging", logger=logger),
+            "scripts.controlnet_lllite": _module("scripts.controlnet_lllite", clear_all_lllite=lambda: None),
             "scripts.ipadapter": _package("scripts.ipadapter"),
+            "scripts.ipadapter.plugable_ipadapter": _module("scripts.ipadapter.plugable_ipadapter", clear_all_ip_adapter=lambda: None),
             "scripts.ipadapter.ipadapter_model": _module("scripts.ipadapter.ipadapter_model", ImageEmbed=object),
             "scripts.controlnet_sparsectrl": _module("scripts.controlnet_sparsectrl", SparseCtrl=type("SparseCtrl", (), {})),
-            "modules.devices": _module(
-                "modules.devices",
-                dtype_unet=torch.float32,
-                dtype_vae=torch.float32,
-                device=torch.device("cpu"),
-                get_device_for=lambda name: torch.device("cpu"),
-                cond_cast_unet=lambda x: x,
-                autocast=contextlib.nullcontext,
-            ),
+            "modules.devices": self.modules["modules.devices"],
             "modules.lowvram": _module("modules.lowvram", send_everything_to_cpu=lambda: None),
             "modules.scripts": _module("modules.scripts", script_callbacks=self.script_callbacks),
             "ldm": _package("ldm"),
@@ -384,6 +397,7 @@ class Harness:
         torch.manual_seed(seed)
         self.controlnet = self.cldm.PlugableControlModel(CONTROLNET_CONFIG).eval()
         randomize(self.controlnet, seed=seed, std=0.05)
+        self.controlnet.to(self.device)
 
         def count(module, args, kwargs):
             self.controlnet_calls += 1
@@ -393,6 +407,7 @@ class Harness:
         hint = torch.rand(1, hint_channels, 64, 64, generator=gen)
         if hint_channels == 4:
             hint[:, 3] = (hint[:, 3] > 0.5).float()  # inpaint mask channel
+        hint = hint.to(self.device)
 
         def fake_vae_latent(p, x, mask=None):
             # Deterministic stand-in for the VAE encode: one latent row per hint row.
@@ -416,13 +431,21 @@ class Harness:
             cfg_injection=cfg_injection,
         )
         self.sd_ldm = types.SimpleNamespace(is_sdxl=True, model=self.sd_model.model)
+        self.process = types.SimpleNamespace(sample=lambda *a, **k: None)
         self.unet_hook = self.hook.UnetHook(lowvram=False)
         self.unet_hook.hook(
             model=self.unet,
             sd_ldm=self.sd_ldm,
             control_params=[self.control_param],
-            process=types.SimpleNamespace(sample=lambda *a, **k: None),
+            process=self.process,
         )
+
+    def sample(self, fn):
+        """Run ``fn`` the way a generation runs sampling: inside ControlNet's hooked process.sample."""
+        if self.unet_hook is None:
+            return fn()
+        self.process.sample_before_CN_hack = fn
+        return self.process.sample()
 
     def pag_modules(self):
         return [m for m in self.sd_model.network_layer_mapping.values() if "middle_block_1_transformer_blocks_0_attn1" in m.network_layer_name]
@@ -456,8 +479,11 @@ class Harness:
         self.captured.clear()
         self.unet_calls.clear()
         self.encoder_calls = 0
+        x, sigma, image_cond = x.to(self.device), sigma.to(self.device), image_cond.to(self.device)
+        cond = DictWithShape({key: value.to(self.device) for key, value in cond.items()})
+        uncond = DictWithShape({key: value.to(self.device) for key, value in uncond.items()})
         with torch.inference_mode():
-            return self.denoiser(x, sigma, uncond, (conds_list, cond), 5.0, s_min_uncond, image_cond)
+            return self.sample(lambda: self.denoiser(x, sigma, uncond, (conds_list, cond), 5.0, s_min_uncond, image_cond))
 
     @contextlib.contextmanager
     def pag_on(self):
@@ -508,8 +534,7 @@ def oracle_pag_cond_rows(harness, main_calls, n_cond):
     """Old PAG semantics: every main-pass call evaluated whole with PAG on; keep the cond rows."""
     outs = []
     with harness.pag_on(), torch.inference_mode():
-        for x, sigma, cond, _ in main_calls:
-            outs.append(harness.inner(x, sigma, cond))
+        harness.sample(lambda: [outs.append(harness.inner(x, sigma, cond)) for x, sigma, cond, _ in main_calls])
     return torch.cat(outs)[:n_cond]
 
 
@@ -645,7 +670,7 @@ def test_replay_reuses_recorded_rows_bitwise(batch_size, mode):
         harness.encoder_calls = 0
         before = harness.controlnet_calls
         with harness.pag_on(), torch.inference_mode():
-            out = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
+            out = harness.sample(lambda: harness.pag.pag_cond_rows_x_out(harness.inner, memo, False))
         for rec, (prefix, row_subset_ok) in zip(memo.calls, saved):
             rec.prefix, rec.row_subset_ok = prefix, row_subset_ok
         return out, harness.encoder_calls + harness.controlnet_calls - before
@@ -673,11 +698,11 @@ def test_controlnet_replay_recomputes_when_inputs_changed_after_the_main_pass():
     expected = None
     with harness.pag_on(), torch.inference_mode():
         rec.row_subset_ok = False
-        expected = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
+        expected = harness.sample(lambda: harness.pag.pag_cond_rows_x_out(harness.inner, memo, False))
         # Inference tensors carry no version counter; a replaced input is what can be detected.
         rec.cond["c_concat"] = [rec.cond["c_concat"][0].clone()]
         before = harness.controlnet_calls
-        out = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
+        out = harness.sample(lambda: harness.pag.pag_cond_rows_x_out(harness.inner, memo, False))
     assert rec.prefix is None
     assert harness.controlnet_calls == before + 1
     assert torch.equal(out, expected)
@@ -693,7 +718,7 @@ def test_controlnet_replay_recomputes_for_foreign_conditioning():
     cond["crossattn"] = cond["crossattn"].clone()
     before = harness.controlnet_calls
     with harness.row_memo.replaying(rec, 1), torch.inference_mode():
-        harness.inner(rec.x[:1], rec.sigma[:1], cond)
+        harness.sample(lambda: harness.inner(rec.x[:1], rec.sigma[:1], cond))
     assert harness.controlnet_calls == before + 1
 
 
@@ -798,7 +823,7 @@ def test_controlnet_hooked_forward_matches_original_semantics(variant, marked):
     harness.controlnet.control_model.register_forward_pre_hook(lambda module, args, kwargs: control_rows.append(kwargs["x"].shape[0]), with_kwargs=True)
     x, timesteps, context, y = unet_inputs(marked=marked)
     with torch.inference_mode():
-        out = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        out = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
         expected = oracle_hooked_forward(harness, x, timesteps, context, y)
     if variant == "balanced" or not marked:
         assert control_rows == [2]
@@ -819,15 +844,20 @@ def test_controlnet_guided_hint_and_placement_are_computed_once_per_hint():
     harness.controlnet.fullvram = lambda: (fullvram_calls.append(1), fullvram())[1]
     x, timesteps, context, y = unet_inputs()
     with torch.inference_mode():
-        first = harness.unet(x, timesteps=timesteps, context=context, y=y)
-        second = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        first = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        second = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
         assert len(hint_block_calls) == 1 and len(fullvram_calls) == 1
         assert torch.equal(first, second)
         harness.control_param.hint_cond = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(9))
-        third = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        third = harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
+        # Outside the hooked process.sample (a leaked hook) ControlNet passes the UNet through untouched.
+        controlnet_calls = harness.controlnet_calls
+        plain = harness.unet(x, timesteps=timesteps, context=context, y=y)
+        assert harness.controlnet_calls == controlnet_calls
         assert len(hint_block_calls) == 2
         assert torch.equal(third, oracle_hooked_forward(harness, x, timesteps, context, y))
     assert not torch.equal(first, third)
+    assert torch.equal(plain, harness.openaimodel.UNetModel.forward(harness.unet, x, timesteps=timesteps, context=context, y=y))
 
 
 def test_controlnet_unet_dtype_compute_is_bitwise_identical_under_bf16_autocast():
