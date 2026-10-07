@@ -492,11 +492,15 @@ def scaled_dot_product_attention_forward(self, x, context=None, mask=None, sdpa_
     del q_in, k_in, v_in
 
     dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-
     # the output of sdp = (batch, num_heads, seq_len, head_dim)
-    hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    if shared.opts.upcast_attn:
+        # CUDA autocast runs scaled_dot_product_attention in its lower-precision dtype, so it would cast the float32
+        # q/k/v straight back to bfloat16/float16; like the split-attention paths, upcasting turns autocast off here.
+        q, k, v = q.float(), k.float(), v.float()
+        with devices.without_autocast():
+            hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    else:
+        hidden_states = run_scaled_dot_product_attention(q, k, v, mask=mask, is_causal=False, sdpa_backend_override=sdpa_backend_override)
 
     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, h * head_dim)
     hidden_states = hidden_states.to(dtype)
@@ -698,12 +702,15 @@ def sdp_attnblock_forward(self, x):
     # kernels require; it is a no-op for channels_last activations.
     q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
-    if shared.opts.upcast_attn:
+    upcast = shared.opts.upcast_attn
+    if upcast:
         q, k, v = q.float(), k.float(), v.float()
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
+    # Upcasting turns autocast off for the kernel, which autocast would otherwise run in its lower-precision dtype.
+    with devices.without_autocast(disable=not upcast):
+        out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
     out = out.to(dtype)
     out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
@@ -720,12 +727,14 @@ def sdp_no_mem_attnblock_forward(self, x):
     # 4-D layout as in sdp_attnblock_forward; flash only takes 4-D input (and head_dim <= 256, else this stays on math).
     q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
-    if shared.opts.upcast_attn:
+    upcast = shared.opts.upcast_attn
+    if upcast:
         q, k, v = q.float(), k.float(), v.float()
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
+    with devices.without_autocast(disable=not upcast):
+        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
     out = out.to(dtype)
     out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)

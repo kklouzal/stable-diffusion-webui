@@ -311,7 +311,8 @@ def read_state_dict(checkpoint_file, print_global_state=False, map_location=None
         if not shared.opts.disable_mmap_load_safetensors:
             pl_sd = safetensors.torch.load_file(checkpoint_file, device=device)
         else:
-            pl_sd = safetensors.torch.load(open(checkpoint_file, 'rb').read())
+            with open(checkpoint_file, 'rb') as file:
+                pl_sd = safetensors.torch.load(file.read())
             pl_sd = {k: v.to(device) for k, v in pl_sd.items()}
     else:
         pl_sd = torch.load(checkpoint_file, map_location=map_location or shared.weight_load_location)
@@ -1087,13 +1088,27 @@ def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, t
     if missing_backup:
         raise RuntimeError(f"Cannot safely reload TorchAO-quantized model; missing BF16 backup weights for {len(missing_backup)} Linear modules, first={missing_backup[:5]}")
     if restored:
-        print(f"Restored {restored} TorchAO-quantized Linear modules to BF16 before checkpoint reload", flush=True)
+        # The restored BF16 masters carry neither the quantization nor the merged LoRA deltas. Drop the Lora
+        # extension's prepared-config markers, as apply_weight_quantization does, so the next activation rebuilds the
+        # quantized+LoRA weights from the masters; otherwise a model moved back to the device after a VAE reload
+        # keeps running the plain masters (no LoRA, no quantization) while its markers say it is prepared.
+        for backend in torchao_weight_quant.BACKENDS.values():
+            for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
+                try:
+                    delattr(model, f"network_{backend.name}_{suffix}")
+                except AttributeError:
+                    pass
+        print(f"Restored {restored} TorchAO-quantized Linear modules to BF16 before reload or move", flush=True)
     return restored
 
 
 def send_torchao_quant_model_to_device(m, *, target=None):
     torchao_tensor_types = torchao_quant_tensor_types()
-    target = target or shared.device
+    target = torch.device(target or shared.device)
+    if target.type == "cuda" and target.index is None:
+        # Tensors report an indexed device ("cuda:0" != "cuda"): compare against the device `to("cuda")` resolves to,
+        # or every resident parameter is re-wrapped in a new Parameter (same storage, new identity) on each move.
+        target = torch.device("cuda", torch.cuda.current_device())
     for module in m.modules():
         for name, param in list(module._parameters.items()):
             if param is None or isinstance(param, torchao_tensor_types):
@@ -1395,7 +1410,9 @@ def reload_model_weights(sd_model=None, info=None, forced_reload=False):
         torchao_quant_mode_changed = True
 
     if torchao_quant_mode_changed:
-        openclaw_cuda_graphs.invalidate("quantization_changed", getattr(checkpoint_info, "filename", None))
+        # Drop UNet and VAE decode graphs (and their pool memory) before the old model is released.
+        with _model_acceleration_boundary("quantization_changed", sd_model):
+            pass
         # LoadStateDictOnMeta mutates the dict it receives and get_checkpoint_state_dict()
         # returns the cached dict by reference. If a cache entry from a previous
         # optimized/meta load survives, a fresh model can still try to materialize

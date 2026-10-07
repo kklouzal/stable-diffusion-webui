@@ -400,3 +400,98 @@ def test_vae_load_has_single_pending_note_contract():
     source = open("modules/sd_vae.py", encoding="utf-8").read()
     load_body = source[source.index("def load_vae("):source.index("# don't call this from outside")]
     assert load_body.count("note_vae_commit(") == 1
+
+
+class FakeQuantWeight(torch.nn.Parameter):
+    """Stands in for a TorchAO MXTensor/NVFP4Tensor Linear weight."""
+
+
+def _quantized_lora_model(monkeypatch):
+    monkeypatch.setattr(sd_models, "torchao_quant_tensor_types", lambda: (FakeQuantWeight,))
+    model = torch.nn.Module()
+    model.linear = torch.nn.Linear(2, 2)
+    master_weight, master_bias = torch.randn(2, 2), torch.randn(2)
+    model.linear.network_mxfp8_base_weight = master_weight
+    model.linear.network_mxfp8_base_bias = master_bias
+    model.linear._parameters["weight"] = FakeQuantWeight(torch.zeros(2, 2), requires_grad=False)  # quantized LoRA-merged
+    # What networks.prepare_quant_active_config leaves on a prepared model; network_quant_is_model_prepared reads
+    # network_<backend>_active_config_ready, and prepare_quant_active_config returns early on a matching signature.
+    model.network_mxfp8_active_config_signature = ("lora-set",)
+    model.network_mxfp8_prepare_stats = {"prepared_linear": 1}
+    model.network_mxfp8_active_config_ready = True
+    return model, master_weight, master_bias
+
+
+def test_restoring_bf16_masters_drops_the_lora_quant_prepared_markers(monkeypatch):
+    # send_model_to_cpu (VAE reload, unload/reload) puts the BF16 masters back: no LoRA deltas, no quantization. With
+    # the prepared markers left set, the next activation skipped re-preparation and generation silently ran the
+    # plain masters until the LoRA set changed.
+    model, master_weight, master_bias = _quantized_lora_model(monkeypatch)
+
+    assert sd_models.restore_torchao_quantized_linears_for_reload(model, target_device=torch.device("cpu"), target_dtype=torch.float32) == 1
+
+    assert torch.equal(model.linear.weight, master_weight) and torch.equal(model.linear.bias, master_bias)
+    for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
+        assert not hasattr(model, f"network_mxfp8_{suffix}"), suffix
+    assert model.linear.network_mxfp8_base_weight is master_weight  # the masters themselves stay for re-preparation
+
+
+def test_restore_without_quantized_linears_keeps_the_prepared_markers(monkeypatch):
+    model, _master_weight, _master_bias = _quantized_lora_model(monkeypatch)
+    model.linear._parameters["weight"] = torch.nn.Parameter(torch.zeros(2, 2))  # already BF16: nothing to restore
+
+    assert sd_models.restore_torchao_quantized_linears_for_reload(model) == 0
+    assert model.network_mxfp8_active_config_ready is True
+
+
+class _ResidentParam:
+    """A parameter already on cuda:0 as tensors report it; moving or re-wrapping it is the regression."""
+
+    device = torch.device("cuda", 0)
+    requires_grad = False
+
+    def to(self, *args, **kwargs):  # pragma: no cover - failures prove the regression
+        raise AssertionError("a parameter already on the target device was moved")
+
+
+def test_torchao_device_helper_keeps_resident_params_for_an_unindexed_cuda_target(monkeypatch):
+    # shared.device is torch.device("cuda"); tensors report "cuda:0", and torch.device("cuda:0") != torch.device("cuda").
+    model = torch.nn.Module()
+    model.linear = torch.nn.Linear(2, 2)
+    resident = _ResidentParam()
+    model.linear._parameters["weight"] = resident
+    model.linear._parameters["bias"] = None
+    monkeypatch.setattr(sd_models, "torchao_quant_tensor_types", lambda: ())
+    monkeypatch.setattr(sd_models.shared, "device", torch.device("cuda"), raising=False)
+    monkeypatch.setattr(sd_models.torch.cuda, "current_device", lambda: 0)
+
+    sd_models.send_torchao_quant_model_to_device(model)
+
+    assert model.linear._parameters["weight"] is resident
+
+
+def test_torchao_forced_reload_drops_unet_and_vae_graphs_before_releasing_the_old_model(monkeypatch):
+    old_model = NoGenericToModel()
+    fresh_model = NoGenericToModel()
+    model_data = _patch_torchao_reload_path(monkeypatch, old_model, fresh_checkpoint_reload=True)
+    events = []
+
+    class Boundary:
+        def __enter__(self):
+            events.append("boundary")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "mutable_runtime_boundary", lambda reason, details=None: events.append(("unet", reason)) or Boundary())
+    monkeypatch.setattr(sd_models.openclaw_vae_decode_graphs, "invalidate", lambda reason: events.append(("vae", reason)))
+    monkeypatch.setattr(sd_models, "read_state_dict", lambda filename: {"state_dict": "fresh"})
+    monkeypatch.setattr(sd_models.sd_hijack.model_hijack, "undo_hijack", lambda model: events.append("undo_old_model"))
+
+    def load_model(checkpoint_info, *, already_loaded_state_dict, checkpoint_config):
+        model_data.sd_model = fresh_model
+
+    monkeypatch.setattr(sd_models, "load_model", load_model)
+
+    assert sd_models.reload_model_weights(old_model, SimpleNamespace(filename="alternate.safetensors")) is fresh_model
+    assert events[:4] == [("unet", "quantization_changed"), "boundary", ("vae", "quantization_changed"), "undo_old_model"]

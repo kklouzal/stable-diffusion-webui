@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import sys
 import threading
 import traceback
@@ -41,6 +42,10 @@ _MISSING = object()
 _GRAPH_POOL: Any = None
 # denoiser wrapper -> (schedule tensors, their versions, value signature); see _schedule_signature().
 _SCHEDULE_SIGNATURES: weakref.WeakKeyDictionary[Any, tuple[Any, ...]] = weakref.WeakKeyDictionary()
+# Full schedule value signature -> the compact token graph keys carry instead (see _schedule_signature). Tokens come
+# from a counter that never repeats, so clearing this table cannot make a stale per-wrapper token equal a new one.
+_SCHEDULE_TOKENS: dict[tuple[Any, ...], tuple[str, int]] = {}
+_SCHEDULE_TOKEN_IDS = itertools.count()
 
 
 _MAX_CACHE_SIZE = openclaw_env.env_int("OPENCLAW_CUDA_GRAPH_CACHE_MAX", 8, minimum=0)
@@ -96,6 +101,7 @@ def _clear_cache_locked() -> bool:
     _CACHE.clear()
     _KEY_LOCKS.clear()
     _FAILED_KEYS.clear()
+    _SCHEDULE_TOKENS.clear()
     # Every graph that captured into the shared pool is gone; the next capture starts a fresh pool.
     _GRAPH_POOL = None
     return had_state
@@ -309,13 +315,17 @@ def _schedule_tensors(fn: Any) -> tuple[tuple[str, torch.Tensor], ...]:
     return tuple(tensors)
 
 
-def _schedule_signature(fn: Any) -> tuple[Any, ...]:
+def _schedule_signature(fn: Any) -> tuple[str, int]:
     """Value identity of _schedule_tensors(fn), read to the host once per wrapper and tensor version.
 
     A replay reads the schedule tensors at the addresses captured from the capturing wrapper (the cache entry
     keeps them alive), so a graph may replay for another wrapper only when the values are equal. One wrapper
     exists per sampling run (update_inner_model builds a new one on a refiner switch), so the device-to-host
     read happens once per run; replacing a tensor or mutating it in place changes the identity/version check.
+
+    The result is a token interned per distinct value signature (equal values, equal token), not the ~3000 floats
+    themselves: the key is hashed, compared, repr'd and digested on every denoiser call, ~1.5 ms of host time per
+    call with the floats inline (CPU-measured on the GB10 host).
     """
     tensors = _schedule_tensors(fn)
     versions = tuple(tensor._version for _name, tensor in tensors)
@@ -330,10 +340,14 @@ def _schedule_signature(fn: Any) -> tuple[Any, ...]:
         and cached[1] == versions
     ):
         return cached[2]
-    signature = tuple(
+    values = tuple(
         (name, tuple(tensor.shape), str(tensor.dtype), str(tensor.device), tuple(tensor.detach().cpu().reshape(-1).tolist()))
         for name, tensor in tensors
     )
+    with _LOCK:
+        signature = _SCHEDULE_TOKENS.get(values)
+        if signature is None:
+            signature = _SCHEDULE_TOKENS[values] = ("schedule", next(_SCHEDULE_TOKEN_IDS))
     try:
         # Holding the tensors keeps their ids from being reused by a different tensor while memoized.
         _SCHEDULE_SIGNATURES[fn] = (tuple(tensor for _name, tensor in tensors), versions, signature)
@@ -375,8 +389,28 @@ def _attention_key() -> str | None:
     return sd_hijack_optimizations.active_sdpa_backend() if sd_hijack_optimizations is not None else None
 
 
+def _runtime_branch_key() -> tuple[Any, ...]:
+    """Process-wide Python state the captured UNet call branches on, which a replay never re-reads.
+
+    - the CrossAttention forward installed by the cross attention optimization (changing the setting swaps the
+      function through sd_hijack.redo_hijack without touching graphs);
+    - upcast_attn: the attention forwards run float32 attention with autocast off;
+    - lora_functional: the Lora extension's per-layer functional path instead of merged weights, and the UNet
+      norms' bf16-native eligibility (sd_hijack_unet.bf16_native_norm_eligible).
+    Request override_settings set these without callbacks, so they must be part of the key.
+    """
+    shared = sys.modules.get("modules.shared")
+    opts = getattr(shared, "opts", None)
+    cross_attention = getattr(sys.modules.get("sgm.modules.attention"), "CrossAttention", None)
+    return (
+        getattr(cross_attention, "forward", None),
+        bool(getattr(opts, "upcast_attn", False)),
+        bool(getattr(opts, "lora_functional", False)),
+    )
+
+
 def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, denoiser: Any | None = None) -> tuple[Any, ...]:
-    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), _attention_key(), _denoiser_graph_key(denoiser))
+    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), _attention_key(), _runtime_branch_key(), _denoiser_graph_key(denoiser))
 
 
 def _seg_params(denoiser: Any | None) -> Any | None:
@@ -478,6 +512,11 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None, fn: Any | None = None) -
         # present in the cond argument copied into static graph inputs. The init
         # latent itself is only used for pre/post mask blending, and mask-bearing
         # variants remain bypassed above.
+
+    # Hypernetworks run as Python inside every attention forward (modules/hypernetworks/hypernetwork.py), reading the
+    # loaded set and each network's multiplier per call; a replay would apply the set that was loaded at capture.
+    if getattr(sys.modules.get("modules.shared"), "loaded_hypernetworks", None):
+        return "hypernetworks"
 
     models = _denoiser_models(fn, p)
     # A per-request instance override (Tiled Diffusion: MultiDiffusion/DemoFusion replace inner_model.forward or
