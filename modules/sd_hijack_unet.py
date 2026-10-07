@@ -3,7 +3,7 @@ from packaging import version
 from einops import repeat
 import math
 
-from modules import devices, shared
+from modules import devices, openclaw_fused_geglu, shared
 from modules.sd_hijack_utils import CondFunc
 
 
@@ -267,6 +267,9 @@ CondFunc('ldm.models.diffusion.ddpm.LatentDiffusion.get_first_stage_encoding', l
 
 CondFunc('ldm.models.diffusion.ddpm.LatentDiffusion.apply_model', apply_model)
 CondFunc('sgm.modules.diffusionmodules.wrappers.OpenAIWrapper.forward', apply_model)
+
+# After the upcast GEGLU CondFunc above, so the fused kernel's CondFunc wraps it and defers to it under upcast sampling.
+openclaw_fused_geglu.install()
 
 
 def timestep_embedding_cast_result(orig_func, timesteps, *args, **kwargs):
