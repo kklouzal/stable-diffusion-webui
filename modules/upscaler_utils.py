@@ -19,6 +19,32 @@ def pil_image_to_torch_bgr(img: Image.Image) -> torch.Tensor:
     return torch.from_numpy(img)
 
 
+_unit_lut_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
+
+def _unit_lut(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """`v / 255` for every uint8 `v`, converted exactly as `pil_image_to_torch_bgr(img).to(device, dtype)` does.
+
+    That path divides in float64 with numpy and casts float64 -> dtype on the CPU (a CPU -> CUDA `to`
+    converts on the source side), so the table is built the same way and only then moved to `device`.
+    """
+    key = (device, dtype)
+    lut = _unit_lut_cache.get(key)
+    if lut is None:
+        lut = torch.from_numpy(np.arange(256, dtype=np.uint8) / 255).to(dtype=dtype).to(device=device)
+        _unit_lut_cache[key] = lut
+    return lut
+
+
+def pil_image_to_device_bgr(img: Image.Image, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Bitwise the same 1xCxHxW tensor as `pil_image_to_torch_bgr(img).unsqueeze(0).to(device, dtype)`,
+    but only the uint8 pixels are copied to `device` and converted there through `_unit_lut`."""
+    pixels = torch.from_numpy(np.array(img.convert("RGB"))).to(device=device)
+    bgr = _unit_lut(device, dtype)[pixels.flip(2).long()]
+    # HWC to CHW with the canonical contiguous strides of the CPU path, also for size-1 dims.
+    return bgr.permute(2, 0, 1).clone(memory_format=torch.contiguous_format).unsqueeze(0)
+
+
 def torch_bgr_to_pil_image(tensor: torch.Tensor) -> Image.Image:
     if tensor.ndim == 4:
         # If we're given a tensor with a batch dimension, squeeze it out
@@ -27,12 +53,11 @@ def torch_bgr_to_pil_image(tensor: torch.Tensor) -> Image.Image:
             raise ValueError(f"{tensor.shape} does not describe a BCHW tensor")
         tensor = tensor.squeeze(0)
     assert tensor.ndim == 3, f"{tensor.shape} does not describe a CHW tensor"
-    # TODO: is `tensor.float().cpu()...numpy()` the most efficient idiom?
-    arr = tensor.float().cpu().clamp_(0, 1).numpy()  # clamp
-    arr = 255.0 * np.moveaxis(arr, 0, 2)  # CHW to HWC, rescale
-    arr = arr.round().astype(np.uint8)
-    arr = arr[:, :, ::-1]  # flip BGR to RGB
-    return Image.fromarray(arr, "RGB")
+    # Quantize on the tensor's device and copy back only uint8. Same ops and order as the former
+    # numpy path: fp32 clamp, fp32 multiply by 255, round half to even, cast to uint8.
+    arr = tensor.float().clamp(0, 1).mul_(255.0).round_().to(torch.uint8)
+    arr = arr.flip(0).permute(1, 2, 0).contiguous()  # BGR CHW to RGB HWC
+    return Image.fromarray(arr.cpu().numpy(), "RGB")
 
 
 def upscale_pil_patch(model, img: Image.Image) -> Image.Image:
@@ -42,8 +67,7 @@ def upscale_pil_patch(model, img: Image.Image) -> Image.Image:
     param = torch_utils.get_param(model)
 
     with torch.inference_mode():
-        tensor = pil_image_to_torch_bgr(img).unsqueeze(0)  # add batch dimension
-        tensor = tensor.to(device=param.device, dtype=param.dtype)
+        tensor = pil_image_to_device_bgr(img, param.device, param.dtype)
         with devices.without_autocast():
             return torch_bgr_to_pil_image(model(tensor))
 
