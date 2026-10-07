@@ -294,6 +294,20 @@ def _bundled_embedding_plan(new_networks, emb_db, previous_bundle_embeddings):
     return planned
 
 
+def _embeddings_registered(emb_db, bundles):
+    return all(emb_db.word_embeddings.get(name) is embedding for name, embedding in bundles.items())
+
+
+def _published_bundles_current(emb_db):
+    """Whether emb_db holds exactly the bundled embeddings the published networks register.
+
+    A textual inversion reload publishes a database built from the embedding folders only, which drops bundled
+    embeddings while the applied LoRA key stays equal, so key equality alone does not prove them registered.
+    """
+    planned = _bundled_embedding_plan(loaded_networks, emb_db, loaded_bundle_embeddings)
+    return planned == loaded_bundle_embeddings and _embeddings_registered(emb_db, planned)
+
+
 def _embedding_db_snapshot(emb_db):
     return dict(emb_db.word_embeddings), {token: list(entries) for token, entries in emb_db.ids_lookup.items()}
 
@@ -331,16 +345,16 @@ def _publish_applied_state(new_networks, emb_db=None):
     wanted_key = network_applied_state_key(new_networks)
     with openclaw_cache_epochs.epoch_transaction():
         with _network_application_lock:
-            if wanted_key == _applied_state_key:
+            previous_bundles = dict(loaded_bundle_embeddings)
+            planned_bundles = _bundled_embedding_plan(new_networks, emb_db, previous_bundles)
+            bundle_changed = previous_bundles != planned_bundles or not _embeddings_registered(emb_db, planned_bundles)
+            if wanted_key == _applied_state_key and not bundle_changed:
                 openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=wanted_key)
                 return False
 
             previous_networks = list(loaded_networks)
             previous_key = _applied_state_key
-            previous_bundles = dict(loaded_bundle_embeddings)
-            planned_bundles = _bundled_embedding_plan(new_networks, emb_db, previous_bundles)
             db_snapshot = _embedding_db_snapshot(emb_db)
-            bundle_changed = previous_bundles != planned_bundles
             touched_embeddings = list({id(embedding): embedding for embedding in (*previous_bundles.values(), *planned_bundles.values())}.values())
             loaded_flags = [(embedding, embedding.loaded) for embedding in touched_embeddings]
 
@@ -564,7 +578,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     ordered = tuple((source_key, float(te).hex(), float(unet).hex(), dyn, tuple(sorted(getattr(cached_by_key.get(source_key), "modules", {}).keys()))) for source_key, te, unet, dyn in zip(source_keys, te_values, unet_values, dyn_values))
     wanted_key = (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
     with _network_application_lock:
-        if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key:
+        if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key and _published_bundles_current(emb_db):
             elapsed = (time.perf_counter() - started) * 1000.0
             _record_lora_steady_state(hit=True, reason="semantic_signature_equal", identity_ms=(identity_done-started)*1000.0, total_ms=elapsed)
             openclaw_cache_epochs.observe("E12", "hit", reason="exact", semantic_key=wanted_key)

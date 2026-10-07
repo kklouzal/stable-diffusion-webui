@@ -1,3 +1,5 @@
+import math
+
 from modules import extra_networks, shared, torchao_weight_quant
 import networks
 
@@ -28,25 +30,33 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         te_multipliers = []
         unet_multipliers = []
         dyn_dims = []
-        for params in params_list:
-            assert params.items
+        try:
+            for params in params_list:
+                assert params.items
 
-            names.append(params.positional[0])
+                names.append(params.positional[0])
 
-            te_multiplier = float(params.positional[1]) if len(params.positional) > 1 else 1.0
-            te_multiplier = float(params.named.get("te", te_multiplier))
+                te_multiplier = float(params.positional[1]) if len(params.positional) > 1 else 1.0
+                te_multiplier = float(params.named.get("te", te_multiplier))
 
-            unet_multiplier = float(params.positional[2]) if len(params.positional) > 2 else te_multiplier
-            unet_multiplier = float(params.named.get("unet", unet_multiplier))
+                unet_multiplier = float(params.positional[2]) if len(params.positional) > 2 else te_multiplier
+                unet_multiplier = float(params.named.get("unet", unet_multiplier))
 
-            dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
-            dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
+                dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
+                dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
 
-            te_multipliers.append(te_multiplier)
-            unet_multipliers.append(unet_multiplier)
-            dyn_dims.append(dyn_dim)
+                if not (math.isfinite(te_multiplier) and math.isfinite(unet_multiplier)):
+                    raise ValueError(f"non-finite multiplier in <lora:{':'.join(params.items)}>")
 
-        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+                te_multipliers.append(te_multiplier)
+                unet_multipliers.append(unet_multiplier)
+                dyn_dims.append(dyn_dim)
+
+            networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+        except Exception as e:
+            # extra_networks.activate would only log any other error and then activate an empty LoRA set,
+            # generating without every requested LoRA.
+            raise FatalLoraPreparationError(f"LoRA activation failed: {e}") from e
         for backend in torchao_weight_quant.BACKENDS.values():
             if not networks.prepare_quant_active_config(backend):
                 error = getattr(shared.sd_model, f"network_{backend.name}_prepare_error", f"{backend.label} LoRA preparation failed")
