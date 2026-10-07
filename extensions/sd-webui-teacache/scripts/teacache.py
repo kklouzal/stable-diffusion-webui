@@ -82,7 +82,7 @@ def relative_l1_distance(prev: torch.Tensor, curr: torch.Tensor) -> torch.Tensor
     prev_f = prev.float()
     curr_f = curr.float()
     baseline = prev_f.abs().mean().clamp_min(torch.finfo(prev_f.dtype).eps)
-    return (prev_f - curr_f).abs().mean() / baseline
+    return (prev_f - curr_f).abs_().mean() / baseline
 
 
 def sdxl_polynomial_distance(relative_distance: torch.Tensor, coeffs: torch.Tensor) -> torch.Tensor:
@@ -240,7 +240,10 @@ class TeaCacheSession:
         context: Optional[torch.Tensor] = None,
         y: Optional[torch.Tensor] = None,
     ):
-        current_fb = first_block_residual.detach()
+        # One owned fp32 copy per call, kept as the lane's previous residual: the next call's distance then
+        # converts only the current residual (bf16 -> fp32 is exact, so the values are unchanged), and the
+        # stored copy replaces the separate clone that kept the lane independent of the producer's tensor.
+        current_fb = first_block_residual.detach().to(dtype=torch.float32, copy=True)
         lane = self.call_index
         self.use_cache = not self.disabled_reason
         # check step range
@@ -282,7 +285,7 @@ class TeaCacheSession:
                 self.distances[lane] = distance.detach()
                 self.consecutive_hits[lane] = hits + 1
 
-        self.previous_fb[lane] = current_fb.clone()
+        self.previous_fb[lane] = current_fb
 
     def next_step(self):
         self.current_step += 1

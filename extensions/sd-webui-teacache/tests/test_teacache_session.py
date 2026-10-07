@@ -118,6 +118,36 @@ class TeaCacheSessionTests(unittest.TestCase):
         residual.add_(10)
         torch.testing.assert_close(session.current_residual(signature), torch.ones(2))
 
+    def test_previous_first_block_residual_is_an_owned_fp32_copy_with_unchanged_distances(self):
+        # The lane keeps its previous residual in fp32 (converted once, no extra clone); the distance must
+        # equal the bf16-stored formulation bitwise, and the stored copy must not alias the producer's tensor.
+        gen = torch.Generator().manual_seed(3)
+        signature = ((2, 8, 4, 4),)
+        for dtype in (torch.bfloat16, torch.float32):
+            session = self.teacache.TeaCacheSession(threshold=10.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+            base = torch.randn(2, 8, 4, 4, generator=gen)
+            residuals = [(base + 0.02 * torch.randn(2, 8, 4, 4, generator=gen)).to(dtype) for _ in range(4)]
+            session.update_condition(residuals[0], signature)
+            session.store_current_residual(signature, residuals[0])
+            previous = residuals[0].clone()
+            residuals[0].add_(100)
+            expected_distance = torch.zeros(())
+            for current in residuals[1:]:
+                session.next_step()
+                session.update_condition(current, signature)
+                prev_f, curr_f = previous.float(), current.float()
+                rel = (prev_f - curr_f).abs().mean() / prev_f.abs().mean().clamp_min(torch.finfo(torch.float32).eps)
+                expected_distance = expected_distance + self.teacache.sdxl_polynomial_distance(
+                    rel, torch.tensor(self.teacache.SDXL_POLYNOMIAL_COEFFICIENTS)
+                )
+                with self.subTest(dtype=dtype):
+                    self.assertTrue(session.use_cache)
+                    self.assertEqual(session.previous_fb[0].dtype, torch.float32)
+                    self.assertNotEqual(session.previous_fb[0].data_ptr(), current.data_ptr())
+                    self.assertTrue(torch.equal(session.distances[0], expected_distance))
+                previous = current.clone()
+                current.add_(100)
+
 
 if __name__ == "__main__":
     unittest.main()

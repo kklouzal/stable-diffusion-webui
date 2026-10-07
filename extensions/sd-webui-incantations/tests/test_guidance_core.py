@@ -1,6 +1,7 @@
 import functools
 import importlib
 import importlib.util
+import itertools
 import math
 import sys
 import types
@@ -15,7 +16,8 @@ EXT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXT_ROOT.parents[1]
 sys.path.insert(0, str(EXT_ROOT))
 
-DynThresh = importlib.import_module("dynthres_core").DynThresh
+dynthres_core = importlib.import_module("dynthres_core")
+DynThresh = dynthres_core.DynThresh
 
 # Package roots install_a1111_stubs() replaces; restored when this file finishes so later files see their own.
 _STUBBED_PACKAGES = ("modules", "scripts")
@@ -227,6 +229,115 @@ class DynamicThresholdingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "constant across batches"):
             dt.dynthresh(cond, uncond, 9.0, None)
+
+    @staticmethod
+    def _bits(tensor):
+        return tensor.contiguous().view({2: torch.int16, 4: torch.int32, 8: torch.int64}[tensor.element_size()])
+
+    def test_cfg_relative_fast_path_is_bitwise_the_accumulation(self):
+        # Signed zeros and equal cond/uncond values are where 0 + d and d could differ.
+        for dtype in (torch.float32, torch.bfloat16):
+            x_out = torch.randn(4, 4, 6, 6).to(dtype)
+            x_out.view(-1)[:20] = 0.0
+            x_out[0].view(-1)[:6] = -0.0
+            x_out[2:].view(-1)[30:40] = x_out[:2].reshape(-1)[30:40]
+            uncond = x_out[2:]
+            for conds_list in ([[(0, 1.0)], [(1, 1.0)]], [[(0, 0.5)], [(1, 1.0)]], [[(1, 1.0)], [(0, 1.0)]], [[(0, 1.0), (1, 0.25)], [(1, 1.0)]]):
+                fast = dynthres_core.cfg_relative(x_out, conds_list, uncond)
+                relative = torch.zeros_like(uncond)
+                for i, conds in enumerate(conds_list):
+                    for cond_index, weight in conds:
+                        relative[i] += (x_out[cond_index] - uncond[i]) * weight
+                dt = DynThresh(6.5, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 15, True, "MEAN", "AD", 1.0)
+                dt.step = 2
+                with self.subTest(dtype=dtype, conds_list=conds_list):
+                    self.assertTrue(torch.equal(fast, relative))
+                    self.assertTrue(torch.equal(self._bits(dt.dynthresh_from_relative(fast, uncond, 9.0)), self._bits(dt.dynthresh_from_relative(relative, uncond, 9.0))))
+
+    def test_dynthresh_matches_legacy_formulation_bitwise(self):
+        gen = torch.Generator().manual_seed(7)
+        for dtype in (torch.float32, torch.bfloat16, torch.float64):
+            uncond = (torch.randn(2, 4, 9, 7, generator=gen) * 2).to(dtype)
+            relative = (torch.randn(2, 4, 9, 7, generator=gen) * 0.3).to(dtype)
+            relative.view(-1)[:5] = 0.0
+            for percentile, sep, start, measure, phi in itertools.product((1.0, 0.95), (True, False), ("MEAN", "ZERO"), ("AD", "STD"), (1.0, 0.6)):
+                dt = DynThresh(6.5, percentile, "Linear Down", 1.0, "Cosine Down", 2.0, 4.0, 15, sep, start, measure, phi)
+                dt.step = 4
+                with self.subTest(dtype=dtype, percentile=percentile, sep=sep, start=start, measure=measure, phi=phi):
+                    new = dt.dynthresh_from_relative(relative, uncond, 9.0)
+                    old = _legacy_dynthresh_from_relative(dt, relative, uncond, 9.0)
+                    self.assertTrue(torch.equal(self._bits(new), self._bits(old)))
+
+    def test_dynthresh_propagates_non_finite_values_like_legacy(self):
+        for bad in (float("nan"), float("inf")):
+            uncond = torch.randn(1, 4, 8, 8)
+            relative = torch.randn(1, 4, 8, 8)
+            relative[0, 1, 2, 3] = bad
+            for sep in (True, False):
+                dt = DynThresh(6.5, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 15, sep, "MEAN", "AD", 1.0)
+                dt.step = 1
+                with self.subTest(bad=bad, sep=sep):
+                    new = dt.dynthresh_from_relative(relative, uncond, 9.0)
+                    old = _legacy_dynthresh_from_relative(dt, relative, uncond, 9.0)
+                    self.assertTrue(torch.equal(self._bits(new), self._bits(old)))
+
+
+def _legacy_dynthresh_from_relative(dt, relative, uncond, cfg_scale):
+    # Pre-kernel-economy DynThresh.dynthresh_from_relative, verbatim: independent oracle for the
+    # fused |x| max, the skipped percentile-100 clamp and the dropped clamp of max_scaleref.
+    orig_dtype = uncond.dtype
+    stats_dtype = torch.float64 if orig_dtype == torch.float64 else torch.float32
+    uncond_f = uncond.to(dtype=stats_dtype)
+    relative_f = relative.to(dtype=stats_dtype)
+    mimic_scale = dt.interpret_scale(dt.mimic_scale, dt.mimic_mode, dt.mimic_scale_min)
+    cfg_scale = dt.interpret_scale(cfg_scale, dt.cfg_mode, dt.cfg_scale_min)
+    mim_target = uncond_f + relative_f * mimic_scale
+    cfg_target = uncond_f + relative_f * cfg_scale
+    mim_flattened = mim_target.flatten(2)
+    cfg_flattened = cfg_target.flatten(2)
+    mim_means = mim_flattened.mean(dim=2).unsqueeze(2)
+    cfg_means = cfg_flattened.mean(dim=2).unsqueeze(2)
+    mim_centered = mim_flattened - mim_means
+    cfg_centered = cfg_flattened - cfg_means
+    if dt.sep_feat_channels:
+        if dt.variability_measure == 'STD':
+            mim_scaleref = mim_centered.std(dim=2, correction=0).unsqueeze(2)
+            cfg_scaleref = cfg_centered.std(dim=2, correction=0).unsqueeze(2)
+        else:
+            mim_scaleref = mim_centered.abs().amax(dim=2).unsqueeze(2)
+            cfg_abs = cfg_centered.abs()
+            if dt.threshold_percentile >= 1.0:
+                cfg_scaleref = cfg_abs.amax(dim=2).unsqueeze(2)
+            else:
+                cfg_scaleref = torch.quantile(cfg_abs, dt.threshold_percentile, dim=2).unsqueeze(2)
+    else:
+        if dt.variability_measure == 'STD':
+            mim_scaleref = mim_centered.std(correction=0)
+            cfg_scaleref = cfg_centered.std(correction=0)
+        else:
+            mim_scaleref = mim_centered.abs().amax()
+            cfg_abs = cfg_centered.abs()
+            if dt.threshold_percentile >= 1.0:
+                cfg_scaleref = cfg_abs.amax()
+            else:
+                cfg_scaleref = torch.quantile(cfg_abs, dt.threshold_percentile)
+    eps = torch.finfo(stats_dtype).eps
+    cfg_scaleref = cfg_scaleref.clamp_min(eps)
+    mim_scaleref = mim_scaleref.clamp_min(eps)
+    if dt.scaling_startpoint == 'ZERO':
+        result = cfg_flattened * (mim_scaleref / cfg_scaleref)
+    else:
+        if dt.variability_measure == 'STD':
+            cfg_renormalized = (cfg_centered / cfg_scaleref) * mim_scaleref
+        else:
+            max_scaleref = torch.maximum(mim_scaleref, cfg_scaleref).clamp_min(eps)
+            cfg_clamped = cfg_centered.clamp(-max_scaleref, max_scaleref)
+            cfg_renormalized = (cfg_clamped / max_scaleref) * mim_scaleref
+        result = cfg_renormalized + cfg_means
+    actual_res = result.unflatten(2, mim_target.shape[2:])
+    if dt.interpolate_phi != 1.0:
+        actual_res = actual_res * dt.interpolate_phi + cfg_target * (1.0 - dt.interpolate_phi)
+    return actual_res.to(dtype=orig_dtype)
 
 
 class DynamicThresholdingLifecycleTests(unittest.TestCase):
@@ -925,7 +1036,7 @@ class SEGBlurTests(unittest.TestCase):
             for half, heads, head_dim in self.QUERY_SHAPES:
                 output = torch.randn(2 * half, h * w, heads * head_dim, generator=gen).to(dtype)
                 geometry = dict(heads=heads, head_dim=head_dim, downscale_h=h, downscale_w=w)
-                new = self.seg._blur_seg_uncond_queries(output, half, kernel_size=kernel_size, sigma=sigma, is_inf_blur=False, **geometry)
+                new = self.seg._blur_seg_uncond_queries(output.clone(), half, kernel_size=kernel_size, sigma=sigma, is_inf_blur=False, **geometry)
                 blur_fn = functools.partial(_legacy_gaussian_blur_2d, kernel_size=kernel_size, sigma=sigma)
                 old = _legacy_blur_seg_cond_queries(output, blur_fn=blur_fn, **geometry)
                 with self.subTest(h=h, w=w, kernel_size=kernel_size, half=half, heads=heads, head_dim=head_dim):
@@ -980,7 +1091,7 @@ class SEGBlurTests(unittest.TestCase):
         geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
 
         for is_inf_blur in (False, True):
-            out = self.seg._blur_seg_uncond_queries(output, 2, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            out = self.seg._blur_seg_uncond_queries(output.clone(), 2, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
             with self.subTest(is_inf_blur=is_inf_blur):
                 self.assertEqual(out.dtype, output.dtype)
                 self.assertTrue(torch.equal(out[:2], output[:2]))
@@ -990,7 +1101,7 @@ class SEGBlurTests(unittest.TestCase):
         for dtype in (torch.float32, torch.bfloat16):
             output = torch.randn(4, 6 * 5, 2 * 3).to(dtype)
             geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
-            new = self.seg._blur_seg_uncond_queries(output, 2, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
+            new = self.seg._blur_seg_uncond_queries(output.clone(), 2, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
             old = _legacy_blur_seg_cond_queries(
                 output,
                 blur_fn=lambda q: self.seg.gaussian_blur_inf(q, 1.0, 2.0**11),
@@ -998,6 +1109,27 @@ class SEGBlurTests(unittest.TestCase):
             )
             with self.subTest(dtype=dtype):
                 self.assertTrue(torch.equal(new, old))
+
+    def test_query_blur_writes_the_to_q_output_in_place_like_the_concatenating_path(self):
+        # The hook's to_q output is a fresh tensor: the blurred uncond rows are written into it (one
+        # rounding copy) instead of concatenating a new batch. Oracle: the previous cat formulation.
+        for dtype, is_inf_blur, (n_cond, n_rows) in itertools.product(
+            (torch.float32, torch.bfloat16, torch.float16), (False, True), ((1, 2), (2, 4), (3, 4))
+        ):
+            output = torch.randn(n_rows, 7 * 6, 4 * 3).to(dtype)
+            geometry = dict(heads=4, head_dim=3, downscale_h=7, downscale_w=6, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur)
+            q_passthrough, q_blur = output.split((n_cond, n_rows - n_cond), dim=0)
+            if is_inf_blur:
+                q_blur = q_blur.view(q_blur.shape[0], -1, 4, 3).transpose(1, 2).permute(0, 1, 3, 2).reshape(-1, 3, 7, 6)
+                q_blur = self.seg.gaussian_blur_inf(q_blur, 1.0, 8.0).reshape(-1, 4, 3, 42).view(-1, 12, 42).transpose(1, 2)
+            else:
+                q_blur = self.seg.gaussian_blur_queries(q_blur, 7, 6, 49, 8.0)
+            expected = torch.cat((q_passthrough, q_blur), dim=0)
+            target = output.clone()
+            out = self.seg._blur_seg_uncond_queries(target, n_cond, **geometry)
+            with self.subTest(dtype=dtype, is_inf_blur=is_inf_blur, n_cond=n_cond):
+                self.assertIs(out, target)
+                self.assertTrue(torch.equal(out, expected))
 
     def test_attention_grid_follows_the_unet_downsample_chain(self):
         # The old sqrt(seq * H / W) floor + divisor walk gave 30x68 for 1080x1920 (true 34x60) and 25x76
@@ -1042,8 +1174,8 @@ class SEGBlurTests(unittest.TestCase):
         output = torch.randn(4, 6 * 5, 2 * 3)
         geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
         for is_inf_blur in (False, True):
-            out = self.seg._blur_seg_uncond_queries(output, 3, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
-            paired = self.seg._blur_seg_uncond_queries(output[2:], 1, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            out = self.seg._blur_seg_uncond_queries(output.clone(), 3, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            paired = self.seg._blur_seg_uncond_queries(output[2:].clone(), 1, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
             with self.subTest(is_inf_blur=is_inf_blur):
                 self.assertTrue(torch.equal(out[:3], output[:3]))
                 self.assertTrue(torch.equal(out[3], paired[1]))
