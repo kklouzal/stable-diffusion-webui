@@ -48,26 +48,37 @@ def snapshot(root: Path) -> dict[str, bytes]:
     return {relative: (root / relative).read_bytes() for relative in TARGETS}
 
 
+def upgraded(relative: str, source: str) -> str:
+    """The text the patcher leaves for a patched or superseded file: every block at its current PATCHED text."""
+    for _state, current, patched in PATCHER_MODULE.block_states(relative, source):
+        source = source.replace(current, patched, 1)
+    return source
+
+
 def copy_multidiffusion(target: Path) -> Path:
     """Copy of the installed checkout as run.sh hands it to this patcher (terminal-tiles patched, performance not)."""
     if INSTALLED_MD is None:
         pytest.skip(f"installed MultiDiffusion fixture missing: {EXTENSION}")
     shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
     installed = snapshot(target)
+    expected = {}
     for relative, blocks in PATCHER_MODULE.BLOCKS.items():
         source = installed[relative].decode("utf-8")
-        if PATCHER_MODULE.file_state(relative, source) == "patched":
-            for _name, original, patched in reversed(blocks):
-                source = source.replace(patched, original, 1)
+        expected[relative] = upgraded(relative, source).encode("utf-8")
+        if PATCHER_MODULE.file_state(relative, source) != "original":
+            # Patched or superseded (an older PATCHED text) blocks are reversed to the upstream text.
+            for (_name, original, _patched), (_state, current, _p) in zip(blocks, PATCHER_MODULE.block_states(relative, source)):
+                source = source.replace(current, original, 1)
             (target / relative).write_bytes(source.encode("utf-8"))
     if snapshot(target) != installed:
-        # The derived tree is only a valid "original" if the patcher turns it back into the installed bytes.
+        # The derived tree is only a valid "original" if the patcher turns it back into the installed bytes (with any
+        # superseded block at its current text).
         probe = target.parent / f"{target.name}-roundtrip"
         for relative in TARGETS:
             (probe / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(target / relative, probe / relative)
         run_patcher(probe)
-        assert snapshot(probe) == installed
+        assert snapshot(probe) == expected
         shutil.rmtree(probe)
     return target
 
@@ -133,6 +144,46 @@ def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
         result = run_patcher(root, *extra, check=False)
         assert result.returncode != 0 and "partially patched" in result.stderr
     assert tilevae.read_text(encoding="utf-8") == partial
+
+
+def test_superseded_blocks_are_upgraded_and_fail_check(tmp_path: Path):
+    """A file deployed with an older PATCHED text is upgraded in place; --check rejects it until then."""
+    relative = "tile_utils/attn.py"
+    blocks = PATCHER_MODULE.BLOCKS[relative]
+    old = {name: PATCHER_MODULE.SUPERSEDED.get((relative, name), ()) for name, _original, _patched in blocks}
+    assert all(old.values()), "every TV-ATTN block keeps its pre-upcast-fix text"
+    texts = [text for name, original, patched in blocks for text in (original, patched, *old[name])]
+    for a in texts:
+        for b in texts:
+            assert a == b or a not in b, "a known block text must never contain another one"
+
+    original_src = "".join(f"# {name}\n{original}" for name, original, _patched in blocks)
+    patched_src = "".join(f"# {name}\n{patched}" for name, _original, patched in blocks)
+    superseded_src = "".join(f"# {name}\n{old[name][0]}" for name, _original, _patched in blocks)
+    mixed_src = f"# {blocks[0][0]}\n{blocks[0][2]}# {blocks[1][0]}\n{old[blocks[1][0]][0]}"
+    assert PATCHER_MODULE.file_state(relative, original_src) == "original"
+    assert PATCHER_MODULE.file_state(relative, patched_src) == "patched"
+    assert PATCHER_MODULE.file_state(relative, superseded_src) == "superseded"
+    assert PATCHER_MODULE.file_state(relative, mixed_src) == "superseded"
+    assert upgraded(relative, superseded_src) == upgraded(relative, mixed_src) == patched_src
+    with pytest.raises(SystemExit, match="partially patched"):
+        PATCHER_MODULE.file_state(relative, f"# {blocks[0][0]}\n{blocks[0][1]}# {blocks[1][0]}\n{old[blocks[1][0]][0]}")
+    with pytest.raises(SystemExit, match="unsupported"):
+        PATCHER_MODULE.file_state(relative, superseded_src + patched_src)
+
+    # End to end on a stand-in checkout: the other targets are patched, attn.py holds the superseded blocks.
+    root = tmp_path / "md"
+    for target, target_blocks in PATCHER_MODULE.BLOCKS.items():
+        (root / target).parent.mkdir(parents=True, exist_ok=True)
+        text = superseded_src if target == relative else "".join(f"# {name}\n{patched}" for name, _o, patched in target_blocks)
+        (root / target).write_bytes(text.encode("utf-8"))
+    result = run_patcher(root, "--check", check=False)
+    assert result.returncode != 0 and "performance patch outdated" in result.stderr
+    first = run_patcher(root)
+    assert first.stdout.count("Patched MultiDiffusion performance changes") == 1
+    assert (root / relative).read_bytes() == patched_src.encode("utf-8")
+    assert "already patched" in run_patcher(root).stdout
+    assert "verified" in run_patcher(root, "--check").stdout
 
 
 def test_run_sh_applies_and_checks_after_terminal_tiles_inside_the_multidiffusion_block():
@@ -206,6 +257,7 @@ def webui_stubs(monkeypatch):
 
     def run_scaled_dot_product_attention(q, k, v, **kwargs):
         calls["sdpa"].append((q.dim(), kwargs.get("sdpa_backend_override")))
+        calls.setdefault("sdpa_dtypes", []).append((q.dtype, torch.is_autocast_enabled("cpu")))
         return fork_run_sdpa(q, k, v, **kwargs)
 
     state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
@@ -216,8 +268,13 @@ def webui_stubs(monkeypatch):
     stub("gradio.components", Component=object)
     stub("modules", __path__=[])
     stub("modules.scripts", Script=object, AlwaysVisible=object())
+    def without_autocast(disable=False):
+        # modules.devices.without_autocast, for the CPU autocast these tests can run under.
+        return torch.autocast("cpu", enabled=False) if torch.is_autocast_enabled("cpu") and not disable else contextlib.nullcontext()
+
     stub("modules.devices", device=cpu, cpu=cpu, get_optimal_device=lambda: cpu, get_optimal_device_name=lambda: "cpu",
-         torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException)
+         torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException,
+         without_autocast=without_autocast)
     stub("modules.shared", state=state, opts=shared.opts, sd_model=sd_model, cmd_opts=types.SimpleNamespace())
     stub("modules.ui", gr_show=lambda *_args, **_kwargs: None)
     stub("modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object)
@@ -492,6 +549,27 @@ def test_tiled_vae_sdp_attention_upcast_keeps_dtype(attn_pair, webui_stubs):
     assert before.dtype == after.dtype == torch.bfloat16
     torch.testing.assert_close(after.double(), expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(after, before, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("forward", ["sdp_attnblock_forward", "sdp_no_mem_attnblock_forward"])
+def test_tiled_vae_sdp_attention_upcast_runs_without_autocast(attn_pair, webui_stubs, forward):
+    """upcast_attn must reach the kernel as float32: autocast lists SDPA as lower precision and would cast it back."""
+    _old, new = attn_pair
+    block = attn_block(64)
+    torch.manual_seed(7)
+    h = torch.randn((1, 64, 8, 8))
+    for upcast in (True, False):
+        webui_stubs.shared.opts.upcast_attn = upcast
+        webui_stubs.calls["sdpa_dtypes"] = []
+        with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+            out = getattr(new, forward)(block, h)
+        assert webui_stubs.calls["sdpa_dtypes"] == [(torch.float32, False) if upcast else (torch.bfloat16, True)]
+        assert out.dtype == torch.bfloat16
+    with torch.no_grad():
+        expected = reference_attention(block, h)
+    webui_stubs.shared.opts.upcast_attn = True
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+        torch.testing.assert_close(getattr(new, forward)(block, h).double(), expected, rtol=3e-2, atol=3e-2)
 
 
 def test_tiled_vae_decode_with_sdp_attention_matches(md_pair, import_extension, webui_stubs):
