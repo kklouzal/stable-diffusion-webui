@@ -23,6 +23,8 @@ def _fake_model_data(monkeypatch, loaded_sd_models):
     # freeze_startup_heap only reads model_data.loaded_sd_models; the real sd_models drags in ldm/sgm.
     fake = types.ModuleType("modules.sd_models")
     fake.model_data = types.SimpleNamespace(loaded_sd_models=loaded_sd_models)
+    # Some tests in this session leave a stub in sys.modules["modules"]; resolve against the real package.
+    monkeypatch.setitem(sys.modules, "modules", modules)
     monkeypatch.setitem(sys.modules, "modules.sd_models", fake)
     monkeypatch.setattr(modules, "sd_models", fake, raising=False)
 
