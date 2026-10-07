@@ -1393,8 +1393,8 @@ class Script(scripts.Script, metaclass=(
         self.latest_network = None
         self.detected_map.clear()
 
-        gc.collect()
-        devices.torch_gc()
+        # No gc.collect()/torch_gc() here: request-end memory release is the core
+        # pipeline's policy; forcing it again per request only churns the allocator.
         if getattr(shared.cmd_opts, 'controlnet_tracemalloc', False):
             logger.info("After generation:")
             for stat in tracemalloc.take_snapshot().compare_to(self.malloc_begin, "lineno")[:10]:

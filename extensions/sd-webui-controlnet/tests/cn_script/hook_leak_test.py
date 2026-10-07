@@ -97,5 +97,22 @@ class TestHookLeakAfterFailedGeneration(unittest.TestCase):
         self.assert_unet_healed()
 
 
+class TestPostprocessRelease(unittest.TestCase):
+    def test_postprocess_restores_without_forcing_gc_or_cache_release(self):
+        unet = FakeUNet()
+        baseline = unet.forward
+        script = Script()
+        p = fake_processing(unet, lambda: None)
+        script.latest_network = UnetHook()
+        script.latest_network.hook(model=unet, sd_ldm=p.sd_model, control_params=[control_param()], process=p)
+        processed = types.SimpleNamespace(images=[], extra_generation_params={})
+        with mock.patch("gc.collect") as collect, mock.patch.object(devices, "torch_gc") as torch_gc:
+            script.postprocess(p, processed)
+        collect.assert_not_called()
+        torch_gc.assert_not_called()
+        self.assertIsNone(script.latest_network)
+        self.assertEqual(unet.forward, baseline)
+
+
 if __name__ == "__main__":
     unittest.main()
