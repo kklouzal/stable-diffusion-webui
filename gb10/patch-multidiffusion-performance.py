@@ -6,7 +6,8 @@ plus the 0001-modern-attention-fallbacks commit (5022f68) and patch-multidiffusi
 - A target file must be either fully original (it gets patched) or fully patched (it is left alone), or hold an
   earlier version of some patched blocks (SUPERSEDED) with every other block patched (those blocks are upgraded).
 - Anything else aborts the deploy: unknown upstream text, a partial patch, CRLF line endings.
-- Every target is validated before any file is written. Each file is replaced atomically, keeping its mode and owner.
+- Every target is validated, and its patched text verified (every block patched, valid Python), before any file is
+  written. Each file is replaced atomically, keeping its mode and owner.
 - --check writes nothing and fails unless every target is fully patched.
 
 Exactness of each change is argued next to the code it patches and tested on CPU against the unpatched extension
@@ -375,7 +376,22 @@ def file_state(relative: str, source: str) -> str:
     raise SystemExit(f"partially patched MultiDiffusion source: {relative}")
 
 
+def verify_patched(relative: str, source: str, path: Path) -> None:
+    """Post-condition of a patch, checked before anything is written: every block of the file holds its current
+    PATCHED text exactly once (and no original or superseded text), and the file is valid Python."""
+    if file_state(relative, source) != "patched":
+        raise SystemExit(f"MultiDiffusion performance patch verification failed (not fully patched): {path}")
+    try:
+        compile(source, str(path), "exec", dont_inherit=True)
+    except SyntaxError as exc:
+        raise SystemExit(f"MultiDiffusion performance patch verification failed (invalid Python): {path}: {exc}") from exc
+
+
 def replace_atomically(path: Path, text: str) -> None:
+    """Write text (UTF-8, newlines untranslated) to a temporary file next to path, fsync it, give it path's mode
+    (and owner when run as root, as run.sh does) and os.replace() path with it: a failure at any point leaves path
+    untouched and removes the temporary file. A symlinked path is written through, as an in-place write would."""
+    path = Path(os.path.realpath(path))
     stat = path.stat()
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".gb10-tmp")
     try:
@@ -387,8 +403,11 @@ def replace_atomically(path: Path, text: str) -> None:
         if os.geteuid() == 0:
             os.chown(tmp_name, stat.st_uid, stat.st_gid)
         os.replace(tmp_name, path)
-    except BaseException:
-        os.unlink(tmp_name)
+    except BaseException as exc:
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup:
+            exc.add_note(f"could not remove the temporary file {tmp_name}: {cleanup}")
         raise
 
 
@@ -399,7 +418,7 @@ def main() -> int:
     args = parser.parse_args()
 
     pending: dict[Path, str] = {}
-    for relative, blocks in BLOCKS.items():
+    for relative in BLOCKS:
         path = args.root / relative
         if not path.is_file():
             raise SystemExit(f"MultiDiffusion source not found: {path}")
@@ -410,6 +429,7 @@ def main() -> int:
         if state != "patched":
             for _state, current, patched in block_states(relative, source):
                 source = source.replace(current, patched, 1)
+            verify_patched(relative, source, path)
             pending[path] = source
 
     for path, text in pending.items():

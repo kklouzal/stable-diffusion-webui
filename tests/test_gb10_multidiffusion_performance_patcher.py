@@ -12,7 +12,9 @@ import copy
 import functools
 import importlib.util
 import math
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import types
@@ -195,6 +197,52 @@ def test_run_sh_applies_and_checks_after_terminal_tiles_inside_the_multidiffusio
     apply = block.index('gb10/patch-multidiffusion-performance.py" "${MULTIDIFFUSION_ROOT}"')
     verify = block.index('gb10/patch-multidiffusion-performance.py" --check "${MULTIDIFFUSION_ROOT}"')
     assert terminal < apply < verify
+
+
+def test_write_failing_midway_leaves_every_target_intact(tmp_path: Path):
+    root = copy_multidiffusion(tmp_path / "md")
+    pristine = snapshot(root)
+
+    def limit_file_size():  # a write past 64 bytes fails with EFBIG partway through, as on a full disk
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
+
+    result = subprocess.run([sys.executable, str(PATCHER), str(root)], capture_output=True, text=True, preexec_fn=limit_file_size)
+
+    assert result.returncode != 0 and "File too large" in result.stderr
+    assert snapshot(root) == pristine
+    assert not list(root.rglob("*.gb10-tmp"))
+
+
+def test_patched_text_that_is_not_valid_python_is_not_written(tmp_path: Path):
+    root = copy_multidiffusion(tmp_path / "md")
+    last = root / TARGETS[-1]
+    last.write_bytes(last.read_bytes() + b"\ndef broken(:\n")
+    before = snapshot(root)
+
+    result = run_patcher(root, check=False)
+
+    assert result.returncode != 0 and "verification failed (invalid Python)" in result.stderr
+    assert snapshot(root) == before
+
+
+def test_patched_text_that_does_not_verify_is_not_written(tmp_path: Path, monkeypatch, capsys):
+    """A block whose PATCHED text contains another block's ORIGINAL text (a patcher edit gone wrong) leaves a file
+    that is not fully patched; the patcher must refuse to write it rather than leave run.sh's --check a broken tree."""
+    root = tmp_path / "md"
+    root.mkdir()
+    target = root / "target.py"
+    target.write_text("a = 1\nb = 1\n", encoding="utf-8")
+    monkeypatch.setattr(PATCHER_MODULE, "BLOCKS", {"target.py": [("A", "a = 1\n", "a = 2\n"), ("B", "b = 1\n", "b = 2\na = 1\n")]})
+    monkeypatch.setattr(PATCHER_MODULE, "SUPERSEDED", {})
+    monkeypatch.setattr(sys, "argv", [str(PATCHER), str(root)])
+
+    with pytest.raises(SystemExit) as raised:
+        PATCHER_MODULE.main()
+
+    assert raised.value.code not in (0, None)
+    assert target.read_text(encoding="utf-8") == "a = 1\nb = 1\n"
+    assert not list(root.glob("*.gb10-tmp"))
 
 
 # ---------------------------------------------------------------- differential tests (CPU)

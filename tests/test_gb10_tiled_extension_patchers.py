@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import types
@@ -408,3 +410,57 @@ def test_terminal_tiles_patcher_rejects_crlf_and_partial_helper_without_writing(
     utils.write_bytes(MD_MODULE.ORIGINAL.encode("utf-8"))
     run_patcher(MD_PATCHER, utils)
     assert utils.read_bytes() == MD_MODULE.PATCHED.encode("utf-8")
+
+
+def run_patcher_with_file_size_limit(patcher: Path, target: Path, limit: int) -> subprocess.CompletedProcess[str]:
+    """Run a patcher with RLIMIT_FSIZE=limit and SIGXFSZ ignored: a write past `limit` bytes fails with EFBIG
+    partway through, as on a full disk."""
+    def limit_file_size():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    return subprocess.run([sys.executable, str(patcher), str(target)], capture_output=True, text=True, preexec_fn=limit_file_size)
+
+
+def directory_snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+LIFECYCLE_FIXTURE = (
+    "class Fixture:\n    def process(self):\n        state.begin()\n"
+    "        if self.redraw.enabled:\n            self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)\n"
+    "        state.end()\n"
+)
+
+
+@pytest.mark.parametrize("patcher, relative, payload", [
+    (MD_PATCHER, "tile_utils/utils.py", MD_MODULE.ORIGINAL),
+    (UU_PATCHER, "scripts/ultimate-upscale.py", LIFECYCLE_FIXTURE),
+], ids=["terminal-tiles", "lifecycle"])
+def test_patcher_write_failing_midway_leaves_the_target_intact(tmp_path: Path, patcher: Path, relative: str, payload: str):
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(payload.encode("utf-8"))
+    target.chmod(0o640)
+    before = directory_snapshot(tmp_path)
+
+    result = run_patcher_with_file_size_limit(patcher, target, 64)
+
+    assert result.returncode != 0 and "File too large" in result.stderr
+    assert directory_snapshot(tmp_path) == before  # no truncated target, no leftover temporary file
+    run_patcher(patcher, target)
+    assert target.read_bytes() != payload.encode("utf-8")
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert not list(tmp_path.rglob("*.gb10-tmp"))
+
+
+def test_terminal_tiles_patcher_verifies_the_patched_text_before_writing(tmp_path: Path):
+    utils = tmp_path / "tile_utils" / "utils.py"
+    utils.parent.mkdir()
+    payload = (MD_MODULE.ORIGINAL + "\ndef broken(:\n").encode("utf-8")
+    utils.write_bytes(payload)
+
+    result = run_patcher(MD_PATCHER, utils, check=False)
+
+    assert result.returncode != 0 and "verification failed (invalid Python)" in result.stderr
+    assert utils.read_bytes() == payload

@@ -10,7 +10,9 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import random
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import types
@@ -112,6 +114,24 @@ def test_patcher_rejects_source_drift_partial_patch_and_crlf(usdu_source: Path, 
     for extra in ((), ("--check",)):
         result = run_patcher(partial, *extra, check=False)
         assert result.returncode != 0 and "partial patch" in result.stderr
+
+
+def test_write_failing_midway_leaves_the_target_intact(usdu_source: Path):
+    usdu_source.chmod(0o640)
+    original = usdu_source.read_bytes()
+
+    def limit_file_size():  # a write past 64 bytes fails with EFBIG partway through, as on a full disk
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
+
+    result = subprocess.run([sys.executable, str(PATCHER), str(usdu_source)], capture_output=True, text=True, preexec_fn=limit_file_size)
+
+    assert result.returncode != 0 and "File too large" in result.stderr
+    assert usdu_source.read_bytes() == original
+    assert not list(usdu_source.parent.glob("*.gb10-tmp"))
+    run_patcher(usdu_source)
+    assert PATCHER_MODULE.MARKER in usdu_source.read_text(encoding="utf-8")
+    assert usdu_source.stat().st_mode & 0o777 == 0o640
 
 
 # ----------------------------------------------------------------------------------------------- differential
