@@ -1,5 +1,6 @@
 """Conditioning cache keys cover every input the SDXL conditioner reads (B1, B5); hits replay encoder infotext (B2)."""
 
+import sys
 import contextlib
 from types import SimpleNamespace
 
@@ -12,6 +13,13 @@ if getattr(shared, "opts", None) is None:
 
 from modules import processing, prompt_parser  # noqa: E402
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _real_webui_modules_package(monkeypatch):
+    # Other test files leave stub "modules" packages in sys.modules; shared.sd_model resolves
+    # modules.sd_models through it.
+    monkeypatch.setitem(sys.modules, "modules", processing.modules)
 
 
 @pytest.fixture

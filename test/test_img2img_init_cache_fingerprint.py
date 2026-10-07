@@ -1,5 +1,6 @@
 """img2img init cache: uint8/raw-image keys and deferred float conversion stay exact."""
 
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,13 @@ if getattr(shared, "opts", None) is None:
 
 from modules import images, processing  # noqa: E402
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _real_webui_modules_package(monkeypatch):
+    # Other test files leave stub "modules" packages in sys.modules; shared.sd_model resolves
+    # modules.sd_models through it.
+    monkeypatch.setitem(sys.modules, "modules", processing.modules)
 
 _flatten = images.flatten  # unpatched, for the oracle
 

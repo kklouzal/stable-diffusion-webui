@@ -48,10 +48,13 @@ def modelloader():
 
 
 def _write_tiny_esrgan(path: Path, seed: int) -> None:
+    # safetensors, not .pth: torch.load is routed through modules.safe once another test imported the real
+    # webui modules, and modules.safe would then read this file's stubbed modules.shared.
+    from safetensors.torch import save_file
     from spandrel.architectures.ESRGAN import ESRGAN
 
     torch.manual_seed(seed)
-    torch.save(ESRGAN(in_nc=3, out_nc=3, num_filters=8, num_blocks=1, scale=2).state_dict(), path)
+    save_file(ESRGAN(in_nc=3, out_nc=3, num_filters=8, num_blocks=1, scale=2).state_dict(), str(path))
 
 
 def _count_loads(monkeypatch, modelloader):
@@ -67,7 +70,7 @@ def _count_loads(monkeypatch, modelloader):
 
 
 def test_hit_returns_same_eval_model_with_exact_weights(tmp_path, monkeypatch, modelloader):
-    path = tmp_path / "tiny.pth"
+    path = tmp_path / "tiny.safetensors"
     _write_tiny_esrgan(path, seed=1)
     calls = _count_loads(monkeypatch, modelloader)
 
@@ -85,7 +88,7 @@ def test_hit_returns_same_eval_model_with_exact_weights(tmp_path, monkeypatch, m
 
 
 def test_replaced_file_reloads_and_drops_stale_entry(tmp_path, monkeypatch, modelloader):
-    path = tmp_path / "tiny.pth"
+    path = tmp_path / "tiny.safetensors"
     _write_tiny_esrgan(path, seed=1)
     calls = _count_loads(monkeypatch, modelloader)
     first = modelloader.load_cached_spandrel_model(path, device="cpu")
@@ -102,7 +105,7 @@ def test_replaced_file_reloads_and_drops_stale_entry(tmp_path, monkeypatch, mode
 
 
 def test_load_arguments_are_part_of_the_key(tmp_path, monkeypatch, modelloader):
-    path = tmp_path / "tiny.pth"
+    path = tmp_path / "tiny.safetensors"
     _write_tiny_esrgan(path, seed=1)
     calls = _count_loads(monkeypatch, modelloader)
 
@@ -116,7 +119,7 @@ def test_load_arguments_are_part_of_the_key(tmp_path, monkeypatch, modelloader):
 
 
 def test_lru_is_bounded_and_refreshed_on_hit(tmp_path, monkeypatch, modelloader):
-    paths = [tmp_path / f"tiny{i}.pth" for i in range(3)]
+    paths = [tmp_path / f"tiny{i}.safetensors" for i in range(3)]
     for seed, path in enumerate(paths):
         _write_tiny_esrgan(path, seed=seed)
     calls = _count_loads(monkeypatch, modelloader)
@@ -133,7 +136,7 @@ def test_lru_is_bounded_and_refreshed_on_hit(tmp_path, monkeypatch, modelloader)
 
 
 def test_failed_load_is_not_cached(tmp_path, monkeypatch, modelloader):
-    path = tmp_path / "tiny.pth"
+    path = tmp_path / "tiny.safetensors"
     _write_tiny_esrgan(path, seed=1)
     original = modelloader.load_spandrel_model
 
