@@ -239,3 +239,40 @@ def test_in_place_failure_rolls_back_and_finalizes_like_the_cpu_path(monkeypatch
         "apply_unet", "boundary:model_reload_in_place", "torch_gc", "undo_hijack",
         "hijack", "boundary:model_to_device", "model_loaded_callback",
     ]  # no CPU move; checkpoint commits stay success-only, as on the CPU path
+
+
+def test_reload_waits_for_a_model_load_in_progress(monkeypatch):
+    import threading
+
+    _environment(monkeypatch, torch.device("cpu"), unified=False)
+    model, base_info = _loaded_model()
+    loading, finish_loading = threading.Event(), threading.Event()
+
+    def load_in_progress():  # holds model_data.lock as SdModelData.get_sd_model does for the startup load
+        with sd_models.model_data.lock:
+            loading.set()
+            finish_loading.wait(10)
+
+    loader = threading.Thread(target=load_in_progress)
+    loader.start()
+    assert loading.wait(10)
+    results = []
+    reload = threading.Thread(target=lambda: results.append(sd_models.reload_model_weights(model, base_info)))
+    reload.start()
+    reload.join(0.5)
+    still_waiting = reload.is_alive()
+    finish_loading.set()
+    reload.join(10)
+    loader.join(10)
+
+    # Before, the reload ran next to the load in progress and could replace model_data.sd_model under it.
+    assert still_waiting
+    assert results == [model]
+
+
+def test_reload_inside_a_model_load_on_the_same_thread_does_not_deadlock(monkeypatch):
+    _environment(monkeypatch, torch.device("cpu"), unified=False)
+    model, base_info = _loaded_model()
+
+    with sd_models.model_data.lock:  # e.g. a model_loaded callback of a load reloading the checkpoint
+        assert sd_models.reload_model_weights(model, base_info) is model
