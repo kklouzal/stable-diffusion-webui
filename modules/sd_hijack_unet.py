@@ -102,6 +102,41 @@ def spatial_transformer_forward(_, self, x: torch.Tensor, context=None):
     return x + x_in
 
 
+# sgm (SDXL) SpatialTransformer.forward without its output .contiguous() copy, keeping sgm's single-context rule (the
+# ldm hijack above indexes context per block). With use_linear, proj_out's (b, h*w, c) result is added to x_in as a
+# permuted view straight into an NCHW output: the same values and the same result layout as the original
+# `.contiguous() + x_in`, minus writing and re-reading the transposed copy. The result layout is kept on purpose: an
+# NHWC result would move the copy into the next GroupNorm and change the reduction order of extension code that
+# reduces block outputs (ControlNet reference/adain var_mean). The input-side copy stays: the GroupNorm output is NCHW,
+# so the permuted view is not contiguous, and Linear fuses its bias into the GEMM only for a contiguous input. The conv
+# (not use_linear) variant and autograd (out= does not differentiate) keep the original code.
+def sgm_spatial_transformer_forward(_, self, x, context=None):
+    # note: if no context is given, cross-attention defaults to self-attention
+    if not isinstance(context, list):
+        context = [context]
+    b, c, h, w = x.shape
+    x_in = x
+    x = self.norm(x)
+    if not self.use_linear:
+        x = self.proj_in(x)
+    x = x.permute(0, 2, 3, 1).reshape(b, h * w, -1).contiguous()
+    if self.use_linear:
+        x = self.proj_in(x)
+    for i, block in enumerate(self.transformer_blocks):
+        if i > 0 and len(context) == 1:
+            i = 0  # use same context for each block
+        x = block(x, context=context[i])
+    if self.use_linear:
+        x = self.proj_out(x)
+    x = x.reshape(b, h, w, -1).permute(0, 3, 1, 2)
+    if self.use_linear and not torch.is_grad_enabled():
+        return torch.add(x, x_in, out=torch.empty(x.shape, dtype=torch.result_type(x, x_in), device=x.device))
+    x = x.contiguous()
+    if not self.use_linear:
+        x = self.proj_out(x)
+    return x + x_in
+
+
 # bf16-native UNet norms. Under --precision autocast, CUDA autocast runs group_norm and layer_norm in fp32: every UNet
 # GroupNorm/LayerNorm reads an fp32 copy of its bf16 input and writes fp32, which the next Linear/conv casts back to
 # bf16 (GroupNorm32 adds its own x.float()/.type(x.dtype) round trip). ATen's bf16 CUDA norm kernels compute in fp32 from
@@ -205,6 +240,7 @@ def hijack_ddpm_edit():
 unet_needs_upcast = lambda *args, **kwargs: devices.unet_needs_upcast
 CondFunc('ldm.modules.diffusionmodules.openaimodel.timestep_embedding', timestep_embedding)
 CondFunc('ldm.modules.attention.SpatialTransformer.forward', spatial_transformer_forward)
+CondFunc('sgm.modules.attention.SpatialTransformer.forward', sgm_spatial_transformer_forward)
 
 if version.parse(torch.__version__) <= version.parse("1.13.2") or torch.cuda.is_available():
     CondFunc('ldm.modules.diffusionmodules.util.GroupNorm32.forward', lambda orig_func, self, *args, **kwargs: orig_func(self.float(), *args, **kwargs), unet_needs_upcast)

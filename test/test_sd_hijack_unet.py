@@ -1,6 +1,7 @@
-"""sd_hijack_unet: bf16-native UNet norms.
+"""sd_hijack_unet: bf16-native UNet norms and the sgm SpatialTransformer.forward hijack.
 
-CPU tests cover which norms take the bf16-native path and when. The CUDA tests check the numerical claims in
+CPU tests cover which norms take the bf16-native path and when, and the SpatialTransformer hijack against the upstream
+forward. The CUDA tests check the numerical claims in
 modules/sd_hijack_unet.py on device; run them on the GPU host with:
     python -m pytest -q test/test_sd_hijack_unet.py -k cuda
 """
@@ -14,6 +15,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 
 _ROOT = Path(__file__).resolve().parents[1]
 for _repo in ("generative-models", "stable-diffusion-stability-ai"):
@@ -238,6 +240,72 @@ def test_layer_norm_keeps_autocast_path_with_hypernetworks_or_misaligned_operand
     assert native(non_contiguous_misaligned)
     monkeypatch.setattr(sd_hijack_unet.shared, "loaded_hypernetworks", [object()])
     assert not native(aligned)
+
+
+def upstream_sgm_spatial_transformer_forward(self, x, context=None):
+    """Verbatim generative-models sgm/modules/attention.py SpatialTransformer.forward: the oracle for the hijack."""
+    # note: if no context is given, cross-attention defaults to self-attention
+    if not isinstance(context, list):
+        context = [context]
+    b, c, h, w = x.shape
+    x_in = x
+    x = self.norm(x)
+    if not self.use_linear:
+        x = self.proj_in(x)
+    x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+    if self.use_linear:
+        x = self.proj_in(x)
+    for i, block in enumerate(self.transformer_blocks):
+        if i > 0 and len(context) == 1:
+            i = 0  # use same context for each block
+        x = block(x, context=context[i])
+    if self.use_linear:
+        x = self.proj_out(x)
+    x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+    if not self.use_linear:
+        x = self.proj_out(x)
+    return x + x_in
+
+
+@pytest.mark.parametrize("use_linear", [True, False], ids=["linear", "conv"])
+@pytest.mark.parametrize("memory_format", [torch.contiguous_format, torch.channels_last], ids=["nchw", "nhwc"])
+def test_sgm_spatial_transformer_forward_matches_upstream(use_linear, memory_format):
+    torch.manual_seed(0)
+    transformer = sgm_attention.SpatialTransformer(64, 2, 32, depth=2, context_dim=48, use_linear=use_linear, use_checkpoint=False)
+    with torch.no_grad():
+        for parameter in transformer.parameters():
+            parameter.normal_(0.0 if parameter.dim() > 1 else 1.0, 0.2)  # proj_out starts zeroed
+    transformer = transformer.eval().to(memory_format=memory_format)
+    x = torch.randn(2, 64, 6, 10).contiguous(memory_format=memory_format)
+    first, second = torch.randn(2, 7, 48), torch.randn(2, 5, 48)
+
+    for context in (first, [first], [first, second]):
+        with torch.no_grad():
+            hijacked = transformer(x, context=context)
+            upstream = upstream_sgm_spatial_transformer_forward(transformer, x, context=context)
+        assert torch.equal(hijacked, upstream)
+        assert hijacked.stride() == upstream.stride()  # same result layout for whatever comes next
+
+    # Autograd (training) takes the original expression; out= does not differentiate.
+    with torch.enable_grad():
+        x_grad = x.clone().requires_grad_(True)
+        hijacked = transformer(x_grad, context=[first])
+        hijacked.sum().backward()
+    assert torch.equal(hijacked.detach(), upstream_sgm_spatial_transformer_forward(transformer, x, context=[first]).detach())
+    assert x_grad.grad is not None
+
+
+def test_sgm_spatial_transformer_single_context_feeds_every_block():
+    transformer = sgm_attention.SpatialTransformer(64, 2, 32, depth=3, context_dim=48, use_linear=True, use_checkpoint=False).eval()
+    seen = []
+    for block in transformer.transformer_blocks:
+        block.register_forward_pre_hook(lambda _module, _args, kwargs: seen.append(kwargs["context"]), with_kwargs=True)
+    context = torch.randn(1, 3, 48)
+
+    with torch.no_grad():
+        transformer(torch.randn(1, 64, 4, 4), context=[context])
+
+    assert len(seen) == 3 and all(c is context for c in seen)
 
 
 # --- CUDA: numerical claims (bf16 GroupNorm == fp32 GroupNorm with bf16(eps); LayerNorm bitwise) ---
