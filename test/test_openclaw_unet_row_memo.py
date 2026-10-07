@@ -63,6 +63,10 @@ class RowMemoTests(unittest.TestCase):
         denoiser.run_inner_model(x_in[0:2], torch.zeros(2), {})
         with self.assertRaisesRegex(RuntimeError, "not the next row slice"):
             denoiser.run_inner_model(x_in[3:4], torch.zeros(1), {})
+        # The failed call dropped the memo: nothing stays armed or referenced.
+        self.assertIsNone(self.memo.disarm(denoiser))
+        self.memo.arm(denoiser, n_cond=2)
+        denoiser.run_inner_model(x_in[0:2], torch.zeros(2), {})
         with self.assertRaisesRegex(RuntimeError, "not the next row slice"):
             denoiser.run_inner_model(torch.randn(2, 1), torch.zeros(2), {})
 
@@ -87,6 +91,30 @@ class RowMemoTests(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertIs(self.memo.disarm(denoiser), second)
         self.assertEqual(second.calls, [])
+
+    def test_uninstall_restores_a_wrapper_that_was_there_before_arm(self):
+        denoiser = FakeDenoiser()
+        earlier = lambda x, sigma, cond: FakeDenoiser.run_inner_model(denoiser, x, sigma, cond)
+        denoiser.run_inner_model = earlier
+        self.memo.arm(denoiser, n_cond=1)
+        denoiser.run_inner_model(torch.zeros(1, 1), torch.zeros(1), {})
+        self.assertEqual(denoiser.calls, [1])
+        self.assertTrue(self.memo.uninstall(denoiser))
+        self.assertIs(denoiser.run_inner_model, earlier)
+
+    def test_inference_tensors_are_sealed_without_version_counters(self):
+        denoiser = FakeDenoiser()
+        with torch.inference_mode():
+            x_in = torch.randn(2, 1)
+            cond = {"crossattn": torch.randn(2, 3), "c_concat": [torch.randn(2, 1)]}
+            memo = self.memo.arm(denoiser, n_cond=1)
+            denoiser.run_inner_model(x_in, torch.zeros(2), cond)
+            self.memo.disarm(denoiser)
+            rec = memo.calls[0]
+            self.assertTrue(x_in.is_inference())
+            self.assertTrue(rec.inputs_unchanged())
+            cond["c_concat"][0] = cond["c_concat"][0].clone()
+            self.assertFalse(rec.inputs_unchanged())
 
     def test_uninstall_leaves_a_foreign_outer_wrapper(self):
         denoiser = FakeDenoiser()

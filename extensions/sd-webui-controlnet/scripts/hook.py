@@ -681,10 +681,12 @@ class UnetHook(nn.Module):
                 if (param.cfg_injection or param.global_average_pooling) and param.control_model_type.is_controlnet:
                     # "ControlNet is more important" and global average pooling zero the uncond rows of the
                     # residuals (cond_mark below), so evaluate the ControlNet on the cond rows only.
+                    # An unmarked context (e.g. hires-pass conds built after process_sample marked the
+                    # prompts) has no indices at all and cond_mark is all ones: every row is cond.
                     c_indices = outer.current_c_indices
-                    if not c_indices:
+                    if not c_indices and outer.current_uc_indices:
                         continue
-                    if len(c_indices) < batch_size and c_indices == list(range(c_indices[0], c_indices[0] + len(c_indices))):
+                    if c_indices and len(c_indices) < batch_size and c_indices == list(range(c_indices[0], c_indices[0] + len(c_indices))):
                         cond_rows = slice(c_indices[0], c_indices[0] + len(c_indices))
 
                 hint = param.used_hint_cond

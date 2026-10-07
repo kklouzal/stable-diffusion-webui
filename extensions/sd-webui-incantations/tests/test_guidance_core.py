@@ -594,6 +594,20 @@ class PAGBatchingTests(unittest.TestCase):
         self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 1, 2)
         torch.testing.assert_close(out, x_in[:1] + 1)
 
+    def test_pag_replays_whole_calls_when_requested(self):
+        memo, x_in, sigma_in, cond_in = self.record_main_pass(n_cond=1, chunks=[2, 1])
+        calls = []
+
+        def inner_model(x, sigma, cond):
+            calls.append((x, sigma, cond))
+            return x + 1
+
+        out = self.pag.pag_cond_rows_x_out(inner_model, memo, False, whole_calls=True)
+        self.assertEqual(len(calls), 2)
+        self.assert_call_rows(calls[0], x_in, sigma_in, cond_in, 0, 2)
+        self.assert_call_rows(calls[1], x_in, sigma_in, cond_in, 2, 3)
+        torch.testing.assert_close(out, x_in[:1] + 1)
+
     def test_pag_fails_fast_when_main_pass_does_not_cover_cond_rows(self):
         memo, *_ = self.record_main_pass(n_cond=3, chunks=[2], rows=2)
         with self.assertRaisesRegex(RuntimeError, "covers 2 of 3 cond rows"):

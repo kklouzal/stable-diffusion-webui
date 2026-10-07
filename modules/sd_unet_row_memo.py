@@ -63,22 +63,33 @@ class CallRecord:
         return tensors
 
     def seal(self) -> None:
-        """Snapshot input identity and version counters once the main call returned.
+        """Snapshot input identity (and version counters where tracked) once the main call returned.
 
         The model's own in-place input edits (dtype casts of the cond dict, ControlNet Revision writing
         ``y``) happen during the call and are part of the snapshot.
         """
-        self._sealed = [(tensor, tensor._version) for tensor in self._input_tensors()]
+        self._sealed = [(tensor, _version(tensor)) for tensor in self._input_tensors()]
 
     def inputs_unchanged(self) -> bool:
-        """True when no input was replaced or modified in place since ``seal``. Never synchronizes."""
+        """True when no input was replaced, or modified in place where detectable, since ``seal``.
+
+        Never synchronizes. Generation runs under ``torch.inference_mode()``, whose tensors have no version
+        counter, so there only replacement is detected. No WebUI callback gets the main-pass inputs between
+        the main call and the PAG pass (``cfg_denoised`` receives the outputs), so in-place edits there
+        would need a reference kept from ``cfg_denoiser``.
+        """
         if self._sealed is None:
             return False
         current = self._input_tensors()
         return len(current) == len(self._sealed) and all(
-            tensor is sealed and tensor._version == version
+            tensor is sealed and _version(tensor) == version
             for tensor, (sealed, version) in zip(current, self._sealed)
         )
+
+
+def _version(tensor: torch.Tensor):
+    """In-place version counter, or None for inference tensors (they have none; reading it raises)."""
+    return None if tensor.is_inference() else tensor._version
 
 
 class MainPassMemo:
@@ -119,25 +130,29 @@ class MainPassMemo:
 
 
 class MainPassRecorder:
-    """Instance-level wrapper over ``CFGDenoiser.run_inner_model`` that records calls while armed."""
+    """Instance-level wrapper over ``CFGDenoiser.run_inner_model`` that records calls while armed.
 
-    def __init__(self, original):
+    ``replaced`` is the instance attribute it shadows (another wrapper), or None for the class method.
+    """
+
+    def __init__(self, original, replaced):
         self.original = original
+        self.replaced = replaced
         self.memo: MainPassMemo | None = None
 
     def __call__(self, x, sigma, cond):
         memo = self.memo
         if memo is None:
             return self.original(x, sigma, cond)
-        record = memo.add_call(x, sigma, cond)
         try:
+            record = memo.add_call(x, sigma, cond)
             with recording(record):
                 out = self.original(x, sigma, cond)
+            record.seal()
         except BaseException:
             self.memo = None
             memo.clear()
             raise
-        record.seal()
         return out
 
 
@@ -145,7 +160,7 @@ def arm(denoiser, n_cond: int) -> MainPassMemo:
     """Start recording ``denoiser``'s main-pass calls for this step, replacing any unconsumed memo."""
     recorder = denoiser.__dict__.get("run_inner_model")
     if not isinstance(recorder, MainPassRecorder):
-        recorder = MainPassRecorder(denoiser.run_inner_model)
+        recorder = MainPassRecorder(denoiser.run_inner_model, recorder)
         denoiser.run_inner_model = recorder
     recorder.memo = MainPassMemo(n_cond)
     return recorder.memo
@@ -172,7 +187,10 @@ def uninstall(denoiser) -> bool:
     if not isinstance(recorder, MainPassRecorder):
         return False
     recorder.memo = None
-    del denoiser.run_inner_model
+    if recorder.replaced is not None:
+        denoiser.run_inner_model = recorder.replaced
+    else:
+        del denoiser.run_inner_model
     return True
 
 

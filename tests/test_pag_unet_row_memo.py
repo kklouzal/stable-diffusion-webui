@@ -456,7 +456,7 @@ class Harness:
         self.captured.clear()
         self.unet_calls.clear()
         self.encoder_calls = 0
-        with torch.no_grad():
+        with torch.inference_mode():
             return self.denoiser(x, sigma, uncond, (conds_list, cond), 5.0, s_min_uncond, image_cond)
 
     @contextlib.contextmanager
@@ -507,7 +507,7 @@ def make_inputs(batch_size, repeats, cond_tokens=4, uncond_tokens=4, seed=1, mar
 def oracle_pag_cond_rows(harness, main_calls, n_cond):
     """Old PAG semantics: every main-pass call evaluated whole with PAG on; keep the cond rows."""
     outs = []
-    with harness.pag_on(), torch.no_grad():
+    with harness.pag_on(), torch.inference_mode():
         for x, sigma, cond, _ in main_calls:
             outs.append(harness.inner(x, sigma, cond))
     return torch.cat(outs)[:n_cond]
@@ -644,7 +644,7 @@ def test_replay_reuses_recorded_rows_bitwise(batch_size, mode):
                 rec.prefix = None
         harness.encoder_calls = 0
         before = harness.controlnet_calls
-        with harness.pag_on(), torch.no_grad():
+        with harness.pag_on(), torch.inference_mode():
             out = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
         for rec, (prefix, row_subset_ok) in zip(memo.calls, saved):
             rec.prefix, rec.row_subset_ok = prefix, row_subset_ok
@@ -671,10 +671,11 @@ def test_controlnet_replay_recomputes_when_inputs_changed_after_the_main_pass():
     memo = record_main_pass(harness, inputs, 1)
     rec = memo.calls[0]
     expected = None
-    with harness.pag_on(), torch.no_grad():
+    with harness.pag_on(), torch.inference_mode():
         rec.row_subset_ok = False
         expected = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
-        rec.x.add_(0.0)  # an in-place edit bumps the version counter: nothing recorded may be reused
+        # Inference tensors carry no version counter; a replaced input is what can be detected.
+        rec.cond["c_concat"] = [rec.cond["c_concat"][0].clone()]
         before = harness.controlnet_calls
         out = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
     assert rec.prefix is None
@@ -691,7 +692,7 @@ def test_controlnet_replay_recomputes_for_foreign_conditioning():
     cond = harness.row_memo.slice_cond_rows(rec.cond, rec.rows, 1)
     cond["crossattn"] = cond["crossattn"].clone()
     before = harness.controlnet_calls
-    with harness.row_memo.replaying(rec, 1), torch.no_grad():
+    with harness.row_memo.replaying(rec, 1), torch.inference_mode():
         harness.inner(rec.x[:1], rec.sigma[:1], cond)
     assert harness.controlnet_calls == before + 1
 
@@ -705,7 +706,7 @@ def test_base_wrapper_main_pass_is_the_original_sgm_forward_bitwise():
     context = torch.randn(3, 6, 16, generator=gen)
     y = torch.randn(3, 12, generator=gen)
     rec = harness.row_memo.CallRecord(0, x, t, {"crossattn": context, "vector": y}, cond_rows=2)
-    with torch.no_grad():
+    with torch.inference_mode():
         original = harness.openaimodel.UNetModel.forward(harness.unet, x, timesteps=t, context=context, y=y)
         with harness.row_memo.recording(rec):
             recorded = harness.unet(x, timesteps=t, context=context, y=y)
@@ -746,8 +747,13 @@ def oracle_hooked_forward(harness, x, timesteps, context, y):
     """The original ControlNet hooked forward for one plain SDXL unit, written out independently."""
     unet = harness.unet
     param = harness.control_param
-    cond_mark = ((context[:, 0, :] + 1024.0).abs().mean(dim=1) > 1e-3).to(x.dtype)[:, None, None, None]
-    ctx = context[:, 1:, :]  # the strided view unmark_prompt_context returns
+    if (context[:, 0, :].abs() - 1024.0).abs().mean() < 1e-3:
+        cond_mark = ((context[:, 0, :] + 1024.0).abs().mean(dim=1) > 1e-3).to(x.dtype)[:, None, None, None]
+        ctx = context[:, 1:, :]  # the strided view unmark_prompt_context returns
+    else:
+        # Unmarked prompts (e.g. hires-pass conds): every row counts as cond.
+        cond_mark = torch.ones(x.shape[0], 1, 1, 1, dtype=x.dtype)
+        ctx = context
     control = legacy_controlnet_forward(harness, harness.controlnet.control_model, x, param.hint_cond, timesteps, ctx, y)
     if param.cfg_injection or param.global_average_pooling:
         control = [c * cond_mark for c in control]
@@ -771,28 +777,30 @@ def oracle_hooked_forward(harness, x, timesteps, context, y):
     return unet.out(h.type(x.dtype))
 
 
-def unet_inputs(batch_size=2, seed=7):
+def unet_inputs(batch_size=2, seed=7, marked=True):
     gen = torch.Generator().manual_seed(seed)
     x = torch.randn(batch_size, 4, 8, 8, generator=gen)
     timesteps = torch.rand(batch_size, generator=gen) * 900
     context = torch.randn(batch_size, 5, 16, generator=gen)
-    context[:, 0, :] = 1024.0
-    context[batch_size // 2:, 0, :] = -1024.0
+    if marked:
+        context[:, 0, :] = 1024.0
+        context[batch_size // 2:, 0, :] = -1024.0
     y = torch.randn(batch_size, 12, generator=gen)
     return x, timesteps, context, y
 
 
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
 @pytest.mark.parametrize("variant", ["balanced", "cfg_injection", "global_average_pooling"])
-def test_controlnet_hooked_forward_matches_original_semantics(variant):
+def test_controlnet_hooked_forward_matches_original_semantics(variant, marked):
     harness = Harness(mode="base")
     harness.install_controlnet(cfg_injection=variant == "cfg_injection", global_average_pooling=variant == "global_average_pooling")
     control_rows = []
     harness.controlnet.control_model.register_forward_pre_hook(lambda module, args, kwargs: control_rows.append(kwargs["x"].shape[0]), with_kwargs=True)
-    x, timesteps, context, y = unet_inputs()
-    with torch.no_grad():
+    x, timesteps, context, y = unet_inputs(marked=marked)
+    with torch.inference_mode():
         out = harness.unet(x, timesteps=timesteps, context=context, y=y)
         expected = oracle_hooked_forward(harness, x, timesteps, context, y)
-    if variant == "balanced":
+    if variant == "balanced" or not marked:
         assert control_rows == [2]
         assert torch.equal(out, expected)
     else:
@@ -810,7 +818,7 @@ def test_controlnet_guided_hint_and_placement_are_computed_once_per_hint():
     fullvram = harness.controlnet.fullvram
     harness.controlnet.fullvram = lambda: (fullvram_calls.append(1), fullvram())[1]
     x, timesteps, context, y = unet_inputs()
-    with torch.no_grad():
+    with torch.inference_mode():
         first = harness.unet(x, timesteps=timesteps, context=context, y=y)
         second = harness.unet(x, timesteps=timesteps, context=context, y=y)
         assert len(hint_block_calls) == 1 and len(fullvram_calls) == 1
@@ -887,3 +895,19 @@ def test_reference_only_calls_are_replayed_whole_and_never_reused():
     assert harness.encoder_calls == 4
     assert harness.pag_params.pag_x_out.shape[0] == 1
     assert torch.isfinite(harness.pag_params.pag_x_out).all()
+
+
+@pytest.mark.parametrize("layout", ["batched", "token_mismatch_split"])
+def test_teacache_patched_unet_gets_whole_calls(layout):
+    """TeaCache keys per-call-lane state on the rows it sees: PAG keeps the old whole-call lane."""
+    batch_size, repeats, cond_tokens, uncond_tokens, batch_cond_uncond = LAYOUTS[layout]
+    inputs = make_inputs(batch_size, repeats, cond_tokens, uncond_tokens)
+    harness = make_harness("base")
+    harness.unet._teacache_patched = True
+    harness.enable_pag()
+    harness.capture()
+    harness.run(*inputs)
+    main_calls = [call for call in harness.unet_calls if not call[3]]
+    pag_calls = [call for call in harness.unet_calls if call[3]]
+    assert [call[0].shape[0] for call in pag_calls] == [call[0].shape[0] for call in main_calls]
+    assert torch.equal(harness.pag_params.pag_x_out, oracle_pag_cond_rows(harness, main_calls, sum(repeats)))

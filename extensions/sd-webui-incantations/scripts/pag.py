@@ -1,5 +1,6 @@
 import logging
 import time
+import weakref
 from contextlib import suppress
 from os import environ
 import modules.scripts as scripts
@@ -166,7 +167,7 @@ def _restore_seg_after_pag_hidden_pass(saved):
                         to_q.seg_enable = enabled
 
 
-def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence):
+def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence, whole_calls=False):
         """Run PAG's perturbed pass on the cond rows of the recorded main-pass calls.
 
         Every PAG input row is an exact duplicate of a main-pass row and the
@@ -174,19 +175,22 @@ def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence):
         each recorded call is replayed with its own inputs, limited to its
         leading cond rows, in the main pass's order and chunking. A call whose
         rows are coupled (``row_subset_ok`` cleared by the UNet forward that
-        ran it) is replayed whole. Calls holding only uncond rows are skipped
-        unless the call sequence must be preserved: hypertile draws its tile
-        layout per UNet call, and row-coupled calls may draw from the global
-        RNG, so those replays keep the previous one-call-per-main-call
-        behavior and discard the uncond output.
+        ran it) is replayed whole, as is every call when ``whole_calls`` is
+        set. Calls holding only uncond rows are skipped unless the call
+        sequence must be preserved: hypertile draws its tile layout per UNet
+        call, and row-coupled calls may draw from the global RNG, so those
+        replays keep the previous one-call-per-main-call behavior and discard
+        the uncond output. The UNet forward serving a replay may reuse what it
+        recorded for the call (modules/sd_unet_row_memo.py).
         """
         outs = []
         covered = 0
         for rec in memo.calls:
                 cond_rows = rec.cond_rows
-                if cond_rows == 0 and rec.row_subset_ok and not preserve_call_sequence:
+                whole = whole_calls or not rec.row_subset_ok
+                if cond_rows == 0 and not whole and not preserve_call_sequence:
                         continue
-                rows = cond_rows if cond_rows and rec.row_subset_ok else rec.rows
+                rows = cond_rows if cond_rows and not whole else rec.rows
                 with sd_unet_row_memo.replaying(rec, rows):
                         out = inner_model(
                                 rec.x[:rows],
@@ -394,15 +398,19 @@ class PAGExtensionScript(UIWrapper):
                 self.remove_main_pass_recorder()
                 logger.debug('Removed PAG hooks and callbacks')
 
+        def recorded_denoiser(self):
+                return self._recorded_denoiser() if self._recorded_denoiser is not None else None
+
         def _drop_main_pass_memo(self):
-                memo = sd_unet_row_memo.disarm(self._recorded_denoiser)
+                memo = sd_unet_row_memo.disarm(self.recorded_denoiser())
                 if memo is not None:
                         memo.clear()
 
         def remove_main_pass_recorder(self):
                 """Release the main-pass memo and unwrap the recorded denoiser (batch end, next batch, failures)."""
-                denoiser = self._recorded_denoiser
+                denoiser = self.recorded_denoiser()
                 if denoiser is None:
+                        self._recorded_denoiser = None
                         return
                 self._drop_main_pass_memo()
                 self._recorded_denoiser = None
@@ -552,9 +560,10 @@ class PAGExtensionScript(UIWrapper):
                 denoiser = getattr(params, 'denoiser', None)
                 if denoiser is None:
                         raise RuntimeError("PAG needs CFGDenoiserParams.denoiser to record the main denoiser pass")
-                if self._recorded_denoiser is not denoiser:
+                if self.recorded_denoiser() is not denoiser:
                         self.remove_main_pass_recorder()
-                        self._recorded_denoiser = denoiser
+                        # Weak: a request that fails mid-step must not keep its denoiser and memo alive.
+                        self._recorded_denoiser = weakref.ref(denoiser)
                 sd_unet_row_memo.arm(denoiser, cond_batch_size(params.text_cond))
 
 
@@ -577,9 +586,13 @@ class PAGExtensionScript(UIWrapper):
                 if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step or pag_params.pag_scale <= 0:
                         return
 
-                memo = sd_unet_row_memo.disarm(self._recorded_denoiser)
+                memo = sd_unet_row_memo.disarm(self.recorded_denoiser())
                 if memo is None:
                         raise RuntimeError("PAG: the main denoiser pass of this step was not recorded")
+                # TeaCache keeps per-call-lane state (cached residuals, a refresh distance averaged over all
+                # rows of the lane): its PAG lane must keep seeing the whole calls it saw before.
+                unet = getattr(getattr(shared.sd_model, 'model', None), 'diffusion_model', None)
+                whole_calls = bool(getattr(unet, '_teacache_patched', False))
 
                 # set pag_enable to True for the hooked cross attention modules
                 for module in pag_params.crossattn_modules:
@@ -595,6 +608,7 @@ class PAGExtensionScript(UIWrapper):
                                         params.inner_model,
                                         memo,
                                         preserve_call_sequence=sd_unet_row_memo.hypertile_unet_enabled(getattr(shared.sd_model, 'model', None)),
+                                        whole_calls=whole_calls,
                                 )
                         finally:
                                 timing.record(pag_params.openclaw_extension_timings.setdefault("details", {}), "pag_hidden_denoise", time.perf_counter() - hidden_started)
