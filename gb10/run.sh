@@ -107,6 +107,8 @@ sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-cache-correctness.py" "${CON
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${MULTIDIFFUSION_ROOT}"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" --check "${MULTIDIFFUSION_ROOT}"
 fi
 ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
 if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then
