@@ -21,7 +21,8 @@ def load_run_postprocessing():
     source = Path("modules/postprocessing.py").read_text()
     tree = ast.parse(source)
     module = ast.Module(
-        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_postprocessing"],
+        # run_postprocessing normalizes input modes through the module-level to_postprocessing_mode
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ("run_postprocessing", "to_postprocessing_mode")],
         type_ignores=[],
     )
     ast.fix_missing_locations(module)

@@ -1,9 +1,31 @@
 import os
 
+import numpy as np
 from PIL import Image
 
 from modules import shared, images, devices, scripts, scripts_postprocessing, ui_common, infotext_utils
 from modules.shared import opts
+
+
+def to_postprocessing_mode(image):
+    """RGB or RGBA input for the postprocessing scripts.
+
+    Images with transparency (LA, PA, La, P/L with a transparency key) become RGBA like RGBA input instead of
+    losing the alpha (and showing the hidden colours); 16-bit grayscale is scaled to 8 bits (65535 -> 255, rounded)
+    where convert("RGB") clipped every value above 255 to white.
+    """
+    if image.mode in ("RGBA", "RGB"):
+        return image
+    if image.has_transparency_data:
+        return image.convert("RGBA")
+    if image.mode.startswith("I;16"):
+        # round(v / 257) in integers; Pillow's point() rejects I;16B/I;16L. fromarray drops info, which carries the
+        # infotext read right after this.
+        values = np.asarray(image).astype(np.uint32)
+        eight_bit = Image.fromarray(((values * 2 + 257) // 514).astype(np.uint8))
+        eight_bit.info.update(image.info)
+        image = eight_bit
+    return image.convert("RGB")
 
 
 def combine_caption(existing_caption, new_caption, action):
@@ -96,7 +118,7 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
         else:
             image_data = image_placeholder
 
-        image_data = image_data if image_data.mode in ("RGBA", "RGB") else image_data.convert("RGB")
+        image_data = to_postprocessing_mode(image_data)
 
         parameters, existing_pnginfo = images.read_info_from_image(image_data)
         if parameters:
