@@ -1,3 +1,4 @@
+import functools
 import importlib
 import importlib.util
 import math
@@ -7,6 +8,7 @@ from pathlib import Path
 import unittest
 
 import torch
+from torch.nn import functional as F
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXT_ROOT.parents[1]
@@ -802,32 +804,144 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertIsNone(p.incant_cfg_params["pag_params"])
 
 
+def _legacy_gaussian_blur_2d(img, kernel_size, sigma):
+    # Pre-separable production SEG blur (reflect pad + k x k depthwise conv of
+    # query-dtype outer-product taps), verbatim minus its kernel cache. Kept as
+    # an independent oracle for gaussian_blur_queries.
+    min_spatial = min(img.shape[-2:])
+    max_reflect_kernel = min_spatial - (min_spatial % 2 - 1)
+    kernel_size = min(kernel_size, max_reflect_kernel)
+    channels = img.shape[-3]
+    ksize_half = (kernel_size - 1) * 0.5
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=img.device, dtype=torch.float32)
+    pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+    x_kernel = (pdf / pdf.sum()).to(dtype=img.dtype)
+    base_kernel = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = base_kernel.expand(channels, 1, base_kernel.shape[0], base_kernel.shape[1]).contiguous()
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+    img = F.pad(img, padding, mode="reflect")
+    img = F.conv2d(img, kernel2d, groups=channels)
+
+    return img
+
+
+def _legacy_blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downscale_w, blur_fn):
+    # Pre-separable query path: blur_fn sees the (half*heads, head_dim, H, W) layout.
+    output_batch = output.shape[0]
+    half_batch = output_batch // 2
+    seq_len = downscale_h * downscale_w
+    q_passthrough, q_blur = output.split(half_batch, dim=0)
+    q_blur = q_blur.view(half_batch, -1, heads, head_dim).transpose(1, 2)
+    q_blur = q_blur.permute(0, 1, 3, 2).reshape(
+        half_batch * heads, head_dim, downscale_h, downscale_w
+    )
+    q_blur = blur_fn(q_blur)
+    q_blur = q_blur.reshape(half_batch, heads, head_dim, seq_len)
+    q_blur = q_blur.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
+    return torch.cat((q_passthrough, q_blur), dim=0)
+
+
 class SEGBlurTests(unittest.TestCase):
+    # (H, W, kernel_size, sigma). The kernel clamps to the shorter side as in
+    # production: 49 -> 41 at 40x40, 25 at 40x24, 7 at 9x7, 3 at 2x9 and 3x3.
+    BLUR_CASES = (
+        (40, 40, 49, 8.0),
+        (32, 32, 33, 5.5),
+        (40, 24, 49, 8.0),
+        (24, 40, 49, 8.0),
+        (9, 7, 49, 8.0),
+        (2, 9, 13, 2.0),
+        (3, 3, 49, 8.0),
+        (5, 6, 1, 2.0),
+    )
+    # (half_batch, heads, head_dim)
+    QUERY_SHAPES = ((1, 2, 3), (2, 1, 4), (2, 5, 2))
+
     @classmethod
     def setUpClass(cls):
         install_a1111_stubs()
         cls.seg = importlib.import_module("scripts.smoothed_energy_guidance")
 
+    def _check_against_legacy(self, dtype, check):
+        gen = torch.Generator().manual_seed(1234)
+        for h, w, kernel_size, sigma in self.BLUR_CASES:
+            for half, heads, head_dim in self.QUERY_SHAPES:
+                output = torch.randn(2 * half, h * w, heads * head_dim, generator=gen).to(dtype)
+                geometry = dict(heads=heads, head_dim=head_dim, downscale_h=h, downscale_w=w)
+                new = self.seg._blur_seg_cond_queries(output, kernel_size=kernel_size, sigma=sigma, is_inf_blur=False, **geometry)
+                blur_fn = functools.partial(_legacy_gaussian_blur_2d, kernel_size=kernel_size, sigma=sigma)
+                old = _legacy_blur_seg_cond_queries(output, blur_fn=blur_fn, **geometry)
+                with self.subTest(h=h, w=w, kernel_size=kernel_size, half=half, heads=heads, head_dim=head_dim):
+                    self.assertEqual(new.shape, output.shape)
+                    self.assertEqual(new.dtype, dtype)
+                    self.assertTrue(torch.equal(new[:half], output[:half]))
+                    check(output, new, old, geometry, blur_fn)
+
+    def test_separable_blur_matches_legacy_conv_fp32(self):
+        def check(output, new, old, geometry, blur_fn):
+            torch.testing.assert_close(new, old, rtol=1e-5, atol=1e-5)
+
+        self._check_against_legacy(torch.float32, check)
+
+    def test_separable_blur_matches_legacy_conv_bf16(self):
+        def check(output, new, old, geometry, blur_fn):
+            torch.testing.assert_close(new.float(), old.float(), rtol=2e-2, atol=2e-2)
+            # fp32 taps and accumulation: one bf16 rounding of the exact blur.
+            exact = _legacy_blur_seg_cond_queries(output.float(), blur_fn=blur_fn, **geometry)
+            torch.testing.assert_close(new.float(), exact, rtol=2**-8, atol=1e-5)
+
+        self._check_against_legacy(torch.bfloat16, check)
+
+    def test_separable_blur_keeps_fp32_math_under_autocast(self):
+        # The hook runs under bf16 autocast, which would otherwise round the
+        # fp32 operators and the intermediate of the matmuls to bf16.
+        q = torch.randn(2, 40 * 24, 6).to(torch.bfloat16)
+        expected = self.seg.gaussian_blur_queries(q, 40, 24, kernel_size=49, sigma=8.0)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = self.seg.gaussian_blur_queries(q, 40, 24, kernel_size=49, sigma=8.0)
+        self.assertTrue(torch.equal(out, expected))
+
     def test_gaussian_blur_clamps_kernel_to_shorter_spatial_side(self):
-        img = torch.randn(2, 3, 2, 9)
-        out = self.seg.gaussian_blur_2d(img, kernel_size=13, sigma=2.0)
-        self.assertEqual(tuple(out.shape), tuple(img.shape))
+        q = torch.randn(2, 2 * 9, 3)
+        out = self.seg.gaussian_blur_queries(q, 2, 9, kernel_size=13, sigma=2.0)
+        self.assertEqual(tuple(out.shape), tuple(q.shape))
         self.assertTrue(torch.isfinite(out).all())
+        # A 2-pixel side admits at most a 3-tap reflect kernel, on both axes.
+        self.assertTrue(torch.equal(out, self.seg.gaussian_blur_queries(q, 2, 9, kernel_size=3, sigma=2.0)))
+
+    def test_blur_operator_rows_sum_to_one(self):
+        for n, kernel_size in ((40, 41), (24, 25), (7, 7), (2, 3), (1, 1)):
+            operator = self.seg._gaussian_blur_operator(n, kernel_size, 8.0, torch.device("cpu"))
+            with self.subTest(n=n, kernel_size=kernel_size):
+                self.assertEqual(operator.dtype, torch.float32)
+                self.assertEqual(tuple(operator.shape), (n, n))
+                self.assertTrue((operator >= 0).all())
+                torch.testing.assert_close(operator.sum(dim=1), torch.ones(n), rtol=0, atol=1e-6)
 
     def test_seg_query_blur_mutates_legacy_tail_half_only(self):
-        output = torch.arange(16, dtype=torch.float32).reshape(2, 4, 2)
+        output = torch.randn(4, 6 * 5, 2 * 3, dtype=torch.bfloat16)
+        geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
 
-        out = self.seg._blur_seg_cond_queries(
-            output,
-            heads=1,
-            head_dim=2,
-            downscale_h=2,
-            downscale_w=2,
-            blur_fn=lambda q: q + 100.0,
-        )
+        for is_inf_blur in (False, True):
+            out = self.seg._blur_seg_cond_queries(output, kernel_size=49, sigma=8.0, is_inf_blur=is_inf_blur, **geometry)
+            with self.subTest(is_inf_blur=is_inf_blur):
+                self.assertEqual(out.dtype, output.dtype)
+                self.assertTrue(torch.equal(out[:2], output[:2]))
+                self.assertFalse(torch.equal(out[2:], output[2:]))
 
-        torch.testing.assert_close(out[0], output[0])
-        torch.testing.assert_close(out[1], output[1] + 100.0)
+    def test_infinite_blur_matches_legacy_path_bitwise(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            output = torch.randn(4, 6 * 5, 2 * 3).to(dtype)
+            geometry = dict(heads=2, head_dim=3, downscale_h=6, downscale_w=5)
+            new = self.seg._blur_seg_cond_queries(output, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
+            old = _legacy_blur_seg_cond_queries(
+                output,
+                blur_fn=lambda q: self.seg.gaussian_blur_inf(q, 1.0, 2.0**11),
+                **geometry,
+            )
+            with self.subTest(dtype=dtype):
+                self.assertTrue(torch.equal(new, old))
 
 
 class ModuleHookTests(unittest.TestCase):
