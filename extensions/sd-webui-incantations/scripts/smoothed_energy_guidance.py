@@ -84,10 +84,12 @@ def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, do
         A1111 orders the CFG batch [cond rows, uncond rows]; legacy SEG blurs the uncond rows, so CFG pushes
         away from the smoothed-attention uncond prediction. With one cond row per uncond row (no AND prompts)
         this is exactly the tail half of the batch. n_cond counts to_q rows (cond rows x hypertile tiles).
-        output is the to_q result (batch, H*W, heads*head_dim) with seq index h*W + w.
+        output is the to_q result (batch, H*W, heads*head_dim) with seq index h*W + w. It is a fresh
+        tensor owned by the hook, so the blurred rows are written into it in place (one rounding copy,
+        no concatenated copy of the batch) and it is returned.
         """
         n_blur = output.shape[0] - n_cond
-        q_passthrough, q_blur = output.split((n_cond, n_blur), dim=0)
+        q_blur = output[n_cond:]
         if is_inf_blur:
                 seq_len = downscale_h * downscale_w
                 q_blur = q_blur.view(n_blur, -1, heads, head_dim).transpose(1, 2)
@@ -98,8 +100,10 @@ def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, do
                 q_blur = q_blur.reshape(n_blur, heads, head_dim, seq_len)
                 q_blur = q_blur.view(n_blur, heads * head_dim, seq_len).transpose(1, 2)
         else:
-                q_blur = gaussian_blur_queries(q_blur, downscale_h, downscale_w, kernel_size, sigma)
-        return torch.cat((q_passthrough, q_blur), dim=0)
+                q_blur = _gaussian_blur_queries_fp32(q_blur, downscale_h, downscale_w, kernel_size, sigma)
+        # Every value is computed from output before this write; copy_ rounds like .to(output.dtype).
+        output[n_cond:].copy_(q_blur)
+        return output
 
 
 class SEGExtensionScript(UIWrapper):
@@ -383,6 +387,11 @@ def gaussian_blur_queries(q, height, width, kernel_size, sigma):
         query dtype; with TF32 matmul (devices.enable_tf32) the taps still keep
         more mantissa bits than bf16.
         """
+        return _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma).to(q.dtype)
+
+
+def _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma):
+        """gaussian_blur_queries before the final cast: the fp32 (batch, height*width, channels) result."""
         min_spatial = min(height, width)
         kernel_size = min(kernel_size, min_spatial - (min_spatial % 2 - 1))
         blur_h = _gaussian_blur_operator(height, kernel_size, float(sigma), q.device)
@@ -392,7 +401,7 @@ def gaussian_blur_queries(q, height, width, kernel_size, sigma):
         with torch.autocast(q.device.type, enabled=False):
                 q_blur = blur_h @ q.float().reshape(batch, height, width * channels)
                 q_blur = blur_w @ q_blur.view(batch * height, width, channels)
-        return q_blur.view(batch, height * width, channels).to(q.dtype)
+        return q_blur.view(batch, height * width, channels)
 
 
 def gaussian_blur_inf(img, kernel_size, sigma):
