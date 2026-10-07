@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 import pytest
+import torch
 
 
 def _module(name: str, **attrs):
@@ -211,3 +212,37 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(monkeypa
     assert sampler.last_latent == "denoised"
     assert sampler_calls == [[1, 0]]
     assert p.extra_generation_params["Sampler chain"] == "Euler@0-1 -> DPM++ 2M SDE@1-2"
+
+
+def _float_images_to_uint8():
+    """modules.sd_samplers_common.float_images_to_uint8, compiled alone (the harness stubs that module)."""
+    import ast
+
+    path = Path(__file__).resolve().parents[1] / "modules" / "sd_samplers_common.py"
+    tree = ast.parse(path.read_text(encoding="utf8"))
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "float_images_to_uint8"]
+    namespace = {"torch": torch}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace["float_images_to_uint8"]
+
+
+def test_snapshots_round_to_uint8_like_generated_images(monkeypatch, tmp_path):
+    module = load_multi_sampler(monkeypatch)
+    # The harness imports the script against a stub torch; real tensor ops need the real module back.
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    # -1 + 63.6 / 127.5 is code value 63.6: truncation gave 63, rounding gives 64; the ends map to 0 and 255.
+    decoded = torch.tensor([-1.0, -1.0 + 63.6 / 127.5, 1.0]).view(1, 3, 1, 1).expand(1, 3, 2, 2).contiguous()
+    monkeypatch.setattr(module.sd_samplers_common, "samples_to_images_tensor", lambda latent, approximation=None: decoded, raising=False)
+    monkeypatch.setattr(module.sd_samplers_common, "float_images_to_uint8", _float_images_to_uint8(), raising=False)
+    saved = []
+    image = types.SimpleNamespace(save=lambda path: saved.append(path))
+    monkeypatch.setattr(module, "Image", types.SimpleNamespace(fromarray=lambda array: saved.append(array) or image))
+    sampler = object.__new__(module.MultiKDiffusionSampler)
+    p = types.SimpleNamespace(openclaw_multi_sampler_snapshots={"enabled": True, "dir": str(tmp_path)})
+
+    sampler._save_snapshot(p, torch.zeros(1, 4, 1, 1), step=0, final=True)
+
+    array, path = saved
+    assert path == tmp_path / "final.png"
+    assert array.shape == (2, 2, 3) and array.dtype.name == "uint8"
+    assert array[0, 0].tolist() == [0, 64, 255]

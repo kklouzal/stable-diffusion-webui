@@ -7,6 +7,7 @@ from collections import OrderedDict
 from PIL import Image
 
 from modules import scripts_postprocessing, shared
+from modules.upscaler import scaled_size
 from modules import headless_ui as gr
 
 from modules.ui_components import FormRow, ToolButton, InputAccordion
@@ -144,8 +145,8 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             pp.shared.target_width = upscale_to_width
             pp.shared.target_height = upscale_to_height
         else:
-            pp.shared.target_width = int(pp.image.width * upscale_by)
-            pp.shared.target_height = int(pp.image.height * upscale_by)
+            pp.shared.target_width = scaled_size(pp.image.width, upscale_by)
+            pp.shared.target_height = scaled_size(pp.image.height, upscale_by)
 
             if max_side_length != 0:  # 0 = no limit; limit_size_by_one_dimention(w, h, 0) would return (0, 0)
                 pp.shared.target_width, pp.shared.target_height = limit_size_by_one_dimention(pp.shared.target_width, pp.shared.target_height, max_side_length)

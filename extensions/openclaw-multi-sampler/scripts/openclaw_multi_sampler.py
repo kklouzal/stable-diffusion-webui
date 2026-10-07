@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from modules import headless_ui as gr
-import numpy as np
 from PIL import Image
 import torch
 from fastapi import FastAPI, Request
@@ -457,9 +456,9 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             approx = 2
         try:
             tensor = sd_samplers_common.samples_to_images_tensor(latent.detach().float(), approximation=approx)[0]
-            tensor = tensor.add(1.0).mul(127.5).clamp_(0, 255).to(dtype=torch.uint8)
-            array = np.moveaxis(tensor.cpu().numpy(), 0, 2)
-            image = Image.fromarray(array)
+            # Same rounded quantization as the generated images (sd_samplers_common.float_images_to_uint8).
+            tensor = tensor.float().add(1.0).mul(0.5).clamp_(0.0, 1.0)
+            image = Image.fromarray(sd_samplers_common.float_images_to_uint8(tensor).cpu().numpy())
             name = "final.png" if final else f"step-{step:03d}.png"
             image.save(out_dir / name)
         except Exception:

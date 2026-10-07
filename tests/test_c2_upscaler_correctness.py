@@ -419,6 +419,15 @@ def test_crop_to_fit_fills_the_whole_target(env, pp_upscale, source, target):
     assert info["Postprocess crop to"] == f"{target[0]}x{target[1]}"
 
 
+def test_scale_by_target_is_not_a_pixel_short(env, pp_upscale):
+    # 1600 * 1.15 == 1839.9999999999998: int() predicted 1839 px, the size the upscaler is asked for is 1840.
+    pp = SimpleNamespace(image=Image.new("RGB", (1600, 800)), shared=SimpleNamespace(target_width=None, target_height=None))
+
+    pp_upscale.ScriptPostprocessingUpscale().process_firstpass(pp, upscale_mode=0, upscale_by=1.15, max_side_length=0)
+
+    assert (pp.shared.target_width, pp.shared.target_height) == (1840, 920)
+
+
 def test_scale_by_without_side_limit_keeps_target_size(env, pp_upscale):
     pp = SimpleNamespace(image=Image.new("RGB", (300, 200)), shared=SimpleNamespace(target_width=None, target_height=None))
     script = pp_upscale.ScriptPostprocessingUpscale()
