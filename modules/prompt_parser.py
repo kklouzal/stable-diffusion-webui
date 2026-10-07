@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections import namedtuple
 import lark
@@ -86,7 +87,10 @@ def get_learned_conditioning_prompt_schedules(prompts, base_steps, hires_steps=N
                         v = (v - flt_offset) * steps
                     else:
                         v = (v - int_offset)
-                tree.children[-2] = min(steps, int(v))
+                # floor, not int(): a decimal fraction of the steps can come out a few ulp below an integer
+                # (0.29 * 100 == 28.999999999999996) and must still switch at that step. Values at or below 0 only
+                # ever compare below every step >= 1, so rounding them down instead of toward zero changes nothing.
+                tree.children[-2] = min(steps, math.floor(v + 1e-9))
                 if tree.children[-2] >= 1:
                     res.append(tree.children[-2])
 
