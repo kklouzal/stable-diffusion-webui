@@ -75,11 +75,14 @@ global bf16 conditioning (fp32 consumers change), dropping autocast, `--disable-
 fallback), `cudnn.benchmark` (nondeterministic), ControlNet flip batching (not exact), sampler micro-optimizations
 hidden at ~95% GPU utilization.
 
-## Open quality decisions (not changed)
+## Follow-up decisions (operator-approved, 2026-10-07)
 
-SDXL size/aesthetic embeddings and UNet timesteps are built in bf16 (1500 -> 1504; t >= 256 quantized); fixing either
-changes outputs. The API echoes ControlNet input images in `parameters` (contract change to remove).
-`configs/sd_xl_inpaint.yaml`/`sd_xl_v.yaml` reference a class absent from the baked sgm.
+- SDXL size/crop/aesthetic conditioning values and UNet/ControlNet timesteps are now embedded from float32 values, as
+  in the reference implementation. Under bfloat16 they had been rounded first (1500 px -> 1504; t >= 256 quantized to
+  steps of 2-4). This intentionally changes outputs.
+- txt2img/img2img responses no longer echo ControlNet input images in `parameters` (img2img returns them only with
+  `include_init_images`, like `init_images`).
+- Still open: `configs/sd_xl_inpaint.yaml`/`sd_xl_v.yaml` reference a class absent from the baked sgm.
 
 ## Verification status (at push)
 
