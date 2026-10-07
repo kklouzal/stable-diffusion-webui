@@ -1,0 +1,17 @@
+diff --git a/sgm/modules/diffusionmodules/wrappers.py b/sgm/modules/diffusionmodules/wrappers.py
+--- a/sgm/modules/diffusionmodules/wrappers.py
++++ b/sgm/modules/diffusionmodules/wrappers.py
+@@ -24,7 +24,12 @@
+     def forward(
+         self, x: torch.Tensor, t: torch.Tensor, c: dict, **kwargs
+     ) -> torch.Tensor:
+-        x = torch.cat((x, c.get("concat", torch.Tensor([]).type_as(x))), dim=1)
++        if "concat" in c:
++            x = torch.cat((x, c["concat"]), dim=1)
++        else:
++            # Same values and layout as concatenating an empty tensor (always a contiguous copy), without
++            # building a CPU tensor and copying x on every UNet call.
++            x = x.contiguous()
+         if "cond_view" in c:
+             return self.diffusion_model(
+                 x,
