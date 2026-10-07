@@ -72,6 +72,10 @@ def load_images_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "piexif", piexif)
     monkeypatch.setitem(sys.modules, "piexif.helper", piexif.helper)
     monkeypatch.setitem(sys.modules, "pillow_avif", module("pillow_avif"))
+    # `from modules import shared` reads the package attribute before sys.modules["modules.shared"]; once another
+    # test file imported the real modules.shared, the real package would hand images.py the real shared (and its
+    # opts) instead of the stub below. Stub the package too, so every `modules` name images.py resolves is ours.
+    monkeypatch.setitem(sys.modules, "modules", module("modules", __path__=[]))
     monkeypatch.setitem(sys.modules, "modules.sd_samplers", module("modules.sd_samplers", find_sampler_config=lambda name: SimpleNamespace(options={}), samplers_map={}))
     monkeypatch.setitem(sys.modules, "modules.shared", shared)
     monkeypatch.setitem(sys.modules, "modules.script_callbacks", callbacks)
