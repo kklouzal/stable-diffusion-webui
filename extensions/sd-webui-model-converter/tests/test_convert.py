@@ -26,16 +26,35 @@ def install_a1111_stubs():
     sd_vae_mod.refresh_vae_list = lambda: None
     shared_mod = types.ModuleType("modules.shared")
     shared_mod.state = types.SimpleNamespace(begin=lambda: None, end=lambda: None, job=None, textinfo=None)
+    call_queue_mod = types.ModuleType("modules.call_queue")
+    call_queue_mod.queue_lock = RecordingLock()
+    script_callbacks_mod = types.ModuleType("modules.script_callbacks")
+    script_callbacks_mod.on_app_started = lambda callback: None
+    modules_pkg.call_queue = call_queue_mod
+    modules_pkg.script_callbacks = script_callbacks_mod
 
     sys.modules.update(
         {
             "modules": modules_pkg,
+            "modules.call_queue": call_queue_mod,
             "modules.paths": paths_mod,
+            "modules.script_callbacks": script_callbacks_mod,
             "modules.sd_models": sd_models_mod,
             "modules.sd_vae": sd_vae_mod,
             "modules.shared": shared_mod,
         }
     )
+
+
+class RecordingLock:
+    def __init__(self):
+        self.held = False
+
+    def __enter__(self):
+        self.held = True
+
+    def __exit__(self, exc_type, exc, tb):
+        self.held = False
 
 
 class LoraDoctorTests(unittest.TestCase):
@@ -112,6 +131,51 @@ class ConverterSafetyTests(unittest.TestCase):
 
         self.assertEqual(set(loaded), {"x"})
         load.assert_called_once_with("/tmp/model.ckpt", map_location="cpu", weights_only=True)
+
+
+class RouteLockTests(unittest.TestCase):
+    """Both routes rebuild the shared checkpoint/VAE maps in place, so they must run under queue_lock."""
+
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.convert = importlib.import_module("scripts.convert")
+        cls.ui = importlib.import_module("scripts.ui")
+
+    def setUp(self):
+        self.lock = self.ui.call_queue.queue_lock
+        self.routes = {}
+        app = types.SimpleNamespace(get=self._register, post=self._register)
+        self.ui.on_app_started(None, app)
+
+    def _register(self, path):
+        def decorator(fn):
+            self.routes[path] = fn
+            return fn
+
+        return decorator
+
+    def test_options_lists_models_under_queue_lock(self):
+        def converter_options():
+            self.assertTrue(self.lock.held)
+            return {"models": [], "vaes": ["None"]}
+
+        with mock.patch.object(self.ui.convert, "converter_options", side_effect=converter_options):
+            result = self.routes["/sdapi/v1/openclaw/model-converter/options"]()
+
+        self.assertEqual(result, {"ok": True, "models": [], "vaes": ["None"]})
+        self.assertFalse(self.lock.held)
+
+    def test_convert_runs_under_queue_lock_and_releases_it_on_failure(self):
+        def convert_single(payload):
+            self.assertTrue(self.lock.held)
+            raise ValueError("selected model was not found")
+
+        with mock.patch.object(self.ui.convert, "convert_single", side_effect=convert_single):
+            result = self.routes["/sdapi/v1/openclaw/model-converter/convert"](self.ui.ConvertRequest(model="missing"))
+
+        self.assertEqual((result["ok"], result["error"]), (False, "selected model was not found"))
+        self.assertFalse(self.lock.held)
 
 
 if __name__ == "__main__":
