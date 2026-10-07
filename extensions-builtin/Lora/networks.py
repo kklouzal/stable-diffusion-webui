@@ -347,17 +347,17 @@ def _publish_applied_state(new_networks, emb_db=None):
             try:
                 if bundle_changed:
                     _replace_bundled_embeddings(emb_db, previous_bundles, planned_bundles)
-                loaded_networks[:] = new_networks
+                _set_loaded_networks(new_networks)
                 _apply_loaded_state_to_model()
             except Exception as application_error:
-                loaded_networks[:] = previous_networks
+                _set_loaded_networks(previous_networks)
                 try:
                     _apply_loaded_state_to_model()
                     _restore_embedding_db(emb_db, db_snapshot)
                     for embedding, loaded in loaded_flags:
                         embedding.loaded = loaded
                 except Exception as rollback_error:
-                    loaded_networks.clear()
+                    _set_loaded_networks([])
                     _applied_state_key = None
                     try:
                         _restore_embedding_db(emb_db, db_snapshot)
@@ -678,6 +678,11 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
     if network_layer_name is None:
         return
 
+    # No LoRA published and none merged into this layer: nothing to back up, restore or apply. This is every
+    # patched forward of a no-LoRA request.
+    if not loaded_networks and not getattr(self, "network_current_names", ()):
+        return
+
     # Quant-managed Linear layers are rebuilt atomically by model-level prepare
     # from immutable BF16 masters. Generic backup/copy_ cannot cross TorchAO
     # tensor-subclass boundaries and must not become a second application path.
@@ -843,8 +848,34 @@ def network_loaded_weight_signature(net):
         LORA_APPLIED_IMPLEMENTATION_REVISION,
     )
 
+
+# (published Network objects, their wanted names); see network_wanted_names().
+_wanted_names_memo = ((), ())
+
+
 def network_wanted_names():
-    return tuple(network_loaded_weight_signature(x) for x in loaded_networks)
+    """Signatures of the published LoRA set in application order; layers compare it with network_current_names.
+
+    Every patched Linear/Conv/norm forward calls this, so the tuple is built once per published set (at publish,
+    by _set_loaded_networks) and reused while loaded_networks holds exactly the same Network objects; the memo
+    holds them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks
+    stamps source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always
+    arrives as different objects.
+    """
+    global _wanted_names_memo
+    published, names = _wanted_names_memo
+    if len(published) == len(loaded_networks) and all(held is net for held, net in zip(published, loaded_networks)):
+        return names
+    published = tuple(loaded_networks)
+    names = tuple(network_loaded_weight_signature(x) for x in published)
+    _wanted_names_memo = (published, names)
+    return names
+
+
+def _set_loaded_networks(networks_to_load):
+    """Publish the LoRA list and build its wanted names once (also drops the memo's references to the old set)."""
+    loaded_networks[:] = networks_to_load
+    network_wanted_names()
 
 
 # TorchAO-quantized (MXFP8/NVFP4) LoRA support. Each backend keeps its own state under
