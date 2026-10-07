@@ -27,6 +27,25 @@ def fix_torch_version():
         torch.__long_version__ = torch.__version__
         torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
 
+def configure_torch_threads():
+    """
+    Sizes torch's CPU thread pools to the CPUs this process may run on. Call right after importing torch,
+    before any parallel work: the inter-op size can only be set once, before that pool starts.
+
+    torch sizes its intra-op pool from the machine's core count, not the affinity mask (20 threads on the
+    10-CPU GB10 container cpuset). Nothing here launches inter-op work, so that pool is kept small.
+    An explicit OMP_NUM_THREADS/MKL_NUM_THREADS is the operator's choice and is left alone.
+    """
+    import torch
+
+    if "OMP_NUM_THREADS" in os.environ or "MKL_NUM_THREADS" in os.environ:
+        return
+
+    cpus = len(os.sched_getaffinity(0))
+    torch.set_num_threads(cpus)
+    torch.set_num_interop_threads(min(cpus, 2))
+
+
 def fix_asyncio_event_loop_policy():
     """
         The default `asyncio` event loop policy only automatically creates

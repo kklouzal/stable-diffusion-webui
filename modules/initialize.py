@@ -11,6 +11,8 @@ def imports():
 
     import torch  # noqa: F401
     startup_timer.record("import torch")
+    from modules import initialize_util
+    initialize_util.configure_torch_threads()
     import pytorch_lightning  # noqa: F401
     startup_timer.record("import torch")
     warnings.filterwarnings(action="ignore", category=DeprecationWarning, module="pytorch_lightning")
