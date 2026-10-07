@@ -69,6 +69,38 @@ def _controlnet_remote_api_keys():
             yield f"control_net_{name}{suffix}"
 
 
+_CONTROLNET_UNIT_IMAGE_FIELDS = ("image", "input_image", "mask", "mask_image", "effective_region_mask", "batch_images", "ipadapter_input")
+
+
+def _response_parameters(request, *, include_images: bool) -> dict[str, Any]:
+    """The request echoed back as response parameters, without ControlNet input images unless images were requested.
+
+    ControlNet units carry full-size base64 images (megabytes each), so echoing them turned every response into a
+    second copy of the request. Like init_images, they are returned only when the caller asks for its images back.
+    The request object itself is left unchanged."""
+    params = dict(vars(request))
+    if include_images:
+        return params
+    for suffix in ("", "2", "3"):
+        for name in ("image", "input_image", "mask", "mask_image"):
+            key = f"control_net_{name}{suffix}"
+            if params.get(key) is not None:
+                params[key] = None
+    scripts = params.get("alwayson_scripts")
+    if isinstance(scripts, dict):
+        echoed_scripts = {}
+        for name, entry in scripts.items():
+            if str(name).lower() == "controlnet" and isinstance(entry, dict) and isinstance(entry.get("args"), list):
+                entry = {**entry, "args": [
+                    {**unit, **{field: None for field in _CONTROLNET_UNIT_IMAGE_FIELDS if unit.get(field) is not None}}
+                    if isinstance(unit, dict) else unit
+                    for unit in entry["args"]
+                ]}
+            echoed_scripts[name] = entry
+        params["alwayson_scripts"] = echoed_scripts
+    return params
+
+
 def _pop_controlnet_remote_args(args: dict[str, Any]) -> dict[str, Any]:
     remote_args = {}
     for key in _controlnet_remote_api_keys():
@@ -1099,7 +1131,7 @@ class Api:
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
-        return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed_js_with_image_paths(processed))
+        return models.TextToImageResponse(images=b64images, parameters=_response_parameters(txt2imgreq, include_images=False), info=processed_js_with_image_paths(processed))
 
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
         task_id = img2imgreq.force_task_id or create_task_id("img2img")
@@ -1178,7 +1210,7 @@ class Api:
             img2imgreq.init_images = None
             img2imgreq.mask = None
 
-        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
+        return models.ImageToImageResponse(images=b64images, parameters=_response_parameters(img2imgreq, include_images=bool(img2imgreq.include_init_images)), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
 
     def _run_extras(self, *, extras_mode, image, image_folder, reqDict):
         return self._call_with_queue_lock(postprocessing.run_extras, extras_mode=extras_mode, image=image, image_folder=image_folder, input_dir="", output_dir="", save_output=False, **reqDict)
