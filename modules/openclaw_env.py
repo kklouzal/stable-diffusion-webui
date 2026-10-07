@@ -16,16 +16,21 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
 
 
-def env_bool(name: str, default):
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        return default
+def parse_bool(value: str, what: str) -> bool:
+    """The boolean grammar above for one non-empty string; `what` names the value in the ValueError."""
     normalized = value.strip().lower()
     if normalized in _TRUE:
         return True
     if normalized in _FALSE:
         return False
-    raise ValueError(f"{name}={value!r} is not a boolean; use 1/true/yes/on or 0/false/no/off")
+    raise ValueError(f"{what}={value!r} is not a boolean; use 1/true/yes/on or 0/false/no/off")
+
+
+def env_bool(name: str, default):
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return parse_bool(value, name)
 
 
 def env_int(name: str, default: int, *, minimum: int) -> int:

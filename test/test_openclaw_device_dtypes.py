@@ -138,6 +138,8 @@ def load_timesteps_sampler_module(device=None):
         ("modules.shared", shared_module),
     ):
         put(name, module)
+    # Importing sd_samplers_timesteps aliases itself as modules.sd_samplers_compvis; that alias must not outlive the load.
+    originals.setdefault("modules.sd_samplers_compvis", sys.modules.get("modules.sd_samplers_compvis"))
 
     try:
         spec = importlib.util.spec_from_file_location(module_name, "modules/sd_samplers_timesteps.py")
@@ -167,6 +169,24 @@ def available_test_device():
 
 
 class OpenClawDeviceDtypeTests(unittest.TestCase):
+    def test_module_loaders_restore_sys_modules(self):
+        sentinel = types.ModuleType("modules.sd_samplers_compvis")
+        names = ("modules", "modules.shared", "modules.devices", "modules.openclaw_generation_profile", "modules.sd_samplers_compvis", "k_diffusion", "k_diffusion.sampling")
+        saved = {name: sys.modules.get(name) for name in names}
+        sys.modules["modules.sd_samplers_compvis"] = sentinel
+        try:
+            before = {name: sys.modules.get(name) for name in names}
+            load_timesteps_impl_module()
+            load_timesteps_sampler_module()
+            after = {name: sys.modules.get(name) for name in names}
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+        self.assertEqual({name: id(module) for name, module in after.items()}, {name: id(module) for name, module in before.items()})
+
 
     def test_timestep_schedule_preserves_existing_stride_for_normal_counts(self):
         sampler_module = load_timesteps_sampler_module()

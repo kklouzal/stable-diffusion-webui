@@ -28,11 +28,13 @@ def sha256_from_cache(filename, title, use_addnet_hash=False):
         return None
     ondisk_revision = modules.cache.file_revision(ondisk_stat)
 
-    if title not in hashes:
+    # One lookup: the disk cache culls entries concurrently, so a membership test does not keep the entry readable.
+    entry = hashes.get(title)
+    if entry is None:
         return None
 
-    cached_sha256 = hashes[title].get("sha256", None)
-    if hashes[title].get("source_revision") != ondisk_revision or cached_sha256 is None:
+    cached_sha256 = entry.get("sha256", None)
+    if entry.get("source_revision") != ondisk_revision or cached_sha256 is None:
         return None
 
     return cached_sha256

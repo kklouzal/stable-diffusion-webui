@@ -7,7 +7,7 @@ import threading
 from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Iterator, Mapping
 
 SCHEMA_VERSION = 2
@@ -307,11 +307,16 @@ def _opaque_bytes(value: Any) -> bytes:
         return b"opaque-unserializable"
 
 
-def _opaque_fallback(value: Any) -> dict[str, str]:
+def _opaque_fallback(value: Any) -> dict[str, Any]:
     # Never call repr()/str() for arbitrary objects: they may contain prompts,
     # paths, filenames, model names, auth material, or user metadata.
     cls = type(value)
-    return {"type": f"{cls.__module__}.{cls.__qualname__}"}
+    opaque: dict[str, Any] = {"type": f"{cls.__module__}.{cls.__qualname__}"}
+    if is_dataclass(value) and not isinstance(value, type):
+        # A dataclass key (E08's GenerationProfileKey) is its field values, each encoded by these same rules; with the
+        # type alone every key of the type shared one digest.
+        opaque["fields"] = [getattr(value, item.name) for item in fields(value)]
+    return opaque
 
 
 class EpochRegistry:

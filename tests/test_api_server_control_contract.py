@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from fastapi.exceptions import HTTPException
+
 from modules import openclaw_env
 
 
@@ -29,15 +32,17 @@ def load_api_control_class():
         "refresh_vae",
         "unloadapi",
         "reloadapi",
+        "set_config",
         "kill_webui",
         "restart_webui",
         "stop_webui",
     }
     methods = [node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
-    subset = ast.Module(body=[ast.ClassDef(name="Api", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
+    helpers = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_request_bool"]
+    subset = ast.Module(body=helpers + [ast.ClassDef(name="Api", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
     ast.fix_missing_locations(subset)
 
-    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "BackgroundTasks": object, "os": os, "openclaw_env": openclaw_env}
+    namespace = {"Any": object, "FastAPI": object, "Lock": object, "APIRouter": lambda: object(), "BackgroundTasks": object, "os": os, "openclaw_env": openclaw_env, "HTTPException": HTTPException}
     exec(compile(subset, "api-server-control", "exec"), namespace)
     return namespace["Api"]
 
@@ -197,9 +202,11 @@ def test_checkpoint_reload_endpoints_preserve_public_empty_response(monkeypatch)
     monkeypatch.setitem(api_class.reloadapi.__globals__, "shared", SimpleNamespace(sd_model=sd_model))
 
     api = api_class.__new__(api_class)
+    api.queue_lock = DummyLock(calls)
     assert api.unloadapi() == {}
     assert api.reloadapi() == {}
-    assert calls == ["unload", ("send", sd_model)]
+    # Never under a running generation: both wait for queue_lock.
+    assert calls == ["lock-enter", "unload", "lock-exit", "lock-enter", ("send", sd_model), "lock-exit"]
 
 
 def test_server_control_routes_are_gated_by_api_server_stop(monkeypatch):
@@ -303,9 +310,12 @@ def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(mon
     monkeypatch.setitem(api_class.get_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
 
     api = api_class.__new__(api_class)
+    lock_events = []
+    api.queue_lock = DummyLock(lock_events)
     assert api.get_cuda_graphs() == {"enabled": True, "cache_size": 2}
     assert api.set_cuda_graphs({"enabled": 1, "clear": "yes"}) == {"enabled": True, "cleared": True}
     assert api.set_cuda_graphs(None) == {"enabled": False, "cleared": False}
+    assert lock_events == ["lock-enter", "lock-exit"] * 2
     assert api.get_openclaw_generation_diagnostics() == {}
 
     Diagnostics.current = {"cuda_graphs_delta": {"captures": 1}}
@@ -426,3 +436,131 @@ def test_get_memory_preserves_ram_and_cuda_response_shape(monkeypatch):
         "inactive": {"current": 7, "peak": 8},
         "events": {"retries": 9, "oom": 10},
     }
+
+
+def test_runtime_switch_booleans_follow_the_env_grammar(monkeypatch):
+    # bool("false") is True: {"enabled": "false"} used to enable CUDA graphs.
+    api_class = load_api_control_class()
+    calls = []
+
+    class CudaGraphs:
+        @staticmethod
+        def set_enabled(enabled, clear=False):
+            calls.append((enabled, clear))
+            return {}
+
+    class VaeGraphs:
+        @staticmethod
+        def set_enabled(enabled, clear_cache=False):
+            calls.append(("vae", enabled, clear_cache))
+            return {}
+
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
+            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
+        if name == "modules" and "openclaw_vae_decode_graphs" in fromlist:
+            return SimpleNamespace(openclaw_vae_decode_graphs=VaeGraphs)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
+    api = api_class.__new__(api_class)
+    api.queue_lock = DummyLock([])
+    api.set_vae_decode_graphs({"clear": True})  # no "enabled": reset the cache, keep the current state
+    api.set_vae_decode_graphs({"enabled": "no"})
+    assert calls == [("vae", None, True), ("vae", False, False)]
+    calls.clear()
+    api.set_cuda_graphs({"enabled": "false", "clear": "Off"})
+    api.set_cuda_graphs({"enabled": True, "clear": 0})
+    assert calls == [(False, False), (True, False)]
+    for bad in ({"enabled": "maybe"}, {"enabled": 2}, {"clear": [1]}):
+        with pytest.raises(HTTPException) as raised:
+            api.set_cuda_graphs(bad)
+        assert raised.value.status_code == 422
+    assert len(calls) == 2
+
+
+class _OptionsStub:
+    """Options.set's contract: True if changed, False if unchanged or refused; raises on a failed onchange."""
+
+    def __init__(self, events, failing=(), refused=(), wrong_type=()):
+        self.data_labels = {"a": None, "b": None, "c": None, "api_useragent": None}
+        self.data = {"a": 1, "b": 2, "c": 3, "api_useragent": ""}
+        self.events, self.failing, self.refused, self.wrong_type = events, failing, refused, wrong_type
+
+    def set(self, key, value, is_api=False):
+        self.events.append(("set", key, value))
+        if key in self.wrong_type:
+            raise ValueError(f"{value!r} is not a {type(self.data[key]).__name__}")
+        if key in self.refused or self.data[key] == value:
+            return False
+        if key in self.failing:
+            raise _OptionChangeFailed(f"changing setting {key} to {value!r} failed and was reverted")
+        self.data[key] = value
+        return True
+
+    def save(self, filename):
+        self.events.append(("save", dict(self.data)))
+
+
+class _OptionChangeFailed(RuntimeError):
+    pass
+
+
+def _config_api(monkeypatch, events, **stub_kwargs):
+    api_class = load_api_control_class()
+    opts = _OptionsStub(events, **stub_kwargs)
+    globals_ = api_class.set_config.__globals__
+    monkeypatch.setitem(globals_, "shared", SimpleNamespace(opts=opts, config_filename="config.json"))
+    monkeypatch.setitem(globals_, "sd_models", SimpleNamespace(checkpoint_aliases={"model.safetensors": object()}))
+    monkeypatch.setitem(globals_, "options", SimpleNamespace(OptionChangeFailed=_OptionChangeFailed))
+    monkeypatch.setitem(globals_, "errors", SimpleNamespace(report=lambda *args, **kwargs: events.append("report")))
+    api = api_class.__new__(api_class)
+    api.queue_lock = DummyLock(events)
+    return api, opts
+
+
+def test_set_config_applies_between_generations_and_saves(monkeypatch):
+    events = []
+    api, opts = _config_api(monkeypatch, events)
+    assert api.set_config({"a": 10, "b": 2}) is None
+    assert events == ["lock-enter", ("set", "a", 10), ("set", "b", 2), ("save", opts.data), "lock-exit"]
+
+
+def test_set_config_reports_a_failed_onchange_instead_of_answering_ok(monkeypatch):
+    # The controller had to re-read options because A1111 answered 200 after a requantize/reload raised.
+    events = []
+    api, opts = _config_api(monkeypatch, events, failing=("b",))
+    with pytest.raises(HTTPException) as raised:
+        api.set_config({"a": 10, "b": 20, "c": 30})
+    assert raised.value.status_code == 500
+    assert "b" in raised.value.detail and "['a']" in raised.value.detail
+    assert ("set", "c", 30) not in events
+    assert opts.data == {"a": 10, "b": 2, "c": 3, "api_useragent": ""}
+    assert events[-2:] == [("save", opts.data), "lock-exit"]  # the applied key is persisted
+
+
+def test_set_config_rejects_unknown_keys_before_applying_anything(monkeypatch):
+    events = []
+    api, _ = _config_api(monkeypatch, events)
+    with pytest.raises(HTTPException) as raised:
+        api.set_config({"a": 10, "nope": 1})
+    assert raised.value.status_code == 422
+    assert events == []
+
+
+def test_set_config_reports_refused_and_mistyped_options(monkeypatch):
+    events = []
+    api, opts = _config_api(monkeypatch, events, refused=("api_useragent",))
+    with pytest.raises(HTTPException) as raised:
+        api.set_config({"api_useragent": "x", "a": 5})
+    assert raised.value.status_code == 422 and "api_useragent" in raised.value.detail
+    assert opts.data["a"] == 5
+
+    events = []
+    api, opts = _config_api(monkeypatch, events, wrong_type=("a",))
+    with pytest.raises(HTTPException) as raised:
+        api.set_config({"a": "five"})
+    assert raised.value.status_code == 422
+    assert not any(event[0] == "save" for event in events if isinstance(event, tuple))

@@ -33,7 +33,10 @@ def reset():
 
 
 def quote(text):
-    if ',' not in str(text) and '\n' not in str(text) and ':' not in str(text):
+    """Returns an infotext value as parse_generation_parameters() reads it back: unchanged, or as a JSON string when
+    it contains a comma, colon or newline, or starts with a double quote (an unquoted "x" would be read back as x)."""
+    text_str = str(text)
+    if ',' not in text_str and '\n' not in text_str and ':' not in text_str and not text_str.startswith('"'):
         return text
 
     return json.dumps(text, ensure_ascii=False)

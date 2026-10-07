@@ -92,6 +92,21 @@ def test_telemetry_is_sanitized():
     assert re.search(r"[0-9a-f]{16}", payload)
 
 
+def test_dataclass_semantic_keys_digest_their_fields():
+    from modules import openclaw_generation_profile
+
+    def key(steps, params=()):
+        return openclaw_generation_profile.make_key("kdiffusion_sigmas", "Euler", "Karras", steps, "cpu", "torch.float32", params)
+
+    digest = openclaw_cache_epochs.registry.digest
+    assert digest(key(20)) == digest(key(20))
+    assert len({digest(key(20)), digest(key(21)), digest(key(20, (True, 0.5))), digest(key(20, (True, 0.25)))}) == 4
+
+    for steps in (20, 21, 22):
+        openclaw_cache_epochs.observe("E08", "miss", reason="cache_miss", semantic_key=key(steps))
+    assert len(family(openclaw_cache_epochs.snapshot(), "E08")["semantic_key_digests"]) == 3
+
+
 def test_all_caches_declare_dependency_contract():
     snapshot = openclaw_cache_epochs.snapshot()
     assert [item["id"] for item in snapshot["families"]] == [f"E{index:02d}" for index in range(1, 35)]

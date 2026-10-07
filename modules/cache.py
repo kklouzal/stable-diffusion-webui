@@ -24,16 +24,17 @@ def file_revision(stat_result):
 
 
 def file_cache_key(path, *extra):
-    """In-memory cache key that changes with the file's content: (abspath, (mtime_ns, size), *extra).
+    """In-memory cache key that changes with the file's content: (abspath, revision, *extra).
 
-    An unreadable file gets (None, None) as its identity instead of raising.
+    The revision is file_revision() as a tuple. Size and mtime alone keep the key of a file replaced by one of equal
+    size with its mtime preserved (cp -p, rsync -t, tar x); the replacement still changes the inode or the ctime.
+    An unreadable file gets None as its revision instead of raising.
     """
     filename = os.path.abspath(path)
     try:
-        stat = os.stat(filename)
-        file_identity = (stat.st_mtime_ns, stat.st_size)
+        file_identity = tuple(file_revision(os.stat(filename)).values())
     except OSError:
-        file_identity = (None, None)
+        file_identity = None
     return (filename, file_identity, *extra)
 
 

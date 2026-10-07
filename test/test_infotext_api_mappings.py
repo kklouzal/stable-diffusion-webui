@@ -32,7 +32,9 @@ def load_api_infotext_value_helper():
     )
     module = ast.Module(body=[helper], type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {}
+    from fastapi.exceptions import HTTPException
+    from modules import openclaw_env
+    namespace = {"HTTPException": HTTPException, "openclaw_env": openclaw_env}
     exec(compile(module, "modules/api/api.py", "exec"), namespace)
     return namespace[helper.name]
 
@@ -123,6 +125,19 @@ def test_api_script_infotext_coerces_bool_strings_without_truthiness_bug():
 
     assert convert(field, {"CFG Interval Enable": "False"}, bool) is False
     assert convert(field, {"CFG Interval Enable": "True"}, bool) is True
+
+
+def test_api_script_infotext_rejects_values_that_do_not_convert():
+    # Before: unrecognized text fell through to bool("garbage") == True, and int("abc") answered 500.
+    from fastapi.exceptions import HTTPException
+    import pytest
+
+    convert = load_api_infotext_value_helper()
+    field = types.SimpleNamespace(label="CFG Interval Enable", function=None)
+    for value, target in (("garbage", bool), ("abc", int)):
+        with pytest.raises(HTTPException) as raised:
+            convert(field, {"CFG Interval Enable": value}, target)
+        assert raised.value.status_code == 422
 
 
 def test_option_bool_casting_accepts_common_false_strings():

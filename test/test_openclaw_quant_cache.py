@@ -134,3 +134,100 @@ def test_artifact_contract_survives_weights_only_load(tmp_path):
     torch.save({"contract": torchao_model_cache.artifact_contract("cfg", ["unet_other"])}, path)
     loaded = torchao_model_cache.torch_load_cache(str(path), "cpu", lambda: None)  # the production weights_only loader
     assert loaded["contract"]["runtime"]["torch"] == str(torch.__version__)
+
+
+def test_torchao_cache_rehash_records_the_identity_seen_before_hashing(monkeypatch, tmp_path):
+    # A file replaced (same size, other bytes) while it is being re-hashed must not become trusted under its new identity.
+    source = tmp_path / "model.safetensors"
+    source.write_bytes(b"aaaa")
+    metadata = torchao_model_cache.stat_source(str(source))
+    os.utime(source, ns=(metadata["mtime_ns"] + 10**9,) * 2)  # same bytes, new identity: the next check re-hashes
+    real_hash = torchao_model_cache.sha256_file
+
+    def hash_then_replace(filename):
+        digest = real_hash(filename)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"bbbb")
+        os.replace(replacement, filename)
+        return digest
+
+    monkeypatch.setattr(torchao_model_cache, "sha256_file", hash_then_replace)
+    assert torchao_model_cache.file_metadata_matches(str(source), metadata)  # the bytes it hashed were the recorded ones
+    monkeypatch.setattr(torchao_model_cache, "sha256_file", real_hash)
+    assert not torchao_model_cache.file_metadata_matches(str(source), metadata)
+
+
+def _linear_model():
+    torch.manual_seed(0)
+    model = torch.nn.Module()
+    model.linear = torch.nn.Linear(64, 64, dtype=torch.bfloat16)
+    return model
+
+
+def _saved_mxfp8_cache(tmp_path, coverage):
+    from torchao.quantization import quantize_
+
+    from modules import torchao_weight_quant
+
+    backend = torchao_weight_quant.MXFP8
+    root = tmp_path / "Stable-diffusion"
+    root.mkdir()
+    source = root / "model.safetensors"
+    source.write_bytes(b"checkpoint bytes")
+    fresh = _linear_model()
+    quantize_(fresh, backend.make_config(), filter_fn=_only_linear)
+    cache_path = torchao_model_cache.save_from_model(backend, fresh, str(source), _only_linear, 1, 0, {}, coverage)
+    assert cache_path
+    return backend, source, fresh, cache_path
+
+
+def _only_linear(module, fqn):
+    return fqn == "linear"
+
+
+def test_torchao_cached_load_matches_quantize_and_hashes_a_touched_source_once(monkeypatch, tmp_path):
+    coverage = ["unet_other"]
+    backend, source, fresh, _ = _saved_mxfp8_cache(tmp_path, coverage)
+    stat = os.stat(source)
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))  # metadata change only: the bytes are the same
+    hashed = []
+    real_hash = torchao_model_cache.sha256_file
+    monkeypatch.setattr(torchao_model_cache, "sha256_file", lambda filename: hashed.append(filename) or real_hash(filename))
+
+    loads = []
+    for _ in range(2):
+        model = _linear_model()
+        assert torchao_model_cache.load_into_model(backend, model, str(source), _only_linear, "cpu", coverage)
+        loads.append((model, list(hashed)))
+        hashed.clear()
+
+    # One re-hash proves the touched source still has the recorded bytes; the payload's stale identity adds none.
+    assert [calls for _, calls in loads] == [[str(source)], []]
+    expected = fresh.linear.weight
+    for model, _ in loads:
+        weight = model.linear.weight
+        assert type(weight) is type(expected)
+        assert isinstance(weight, torch.nn.Parameter) and isinstance(expected, torch.nn.Parameter)
+        assert weight.requires_grad is False
+        assert torch.equal(weight.qdata.view(torch.uint8), expected.qdata.view(torch.uint8))
+        assert torch.equal(weight.scale.view(torch.uint8), expected.scale.view(torch.uint8))
+        assert weight.act_quant_kwargs == expected.act_quant_kwargs and weight.is_swizzled_scales == expected.is_swizzled_scales
+        assert torch.equal(model.linear.bias.detach(), fresh.linear.bias.detach())
+
+
+def test_torchao_cache_rejects_a_payload_built_from_other_bytes(tmp_path):
+    import json
+
+    backend, source, _, cache_path = _saved_mxfp8_cache(tmp_path, None)
+
+    # Rewrite the payload as if it had been built from other bytes, and re-seal the sidecar around the new artifact.
+    payload = torchao_model_cache.torch_load_cache(cache_path, "cpu", backend.register_safe_globals)
+    payload["source"] = {**payload["source"], "sha256": "0" * 64}
+    torch.save(payload, cache_path)
+    sidecar = torchao_model_cache.load_sidecar(cache_path, backend.sidecar_suffix)
+    sidecar["cache"] = torchao_model_cache.stat_source(cache_path)
+    with open(torchao_model_cache.sidecar_path(cache_path, backend.sidecar_suffix), "w", encoding="utf8") as f:
+        json.dump(sidecar, f)
+
+    assert torchao_model_cache.sidecar_matches(str(source), cache_path, backend.cache_version, backend.config_name, backend.sidecar_suffix)
+    assert not torchao_model_cache.load_into_model(backend, _linear_model(), str(source), _only_linear, "cpu", None)

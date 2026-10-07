@@ -4,7 +4,7 @@ import sys
 import inspect
 import time
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from modules import headless_ui as gr
 
@@ -43,6 +43,23 @@ class PostProcessMaskOverlayArgs:
 class PostprocessBatchListArgs:
     def __init__(self, images):
         self.images = images
+
+
+@dataclass
+class ScriptLifecycle:
+    """What one process_images() call still owes its alwayson scripts if it fails: which scripts ran a hook
+    (only those get failure cleanup), whether a batch is open (postprocess_batch not started yet), and whether
+    postprocess has started. Owned by ScriptRunner; stored on p as `_script_lifecycle`."""
+    entered: dict = field(default_factory=dict)  # id(script) -> script, in first-hook order
+    batch_open: bool = False
+    postprocess_started: bool = False
+
+
+def _raise_hook_failures(hook_name, failures):
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise ExceptionGroup(f"{len(failures)} scripts failed in {hook_name}", failures)
 
 
 class Script:
@@ -204,6 +221,10 @@ class Script:
         **kwargs will have same items as process_batch, and also:
           - batch_number - index of current batch, from 0 to number of batches-1
           - images - torch tensor with all generated images, with values ranging from 0 to 1;
+
+        Also called, with an empty `images` batch, when the generation fails after a hook of this script ran,
+        so per-batch hooks installed in process_batch are always removed. Every script's postprocess_batch
+        runs even if another one raises; the failures are raised afterwards.
         """
 
         pass
@@ -273,6 +294,10 @@ class Script:
         """
         This function is called after processing ends for AlwaysVisible scripts.
         args contains all values returned by components from ui()
+
+        Also called when the generation fails after any hook of this script ran, with an empty Processed (no
+        images, the shape an interrupted generation also produces), so per-request hooks are always removed.
+        Every script's postprocess runs even if another one raises; the failures are raised afterwards.
         """
 
         pass
@@ -806,80 +831,132 @@ class ScriptRunner:
         script_stats["hooks"][hook_name] = round(float(script_stats["hooks"].get(hook_name) or 0.0) + elapsed, 6)
 
     def _run_timed_script_hook(self, p, script, hook_name, *hook_args, **kwargs):
-        try:
-            script_args = self._script_args_for(p, script)
-            started = time.perf_counter()
-            try:
-                getattr(script, hook_name)(p, *hook_args, *script_args, **kwargs)
-            finally:
-                self._record_script_timing(p, hook_name, script, time.perf_counter() - started)
-        except Exception:
-            errors.report(f"Error running {hook_name}: {script.filename}", exc_info=True)
+        # A hook that raises has not applied (or only partly applied) what the request asked for, so the
+        # exception fails the request instead of being logged. The script is recorded first: a hook that
+        # fails midway may already have installed state that its cleanup hooks must remove.
+        lifecycle = getattr(p, "_script_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.entered.setdefault(id(script), script)
 
+        script_args = self._script_args_for(p, script)
+        started = time.perf_counter()
+        try:
+            getattr(script, hook_name)(p, *hook_args, *script_args, **kwargs)
+        except Exception as e:
+            e.add_note(f"raised by {hook_name} of script {script.filename}")
+            raise
+        finally:
+            self._record_script_timing(p, hook_name, script, time.perf_counter() - started)
+
+    def _run_hook(self, p, hook_name, *hook_args, **kwargs):
+        """Setup and output hooks: the first failure stops the remaining scripts and fails the request."""
+        for script in self.ordered_scripts(hook_name):
+            self._run_timed_script_hook(p, script, hook_name, *hook_args, **kwargs)
+
+    def _run_cleanup_hook(self, p, hook_name, *hook_args, only=None, **kwargs):
+        """Cleanup hooks run for every script (or for every script in `only`, a dict keyed by id(script)) even
+        when one raises, so one failing script cannot leave the others' hooks installed. Returns the failures."""
+        failures = []
+        for script in self.ordered_scripts(hook_name):
+            if only is not None and id(script) not in only:
+                continue
+            try:
+                self._run_timed_script_hook(p, script, hook_name, *hook_args, **kwargs)
+            except Exception as e:
+                failures.append(e)
+        return failures
+
+    def begin_generation(self, p):
+        """Start tracking one process_images() call on p. Returns the tracker it replaces (a nested
+        process_images on the same p), which end_generation restores."""
+        previous = getattr(p, "_script_lifecycle", None)
+        p._script_lifecycle = ScriptLifecycle()
+        return previous
+
+    @staticmethod
+    def end_generation(p, previous):
+        p._script_lifecycle = previous
+
+    def cleanup_failed_generation(self, p, primary, make_batch_images, make_processed):
+        """After `primary` failed a process_images() call, give every script that ran a hook in it the cleanup
+        hooks the success path did not reach: postprocess_batch for the open batch (images=make_batch_images(),
+        an empty batch), then postprocess(make_processed()), an empty Processed. Cleanup failures are reported
+        and attached to `primary` as notes; they never replace it."""
+        lifecycle = getattr(p, "_script_lifecycle", None)
+        if lifecycle is None or not lifecycle.entered:
+            return
+
+        failures = []
+        try:
+            if lifecycle.batch_open and not lifecycle.postprocess_started:
+                lifecycle.batch_open = False
+                failures += self._run_cleanup_hook(p, 'postprocess_batch', only=lifecycle.entered, images=make_batch_images(), batch_number=p.iteration)
+            if not lifecycle.postprocess_started:
+                lifecycle.postprocess_started = True
+                failures += self._run_cleanup_hook(p, 'postprocess', make_processed(), only=lifecycle.entered)
+        except Exception as e:
+            failures.append(e)
+
+        for failure in failures:
+            errors.display(failure, "script cleanup after a failed generation")
+            primary.add_note(f"script cleanup after this failure also failed: {type(failure).__name__}: {failure}")
 
     def before_process(self, p):
-        for script in self.ordered_scripts('before_process'):
-            self._run_timed_script_hook(p, script, 'before_process')
+        self._run_hook(p, 'before_process')
 
     def process(self, p):
-        for script in self.ordered_scripts('process'):
-            self._run_timed_script_hook(p, script, 'process')
+        self._run_hook(p, 'process')
 
     def process_before_every_sampling(self, p, **kwargs):
-        for script in self.ordered_scripts('process_before_every_sampling'):
-            self._run_timed_script_hook(p, script, 'process_before_every_sampling', **kwargs)
+        self._run_hook(p, 'process_before_every_sampling', **kwargs)
 
     def before_process_batch(self, p, **kwargs):
-        for script in self.ordered_scripts('before_process_batch'):
-            self._run_timed_script_hook(p, script, 'before_process_batch', **kwargs)
+        lifecycle = getattr(p, "_script_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.batch_open = True
+        self._run_hook(p, 'before_process_batch', **kwargs)
 
     def after_extra_networks_activate(self, p, **kwargs):
-        for script in self.ordered_scripts('after_extra_networks_activate'):
-            self._run_timed_script_hook(p, script, 'after_extra_networks_activate', **kwargs)
+        self._run_hook(p, 'after_extra_networks_activate', **kwargs)
 
     def process_batch(self, p, **kwargs):
-        for script in self.ordered_scripts('process_batch'):
-            self._run_timed_script_hook(p, script, 'process_batch', **kwargs)
+        self._run_hook(p, 'process_batch', **kwargs)
 
     def postprocess(self, p, processed):
-        for script in self.ordered_scripts('postprocess'):
-            self._run_timed_script_hook(p, script, 'postprocess', processed)
+        lifecycle = getattr(p, "_script_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.postprocess_started = True
+        _raise_hook_failures('postprocess', self._run_cleanup_hook(p, 'postprocess', processed))
 
     def postprocess_batch(self, p, images, **kwargs):
-        for script in self.ordered_scripts('postprocess_batch'):
-            self._run_timed_script_hook(p, script, 'postprocess_batch', images=images, **kwargs)
+        lifecycle = getattr(p, "_script_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.batch_open = False
+        _raise_hook_failures('postprocess_batch', self._run_cleanup_hook(p, 'postprocess_batch', images=images, **kwargs))
 
     def postprocess_batch_list(self, p, pp: PostprocessBatchListArgs, **kwargs):
-        for script in self.ordered_scripts('postprocess_batch_list'):
-            self._run_timed_script_hook(p, script, 'postprocess_batch_list', pp, **kwargs)
+        self._run_hook(p, 'postprocess_batch_list', pp, **kwargs)
 
     def post_sample(self, p, ps: PostSampleArgs):
-        for script in self.ordered_scripts('post_sample'):
-            self._run_timed_script_hook(p, script, 'post_sample', ps)
+        self._run_hook(p, 'post_sample', ps)
 
     def on_mask_blend(self, p, mba: MaskBlendArgs):
-        for script in self.ordered_scripts('on_mask_blend'):
-            self._run_timed_script_hook(p, script, 'on_mask_blend', mba)
-
-    def _run_postprocess_arg_hook(self, p, hook_name, hook_arg):
-        for script in self.ordered_scripts(hook_name):
-            self._run_timed_script_hook(p, script, hook_name, hook_arg)
+        self._run_hook(p, 'on_mask_blend', mba)
 
     def postprocess_image(self, p, pp: PostprocessImageArgs):
-        self._run_postprocess_arg_hook(p, 'postprocess_image', pp)
+        self._run_hook(p, 'postprocess_image', pp)
 
     def postprocess_maskoverlay(self, p, ppmo: PostProcessMaskOverlayArgs):
-        self._run_postprocess_arg_hook(p, 'postprocess_maskoverlay', ppmo)
+        self._run_hook(p, 'postprocess_maskoverlay', ppmo)
 
     def postprocess_image_after_composite(self, p, pp: PostprocessImageArgs):
-        self._run_postprocess_arg_hook(p, 'postprocess_image_after_composite', pp)
+        self._run_hook(p, 'postprocess_image_after_composite', pp)
 
     def script(self, title):
         return self.title_map.get(title.lower())
 
     def before_hr(self, p):
-        for script in self.ordered_scripts('before_hr'):
-            self._run_timed_script_hook(p, script, 'before_hr')
+        self._run_hook(p, 'before_hr')
 
     def setup_scrips(self, p, *, is_ui=True):
         for script in self.ordered_scripts('setup'):

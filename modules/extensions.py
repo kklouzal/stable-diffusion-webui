@@ -168,9 +168,12 @@ class Extension:
 
         try:
             d = cache.cached_data_for_file('extensions-git', self.name, os.path.join(self.path, ".git"), read_from_repo, source_revision=lambda: git_repository_revision(self.path))
-            self.from_dict(d)
         except FileNotFoundError:
-            pass
+            d = None
+        # None without an exception: the repository changed while it was read (nothing cached), or another thread
+        # read it first; either way do_read_info_from_repo() has already set this extension's fields.
+        if d is not None:
+            self.from_dict(d)
         self.status = 'unknown' if self.status == '' else self.status
 
     def do_read_info_from_repo(self):
@@ -249,9 +252,12 @@ class Extension:
 
 
 def list_extensions():
-    extensions.clear()
-    extension_paths.clear()
-    loaded_extensions.clear()
+    """Rescans the extension directories and replaces extensions, extension_paths and loaded_extensions.
+
+    The new registries are built aside and published by rebinding, never emptied and refilled in place:
+    GET /sdapi/v1/extensions rescans while a generation reads them (script_callbacks.find_extension, sort_callbacks).
+    """
+    global extensions, extension_paths, loaded_extensions
 
     if shared.cmd_opts.disable_all_extensions:
         print("*** \"--disable-all-extensions\" arg was used, will not load any extensions ***")
@@ -262,6 +268,10 @@ def list_extensions():
     elif shared.opts.disable_all_extensions == "extra":
         print("*** \"Disable all extensions\" option was set, will only load built-in extensions ***")
 
+
+    found_extensions = []
+    found_paths = {}
+    found_by_name = {}
 
     # scan through extensions directory and load metadata
     for dirname in [extensions_builtin_dir, extensions_dir]:
@@ -277,16 +287,18 @@ def list_extensions():
             metadata = ExtensionMetadata(path, canonical_name)
 
             # check for duplicated canonical names
-            already_loaded_extension = loaded_extensions.get(metadata.canonical_name)
+            already_loaded_extension = found_by_name.get(metadata.canonical_name)
             if already_loaded_extension is not None:
                 errors.report(f'Duplicate canonical name "{canonical_name}" found in extensions "{extension_dirname}" and "{already_loaded_extension.name}". Former will be discarded.', exc_info=False)
                 continue
 
             is_builtin = dirname == extensions_builtin_dir
             extension = Extension(name=extension_dirname, path=path, enabled=extension_dirname not in shared.opts.disabled_extensions, is_builtin=is_builtin, metadata=metadata)
-            extensions.append(extension)
-            extension_paths[extension.path] = extension
-            loaded_extensions[metadata.canonical_name] = extension
+            found_extensions.append(extension)
+            found_paths[extension.path] = extension
+            found_by_name[metadata.canonical_name] = extension
+
+    extensions, extension_paths, loaded_extensions = found_extensions, found_paths, found_by_name
 
     for extension in extensions:
         extension.metadata.requires = extension.metadata.get_script_requirements("Requires", "Extension")

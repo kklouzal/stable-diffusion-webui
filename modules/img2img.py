@@ -27,6 +27,13 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
         inpaint_masks = shared.listfiles(inpaint_mask_dir)
         is_inpaint_batch = bool(inpaint_masks)
 
+        # An image's mask is the mask named like the image with any extension: preferably exactly "<image stem>.<ext>",
+        # else any "<image stem>.*", first in listfiles' natural order. Names are compared literally; the glob pattern
+        # this replaces read "[1]" in "a[1].png" as a character class and so picked "a1.png", in directory order.
+        masks_by_stem = {}
+        for mask_path in inpaint_masks:
+            masks_by_stem.setdefault(Path(mask_path).stem, mask_path)
+
         if is_inpaint_batch:
             print(f"\nInpaint batch is enabled. {len(inpaint_masks)} masks found.")
 
@@ -73,17 +80,14 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
             if len(inpaint_masks) == 1:
                 mask_image_path = inpaint_masks[0]
             else:
-                # try to find corresponding mask for an image using simple filename matching
-                mask_image_dir = Path(inpaint_mask_dir)
-                masks_found = list(mask_image_dir.glob(f"{image_path.stem}.*"))
+                mask_image_path = masks_by_stem.get(image_path.stem)
+                if mask_image_path is None:
+                    prefix = image_path.stem + "."
+                    mask_image_path = next((mask for mask in inpaint_masks if os.path.basename(mask).startswith(prefix)), None)
 
-                if len(masks_found) == 0:
-                    print(f"Warning: mask is not found for {image_path} in {mask_image_dir}. Skipping it.")
+                if mask_image_path is None:
+                    print(f"Warning: mask is not found for {image_path} in {Path(inpaint_mask_dir)}. Skipping it.")
                     continue
-
-                # it should contain only 1 matching mask
-                # otherwise user has many masks with the same name but different extensions
-                mask_image_path = masks_found[0]
 
             mask_image = images.read(mask_image_path)
             p.image_mask = mask_image

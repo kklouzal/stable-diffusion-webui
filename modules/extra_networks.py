@@ -125,19 +125,17 @@ def lookup_extra_networks(extra_network_data):
 
 def activate(p, extra_network_data):
     """call activate for extra networks in extra_network_data in specified order, then call
-    activate for all remaining registered networks with an empty argument list"""
+    activate for all remaining registered networks with an empty argument list
+
+    An exception from a network named in the prompt propagates and fails the request: catching it generated the
+    image without the requested network (the reset pass below re-activated that network with an empty list).
+    processing.process_images still runs deactivate() for the request."""
 
     activated = []
 
     for extra_network, extra_network_args in lookup_extra_networks(extra_network_data).items():
-
-        try:
-            extra_network.activate(p, extra_network_args)
-            activated.append(extra_network)
-        except Exception as e:
-            if type(e).__name__ == "FatalLoraPreparationError":
-                raise
-            errors.display(e, f"activating extra network {extra_network.name} with arguments {extra_network_args}")
+        extra_network.activate(p, extra_network_args)
+        activated.append(extra_network)
 
     for extra_network_name, extra_network in extra_network_registry.items():
         if extra_network in activated:

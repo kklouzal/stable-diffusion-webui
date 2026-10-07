@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+import threading
 from dataclasses import dataclass
 
 from modules import headless_ui as gr
@@ -79,6 +80,13 @@ def options_section(section_identifier, options_dict):
 options_builtin_fields = {"data_labels", "data", "restricted_opts", "typemap"}
 
 
+class OptionChangeFailed(RuntimeError):
+    """An option's onchange callback raised; the option keeps its previous value (the cause is chained)."""
+
+_save_lock = threading.Lock()
+"""Serializes Options.save(): API requests save the settings file from concurrent threads."""
+
+
 class Options:
     typemap = {int: float}
 
@@ -97,9 +105,10 @@ class Options:
                 # Check that settings aren't globally frozen
                 assert not cmd_opts.freeze_settings, "changing settings is disabled"
 
-                # Get the info related to the setting being changed
+                # Get the info related to the setting being changed; a key loaded from the settings file whose option
+                # is no longer registered (e.g. its extension was removed) has none
                 info = self.data_labels.get(key, None)
-                if info.do_not_save:
+                if info is not None and info.do_not_save:
                     return
 
                 # Restrict component arguments
@@ -108,7 +117,7 @@ class Options:
                     raise RuntimeError(f"not possible to set '{key}' because it is restricted")
 
                 # Check that this section isn't frozen
-                if cmd_opts.freeze_settings_in_sections is not None:
+                if cmd_opts.freeze_settings_in_sections is not None and info is not None:
                     frozen_sections = list(map(str.strip, cmd_opts.freeze_settings_in_sections.split(','))) # Trim whitespace from section names
                     section_key = info.section[0]
                     section_name = info.section[1]
@@ -142,7 +151,13 @@ class Options:
         return super(Options, self).__getattribute__(item)
 
     def set(self, key, value, is_api=False, run_callbacks=True):
-        """sets an option and calls its onchange callback, returning True if the option changed and False otherwise"""
+        """sets an option and calls its onchange callback, returning True if the option changed and False otherwise
+
+        An API value (is_api=True: /sdapi/v1/options and request override_settings) must have the type of the option's
+        default, with int and float interchangeable and None accepted (same_type()); any other value raises ValueError
+        rather than being stored, because e.g. the JSON string "false" stored in a bool option reads as True.
+        If the onchange callback raises, the previous value is restored and OptionChangeFailed (from the callback's
+        exception) propagates to the caller."""
 
         oldval = self.data.get(key, None)
         if oldval == value:
@@ -155,6 +170,9 @@ class Options:
         if is_api and option.restrict_api:
             return False
 
+        if is_api and not self.same_type(option.default, value):
+            raise ValueError(f"setting {key!r} expects a value of type {type(option.default).__name__}, got {type(value).__name__} {value!r}")
+
         try:
             setattr(self, key, value)
         except RuntimeError:
@@ -164,9 +182,8 @@ class Options:
             try:
                 option.onchange()
             except Exception as e:
-                errors.display(e, f"changing setting {key} to {value}")
                 setattr(self, key, oldval)
-                return False
+                raise OptionChangeFailed(f"changing setting {key} to {value!r} failed and was reverted: {type(e).__name__}: {e}") from e
 
         return True
 
@@ -182,8 +199,13 @@ class Options:
     def save(self, filename):
         assert not cmd_opts.freeze_settings, "saving settings is disabled"
 
-        with open(filename, "w", encoding="utf8") as file:
-            json.dump(self.data, file, indent=4, ensure_ascii=False)
+        # Serialized before the file is opened, so a value json cannot encode leaves the file intact instead of
+        # truncated, and under a lock, so concurrent saves cannot interleave their writes. The file is rewritten in
+        # place, not replaced by rename: gb10/run.sh bind-mounts it as a single file, which rename cannot replace.
+        with _save_lock:
+            text = json.dumps(self.data, indent=4, ensure_ascii=False)
+            with open(filename, "w", encoding="utf8") as file:
+                file.write(text)
 
     def same_type(self, x, y):
         if x is None or y is None:
@@ -316,6 +338,7 @@ class Options:
                     return True
                 if normalized in ("false", "0", "no", "off"):
                     return False
+                raise ValueError(f"setting {key!r} expects a boolean, got {value!r}")
 
             value = bool(value)
         else:

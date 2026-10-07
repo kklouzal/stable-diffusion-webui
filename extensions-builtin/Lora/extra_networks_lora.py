@@ -54,8 +54,8 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
 
             networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
         except Exception as e:
-            # extra_networks.activate would only log any other error and then activate an empty LoRA set,
-            # generating without every requested LoRA.
+            # Name the failing step; extra_networks.activate lets it fail the request (generating without the requested
+            # LoRAs is never an option).
             raise FatalLoraPreparationError(f"LoRA activation failed: {e}") from e
         for backend in torchao_weight_quant.BACKENDS.values():
             if not networks.prepare_quant_active_config(backend):

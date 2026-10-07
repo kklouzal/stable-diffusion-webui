@@ -40,6 +40,9 @@ def lora_networks(monkeypatch):
     monkeypatch.setattr(shared.opts, "hide_samplers", [], raising=False)
     monkeypatch.setattr(shared.opts, "samples_format", "png", raising=False)
     monkeypatch.setattr(shared.opts, "lora_in_memory_limit", 10, raising=False)
+    # ExtraNetworkLora.activate reads sd_lora before its FatalLoraPreparationError wrapping: when an earlier test left a
+    # real Options without the Lora extension's options in shared.opts, reading it raises AttributeError instead.
+    monkeypatch.setattr(shared.opts, "sd_lora", "None", raising=False)
     monkeypatch.setattr(shared.opts, "lora_bundled_ti_to_infotext", False, raising=False)
     monkeypatch.setattr(shared.opts, "lora_not_found_warning_console", False, raising=False)
     monkeypatch.setattr(shared.opts, "lora_not_found_gradio_warning", False, raising=False)
@@ -1109,7 +1112,7 @@ def test_bundled_ti_dropped_by_ti_reload_is_registered_again(lora_networks, monk
 
 
 def test_lora_activation_errors_stop_generation_instead_of_dropping_every_lora(lora_networks, monkeypatch):
-    """extra_networks.activate logs non-fatal errors and then activates an empty LoRA set."""
+    """A LoRA that fails to prepare stops the request: generating with an empty LoRA set would drop every LoRA."""
     import extra_networks_lora
     from modules import extra_networks
 

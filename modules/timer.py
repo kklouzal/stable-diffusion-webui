@@ -10,7 +10,7 @@ class TimerSubcategory:
         self.original_base_category = timer.base_category
 
     def __enter__(self):
-        self.start = time.time()
+        self.start = time.perf_counter()
         self.timer.base_category = self.original_base_category + self.category + "/"
         self.timer.subcategory_level += 1
 
@@ -18,16 +18,18 @@ class TimerSubcategory:
             print(f"{'  ' * self.timer.subcategory_level}{self.category}:")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        elapsed_for_subcategroy = time.time() - self.start
+        elapsed_for_subcategroy = time.perf_counter() - self.start
         self.timer.base_category = self.original_base_category
         self.timer.add_time_to_record(self.original_base_category + self.category, elapsed_for_subcategroy)
         self.timer.subcategory_level -= 1
-        self.timer.record(self.category, disable_log=True)
+        # The subcategory's record already spans the time since its last inner record: add that time to the total
+        # only (recording it under the category again counted it twice).
+        self.timer.total += self.timer.elapsed()
 
 
 class Timer:
     def __init__(self, print_log=False):
-        self.start = time.time()
+        self.start = time.perf_counter()
         self.records = {}
         self.total = 0
         self.base_category = ''
@@ -35,7 +37,7 @@ class Timer:
         self.subcategory_level = 0
 
     def elapsed(self):
-        end = time.time()
+        end = time.perf_counter()
         res = end - self.start
         self.start = end
         return res

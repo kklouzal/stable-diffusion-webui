@@ -83,3 +83,49 @@ def test_list_extensions_keys_loaded_extensions_by_metadata_name(tmp_path):
     assert "canonicalname" in extensions.loaded_extensions
     assert "folder-name" not in extensions.loaded_extensions
     assert extensions.extensions[0].canonical_name == "canonicalname"
+
+
+def test_rescan_keeps_the_registries_complete_until_the_new_ones_are_published(tmp_path):
+    extensions = load_extensions_module(tmp_path)
+    for name in ("first", "second"):
+        (tmp_path / "extensions" / name).mkdir(parents=True)
+    extensions.list_extensions()
+    previous = list(extensions.extensions)
+    observed = []
+    create_metadata = extensions.ExtensionMetadata
+
+    def observing_metadata(path, canonical_name):
+        # what a concurrent reader (script_callbacks.find_extension/sort_callbacks) sees during the rescan
+        observed.append(([x.name for x in extensions.extensions], len(extensions.extension_paths), sorted(extensions.loaded_extensions)))
+        return create_metadata(path, canonical_name)
+
+    extensions.ExtensionMetadata = observing_metadata
+    extensions.list_extensions()
+
+    assert observed == [(["first", "second"], 2, ["first", "second"])] * 2
+    assert [x.name for x in extensions.extensions] == ["first", "second"]
+    assert all(new is not old for new, old in zip(extensions.extensions, previous))
+    assert sorted(extensions.extension_paths) == sorted(x.path for x in extensions.extensions)
+
+
+def test_read_info_keeps_fields_when_the_repository_changes_while_it_is_read(tmp_path):
+    extensions = load_extensions_module(tmp_path)
+    ext_path = tmp_path / "extensions" / "git-ext"
+    (ext_path / ".git").mkdir(parents=True)
+    extension = extensions.Extension("git-ext", str(ext_path))
+
+    def read_repository():
+        extension.remote = "https://example.invalid/git-ext.git"
+        extension.commit_hash = "0123456789abcdef"
+        extension.have_info_from_repo = True
+
+    def cached_data_for_file(subsection, title, filename, func, **kwargs):
+        func()
+        return None  # cache.cached_data_for_file: source revision changed during func(), nothing cached
+
+    extension.do_read_info_from_repo = read_repository
+    extensions.cache = types.SimpleNamespace(cached_data_for_file=cached_data_for_file)
+
+    extension.read_info_from_repo()
+
+    assert (extension.remote, extension.commit_hash, extension.status) == ("https://example.invalid/git-ext.git", "0123456789abcdef", "unknown")
