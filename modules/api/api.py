@@ -840,6 +840,8 @@ class Api:
         self.add_api_route("/sdapi/v1/openclaw/cuda-graphs", self.set_cuda_graphs, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/vae-decode-graphs", self.get_vae_decode_graphs, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/vae-decode-graphs", self.set_vae_decode_graphs, methods=["POST"])
+        self.add_api_route("/sdapi/v1/openclaw/nhwc-groupnorm", self.get_nhwc_groupnorm, methods=["GET"])
+        self.add_api_route("/sdapi/v1/openclaw/nhwc-groupnorm", self.set_nhwc_groupnorm, methods=["POST"])
         self.add_api_route("/sdapi/v1/openclaw/generation-diagnostics", self.get_openclaw_generation_diagnostics, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/cache-telemetry", self.get_openclaw_cache_telemetry, methods=["GET"])
         self.add_api_route("/sdapi/v1/openclaw/precision-map", self.get_precision_map, methods=["GET"])
@@ -963,6 +965,29 @@ class Api:
         clear = _request_bool(req, "clear", False)
         with self.queue_lock:
             return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
+
+    def get_nhwc_groupnorm(self):
+        from modules import openclaw_nhwc_groupnorm
+        return openclaw_nhwc_groupnorm.status()
+
+    def set_nhwc_groupnorm(self, req: dict[str, Any]):
+        """{"scopes": "all" | "" | "unet,silu,vae,controlnet" | [...], "reset_counters": bool}, each optional (missing
+        scopes: unchanged); see modules/openclaw_nhwc_groupnorm.py. Applied between generations (queue_lock)."""
+        from modules import openclaw_nhwc_groupnorm
+        if not isinstance(req, dict):
+            raise HTTPException(status_code=422, detail="expected a JSON object")
+        reset = _request_bool(req, "reset_counters", False)
+        with self.queue_lock:
+            if "scopes" in req:
+                try:
+                    openclaw_nhwc_groupnorm.set_scopes(req["scopes"])
+                except ValueError as exc:  # unknown scope
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                except RuntimeError as exc:  # the Triton kernels cannot be imported here
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if reset:
+                openclaw_nhwc_groupnorm.reset_counters()
+            return openclaw_nhwc_groupnorm.status()
 
     def get_precision_map(self):
         # The precision map walks shared.sd_model. Keep it out of the model

@@ -1364,11 +1364,20 @@ def network_Conv2d_load_state_dict(self, *args, **kwargs):
     return originals.Conv2d_load_state_dict(self, *args, **kwargs)
 
 
-def network_GroupNorm_forward(self, input):
+def network_GroupNorm_prepare(self):
+    """What network_GroupNorm_forward does before torch's GroupNorm kernel: apply (or restore) the merged network
+    weights on the module. False when the functional path must run instead (lora_functional), which adds per-network
+    terms to the output. modules/openclaw_nhwc_groupnorm.py calls this before running another GroupNorm kernel."""
     if shared.opts.lora_functional:
-        return network_forward(self, input, originals.GroupNorm_forward)
+        return False
 
     network_apply_weights(self)
+    return True
+
+
+def network_GroupNorm_forward(self, input):
+    if not network_GroupNorm_prepare(self):
+        return network_forward(self, input, originals.GroupNorm_forward)
 
     return originals.GroupNorm_forward(self, input)
 

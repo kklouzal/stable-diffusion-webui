@@ -156,6 +156,68 @@ class TestAggressiveLowVram(unittest.TestCase):
             self.assertTrue(torch.isfinite(guided).all())
 
 
+class TestNhwcGroupNormLayout(unittest.TestCase):
+    """NHWC GroupNorm switch, controlnet scope (modules/openclaw_nhwc_groupnorm.py): full-VRAM use keeps the weights
+    channels_last like the --opt-channelslast SD model's; low-VRAM use, Control-LoRA or the scope off keep or restore
+    the checkpoint layout bit for bit. The model is cached across requests, so each transition happens once."""
+
+    def setUp(self):
+        from modules import openclaw_nhwc_groupnorm, shared
+
+        cmd_opts = getattr(shared, "cmd_opts", None) or types.SimpleNamespace()
+        patches = [
+            mock.patch.object(openclaw_nhwc_groupnorm, "_SCOPES", frozenset({"controlnet"})),
+            mock.patch.object(shared, "cmd_opts", cmd_opts, create=True),
+            mock.patch.object(cmd_opts, "opt_channelslast", True, create=True),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.switch = openclaw_nhwc_groupnorm
+
+    @staticmethod
+    def conv_weights(model):
+        return [p for p in model.parameters() if p.dim() == 4 and p.shape[-1] > 1]
+
+    def test_fullvram_converts_and_lowvram_or_scope_off_restores(self):
+        model = PlugableControlModel(TINY_SDXL_CONTROLNET).eval()
+        with torch.no_grad():
+            for p in model.parameters():
+                p.normal_(0, 0.05)  # the zero convs would make every output zero
+        before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+        x, hint = torch.randn(2, 4, 8, 8), torch.rand(1, 3, 64, 64)
+        kwargs = dict(timesteps=torch.tensor([10.0, 500.0]), context=torch.randn(2, 5, 16), y=torch.randn(2, 12))
+        with cpu_controlnet_env(), torch.no_grad():
+            reference = model(x=x, hint=hint, **kwargs)
+            model.fullvram()
+            weights = self.conv_weights(model)
+            self.assertTrue(weights and all(w.is_contiguous(memory_format=torch.channels_last) and not w.is_contiguous() for w in weights))
+            for got, expected in zip(model(x=x, hint=hint, **kwargs), reference, strict=True):
+                torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-5)  # same values, other conv algorithms
+            model.aggressive_lowvram()
+            self.assertTrue(all(w.is_contiguous() for w in self.conv_weights(model)))
+            self.assertTrue(all(torch.equal(model.state_dict()[name], tensor) for name, tensor in before.items()))
+            model.fullvram()
+            with mock.patch.object(self.switch, "_SCOPES", frozenset()):
+                model.fullvram()
+            self.assertTrue(all(w.is_contiguous() for w in self.conv_weights(model)))
+            self.assertTrue(all(torch.equal(model.state_dict()[name], tensor) for name, tensor in before.items()))
+
+    def test_control_lora_or_an_nchw_sd_model_keep_the_checkpoint_layout(self):
+        from modules import shared
+
+        model = PlugableControlModel(TINY_SDXL_CONTROLNET).eval()
+        model.is_control_lora = True
+        with cpu_controlnet_env():
+            model.fullvram()
+        self.assertTrue(all(w.is_contiguous() for w in self.conv_weights(model)))
+
+        model = PlugableControlModel(TINY_SDXL_CONTROLNET).eval()
+        with cpu_controlnet_env(), mock.patch.object(shared.cmd_opts, "opt_channelslast", False):
+            model.fullvram()
+        self.assertTrue(all(w.is_contiguous() for w in self.conv_weights(model)))
+
+
 class TestModelCacheCheckpointDependence(unittest.TestCase):
     """'difference' ControlNets bake the UNet's weights in at build time; other models do not depend on the loaded
     checkpoint. With --no-hashing the checkpoint sha256 is None and checkpoint switches load in place into the same

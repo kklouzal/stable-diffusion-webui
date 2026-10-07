@@ -22,6 +22,8 @@ def load_api_control_class():
         "set_cuda_graphs",
         "get_vae_decode_graphs",
         "set_vae_decode_graphs",
+        "get_nhwc_groupnorm",
+        "set_nhwc_groupnorm",
         "get_openclaw_generation_diagnostics",
         "get_openclaw_cache_telemetry",
         "get_last_generation",
@@ -479,6 +481,51 @@ def test_runtime_switch_booleans_follow_the_env_grammar(monkeypatch):
             api.set_cuda_graphs(bad)
         assert raised.value.status_code == 422
     assert len(calls) == 2
+
+
+def test_nhwc_groupnorm_switch_validates_and_applies_between_generations(monkeypatch):
+    api_class = load_api_control_class()
+    events = []
+
+    class Switch:
+        @staticmethod
+        def set_scopes(value):
+            if value == "bogus":
+                raise ValueError("unknown OPENCLAW_NHWC_GROUPNORM scope(s) ['bogus']")
+            if value == "no-kernels":
+                raise RuntimeError("NHWC GroupNorm kernels unavailable")
+            events.append(("scopes", value))
+
+        @staticmethod
+        def reset_counters():
+            events.append("reset")
+
+        @staticmethod
+        def status():
+            return {"scopes": ["unet"]}
+
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "modules" and "openclaw_nhwc_groupnorm" in fromlist:
+            return SimpleNamespace(openclaw_nhwc_groupnorm=Switch)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setitem(api_class.set_nhwc_groupnorm.__globals__["__builtins__"], "__import__", fake_import)
+    api = api_class.__new__(api_class)
+    api.queue_lock = DummyLock(events)
+    assert api.get_nhwc_groupnorm() == {"scopes": ["unet"]}
+    assert api.set_nhwc_groupnorm({"scopes": "unet,silu", "reset_counters": "on"}) == {"scopes": ["unet"]}
+    assert events == ["lock-enter", ("scopes", "unet,silu"), "reset", "lock-exit"]
+    events.clear()
+    api.set_nhwc_groupnorm({})  # nothing to change: still answers the status, between generations
+    assert events == ["lock-enter", "lock-exit"]
+    events.clear()
+    for bad, status_code in (({"scopes": "bogus"}, 422), ({"scopes": "no-kernels"}, 400), ({"reset_counters": "maybe"}, 422), ([], 422)):
+        with pytest.raises(HTTPException) as raised:
+            api.set_nhwc_groupnorm(bad)
+        assert raised.value.status_code == status_code
+    assert ("scopes", "bogus") not in events and "reset" not in events
 
 
 class _OptionsStub:

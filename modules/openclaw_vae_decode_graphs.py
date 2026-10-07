@@ -203,9 +203,16 @@ def _option_identity(approximation: int) -> tuple[Any, ...]:
             bool(getattr(cmd_opts, "no_half_vae", False)),
             bool(getattr(cmd_opts, "upcast_sampling", False)),
             bool(getattr(cmd_opts, "precision", None) == "full"),
+            # The NHWC GroupNorm switch picks the VAE GroupNorm kernel (and fused swish) a capture freezes.
+            _nhwc_group_norm_state(),
         )
     except Exception:
-        return (approximation, None, None, None, None, None, None)
+        return (approximation, None, None, None, None, None, None, None)
+
+
+def _nhwc_group_norm_state() -> tuple[str, ...] | None:
+    nhwc_group_norm = sys.modules.get("modules.openclaw_nhwc_groupnorm")
+    return nhwc_group_norm.state_key() if nhwc_group_norm is not None else None
 
 
 def _attention_identity(vae: Any) -> tuple[Any, ...]:
