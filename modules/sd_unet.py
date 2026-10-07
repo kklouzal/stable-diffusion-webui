@@ -1,6 +1,8 @@
+import sys
+
 import torch.nn
 
-from modules import script_callbacks, shared, devices
+from modules import script_callbacks, shared, devices, sd_unet_row_memo
 
 unet_options = []
 current_unet_option = None
@@ -84,11 +86,61 @@ class SdUnet(torch.nn.Module):
 
 
 def create_unet_forward(original_forward):
+    # Only the sgm (SDXL) UNet records/replays encoder rows for PAG (modules/sd_unet_row_memo.py).
+    sgm_openaimodel = sys.modules.get(original_forward.__module__) if original_forward.__module__ == "sgm.modules.diffusionmodules.openaimodel" else None
+
     def UNetModel_forward(self, x, timesteps=None, context=None, *args, **kwargs):
         if current_unet is not None:
             return current_unet.forward(x, timesteps, context, *args, **kwargs)
 
+        memo_slot = sd_unet_row_memo.claim() if sgm_openaimodel is not None else None
+        if memo_slot is not None and not args and set(kwargs) <= {"y"}:
+            return sgm_forward_with_row_memo(sgm_openaimodel, self, memo_slot, x, timesteps, context, **kwargs)
+
         return original_forward(self, x, timesteps, context, *args, **kwargs)
 
     return UNetModel_forward
+
+
+def sgm_forward_with_row_memo(openaimodel, unet, memo_slot, x, timesteps=None, context=None, y=None):
+    """sgm ``UNetModel.forward`` for a call recorded for, or replayed by, PAG's hidden pass.
+
+    Op-for-op the generative-models forward (openaimodel.py), so a recorded main-pass call is bitwise
+    unchanged; it only keeps the encoder outputs. A replay of the call's rows resumes at the middle block,
+    where PAG's perturbation starts, from those outputs. ``th`` and ``timestep_embedding`` are looked up on
+    the module per call because the WebUI hijacks replace them there.
+    """
+    owner = ("sgm", unet)
+    prefix = sd_unet_row_memo.replay_prefix(memo_slot, owner, x, context, y) if memo_slot.replay else None
+    if prefix is not None:
+        m = x.shape[0]
+        hs = [sd_unet_row_memo.rows_of(t, prefix.rows, m) for t in prefix.state["hs"]]
+        emb = sd_unet_row_memo.rows_of(prefix.state["emb"], prefix.rows, m)
+        h = hs[-1]
+    else:
+        assert (y is not None) == (unet.num_classes is not None), "must specify y if and only if the model is class-conditional"
+        hs = []
+        t_emb = openaimodel.timestep_embedding(timesteps, unet.model_channels, repeat_only=False)
+        emb = unet.time_embed(t_emb)
+
+        if unet.num_classes is not None:
+            assert y.shape[0] == x.shape[0]
+            emb = emb + unet.label_emb(y)
+
+        h = x
+        for module in unet.input_blocks:
+            h = module(h, emb, context)
+            hs.append(h)
+
+        # Hypertile draws tile layouts per wrapped encoder layer call; a replay must keep those draws.
+        if sd_unet_row_memo.can_record(memo_slot, x) and not sd_unet_row_memo.hypertile_unet_enabled(getattr(shared.sd_model, "model", None)):
+            sd_unet_row_memo.attach_prefix(memo_slot, sd_unet_row_memo.Prefix(owner, x, context, y, {"hs": list(hs), "emb": emb}))
+
+    h = unet.middle_block(h, emb, context)
+    for module in unet.output_blocks:
+        h = openaimodel.th.cat([h, hs.pop()], dim=1)
+        h = module(h, emb, context)
+    h = h.type(x.dtype)
+
+    return unet.out(h)
 

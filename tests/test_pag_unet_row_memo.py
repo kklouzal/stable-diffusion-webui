@@ -186,10 +186,23 @@ CONTROLNET_CONFIG = dict(
 )
 
 
-class Harness:
-    """Real CFGDenoiser + real PAG script over a tiny sgm UNet, with A1111 globals stubbed."""
+class DiffusionWrapper(torch.nn.Module):
+    """shared.sd_model.model: hypertile marks its layers on this module."""
 
-    def __init__(self):
+    def __init__(self, unet):
+        super().__init__()
+        self.diffusion_model = unet
+        self.conditioning_key = "crossattn"
+
+
+class Harness:
+    """Real CFGDenoiser + real PAG script over a tiny sgm UNet, with A1111 globals stubbed.
+
+    mode "unet": the raw sgm forward (no producer); "base": the WebUI's sd_unet forward wrapper; with
+    install_controlnet() the ControlNet hook sits on top.
+    """
+
+    def __init__(self, mode="base"):
         real = real_modules()
         self.openaimodel = real["sgm.modules.diffusionmodules.openaimodel"]
         self.unet = self.openaimodel.UNetModel(**UNET_CONFIG).eval()
@@ -212,7 +225,7 @@ class Harness:
                 mapping[name] = module
         self.sd_model = types.SimpleNamespace(
             cond_stage_key="crossattn",
-            model=types.SimpleNamespace(conditioning_key="crossattn", diffusion_model=self.unet),
+            model=DiffusionWrapper(self.unet),
             network_layer_mapping=mapping,
             cond_stage_model_empty_prompt=torch.zeros(1, 4, 16),
         )
@@ -251,10 +264,35 @@ class Harness:
             "modules.sd_unet_row_memo": self.row_memo,
             "modules.processing": _module("modules.processing", StableDiffusionProcessing=type("StableDiffusionProcessing", (), {})),
         }
+        self.modules["modules.devices"] = _module(
+            "modules.devices",
+            dtype_unet=torch.float32,
+            dtype_vae=torch.float32,
+            device=torch.device("cpu"),
+            get_device_for=lambda name: torch.device("cpu"),
+            cond_cast_unet=lambda x: x,
+            autocast=contextlib.nullcontext,
+        )
+        self.modules["modules"].devices = self.modules["modules.devices"]
         with isolated_modules(self.modules, {"modules"}):
             spec = importlib.util.spec_from_file_location("cfg_denoiser_under_test", ROOT / "modules" / "sd_samplers_cfg_denoiser.py")
             cfg_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(cfg_module)
+            spec = importlib.util.spec_from_file_location("sd_unet_under_test", ROOT / "modules" / "sd_unet.py")
+            self.sd_unet = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.sd_unet)
+        if mode == "base":
+            # sd_hijack installs this wrapper as UNetModel.forward; bind it to this instance only.
+            wrapper = self.sd_unet.create_unet_forward(self.openaimodel.UNetModel.forward)
+            self.unet.forward = types.MethodType(wrapper, self.unet)
+        else:
+            assert mode == "unet"
+        self.encoder_calls = 0
+
+        def count_encoder(module, args):
+            self.encoder_calls += 1
+
+        self.unet.input_blocks[0].register_forward_pre_hook(count_encoder)
 
         pag_modules = dict(self.modules)
         pag_modules.update({
@@ -370,7 +408,7 @@ class Harness:
         self.unet_hook = self.hook.UnetHook(lowvram=False)
         self.unet_hook.hook(
             model=self.unet,
-            sd_ldm=types.SimpleNamespace(is_sdxl=True),
+            sd_ldm=types.SimpleNamespace(is_sdxl=True, model=self.sd_model.model),
             control_params=[self.control_param],
             process=types.SimpleNamespace(sample=lambda *a, **k: None),
         )
@@ -393,9 +431,20 @@ class Harness:
     def capture(self):
         self.callbacks.denoised.append(lambda params: self.captured.update(x_out=params.x.clone()))
 
+    def enable_hypertile(self):
+        """Mark encoder attention layers the way extensions-builtin/hypertile does, enabled."""
+        layers = {}
+        for name, module in self.sd_model.model.named_modules():
+            if name.startswith("diffusion_model.input_blocks") and name.endswith("attn1"):
+                setattr(module, "__webui_hypertile_params", types.SimpleNamespace(enabled=True))
+                layers[name] = 1
+        assert layers
+        setattr(self.sd_model.model, "__webui_hypertile_layers", layers)
+
     def run(self, x, sigma, conds_list, cond, uncond, image_cond, s_min_uncond=0.0):
         self.captured.clear()
         self.unet_calls.clear()
+        self.encoder_calls = 0
         with torch.no_grad():
             return self.denoiser(x, sigma, uncond, (conds_list, cond), 5.0, s_min_uncond, image_cond)
 
@@ -464,25 +513,36 @@ LAYOUTS = {
 }
 
 
-@pytest.mark.parametrize("controlnet", [False, True], ids=["unet", "controlnet"])
+MODES = ["unet", "base", "controlnet", "base_hypertile", "controlnet_hypertile"]
+
+
+def make_harness(mode):
+    harness = Harness(mode="unet" if mode == "unet" else "base")
+    if mode.startswith("controlnet"):
+        harness.install_controlnet()
+    if mode.endswith("hypertile"):
+        harness.enable_hypertile()
+    return harness
+
+
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("layout", sorted(LAYOUTS))
-def test_pag_cond_rows_match_old_full_pass_and_main_pass_is_unchanged(layout, controlnet):
+def test_pag_cond_rows_match_old_full_pass_and_main_pass_is_unchanged(layout, mode):
     batch_size, repeats, cond_tokens, uncond_tokens, batch_cond_uncond = LAYOUTS[layout]
+    controlnet = mode.startswith("controlnet")
+    hypertile = mode.endswith("hypertile")
     inputs = make_inputs(batch_size, repeats, cond_tokens, uncond_tokens, marked=controlnet)
     n_cond = sum(repeats)
 
-    baseline = Harness()
+    # The baseline main pass goes through the unrecorded forward (the original sgm forward for "base").
+    baseline = make_harness(mode)
     baseline.opts.batch_cond_uncond = batch_cond_uncond
-    if controlnet:
-        baseline.install_controlnet()
     baseline.capture()
     baseline.run(*inputs)
     baseline_x_out = baseline.captured["x_out"]
 
-    harness = Harness()
+    harness = make_harness(mode)
     harness.opts.batch_cond_uncond = batch_cond_uncond
-    if controlnet:
-        harness.install_controlnet()
     harness.enable_pag()
     harness.capture()
     harness.run(*inputs)
@@ -492,12 +552,16 @@ def test_pag_cond_rows_match_old_full_pass_and_main_pass_is_unchanged(layout, co
     # (a) the main pass is bitwise unchanged by recording.
     assert torch.equal(harness.captured["x_out"], baseline_x_out)
     # PAG mirrors the main pass's chunking, limited to cond rows, with the main call's own inputs.
+    starts = [sum(call[0].shape[0] for call in main_calls[:i]) for i in range(len(main_calls))]
+    # Hypertile keeps one PAG call per main call (its tile RNG draws per call); uncond-only calls run whole.
     expected_rows = []
     start = 0
     for x, *_ in main_calls:
         rows = min(x.shape[0], n_cond - start)
         if rows > 0:
             expected_rows.append(rows)
+        elif hypertile:
+            expected_rows.append(x.shape[0])
         start += x.shape[0]
     assert [call[0].shape[0] for call in pag_calls] == expected_rows
     for (main_x, main_sigma, main_cond, _), (pag_x, pag_sigma, pag_cond, _) in zip(main_calls, pag_calls):
@@ -507,15 +571,21 @@ def test_pag_cond_rows_match_old_full_pass_and_main_pass_is_unchanged(layout, co
         assert pag_cond["crossattn"].data_ptr() == main_cond["crossattn"].data_ptr()
         assert torch.equal(pag_cond["vector"], main_cond["vector"][:rows])
     if controlnet:
-        # The ControlNet model ran for the main-pass calls only; PAG reused their residuals.
-        assert harness.controlnet_calls == len(main_calls)
+        # The ControlNet model ran for the main-pass calls only; PAG reused their residuals. Only the
+        # uncond-only calls hypertile keeps (nothing recorded for them) recompute it, as before.
+        uncond_only = sum(1 for (x, *_), start in zip(main_calls, starts) if start >= n_cond)
+        assert harness.controlnet_calls == len(main_calls) + (uncond_only if hypertile else 0)
+    if mode in ("base", "controlnet"):
+        # PAG resumed at the middle block from the recorded encoder rows.
+        assert harness.encoder_calls == len(main_calls)
+    else:
+        assert harness.encoder_calls == len(main_calls) + len(pag_calls)
 
     # (c) the cond rows equal the old full pass's cond rows (bitwise when a replay keeps the call's batch).
     pag_x_out = harness.pag_params.pag_x_out
     assert pag_x_out.shape[0] == n_cond
     expected = oracle_pag_cond_rows(harness, main_calls, n_cond)
     torch.testing.assert_close(pag_x_out, expected, rtol=1e-5, atol=1e-6)
-    starts = [sum(call[0].shape[0] for call in main_calls[:i]) for i in range(len(main_calls))]
     if all(start + call[0].shape[0] <= n_cond or start >= n_cond for start, call in zip(starts, main_calls)):
         assert torch.equal(pag_x_out, expected)
     # PAG actually perturbs the output.
@@ -544,15 +614,15 @@ def record_main_pass(harness, inputs, n_cond):
     return memo
 
 
+@pytest.mark.parametrize("mode", ["base", "controlnet"])
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_controlnet_replay_reuses_recorded_control_state_bitwise(batch_size):
+def test_replay_reuses_recorded_rows_bitwise(batch_size, mode):
     """(b) Replayed rows equal a full recompute of the same rows: exact at the call's batch, ULP-level below it."""
-    inputs = make_inputs(batch_size, [1] * batch_size, marked=True)
-    harness = Harness()
-    harness.install_controlnet()
+    inputs = make_inputs(batch_size, [1] * batch_size, marked=mode == "controlnet")
+    harness = make_harness(mode)
     harness.enable_pag(callbacks=False)
     memo = record_main_pass(harness, inputs, batch_size)
-    assert harness.controlnet_calls == 1
+    assert harness.encoder_calls == 1
     assert all(rec.prefix is not None for rec in memo.calls)
 
     def replay(full_rows, reuse):
@@ -561,31 +631,31 @@ def test_controlnet_replay_reuses_recorded_control_state_bitwise(batch_size):
             rec.row_subset_ok = not full_rows
             if not reuse:
                 rec.prefix = None
+        harness.encoder_calls = 0
         before = harness.controlnet_calls
         with harness.pag_on(), torch.no_grad():
             out = harness.pag.pag_cond_rows_x_out(harness.inner, memo, False)
         for rec, (prefix, row_subset_ok) in zip(memo.calls, saved):
             rec.prefix, rec.row_subset_ok = prefix, row_subset_ok
-        return out, harness.controlnet_calls - before
+        return out, harness.encoder_calls + harness.controlnet_calls - before
 
-    reused_full, cn_calls = replay(full_rows=True, reuse=True)
-    assert cn_calls == 0
-    recomputed_full, cn_calls = replay(full_rows=True, reuse=False)
-    assert cn_calls == 1
+    reused_full, recomputed_parts = replay(full_rows=True, reuse=True)
+    assert recomputed_parts == 0
+    recomputed_full, recomputed_parts = replay(full_rows=True, reuse=False)
+    assert recomputed_parts == (2 if mode == "controlnet" else 1)
     assert torch.equal(reused_full, recomputed_full)
 
-    reused_cond, cn_calls = replay(full_rows=False, reuse=True)
-    assert cn_calls == 0
-    recomputed_cond, cn_calls = replay(full_rows=False, reuse=False)
-    assert cn_calls == 1
+    reused_cond, recomputed_parts = replay(full_rows=False, reuse=True)
+    assert recomputed_parts == 0
+    recomputed_cond, recomputed_parts = replay(full_rows=False, reuse=False)
+    assert recomputed_parts == (2 if mode == "controlnet" else 1)
     torch.testing.assert_close(reused_cond, recomputed_cond, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(reused_cond, reused_full, rtol=1e-5, atol=1e-6)
 
 
 def test_controlnet_replay_recomputes_when_inputs_changed_after_the_main_pass():
     inputs = make_inputs(1, [1], marked=True)
-    harness = Harness()
-    harness.install_controlnet()
+    harness = make_harness("controlnet")
     harness.enable_pag(callbacks=False)
     memo = record_main_pass(harness, inputs, 1)
     rec = memo.calls[0]
@@ -603,8 +673,7 @@ def test_controlnet_replay_recomputes_when_inputs_changed_after_the_main_pass():
 
 def test_controlnet_replay_recomputes_for_foreign_conditioning():
     inputs = make_inputs(1, [1], marked=True)
-    harness = Harness()
-    harness.install_controlnet()
+    harness = make_harness("controlnet")
     harness.enable_pag(callbacks=False)
     memo = record_main_pass(harness, inputs, 1)
     rec = memo.calls[0]
@@ -614,3 +683,20 @@ def test_controlnet_replay_recomputes_for_foreign_conditioning():
     with harness.row_memo.replaying(rec, 1), torch.no_grad():
         harness.inner(rec.x[:1], rec.sigma[:1], cond)
     assert harness.controlnet_calls == before + 1
+
+
+def test_base_wrapper_main_pass_is_the_original_sgm_forward_bitwise():
+    """The recorded main call runs the wrapper's copy of the sgm forward; it must match the original op for op."""
+    harness = Harness(mode="base")
+    gen = torch.Generator().manual_seed(5)
+    x = torch.randn(3, 4, 8, 8, generator=gen)
+    t = torch.rand(3, generator=gen) * 900
+    context = torch.randn(3, 6, 16, generator=gen)
+    y = torch.randn(3, 12, generator=gen)
+    rec = harness.row_memo.CallRecord(0, x, t, {"crossattn": context, "vector": y}, cond_rows=2)
+    with torch.no_grad():
+        original = harness.openaimodel.UNetModel.forward(harness.unet, x, timesteps=t, context=context, y=y)
+        with harness.row_memo.recording(rec):
+            recorded = harness.unet(x, timesteps=t, context=context, y=y)
+    assert rec.prefix is not None
+    assert torch.equal(recorded, original)

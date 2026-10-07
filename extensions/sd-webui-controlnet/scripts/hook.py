@@ -847,6 +847,7 @@ class UnetHook(nn.Module):
         def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
             memo_slot = sd_unet_row_memo.claim()
             prefix = None
+            recorded_state = None
             if memo_slot is not None and memo_slot.replay:
                 prefix = sd_unet_row_memo.replay_prefix(memo_slot, (outer, self), x, context, y)
             if prefix is not None:
@@ -875,7 +876,7 @@ class UnetHook(nn.Module):
                 (is_sdxl, x, context, cond_mark, total_controlnet_embedding, total_t2i_adapter_embedding,
                  require_inpaint_hijack, is_in_high_res_fix) = prepare_control(self, x, timesteps, context, y, memo_slot)
                 if sd_unet_row_memo.can_record(memo_slot, raw_x) and control_is_replayable():
-                    sd_unet_row_memo.attach_prefix(memo_slot, sd_unet_row_memo.Prefix((outer, self), raw_x, raw_context, y, dict(
+                    recorded_state = dict(
                         is_sdxl=is_sdxl,
                         require_inpaint_hijack=require_inpaint_hijack,
                         is_in_high_res_fix=is_in_high_res_fix,
@@ -886,29 +887,43 @@ class UnetHook(nn.Module):
                         t2i=list(total_t2i_adapter_embedding),
                         c_indices=list(outer.current_c_indices),
                         uc_indices=list(outer.current_uc_indices),
-                    )))
+                        encoder=None,
+                    )
+                    sd_unet_row_memo.attach_prefix(memo_slot, sd_unet_row_memo.Prefix((outer, self), raw_x, raw_context, y, recorded_state))
 
             # U-Net Encoder
             hs = []
             with th.no_grad():
-                t_emb = cond_cast_unet(timestep_embedding(timesteps, self.model_channels, repeat_only=False))
-                emb = self.time_embed(t_emb)
+                encoder = prefix.state['encoder'] if prefix is not None else None
+                if encoder is not None:
+                    # Nothing before the middle block differs in a PAG replay: resume from the recorded encoder rows.
+                    hs = [rows(t) for t in encoder['hs']]
+                    emb = rows(encoder['emb'])
+                    total_t2i_adapter_embedding = [rows(t) for t in encoder['t2i']]
+                    h = hs[-1]
+                else:
+                    t_emb = cond_cast_unet(timestep_embedding(timesteps, self.model_channels, repeat_only=False))
+                    emb = self.time_embed(t_emb)
 
-                if is_sdxl:
-                    assert y.shape[0] == x.shape[0]
-                    emb = emb + self.label_emb(y)
+                    if is_sdxl:
+                        assert y.shape[0] == x.shape[0]
+                        emb = emb + self.label_emb(y)
 
-                h = x
-                for i, module in enumerate(self.input_blocks):
-                    self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
-                    h = module(h, emb, context)
+                    h = x
+                    for i, module in enumerate(self.input_blocks):
+                        self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
+                        h = module(h, emb, context)
 
-                    t2i_injection = [3, 5, 8] if is_sdxl else [2, 5, 8, 11]
+                        t2i_injection = [3, 5, 8] if is_sdxl else [2, 5, 8, 11]
 
-                    if i in t2i_injection:
-                        h = aligned_adding(h, total_t2i_adapter_embedding.pop(0), require_inpaint_hijack)
+                        if i in t2i_injection:
+                            h = aligned_adding(h, total_t2i_adapter_embedding.pop(0), require_inpaint_hijack)
 
-                    hs.append(h)
+                        hs.append(h)
+
+                    # Hypertile draws tile layouts per wrapped encoder layer call; a replay must keep those draws.
+                    if recorded_state is not None and not sd_unet_row_memo.hypertile_unet_enabled(getattr(outer.sd_ldm, 'model', None)):
+                        recorded_state['encoder'] = dict(hs=list(hs), emb=emb, t2i=list(total_t2i_adapter_embedding))
 
                 self.current_h_shape = (h.shape[0], h.shape[1], h.shape[2], h.shape[3])
                 h = self.middle_block(h, emb, context)
