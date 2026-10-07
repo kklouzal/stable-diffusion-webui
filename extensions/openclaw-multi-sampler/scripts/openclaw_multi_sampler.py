@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 import json
+import math
 import re
 import threading
 import time
@@ -171,9 +172,41 @@ def _validate_stage_spans(boundaries: list[int], steps: int) -> None:
 
 def _validate_stage_sigmas(sigmas: Any, start: int, end: int, sampler_name: str, scheduler_name: str | None) -> None:
     expected = end - start + 1
+    label = f"{sampler_name}[{scheduler_name}]" if scheduler_name else sampler_name
     if len(sigmas) != expected:
-        label = f"{sampler_name}[{scheduler_name}]" if scheduler_name else sampler_name
         raise ValueError(f"Sampler stage {label}@{start}-{end} expected {expected} sigma value(s), got {len(sigmas)}")
+    # Stage sigmas live on the CPU (get_sigmas returns CPU float32), so reading them never synchronizes the GPU. A rising
+    # or non-finite sigma makes the k-diffusion step math take sqrt/log of negative values and poisons the latent with NaN.
+    values = [float(sigma) for sigma in sigmas]
+    if not all(math.isfinite(value) and value >= 0 for value in values):
+        raise ValueError(f"Sampler stage {label}@{start}-{end} has non-finite or negative sigmas")
+    if any(later > earlier for earlier, later in zip(values, values[1:])):
+        raise ValueError(f"Sampler stage {label}@{start}-{end} sigmas rise; adjust the switch points or schedulers")
+
+
+def _splice_handoff_sigma(stage_sigmas: torch.Tensor, handoff: torch.Tensor) -> torch.Tensor:
+    """Start a later chain stage at the previous stage's final sigma without making sigma rise.
+
+    Overwriting only the first sigma is kept whenever the result does not rise, so chains that already
+    worked stay bit-identical. Otherwise the stage's own spacing is rebased in log-sigma so that it starts at the handoff
+    sigma: it keeps its own final positive sigma when the handoff is above it, and otherwise is scaled down as a whole.
+    """
+    spliced = stage_sigmas.clone()
+    spliced[0] = handoff
+    if not bool((spliced[1:] > spliced[:-1]).any()) or not bool(handoff > 0):
+        return spliced
+    source = stage_sigmas[stage_sigmas > 0]
+    log_source = source.log()
+    log_handoff, log_first, log_last = handoff.log(), log_source[0], log_source[-1]
+    if log_handoff > log_last and log_first > log_last:
+        rebased = log_last + (log_source - log_last) * ((log_handoff - log_last) / (log_first - log_last))
+        rebased[-1] = log_last
+    else:
+        rebased = log_source + (log_handoff - log_first)
+    rebased[0] = log_handoff
+    spliced[: source.numel()] = rebased.exp()
+    spliced[0] = handoff
+    return spliced
 
 
 def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str], list[int]]:
@@ -344,9 +377,10 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             stage_source = stage_source[scheduler_slice_start:].to(device=sigmas.device, dtype=sigmas.dtype)
             start, end = boundaries[index], boundaries[index + 1]
             stage_sigmas = stage_source[start : end + 1].clone()
-            _validate_stage_sigmas(stage_sigmas, start, end, sampler_name, scheduler_name)
             if previous_final_sigma is not None and len(stage_sigmas):
-                stage_sigmas[0] = previous_final_sigma.to(device=stage_sigmas.device, dtype=stage_sigmas.dtype)
+                handoff = previous_final_sigma.to(device=stage_sigmas.device, dtype=stage_sigmas.dtype)
+                stage_sigmas = _splice_handoff_sigma(stage_sigmas, handoff)
+            _validate_stage_sigmas(stage_sigmas, start, end, sampler_name, scheduler_name)
             if len(stage_sigmas):
                 previous_final_sigma = stage_sigmas[-1].detach()
             stages.append((sampler_name, scheduler_name, stage_sigmas, start, end))

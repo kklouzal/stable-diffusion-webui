@@ -206,7 +206,46 @@ class MultiSamplerCoreTests(unittest.TestCase):
         stages = sampler._build_stages(types.SimpleNamespace(), torch.zeros(5), steps=4)
 
         torch.testing.assert_close(stages[0][2], torch.tensor([10.0, 9.0, 8.0]))
-        torch.testing.assert_close(stages[1][2], torch.tensor([8.0, 70.0, 0.0]))
+        # The handoff sigma (8) is below the later stage's last positive sigma (70), so the stage is scaled down whole
+        # instead of rising from 8 back up to 70.
+        torch.testing.assert_close(stages[1][2], torch.tensor([8.0, 7.0, 0.0]))
+
+    def test_scheduler_stage_split_keeps_non_rising_splice_bit_identical(self):
+        sampler = object.__new__(self.multi.MultiKDiffusionSampler)
+        sampler.definition = {"samplers": ["Euler", "Heun"], "switch_ats": [2], "schedulers": ["Karras", "Exponential"]}
+        sources = {
+            "Karras": torch.tensor([10.0, 9.0, 8.0, 7.0, 0.0]),
+            "Exponential": torch.tensor([12.0, 9.5, 8.5, 3.0, 0.0]),
+        }
+        sampler._sigmas_for_scheduler = lambda _p, _source_steps, _sampler_name, scheduler_name: sources[scheduler_name]
+
+        stages = sampler._build_stages(types.SimpleNamespace(), torch.zeros(5), steps=4)
+
+        self.assertTrue(torch.equal(stages[1][2], torch.tensor([8.0, 3.0, 0.0])))
+
+    def test_scheduler_stage_split_rebases_rising_handoff_in_log_sigma(self):
+        # "Multi: oi" img2img: Euler a [Exponential] ends at 0.1011, DPM++ 2M SDE [Align Your Steps] stage starts at 0.234.
+        sampler = object.__new__(self.multi.MultiKDiffusionSampler)
+        sampler.definition = {"samplers": ["Euler", "Heun"], "switch_ats": [1], "schedulers": ["Exponential", "Karras"]}
+        sources = {
+            "Exponential": torch.tensor([0.2, 0.1011, 0.09, 0.05, 0.02, 0.01, 0.0]),
+            "Karras": torch.tensor([0.5, 0.234, 0.1626, 0.113, 0.0572, 0.029, 0.0]),
+        }
+        sampler._sigmas_for_scheduler = lambda _p, _source_steps, _sampler_name, scheduler_name: sources[scheduler_name]
+
+        stage = sampler._build_stages(types.SimpleNamespace(), torch.zeros(7), steps=6)[1][2]
+
+        self.assertEqual(float(stage[0]), float(torch.tensor(0.1011)))
+        self.assertAlmostEqual(float(stage[-2]), 0.029, places=6)
+        self.assertEqual(float(stage[-1]), 0.0)
+        self.assertTrue(bool((stage[1:] < stage[:-1]).all()))
+        torch.testing.assert_close(stage, torch.tensor([0.1011, 0.0812, 0.0654, 0.0435, 0.029, 0.0]), atol=2e-4, rtol=0)
+
+    def test_stage_sigma_validation_rejects_rising_or_non_finite_sigmas(self):
+        with self.assertRaisesRegex(ValueError, "rise"):
+            self.multi._validate_stage_sigmas(torch.tensor([0.0, 0.5, 0.0]), 0, 2, "Euler", None)
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            self.multi._validate_stage_sigmas(torch.tensor([1.0, float("nan"), 0.0]), 0, 2, "Euler", None)
 
 
     def test_brownian_noise_sampler_uses_stage_sigmas_not_full_chain(self):
