@@ -1353,6 +1353,15 @@ class Script(scripts.Script, metaclass=(
             self.controlnet_hack(p)
         return
 
+    def before_hr(self, p, *args, **kwargs):
+        # sample_hr_pass computes p.hr_c/p.hr_uc (calculate_hr_conds) after the hook's process_sample marked the
+        # first pass's conds -- always unless hires_fix_use_firstpass_conds -- and runs this right before sampling
+        # with them. Unmarked, unmark_prompt_context reads every hires row as cond: cond-only control
+        # ("ControlNet is more important"), IP-Adapter/InstantID uncond embeds and reference style fidelity
+        # would treat the uncond rows as cond rows.
+        if self.latest_network is not None and self.latest_network.sampling_active:
+            UnetHook.mark_hires_conds(p)
+
     def postprocess_batch(self, p, *args, **kwargs):
         images = kwargs.get('images', [])
         for post_processor in self.post_processors:
