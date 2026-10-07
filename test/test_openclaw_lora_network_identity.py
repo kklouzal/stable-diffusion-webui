@@ -184,6 +184,27 @@ def test_same_size_restored_mtime_rewrite_misses(lora_networks, tmp_path):
     assert first != second
     assert first[0] == second[0] == "sha256"
 
+def test_file_signature_is_hashed_once_per_file_revision(lora_networks, tmp_path, monkeypatch):
+    networks = lora_networks
+    hashed = []
+    real_sha256 = networks.hashlib.sha256
+    monkeypatch.setattr(networks.hashlib, "sha256", lambda: hashed.append(1) or real_sha256())
+    lora_file = tmp_path / "memo.safetensors"
+    lora_file.write_bytes(b"abcd")
+
+    first = networks.network_file_signature(lora_file)
+    assert networks.network_file_signature(str(lora_file)) == first
+    assert len(hashed) == 1  # unchanged revision: no second read of the file
+
+    stat = os.stat(lora_file)
+    lora_file.write_bytes(b"wxyz")  # same size, mtime restored: ctime still moves
+    os.utime(lora_file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    second = networks.network_file_signature(lora_file)
+    assert len(hashed) == 2 and second != first
+    assert second == ("sha256", real_sha256(b"wxyz").hexdigest())
+    assert networks.network_file_signature(tmp_path / "missing.safetensors") is None
+
+
 def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_networks, monkeypatch):
     networks = lora_networks
     base, _module, _payload = _base_network(networks)

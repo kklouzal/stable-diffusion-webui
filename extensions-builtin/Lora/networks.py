@@ -21,7 +21,7 @@ import network_oft
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
+from modules import cache, shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
 import modules.textual_inversion.textual_inversion as textual_inversion
 import modules.models.sd3.mmdit
 
@@ -188,15 +188,40 @@ class BundledTIHash(str):
 
 
 def network_file_signature(filename):
-    """Return exact source-byte identity; stat data is deliberately not semantic."""
+    """Return exact source-byte identity: the SHA-256 of the file's bytes.
+
+    A digest is reused while the file revision (device, inode, size, mtime_ns, ctime_ns; the validity contract of
+    modules.hashes) read from the opened file is unchanged: every write or utime changes ctime, and NFS
+    close-to-open consistency revalidates attributes at open. Re-hashing cost 0.1-0.2 s per LoRA per activation
+    from page cache and seconds from the NAS. A file whose revision changes while it is read is not memoized.
+    """
+    key = os.path.realpath(os.fspath(filename))
     try:
-        digest = hashlib.sha256()
         with open(filename, "rb") as source:
+            revision = cache.file_revision(os.fstat(source.fileno()))
+            with _file_signature_lock:
+                memo = _file_signature_memo.get(key)
+            if memo is not None and memo[0] == revision:
+                return memo[1]
+            digest = hashlib.sha256()
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
-        return ("sha256", digest.hexdigest())
+            unchanged = cache.file_revision(os.fstat(source.fileno())) == revision
     except OSError:
         return None
+    signature = ("sha256", digest.hexdigest())
+    if unchanged:
+        with _file_signature_lock:
+            _file_signature_memo.pop(key, None)
+            _file_signature_memo[key] = (revision, signature)
+            while len(_file_signature_memo) > _file_signature_memo_capacity:
+                _file_signature_memo.pop(next(iter(_file_signature_memo)))
+    return signature
+
+
+_file_signature_lock = threading.Lock()
+_file_signature_memo = {}
+_file_signature_memo_capacity = 1024
 
 
 def _execution_identity():
