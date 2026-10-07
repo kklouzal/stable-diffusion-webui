@@ -188,6 +188,28 @@ def test_saved_geninfo_reads_back(images, tmp_path, extension):
         assert images.read_info_from_image(image)[0] == text
 
 
+def _tiff_with_ascii_user_comment(payload):
+    """Little-endian TIFF/EXIF bytes whose Exif IFD holds UserComment (0x9286) with the ASCII type (2)."""
+    import struct
+
+    ifd0 = struct.pack("<HHHII", 1, 0x8769, 4, 1, 26) + struct.pack("<I", 0)  # one entry: Exif IFD pointer at 26
+    exif_ifd = struct.pack("<HHHII", 1, 0x9286, 2, len(payload), 26 + 18) + struct.pack("<I", 0)
+    return b"II*\x00" + struct.pack("<I", 8) + ifd0 + exif_ifd + payload
+
+
+@pytest.mark.parametrize("prefix", [b"", b"Exif\x00\x00"])
+def test_ascii_typed_user_comment_is_read(images, prefix):
+    # EXIF specifies UNDEFINED with an 8-byte code prefix, but Pillow writes a str UserComment with the ASCII type.
+    # piexif-based parsing read such comments (as UTF-8 text); they must not be dropped.
+    text = "a cat, Steps: 20, Sampler: Euler, ünïcödé"
+    utf8 = _tiff_with_ascii_user_comment(text.encode("utf8") + b"\x00")
+    assert images.read_info_from_image(SimpleNamespace(info={"exif": prefix + utf8}))[0] == text
+
+    exif = Image.Exif()
+    exif.get_ifd(0x8769)[0x9286] = "Steps: 20, Sampler: Euler"
+    assert images.read_info_from_image(SimpleNamespace(info={"exif": prefix + exif.tobytes().removeprefix(b"Exif\x00\x00")}))[0] == "Steps: 20, Sampler: Euler"
+
+
 def test_exif_bytes_are_never_opened_as_a_file_path(images, tmp_path, monkeypatch):
     secret = tmp_path / "server-side.jpg"
     Image.new("RGB", (4, 4)).save(secret)

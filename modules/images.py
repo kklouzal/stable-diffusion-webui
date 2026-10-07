@@ -827,6 +827,10 @@ def exif_user_comment(exif_data) -> str | None:
     except (SyntaxError, ValueError, OSError, TypeError, struct.error):  # not EXIF bytes, or a malformed IFD
         return None
 
+    if isinstance(comment, str):
+        # UserComment stored with the ASCII type (as Pillow writes str values) instead of UNDEFINED. Pillow decoded
+        # it as latin-1, which is lossless: these are the stored bytes, read like a comment without a code prefix.
+        comment = comment.encode("latin-1")
     if not isinstance(comment, bytes):
         return None
 
