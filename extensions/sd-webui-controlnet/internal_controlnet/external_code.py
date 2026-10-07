@@ -427,7 +427,9 @@ ControlNetUnit.cls_decode_base64 = to_base64_nparray
 
 def decode_base64(b: str) -> torch.Tensor:
     decoded_bytes = base64.b64decode(b)
-    return unsafe_torch_load(io.BytesIO(decoded_bytes))
+    # API input is data, never code: tensors and plain containers only, whatever
+    # TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD says (it only changes the default).
+    return unsafe_torch_load(io.BytesIO(decoded_bytes), weights_only=True)
 
 
 ControlNetUnit.cls_torch_load_base64 = decode_base64
