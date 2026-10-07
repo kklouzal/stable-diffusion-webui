@@ -1,4 +1,5 @@
 from __future__ import annotations
+import functools
 import logging
 import math
 import psutil
@@ -556,17 +557,41 @@ def _normalize_sdpa_backend_choice(value: str | None) -> tuple[list[SDPBackend] 
     return backends, ",".join(labels)
 
 
-def _selected_sdpa_backends() -> list[SDPBackend] | None:
-    backends, _ = _normalize_sdpa_backend_choice(_active_sdpa_backend)
-    return backends
+# Every backend a selection can name; torch enables all of them by default.
+_ALL_SDPA_BACKENDS = frozenset((SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH))
+
+
+@functools.lru_cache(maxsize=16)
+def _sdpa_backend_selection(value: str | None) -> tuple[list[SDPBackend] | None, bool]:
+    """(backends, names_every_backend) for a selection or override string, parsed once per distinct string.
+
+    set_sdpa_backend validates and warms the entry. The cached list is shared; sdpa_kernel copies it, nothing mutates it.
+    """
+    backends, _ = _normalize_sdpa_backend_choice(value)
+    return backends, backends is not None and frozenset(backends) == _ALL_SDPA_BACKENDS
+
+
+def _sdpa_kernel_all_backends_is_noop() -> bool:
+    """True when sdpa_kernel(<every backend>) cannot change which SDPA backend runs.
+
+    It would turn the cudnn/flash/mem_efficient/math flags on and overrideable off, leaving the priority order alone.
+    Overrideable is unobservable when off or ordered after math: CUDA's selector returns an enabled math before reaching
+    it, and the CPU selector never reads it. These are the getters sdpa_kernel itself uses (no public API for the last two).
+    """
+    c = torch._C
+    if not (c._get_cudnn_sdp_enabled() and c._get_flash_sdp_enabled() and c._get_mem_efficient_sdp_enabled() and c._get_math_sdp_enabled()):
+        return False
+    if not c._get_overrideable_sdp_enabled():
+        return True
+    order = c._get_sdp_priority_order()
+    return order.index(int(SDPBackend.MATH)) < order.index(int(SDPBackend.OVERRIDEABLE))
 
 
 def run_scaled_dot_product_attention(q, k, v, *, mask=None, is_causal=False, sdpa_backend_override: str | None = None):
-    if sdpa_backend_override is not None:
-        backends, _ = _normalize_sdpa_backend_choice(sdpa_backend_override)
-    else:
-        backends = _selected_sdpa_backends()
-    if backends is None:
+    backends, all_backends = _sdpa_backend_selection(_active_sdpa_backend if sdpa_backend_override is None else sdpa_backend_override)
+    # Selecting every backend is torch's default state, so skip sdpa_kernel's per-call flag save/set/restore (~8 us,
+    # ~140 calls per SDXL UNet forward) whenever the global flags already make it a no-op.
+    if backends is None or (all_backends and _sdpa_kernel_all_backends_is_noop()):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=is_causal)
     # Enables exactly these backends; torch still picks among them in its own priority order (flash, efficient, math,
     # cudnn), not in list order. set_priority=True would honor the list, but on GB10 with SDXL bf16 shapes cuDNN
@@ -588,9 +613,15 @@ def sdpa_backend_status():
     }
 
 
+def active_sdpa_backend() -> str:
+    """Normalized label of the active SDPA backend selection; the cheap per-call read used by CUDA graph keys."""
+    return _active_sdpa_backend
+
+
 def set_sdpa_backend(sdpa_backend: str | None = None):
     global _active_sdpa_backend
     _, normalized_sdpa_backend = _normalize_sdpa_backend_choice(sdpa_backend or _active_sdpa_backend)
+    _sdpa_backend_selection(normalized_sdpa_backend)  # parse once here; attention calls only hit the cache
     _active_sdpa_backend = normalized_sdpa_backend
     SdOptimizationSdp().apply()
     return sdpa_backend_status()
@@ -662,7 +693,10 @@ def sdp_attnblock_forward(self, x):
     k = self.k(h_)
     v = self.v(h_)
     b, c, h, w = q.shape
-    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    # Single-head 4-D layout: fused SDPA kernels reject 3-D q/k/v, which forced the math path and its fp32 L x L
+    # scores (~5 GB transient per image at a 160x160 latent). .contiguous() provides the stride-1 last dim those
+    # kernels require; it is a no-op for channels_last activations.
+    q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
     if shared.opts.upcast_attn:
         q, k, v = q.float(), k.float(), v.float()
@@ -671,7 +705,7 @@ def sdp_attnblock_forward(self, x):
     v = v.contiguous()
     out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
     out = out.to(dtype)
-    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
     return x + out
 
@@ -683,7 +717,8 @@ def sdp_no_mem_attnblock_forward(self, x):
     k = self.k(h_)
     v = self.v(h_)
     b, c, h, w = q.shape
-    q, k, v = (rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    # 4-D layout as in sdp_attnblock_forward; flash only takes 4-D input (and head_dim <= 256, else this stays on math).
+    q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
     dtype = q.dtype
     if shared.opts.upcast_attn:
         q, k, v = q.float(), k.float(), v.float()
@@ -692,7 +727,7 @@ def sdp_no_mem_attnblock_forward(self, x):
     v = v.contiguous()
     out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
     out = out.to(dtype)
-    out = rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
     return x + out
 

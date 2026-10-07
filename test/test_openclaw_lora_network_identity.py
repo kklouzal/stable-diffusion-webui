@@ -161,7 +161,11 @@ def test_wanted_names_include_source_signature_for_stale_weight_invalidation(lor
     networks.loaded_networks[:] = [net]
 
     first_signature = networks.network_wanted_names()
-    net.source_signature = (9999, 5678)
+    # A changed source is reloaded into a new Network object (published networks are immutable).
+    reloaded = networks.network.Network("alpha", on_disk)
+    reloaded.__dict__.update(net.__dict__)
+    reloaded.source_signature = (9999, 5678)
+    networks.loaded_networks[:] = [reloaded]
     second_signature = networks.network_wanted_names()
 
     assert first_signature != second_signature
@@ -929,3 +933,107 @@ def test_identical_load_is_physical_noop_and_semantic_changes_invalidate(lora_ne
     assert networks.load_networks(["alpha"], [0.6], [0.5], [4])
     assert networks.unload_networks()
     assert networks.load_networks(["alpha"], [0.5], [0.5], [None])
+
+
+def test_quant_active_config_signature_keys_on_loaded_source_key_without_file_reads(lora_networks, monkeypatch):
+    networks = lora_networks
+
+    def no_file_reads(_filename):
+        raise AssertionError("LoRA files must not be re-hashed per request")
+
+    monkeypatch.setattr(networks, "network_file_signature", no_file_reads)
+    monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(sd_checkpoint_info=None), raising=False)
+    source_key = ("alpha.safetensors", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION)
+    net = SimpleNamespace(name="alpha", te_multiplier=1.0, unet_multiplier=0.5, dyn_dim=None, source_key=source_key, network_on_disk=SimpleNamespace(filename="alpha.safetensors"))
+    networks.loaded_networks[:] = [net]
+
+    signature = networks.network_quant_active_config_signature(MXFP8)
+
+    assert signature[-1] == (("alpha", 1.0, 0.5, None, source_key),)
+    assert not hasattr(networks, "network_lora_source_signature")
+
+
+def _published_net(name, updown=None):
+    calls = []
+
+    def calc_updown(weight):
+        calls.append(name)
+        return updown, None
+
+    net = SimpleNamespace(
+        name=name,
+        source_key=(name,),
+        te_multiplier=1.0,
+        unet_multiplier=1.0,
+        dyn_dim=None,
+        modules={"layer": SimpleNamespace(calc_updown=calc_updown)},
+    )
+    return net, calls
+
+
+def test_wanted_names_are_built_once_per_published_set(lora_networks, monkeypatch):
+    networks = lora_networks
+    built = []
+    signature = networks.network_loaded_weight_signature
+    monkeypatch.setattr(networks, "network_loaded_weight_signature", lambda net: built.append(net.name) or signature(net))
+    alpha, _ = _published_net("alpha")
+    beta, _ = _published_net("beta")
+
+    networks._set_loaded_networks([alpha])
+    names = networks.network_wanted_names()
+    assert built == ["alpha"]  # built at publish, reused by every later forward
+    assert all(networks.network_wanted_names() is names for _ in range(3))
+    assert names == (signature(alpha),)
+
+    networks._set_loaded_networks([alpha, beta])
+    assert built == ["alpha", "alpha", "beta"]
+    networks.loaded_networks[:] = [beta]  # a direct list replacement is still observed
+    assert networks.network_wanted_names() == (signature(beta),)
+    networks._set_loaded_networks([])
+    assert networks.network_wanted_names() == ()
+    assert networks._wanted_names_memo == ((), ())  # no reference to the unloaded set is kept
+
+
+def test_apply_weights_returns_early_without_loras(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    linear = torch.nn.Linear(2, 2)
+    linear.network_layer_name = "layer"
+    weight = linear.weight.detach().clone()
+    monkeypatch.setattr(networks, "network_wanted_names", lambda: (_ for _ in ()).throw(AssertionError("no-LoRA forward must not build names")))
+
+    networks.network_apply_weights(linear)
+
+    assert torch.equal(linear.weight, weight)
+    assert not hasattr(linear, "network_weights_backup")
+    assert getattr(linear, "network_current_names", ()) == ()
+
+
+def test_published_names_merge_and_restore_like_per_call_names(lora_networks):
+    import torch
+    networks = lora_networks
+    torch.manual_seed(0)
+    linear = torch.nn.Linear(4, 4)
+    linear.network_layer_name = "layer"
+    base_weight, base_bias = linear.weight.detach().clone(), linear.bias.detach().clone()
+    alpha_updown, beta_updown = torch.randn(4, 4), torch.randn(4, 4)
+    alpha, alpha_calls = _published_net("alpha", alpha_updown)
+    beta, beta_calls = _published_net("beta", beta_updown)
+
+    networks._set_loaded_networks([alpha])
+    for _ in range(3):  # per-forward calls after the first merge are no-ops
+        networks.network_apply_weights(linear)
+    assert alpha_calls == ["alpha"]
+    assert torch.equal(linear.weight, base_weight + alpha_updown)
+
+    networks._set_loaded_networks([beta])
+    networks.network_apply_weights(linear)
+    assert beta_calls == ["beta"]
+    assert torch.equal(linear.weight, base_weight + beta_updown)
+
+    networks._set_loaded_networks([])
+    networks.network_apply_weights(linear)
+    assert torch.equal(linear.weight, base_weight) and torch.equal(linear.bias, base_bias)
+    assert linear.network_current_names == ()
+    networks.network_apply_weights(linear)  # now takes the early return
+    assert torch.equal(linear.weight, base_weight)

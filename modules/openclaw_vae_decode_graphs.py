@@ -10,14 +10,15 @@ from typing import Any
 import torch
 
 from modules import openclaw_cache_epochs, openclaw_env
+from modules.openclaw_cuda_graphs import instance_overrides, on_default_stream
 
 _ENABLED = False
 _GRAPH_CONTRACT_VERSION = 2
+# lora_applied_epoch is added only while LoRA can reach the VAE; see _lora_reaches_vae().
 _EPOCH_DIMENSIONS = (
     "checkpoint_object_epoch",
     "model_movement_epoch",
     "vae_object_epoch",
-    "lora_applied_epoch",
     "forward_hook_epoch",
     "precision_epoch",
     "device_epoch",
@@ -40,6 +41,11 @@ _BYPASS_REASONS: dict[str, int] = {}
 _INVALIDATION_REASONS: dict[str, int] = {}
 _LAST_ERROR: str | None = None
 _LAST_KEY: tuple[Any, ...] | None = None
+# One memory pool shared by every decode graph capture (allocated lazily, dropped with the cache): replays and
+# captures are serialized by _EXECUTION_LOCK on the device's default stream, static inputs are cloned outside the
+# capture, and each replay's output is cloned before the lock is released, so captures may reuse each other's
+# freed memory. Private pools retained one full decode peak per entry.
+_GRAPH_POOL: Any = None
 
 
 def _observe_bypass(reason: str) -> None:
@@ -50,11 +56,20 @@ def _observe_bypass(reason: str) -> None:
 
 
 def _clear_cache_locked() -> bool:
+    global _GRAPH_POOL
     had_state = bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS)
     _CACHE.clear()
     _KEY_LOCKS.clear()
     _FAILED_KEYS.clear()
+    _GRAPH_POOL = None
     return had_state
+
+
+def _graph_pool() -> Any:
+    global _GRAPH_POOL
+    if _GRAPH_POOL is None:
+        _GRAPH_POOL = torch.cuda.graph_pool_handle()
+    return _GRAPH_POOL
 
 
 def _key_lock(key: tuple[Any, ...]) -> threading.RLock:
@@ -236,11 +251,22 @@ def _graph_runtime_identity() -> tuple[Any, ...]:
     )
 
 
+def _lora_reaches_vae() -> bool:
+    """Whether the loaded LoRA set can change a VAE decode.
+
+    LoRA never edits VAE weights: networks.assign_network_names_to_compvis_modules maps only the text encoders and
+    sd_model.model (the UNet), and network_apply_weights returns at once for modules without a network_layer_name.
+    The legacy lora_functional path (networks.network_forward) is the exception: while any LoRA is loaded it routes
+    every Linear/Conv/norm input, VAE ones included, through devices.cond_cast_unet.
+    """
+    from modules import shared
+
+    return bool(getattr(shared.opts, "lora_functional", False))
+
+
 def _mutation_epochs() -> tuple[tuple[str, int], ...]:
-    try:
-        return openclaw_cache_epochs.epoch_subset(_EPOCH_DIMENSIONS)
-    except Exception:
-        return tuple()
+    dimensions = _EPOCH_DIMENSIONS + (("lora_applied_epoch",) if _lora_reaches_vae() else ())
+    return openclaw_cache_epochs.epoch_subset(dimensions)
 
 
 def _bypass_reason(model: Any, x: Any, approximation: int) -> str | None:
@@ -273,6 +299,13 @@ def _bypass_reason(model: Any, x: Any, approximation: int) -> str | None:
         return "missing_vae"
     if bool(getattr(vae, "training", False)):
         return "vae_training"
+    # Tiled VAE (VAEHook) and similar extensions replace decoder.forward per request. The key does not see that
+    # Python override, and capture would either freeze it or fail (tiling syncs to the host) and latch the key.
+    if instance_overrides(vae, "decode") or instance_overrides(getattr(vae, "decoder", None), "forward"):
+        return "vae_forward_override"
+    if not on_default_stream(x.device):
+        # The shared pool and static buffers rely on every replay being ordered on one stream.
+        return "non_default_stream"
     return None
 
 
@@ -358,7 +391,7 @@ def run(model: Any, x: Any, approximation: int = 0) -> torch.Tensor | None:
                     _execute(model, static_input)
                 torch.cuda.current_stream(x.device).wait_stream(stream)
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
+                with torch.cuda.graph(graph, pool=_graph_pool()):
                     static_output = _execute(model, static_input)
                 # CUDA graph capture completes asynchronously. Synchronize before
                 # publishing or replaying a first-use entry so capture work cannot

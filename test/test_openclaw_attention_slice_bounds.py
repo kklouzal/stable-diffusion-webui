@@ -5,6 +5,7 @@ import types
 import warnings
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -181,6 +182,260 @@ def test_select_optimizer_resolves_an_unknown_setting_like_automatic(capsys):
     assert opt.select_optimizer("None", available, flags) is None
     assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=False)) is doggettx
     assert opt.select_optimizer("Automatic", available, SimpleNamespace(disable_opt_split_attention=True)) is None
+
+
+ALL_FOUR = [opt.SDPBackend.CUDNN_ATTENTION, opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.EFFICIENT_ATTENTION, opt.SDPBackend.MATH]
+
+
+@pytest.fixture
+def sdpa_selection(monkeypatch):
+    """Restore the active selection afterwards and keep set_sdpa_backend from patching attention classes."""
+    monkeypatch.setattr(opt.SdOptimizationSdp, "apply", lambda self: None)
+    previous = opt._active_sdpa_backend
+    yield
+    opt._active_sdpa_backend = previous
+
+
+@pytest.fixture
+def recorded_sdpa_kernel(monkeypatch):
+    entered = []
+    real_sdpa_kernel = opt.sdpa_kernel
+
+    @contextlib.contextmanager
+    def recording_sdpa_kernel(backends, *args, **kwargs):
+        entered.append(list(backends))
+        with real_sdpa_kernel(backends, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(opt, "sdpa_kernel", recording_sdpa_kernel)
+    return entered
+
+
+@pytest.fixture
+def restore_sdp_globals():
+    getters = [torch._C._get_cudnn_sdp_enabled, torch._C._get_flash_sdp_enabled, torch._C._get_mem_efficient_sdp_enabled, torch._C._get_math_sdp_enabled, torch._C._get_overrideable_sdp_enabled]
+    setters = [torch._C._set_sdp_use_cudnn, torch._C._set_sdp_use_flash, torch._C._set_sdp_use_mem_efficient, torch._C._set_sdp_use_math, torch._C._set_sdp_use_overrideable]
+    flags = [get() for get in getters]
+    order = torch._C._get_sdp_priority_order()
+    yield
+    for set_flag, flag in zip(setters, flags):
+        set_flag(flag)
+    torch._C._set_sdp_priority_order(order)
+
+
+def _qkv(seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return tuple(torch.randn(2, 2, 16, 8, generator=generator) for _ in range(3))
+
+
+def test_set_sdpa_backend_parses_once_and_keeps_status_contract(sdpa_selection, monkeypatch):
+    status = opt.set_sdpa_backend(" CUDNN+flash efficient,math ")
+    assert status["sdpa_backend"] == opt.active_sdpa_backend() == "cudnn,flash,efficient,math"
+    assert status["sdpa_backend_choices"] == opt._SDPA_BACKEND_CHOICES
+    q, k, v = _qkv()
+    opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override="flash,math")
+
+    def no_parsing(_value):
+        raise AssertionError("SDPA backend selection was re-parsed on the attention hot path")
+
+    monkeypatch.setattr(opt, "_normalize_sdpa_backend_choice", no_parsing)
+    for _ in range(3):
+        opt.run_scaled_dot_product_attention(q, k, v)
+        opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override="flash,math")
+
+
+def test_invalid_sdpa_backend_raises_at_set_time_and_keeps_selection(sdpa_selection):
+    opt.set_sdpa_backend("flash,math")
+    with pytest.raises(ValueError, match="Unsupported SDPA backend: bogus"):
+        opt.set_sdpa_backend("flash,bogus")
+    assert opt.sdpa_backend_status()["sdpa_backend"] == opt.active_sdpa_backend() == "flash,math"
+
+
+@pytest.mark.parametrize("selection", ["auto", "cudnn,flash,efficient,math", "math,efficient,flash,cudnn", "flash,cudnn,mem_efficient,math,flash"])
+def test_default_backend_set_skips_sdpa_kernel(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals, selection):
+    opt.set_sdpa_backend(selection)
+    q, k, v = _qkv()
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == []
+    with opt.sdpa_kernel(ALL_FOUR):
+        expected = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize(("selection", "override", "expected"), [
+    ("flash,math", None, [opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("cudnn,flash,math", None, [opt.SDPBackend.CUDNN_ATTENTION, opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("math", None, [opt.SDPBackend.MATH]),
+    ("auto", "flash,math", [opt.SDPBackend.FLASH_ATTENTION, opt.SDPBackend.MATH]),
+    ("cudnn,flash,efficient,math", "math", [opt.SDPBackend.MATH]),
+])
+def test_backend_subsets_and_overrides_enter_sdpa_kernel(sdpa_selection, recorded_sdpa_kernel, selection, override, expected):
+    opt.set_sdpa_backend(selection)
+    q, k, v = _qkv(1)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override=override)
+
+    assert recorded_sdpa_kernel == [expected]
+    with opt.sdpa_kernel(expected):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
+
+
+@pytest.mark.parametrize("change", ["flash_off", "math_off", "cudnn_off", "efficient_off", "overrideable_before_math"])
+def test_full_set_keeps_sdpa_kernel_when_global_state_differs_from_default(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals, change):
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    if change == "overrideable_before_math":
+        order = torch._C._get_sdp_priority_order()
+        order.remove(int(opt.SDPBackend.OVERRIDEABLE))
+        order.insert(order.index(int(opt.SDPBackend.MATH)), int(opt.SDPBackend.OVERRIDEABLE))
+        torch._C._set_sdp_priority_order(order)
+    else:
+        {
+            "flash_off": torch._C._set_sdp_use_flash,
+            "math_off": torch._C._set_sdp_use_math,
+            "cudnn_off": torch._C._set_sdp_use_cudnn,
+            "efficient_off": torch._C._set_sdp_use_mem_efficient,
+        }[change](False)
+    q, k, v = _qkv(2)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == [ALL_FOUR]
+    with opt.sdpa_kernel(ALL_FOUR):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
+
+
+def test_full_set_skip_is_exact_when_overrideable_is_disabled(sdpa_selection, recorded_sdpa_kernel, restore_sdp_globals):
+    torch._C._set_sdp_use_overrideable(False)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    q, k, v = _qkv(3)
+
+    out = opt.run_scaled_dot_product_attention(q, k, v)
+
+    assert recorded_sdpa_kernel == []
+    with opt.sdpa_kernel(ALL_FOUR):
+        assert torch.equal(out, torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0))
+
+
+class TinyAttnBlock(torch.nn.Module):
+    """Same parameters and structure as sgm/ldm diffusionmodules.model.AttnBlock (single head, head_dim = channels)."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = torch.nn.GroupNorm(32, channels, eps=1e-6)
+        self.q = torch.nn.Conv2d(channels, channels, 1)
+        self.k = torch.nn.Conv2d(channels, channels, 1)
+        self.v = torch.nn.Conv2d(channels, channels, 1)
+        self.proj_out = torch.nn.Conv2d(channels, channels, 1)
+
+
+def legacy_3d_attnblock_forward(self, x, sdpa_backend_override=None):
+    """Oracle: the pre-PV1 sdp_attnblock_forward / sdp_no_mem_attnblock_forward with 3-D q/k/v."""
+    h_ = self.norm(x)
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (opt.rearrange(t, 'b c h w -> b (h w) c') for t in (q, k, v))
+    dtype = q.dtype
+    if opt.shared.opts.upcast_attn:
+        q, k, v = q.float(), k.float(), v.float()
+    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+    out = opt.run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = opt.rearrange(out, 'b (h w) c -> b c h w', h=h)
+    out = self.proj_out(out)
+    return x + out
+
+
+def _attnblock_case(channels, dtype, channels_last, device="cpu", size=8, seed=0):
+    torch.manual_seed(seed)
+    block = TinyAttnBlock(channels).to(device=device, dtype=dtype).eval()
+    x = torch.randn(2 if device == "cpu" else 1, channels, size, size, device=device, dtype=dtype)
+    if channels_last:
+        block = block.to(memory_format=torch.channels_last)
+        x = x.contiguous(memory_format=torch.channels_last)
+    return block, x
+
+
+# Fused (online-softmax) kernel vs the math path: one rounding of the final bf16 residual add, or fp32 reassociation.
+_FUSED_VS_MATH_TOLERANCE = {torch.float32: dict(rtol=1e-5, atol=1e-5), torch.bfloat16: dict(rtol=2 ** -7, atol=2 ** -7)}
+
+
+@pytest.fixture
+def upcast_attn():
+    previous = opt.shared.opts.upcast_attn
+    yield lambda value: setattr(opt.shared.opts, "upcast_attn", value)
+    opt.shared.opts.upcast_attn = previous
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("channels_last", [False, True])
+@pytest.mark.parametrize("upcast", [False, True])
+def test_vae_attnblock_4d_layout_is_bitwise_identical_on_the_math_backend(sdpa_selection, upcast_attn, dtype, channels_last, upcast):
+    # Same backend on both sides isolates the layout change: the 3-D and 4-D math paths run the same batched GEMMs.
+    upcast_attn(upcast)
+    opt.set_sdpa_backend("math")
+    block, x = _attnblock_case(64, dtype, channels_last)
+    with torch.no_grad():
+        expected = legacy_3d_attnblock_forward(block, x)
+        out = opt.sdp_attnblock_forward(block, x)
+        out_no_mem = opt.sdp_no_mem_attnblock_forward(block, x)
+        expected_no_mem = legacy_3d_attnblock_forward(block, x, sdpa_backend_override="flash,math")
+
+    assert out.dtype == expected.dtype == dtype
+    assert out.stride() == expected.stride()
+    assert torch.equal(out, expected)
+    # "flash,math" ignores the active selection; CPU flash now accepts the 4-D input, so this is close, not bitwise.
+    torch.testing.assert_close(out_no_mem, expected_no_mem, **_FUSED_VS_MATH_TOLERANCE[dtype])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("channels_last", [False, True])
+@pytest.mark.parametrize("upcast", [False, True])
+def test_vae_attnblock_4d_default_selection_stays_close_to_legacy(sdpa_selection, upcast_attn, dtype, channels_last, upcast):
+    # With every backend enabled the 4-D input becomes eligible for a fused kernel (CPU flash here, mem-efficient on
+    # CUDA at head_dim 512) while the legacy 3-D input always ran math: numerically equivalent, not bitwise.
+    upcast_attn(upcast)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    block, x = _attnblock_case(64, dtype, channels_last, seed=1)
+    with torch.no_grad():
+        expected = legacy_3d_attnblock_forward(block, x)
+        out = opt.sdp_attnblock_forward(block, x)
+
+    assert out.stride() == expected.stride()
+    torch.testing.assert_close(out, expected, **_FUSED_VS_MATH_TOLERANCE[dtype])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA: SDXL-VAE mid-block shape on the fused kernel")
+def test_vae_attnblock_sdxl_shape_uses_mem_efficient_kernel_close_to_legacy_math_with_bounded_memory(sdpa_selection, upcast_attn):
+    # SDXL VAE mid-block: 512 channels at a 128x128 latent (1024x1024 image), bf16, channels_last as deployed.
+    upcast_attn(False)
+    opt.set_sdpa_backend("cudnn,flash,efficient,math")
+    block, x = _attnblock_case(512, torch.bfloat16, True, device="cuda", size=128, seed=2)
+    tokens = x.shape[-2] * x.shape[-1]
+    with torch.no_grad():
+        h_ = block.norm(x)
+        q, k, v = (opt.rearrange(m(h_), 'b c h w -> b 1 (h w) c').contiguous() for m in (block.q, block.k, block.v))
+        params = torch.backends.cuda.SDPAParams(q, k, v, None, 0.0, False, False)
+        assert torch.backends.cuda.can_use_efficient_attention(params, True)
+        assert not torch.backends.cuda.can_use_flash_attention(params, False)  # head_dim 512 > 256
+        del h_, q, k, v, params
+
+        expected = legacy_3d_attnblock_forward(block, x)
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        out = opt.sdp_attnblock_forward(block, x)
+        torch.cuda.synchronize()
+        peak_delta = torch.cuda.max_memory_allocated() - baseline
+
+    # Bound: at most one bf16 ULP of the residual output per element (rtol = atol = 2^-7), mean error far smaller.
+    torch.testing.assert_close(out, expected, rtol=2 ** -7, atol=2 ** -7)
+    assert (out.float() - expected.float()).abs().mean().item() < 2e-3
+    # The legacy math path materialises fp32 L x L scores (tokens^2 * 4 B = 1 GiB here); the fused path stays O(L).
+    assert peak_delta < tokens * tokens * 4 // 4
 
 
 if __name__ == "__main__":

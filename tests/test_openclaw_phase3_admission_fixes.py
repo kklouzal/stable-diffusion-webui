@@ -72,7 +72,7 @@ def test_vae_graph_capture_synchronizes_before_publish_without_replay_barrier():
     run_source = ast.get_source_segment(source, _function("modules/openclaw_vae_decode_graphs.py", "run"))
     assert run_source is not None
     publish = run_source.index('entry = {"graph": graph')
-    capture = run_source.index("with torch.cuda.graph(graph):")
+    capture = run_source.index("with torch.cuda.graph(graph, pool=_graph_pool()):")
     replay = run_source.rindex("graph.replay()")
     returned = run_source.rindex("return static_output.clone()")
     synchronizes = [node for node in ast.walk(ast.parse(run_source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "cuda" and node.func.attr == "synchronize"]
