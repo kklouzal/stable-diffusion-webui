@@ -228,20 +228,22 @@ def apply_masks(
     # Remove aliasing artifacts using a gaussian blur.
     converted_mask = converted_mask.filter(ImageFilter.GaussianBlur(radius=4))
 
-    # Expand the mask to fit the whole image if needed.
-    if paste_to is not None:
-        converted_mask = proc.uncrop(converted_mask,
-                                     (width, height),
-                                     paste_to)
-
     masks_for_overlay = []
 
     for i, overlay_image in enumerate(overlay_images):
-        masks_for_overlay.append(converted_mask)
+        mask_for_overlay = converted_mask
+        # Expand the mask to fit the whole image if needed. With inpaint full-res the overlay is the uncropped
+        # original, not width x height.
+        if paste_to is not None:
+            mask_for_overlay = proc.uncrop(converted_mask,
+                                           (overlay_image.width, overlay_image.height),
+                                           paste_to)
+
+        masks_for_overlay.append(mask_for_overlay)
 
         image_masked = Image.new('RGBa', (overlay_image.width, overlay_image.height))
         image_masked.paste(overlay_image.convert("RGBA").convert("RGBa"),
-                           mask=ImageOps.invert(converted_mask.convert('L')))
+                           mask=ImageOps.invert(mask_for_overlay.convert('L')))
 
         overlay_images[i] = image_masked.convert('RGBA')
 
@@ -273,99 +275,81 @@ def weighted_histogram_filter(img, kernel, kernel_center, percentile_min=0.0, pe
 
     Returns:
         (nparray): A filtered copy of the input image "img", a 2-D array of floats.
+
+    All pixels are filtered at once. For finite input, a float64 kernel and a float or integer-1 min_width (the call
+    sites), the result is bit-identical to the original per-pixel loop:
+    - each pixel's samples are taken in row-major kernel order and stably sorted by value;
+    - every running sum is accumulated sequentially in that sorted order, starting from 0.
+    Kernel taps outside the image get value 0 and weight 0. They do not change any running sum, any stack bound or
+    the weighted average, so the clipped border windows behave exactly as before.
     """
 
-    kernel_min = -kernel_center
-    kernel_max = vec(kernel.shape) - kernel_center
+    kernel_height, kernel_width = kernel.shape
+    center_y, center_x = (int(c) for c in np.broadcast_to(kernel_center, (2,)))
+    if img.ndim != 2 or kernel.dtype != np.float64 or not (0 <= center_y < kernel_height and 0 <= center_x < kernel_width):
+        raise ValueError(f"weighted_histogram_filter needs a 2-D image and a float64 kernel containing its center; "
+                         f"got image {img.shape}, kernel {kernel.shape} {kernel.dtype}, center {kernel_center}")
 
-    def weighted_histogram_filter_single(idx):
-        idx = vec(idx)
-        min_index = np.maximum(0, idx + kernel_min)
-        max_index = np.minimum(vec(img.shape), idx + kernel_max)
-        window_shape = max_index - min_index
+    height, width = img.shape
+    padded = np.zeros((height + kernel_height - 1, width + kernel_width - 1), dtype=img.dtype)
+    padded[center_y:center_y + height, center_x:center_x + width] = img
+    inside = np.zeros(padded.shape, dtype=bool)
+    inside[center_y:center_y + height, center_x:center_x + width] = True
+    taps = list(np.ndindex(kernel.shape))
 
-        class WeightedElement:
-            """
-            An element of the histogram, its weight
-            and bounds.
-            """
+    img_out = np.empty_like(img)
+    # Rows per block bound the (pixels x taps) work arrays to a few MB.
+    block_rows = max(1, 16384 // width)
+    for y0 in range(0, height, block_rows):
+        y1 = min(height, y0 + block_rows)
+        values = np.stack([padded[y0 + dy:y1 + dy, dx:dx + width].reshape(-1) for dy, dx in taps], axis=1)
+        weights = np.stack([np.where(inside[y0 + dy:y1 + dy, dx:dx + width].reshape(-1), kernel[dy, dx], 0.0) for dy, dx in taps], axis=1)
 
-            def __init__(self, value, weight):
-                self.value: float = value
-                self.weight: float = weight
-                self.window_min: float = 0.0
-                self.window_max: float = 1.0
-
-        # Collect the values in the image as WeightedElements,
-        # weighted by their corresponding kernel values.
-        values = []
-        for window_tup in np.ndindex(tuple(window_shape)):
-            window_index = vec(window_tup)
-            image_index = window_index + min_index
-            centered_kernel_index = image_index - idx
-            kernel_index = centered_kernel_index + kernel_center
-            element = WeightedElement(img[tuple(image_index)], kernel[tuple(kernel_index)])
-            values.append(element)
-
-        def sort_key(x: WeightedElement):
-            return x.value
-
-        values.sort(key=sort_key)
+        order = np.argsort(values, axis=1, kind='stable')
+        values = np.take_along_axis(values, order, axis=1)
+        weights = np.take_along_axis(weights, order, axis=1)
 
         # Calculate the height of the stack (sum)
         # and each sample's range they occupy in the stack
-        sum = 0
-        for i in range(len(values)):
-            values[i].window_min = sum
-            sum += values[i].weight
-            values[i].window_max = sum
+        sample_max = np.cumsum(weights, axis=1)
+        sample_min = np.concatenate([np.zeros((len(weights), 1)), sample_max[:, :-1]], axis=1)
+        stack_sum = sample_max[:, -1]
 
         # Calculate what range of this stack ("window")
         # we want to get the weighted average across.
-        window_min = sum * percentile_min
-        window_max = sum * percentile_max
-        window_width = window_max - window_min
+        window_min = stack_sum * percentile_min
+        window_max = stack_sum * percentile_max
 
         # Ensure the window is within the stack and at least a certain size.
-        if window_width < min_width:
-            window_center = (window_min + window_max) / 2
-            window_min = window_center - min_width / 2
-            window_max = window_center + min_width / 2
+        narrow = window_max - window_min < min_width
+        window_center = (window_min + window_max) / 2
+        narrow_min = window_center - min_width / 2
+        narrow_max = window_center + min_width / 2
+        over = narrow_max > stack_sum
+        narrow_min = np.where(over, stack_sum - min_width, narrow_min)
+        narrow_max = np.where(over, stack_sum, narrow_max)
+        under = narrow_min < 0
+        narrow_min = np.where(under, 0.0, narrow_min)
+        narrow_max = np.where(under, min_width, narrow_max)
+        window_min = np.where(narrow, narrow_min, window_min)[:, None]
+        window_max = np.where(narrow, narrow_max, window_max)[:, None]
 
-            if window_max > sum:
-                window_max = sum
-                window_min = sum - min_width
+        # Get the weighted average of all the samples that overlap with the window, weighted by the size of their
+        # overlap. Samples entirely below the window are skipped; the first sample above it ends the scan.
+        skipped = window_min >= sample_max
+        stopped = np.logical_or.accumulate(~skipped & (window_max <= sample_min), axis=1)
+        used = ~skipped & ~stopped
+        overlap = np.minimum(window_max, sample_max) - np.maximum(window_min, sample_min)
 
-            if window_min < 0:
-                window_min = 0
-                window_max = min_width
+        value = np.zeros(len(values))
+        value_weight = np.zeros(len(values))
+        for i in range(len(taps)):
+            value += np.where(used[:, i], values[:, i] * overlap[:, i], 0.0)
+            value_weight += np.where(used[:, i], overlap[:, i], 0.0)
 
-        value = 0
-        value_weight = 0
-
-        # Get the weighted average of all the samples
-        # that overlap with the window, weighted
-        # by the size of their overlap.
-        for i in range(len(values)):
-            if window_min >= values[i].window_max:
-                continue
-            if window_max <= values[i].window_min:
-                break
-
-            s = max(window_min, values[i].window_min)
-            e = min(window_max, values[i].window_max)
-            w = e - s
-
-            value += values[i].value * w
-            value_weight += w
-
-        return value / value_weight if value_weight != 0 else 0
-
-    img_out = img.copy()
-
-    # Apply the kernel operation over each pixel.
-    for index in np.ndindex(img.shape):
-        img_out[index] = weighted_histogram_filter_single(index)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            average = np.where(value_weight != 0, value / value_weight, 0.0)
+        img_out[y0:y1] = average.reshape(y1 - y0, width)
 
     return img_out
 
@@ -682,6 +666,11 @@ class Script(scripts.Script):
 
     def post_sample(self, p, ps: scripts.PostSampleArgs, enabled, power, scale, detail_preservation, mask_inf,
                     dif_thresh, dif_contr):
+        # Masks and overlays belong to this batch only: a batch that builds none (or fails building them) must not
+        # composite the previous batch's or request's.
+        self.masks_for_overlay = None
+        self.overlay_images = None
+
         if not enabled:
             return
 
@@ -745,3 +734,8 @@ class Script(scripts.Script):
 
         ppmo.mask_for_overlay = self.masks_for_overlay[ppmo.index]
         ppmo.overlay_image = self.overlay_images[ppmo.index]
+
+    def postprocess(self, p, processed, *args):
+        # Release the request's full-resolution overlays.
+        self.masks_for_overlay = None
+        self.overlay_images = None

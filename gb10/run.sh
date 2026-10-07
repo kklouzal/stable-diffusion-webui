@@ -107,6 +107,8 @@ sudo python3 "${PROJECT_ROOT}/gb10/patch-controlnet-cache-correctness.py" "${CON
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${MULTIDIFFUSION_ROOT}"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" --check "${MULTIDIFFUSION_ROOT}"
 fi
 ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
 if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then
@@ -115,6 +117,8 @@ if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then
 fi
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" --check "${ULTIMATE_UPSCALE_ROOT}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${ULTIMATE_UPSCALE_ROOT}"
+sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" --check "${ULTIMATE_UPSCALE_ROOT}"
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"
