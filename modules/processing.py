@@ -154,11 +154,12 @@ def _replay_conditioning_infotext(target, written):
 
     Text encoders write them only while they run ("TI hashes", "Emphasis" in sd_hijack_clip), so the cond cache
     captures them in an empty dict and applies them on misses and hits alike. As in sd_hijack_clip, "TI hashes" is
-    prepended to an existing value; other entries are assigned.
+    prepended to an existing value with each entry kept once (a hit replays the same entries every iteration and
+    hires pass); other entries are assigned.
     """
     for key, value in written.items():
         previous = target.get(key) if key == "TI hashes" else None
-        target[key] = f"{value}, {previous}" if previous else value
+        target[key] = ", ".join(dict.fromkeys(f"{value}, {previous}".split(", "))) if previous else value
 
 
 def _cache_stats(**extra):
