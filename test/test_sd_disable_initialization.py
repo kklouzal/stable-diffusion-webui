@@ -79,25 +79,26 @@ def test_initialize_on_meta_does_not_touch_other_threads(ram_optimization, class
     finally:
         finish(stop, thread)
 
-    assert inside == {"meta": True, "to_result_is_layer": True}
     assert not layer.weight.is_meta and not conv.weight.is_meta
     assert moved is layer and layer.weight.dtype == torch.float64
+    assert inside == {"meta": True, "to_result_is_layer": True}
     for obj, field in ((torch.nn.Linear, "__init__"), (torch.nn.Conv2d, "__init__"), (torch.nn.Module, "to")):
         assert vars(obj)[field] is class_dicts[(obj, field)]
 
 
 def test_load_state_dict_on_meta_does_not_feed_other_threads_from_the_checkpoint(ram_optimization, class_dicts):
-    checkpoint = {"weight": torch.full((2, 2), 7.0), "bias": torch.full((2,), 7.0)}
+    checkpoint = {"child.weight": torch.full((2, 2), 7.0), "child.bias": torch.full((2,), 7.0)}
     stop, thread, _ = run_inside(sd_disable_initialization.LoadStateDictOnMeta(checkpoint, device="cpu"))
     try:
-        layer = torch.nn.Linear(2, 2)
-        layer.load_state_dict({"weight": torch.ones(2, 2), "bias": torch.zeros(2)})
+        parent = torch.nn.Module()
+        parent.child = torch.nn.Linear(2, 2)
+        parent.load_state_dict({"child.weight": torch.ones(2, 2), "child.bias": torch.zeros(2)})
     finally:
         finish(stop, thread)
 
-    torch.testing.assert_close(layer.weight.detach(), torch.ones(2, 2))
-    torch.testing.assert_close(layer.bias.detach(), torch.zeros(2))
-    assert set(checkpoint) == {"weight", "bias"}, "another thread's load consumed the checkpoint's tensors"
+    torch.testing.assert_close(parent.child.weight.detach(), torch.ones(2, 2))
+    torch.testing.assert_close(parent.child.bias.detach(), torch.zeros(2))
+    assert set(checkpoint) == {"child.weight", "child.bias"}, "another thread's load consumed the checkpoint's tensors"
 
 
 def test_disable_initialization_does_not_disable_init_on_other_threads(class_dicts):
@@ -143,14 +144,16 @@ def test_load_state_dict_on_meta_wraps_own_class_hooks_once(ram_optimization, cl
         return original(self, *args, **kwargs)
 
     torch.nn.Linear._load_from_state_dict = own_hook
-    checkpoint = {"weight": torch.ones(2, 2), "bias": torch.zeros(2)}
-    layer = torch.nn.Linear(2, 2)
+    checkpoint = {"child.weight": torch.ones(2, 2), "child.bias": torch.zeros(2)}
+    parent = torch.nn.Module()
+    parent.child = torch.nn.Linear(2, 2)
     with sd_disable_initialization.LoadStateDictOnMeta(checkpoint, device="cpu"):
-        result = layer.load_state_dict(checkpoint, strict=False)
+        result = parent.load_state_dict(checkpoint, strict=False)
 
     assert calls == ["Linear"]
     assert checkpoint == {}, "the checkpoint's tensors are consumed as they load"
-    torch.testing.assert_close(layer.weight.detach(), torch.ones(2, 2))
+    torch.testing.assert_close(parent.child.weight.detach(), torch.ones(2, 2))
+    assert result is not None, "the replaced load_state_dict must return torch's result"
     assert list(result.missing_keys) == [] and list(result.unexpected_keys) == []
     assert vars(torch.nn.Linear)["_load_from_state_dict"] is own_hook
 
