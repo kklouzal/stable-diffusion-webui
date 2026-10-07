@@ -126,6 +126,12 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 upscale_cache.popitem(last=False)
 
         if upscale_mode == 1 and upscale_crop:
+            if image.width < upscale_to_width or image.height < upscale_to_height:
+                # Upscalers floor their output to a multiple of 8, which falls short of other target sizes;
+                # stretch to cover the target instead of leaving black bars around the pasted image.
+                fill = max(upscale_to_width / image.width, upscale_to_height / image.height)
+                image = image.resize((max(upscale_to_width, round(image.width * fill)), max(upscale_to_height, round(image.height * fill))), resample=Image.Resampling.LANCZOS)
+
             cropped = Image.new("RGB", (upscale_to_width, upscale_to_height))
             cropped.paste(image, box=(upscale_to_width // 2 - image.width // 2, upscale_to_height // 2 - image.height // 2))
             image = cropped
@@ -141,7 +147,8 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             pp.shared.target_width = int(pp.image.width * upscale_by)
             pp.shared.target_height = int(pp.image.height * upscale_by)
 
-            pp.shared.target_width, pp.shared.target_height = limit_size_by_one_dimention(pp.shared.target_width, pp.shared.target_height, max_side_length)
+            if max_side_length != 0:  # 0 = no limit; limit_size_by_one_dimention(w, h, 0) would return (0, 0)
+                pp.shared.target_width, pp.shared.target_height = limit_size_by_one_dimention(pp.shared.target_width, pp.shared.target_height, max_side_length)
 
     def process(self, pp: scripts_postprocessing.PostprocessedImage, upscale_enabled=True, upscale_mode=1, upscale_by=2.0, max_side_length=0, upscale_to_width=None, upscale_to_height=None, upscale_crop=False, upscaler_1_name=None, upscaler_2_name=None, upscaler_2_visibility=0.0):
         if not upscale_enabled:
