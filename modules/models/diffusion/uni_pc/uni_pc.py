@@ -478,8 +478,9 @@ class UniPC:
         """Compute the intermediate time steps for sampling.
         """
         if skip_type == 'logSNR':
-            lambda_T = self.noise_schedule.marginal_lambda(torch.as_tensor(t_T, device=device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.as_tensor(t_0, device=device))
+            # torch.linspace takes only 0-dim tensor endpoints; the discrete schedule returns lambda with shape (1,).
+            lambda_T = self.noise_schedule.marginal_lambda(torch.as_tensor(t_T, device=device)).reshape(())
+            lambda_0 = self.noise_schedule.marginal_lambda(torch.as_tensor(t_0, device=device)).reshape(())
             logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == 'time_uniform':
