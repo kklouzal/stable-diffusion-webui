@@ -479,6 +479,35 @@ class GenerationLastTests(unittest.TestCase):
             self.assertIs(self.module._image_to_api_base64(base64.b64encode(data).decode("ascii"), limitations, "image", {"images": 0}), self.module._OMIT)
             self.assertTrue(limitations)
 
+    def test_one_snapshot_decodes_an_inline_image_once_for_every_use(self):
+        import base64
+        decoded = Image.frombytes("RGB", (16, 16), os.urandom(16 * 16 * 3))
+        source = base64.b64encode(self._png(decoded)).decode("ascii")
+        p = StableDiffusionProcessingImg2Img()
+        p.init_images = [decoded]
+        p.openclaw_api_init_image_sources = [(decoded, source)]
+        script = types.SimpleNamespace(title=lambda: "ControlNet", args_from=1, args_to=3)
+        p.scripts = types.SimpleNamespace(alwayson_scripts=[script], selectable_scripts=[])
+        p.script_args = [0, ControlNetUnit(enabled=True, image=source), ControlNetUnit(enabled=True, image=source)]
+        calls = []
+        original = self.module._decode_inline_image
+
+        def counting(value, keep_png=True):
+            calls.append((value, keep_png))
+            return original(value, keep_png)
+
+        with patch.object(self.module, "_decode_inline_image", counting):
+            snapshot = self.module.build_snapshot(p, self.processed)
+            self.assertEqual(calls, [(source, True)])  # init image source + two ControlNet units
+            calls.clear()
+            again = self.module.build_snapshot(p, self.processed)
+            self.assertEqual(calls, [(source, True)])  # each snapshot decodes for itself
+        self.assertTrue(snapshot["replayable"], snapshot["limitations"])
+        self.assertEqual(snapshot["parameters"]["init_images"], [source])
+        units = snapshot["parameters"]["alwayson_scripts"]["ControlNet"]["args"]
+        self.assertEqual([unit["image"] for unit in units], [source, source])
+        self.assertEqual(again["parameters"], snapshot["parameters"])
+
     def test_api_init_image_source_is_retained_only_for_the_image_the_run_used(self):
         import base64
         import io

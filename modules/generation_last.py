@@ -220,12 +220,25 @@ def _decode_inline_image(value: str, keep_png: bool = True):
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL, keep_inline_png: bool = True) -> str:
+def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict | None):
+    """_decode_inline_image memoized in decoded_inline, which lives for one snapshot (a pure function of its
+    arguments; a decoded image it returns is only read). An init image's request data and a ControlNet unit image are
+    often the same string, decoded once per use before (~28 ms at 1280x1280). Failures are not memoized."""
+    if decoded_inline is None:
+        return _decode_inline_image(value, keep_png)
+    key = (value, keep_png)
+    if key not in decoded_inline:
+        decoded_inline[key] = _decode_inline_image(value, keep_png)
+    return decoded_inline[key]
+
+
+def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL, keep_inline_png: bool = True, decoded_inline: dict | None = None) -> str:
     """Return PNG base64 for a PIL/numpy/inline-base64 input.
 
     source is the API request's inline data that decoded to the PIL image value.
     With keep_inline_png, an eligible inline PNG (source, or value itself) is
     retained; otherwise the decoded pixels are encoded as RGBA at compress_level.
+    decoded_inline memoizes inline-data decodes across one snapshot.
     """
     from PIL import Image
     import base64
@@ -233,7 +246,7 @@ def _encode_api_png(value: Any, source: str | None = None, compress_level: int =
 
     if source is not None and keep_inline_png:
         try:
-            retained, _ = _decode_inline_image(source)
+            retained, _ = _decode_inline_image_once(source, True, decoded_inline)
         except Exception:
             # The run accepted value through the API's own decoder; data this
             # stricter check rejects is simply encoded from value instead.
@@ -241,7 +254,7 @@ def _encode_api_png(value: Any, source: str | None = None, compress_level: int =
         if retained is not None:
             return retained
     elif isinstance(value, str):
-        retained, value = _decode_inline_image(value, keep_inline_png)
+        retained, value = _decode_inline_image_once(value, keep_inline_png, decoded_inline)
         if retained is not None:
             return retained
     if not isinstance(value, Image.Image):
@@ -266,6 +279,7 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     # ControlNet image, unit image): encode it once, charge the budget per use.
     # Entries keep value alive so its id() cannot be reused during the snapshot.
     encoded_inputs = budget.setdefault("encoded", {})
+    decoded_inline = budget.setdefault("decoded_inline", {})
     key = value if isinstance(value, str) else id(value)
     # The kept inline PNG or a zlib level 1 re-encode comes first; only when that
     # does not fit the remaining budget is the historical encoding (RGBA re-encode
@@ -273,7 +287,7 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     for compress_level, keep_inline_png in ((_PNG_FAST_LEVEL, True), (_PNG_DEFAULT_LEVEL, False)):
         if (key, compress_level) not in encoded_inputs:
             try:
-                encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level, keep_inline_png))
+                encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level, keep_inline_png, decoded_inline))
             except Exception:
                 encoded_inputs[key, compress_level] = (value, None)
         encoded = encoded_inputs[key, compress_level][1]
