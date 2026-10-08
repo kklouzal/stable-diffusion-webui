@@ -554,18 +554,44 @@ def test_cuda_accuracy_holds_at_any_mean_over_std(kernels_on, offset):
     assert kernel_max <= native_max + floor_max, (offset, kernel_max, native_max)
 
 
+_BLOCK_KINDS = ["resblock", "spatial_transformer", "vae_resnet_block"]
+
+
+def _block_module(kind, small=False):
+    """The block of each kind: SDXL-sized, or (small) the same classes at CPU-test size."""
+    if kind == "resblock":
+        channels, emb_channels = (64, 128) if small else (640, 1280)
+        return sgm_openaimodel.ResBlock(channels, emb_channels, 0.0, out_channels=channels)
+    if kind == "spatial_transformer":
+        if small:
+            return sgm_attention.SpatialTransformer(64, 2, 32, depth=1, context_dim=48, use_linear=True, use_checkpoint=False)
+        return sgm_attention.SpatialTransformer(640, 10, 64, depth=1, context_dim=2048, use_linear=True, use_checkpoint=False)
+    channels = 64 if small else 512
+    return sgm_vae.ResnetBlock(in_channels=channels, out_channels=channels, dropout=0.0, temb_channels=0)
+
+
 def _sdxl_block(kind):
     """(module, args, autocast): SDXL-sized blocks; the UNet ones run under bf16 autocast, the VAE one without (how the
     decode runs)."""
+    module = _block_module(kind)
     if kind == "resblock":
-        x = _random_activations((2, 640, 64, 64), CL)
-        return sgm_openaimodel.ResBlock(640, 1280, 0.0, out_channels=640), (x, _random_activations((2, 1280))), True
+        return module, (_random_activations((2, 640, 64, 64), CL), _random_activations((2, 1280))), True
     if kind == "spatial_transformer":
-        x = _random_activations((2, 640, 64, 64), CL)
-        transformer = sgm_attention.SpatialTransformer(640, 10, 64, depth=1, context_dim=2048, use_linear=True, use_checkpoint=False)
-        return transformer, (x, [_random_activations((2, 77, 2048))]), True
-    x = _random_activations((1, 512, 128, 128), CL)
-    return sgm_vae.ResnetBlock(in_channels=512, out_channels=512, dropout=0.0, temb_channels=0), (x, None), False
+        return module, (_random_activations((2, 640, 64, 64), CL), [_random_activations((2, 77, 2048))]), True
+    return module, (_random_activations((1, 512, 128, 128), CL), None), False
+
+
+def _float64_reference(module, device):
+    """A float64 copy of `module` on `device` that computes every norm in float64.
+
+    sgm GroupNorm32.forward normalizes x.float(): in a float64 copy that is a float32 input against float64 weights,
+    which F.group_norm rejects (and a float32 norm would not be a float64 reference anyway). A plain GroupNorm computes
+    in its input dtype, so the copy's GroupNorm32 instances become plain GroupNorms (same parameters and eps)."""
+    reference = copy.deepcopy(module).to(device, torch.float64)
+    for submodule in reference.modules():
+        if isinstance(submodule, sgm_util.GroupNorm32):
+            submodule.__class__ = torch.nn.GroupNorm
+    return reference
 
 
 def _run_block(module, args, autocast, scopes):
@@ -580,14 +606,37 @@ def _double(arg):
     return arg.double() if torch.is_tensor(arg) else arg
 
 
+@pytest.mark.parametrize("kind", _BLOCK_KINDS)
+def test_float64_block_references_run_and_compute_the_block(switch, kind):
+    """The CUDA block test's float64 reference, on CPU at test size: a plain float64 copy of a ResBlock fails in sgm
+    GroupNorm32 (float32 input, float64 weights), the reference built by _float64_reference runs every kind and agrees
+    with the float32 block."""
+    module = _randomize(_block_module(kind, small=True)).eval()
+    generator = torch.Generator().manual_seed(5)
+    x = torch.randn((2, 64, 8, 8), generator=generator, dtype=torch.float64)
+    extra = {"resblock": torch.randn((2, 128), generator=generator, dtype=torch.float64),
+             "spatial_transformer": [torch.randn((2, 5, 48), generator=generator, dtype=torch.float64)]}.get(kind)
+    args64 = (x, extra)
+    args32 = (x.float(), [a.float() for a in extra] if isinstance(extra, list) else None if extra is None else extra.float())
+
+    with torch.inference_mode():
+        if kind == "resblock":
+            with pytest.raises(RuntimeError):
+                copy.deepcopy(module).double()(*args64)
+        reference = _float64_reference(module, "cpu")(*args64)
+        expected = module(*args32)
+    assert reference.dtype == torch.float64 and torch.isfinite(reference).all()
+    torch.testing.assert_close(expected.double(), reference, rtol=1e-4, atol=1e-4 * reference.abs().max().item())
+
+
 @needs_cuda
-@pytest.mark.parametrize("kind", ["resblock", "spatial_transformer", "vae_resnet_block"])
+@pytest.mark.parametrize("kind", _BLOCK_KINDS)
 def test_cuda_fused_blocks_match_the_torch_paths_and_replay_in_cuda_graphs(kernels_on, kind):
     """Switch-on error against float64 within 10% of switch-off's, a second run bitwise equal, and a CUDA graph replay
     equal to the eager run."""
     module, args, autocast = _sdxl_block(kind)
     module = _randomize(module).eval()
-    reference_module = copy.deepcopy(module).to("cuda", torch.float64)
+    reference_module = _float64_reference(module, "cuda")
     module = module.to("cuda", BF16).to(memory_format=CL)
 
     off, on = _run_block(module, args, autocast, ""), _run_block(module, args, autocast, "all")
