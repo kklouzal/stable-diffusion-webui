@@ -52,6 +52,9 @@ Default `COMMANDLINE_ARGS` baseline:
 
 - `--listen --port 7860 --no-hashing --disable-console-progressbars --api --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access`
 
+Keep `--opt-channelslast`: dropping it (all-NCHW) measured 8.5-16% faster but hard-locked the host twice under sustained
+load on 2026-10-07 (`docs/gb10/notes/performance-pass-2-2026-10-07.md`).
+
 ### Smoke test
 
 ```bash

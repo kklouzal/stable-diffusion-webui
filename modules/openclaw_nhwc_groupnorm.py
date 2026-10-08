@@ -12,6 +12,10 @@ and the whole VAE decode would take, adds the per-CTA group sums with float atom
 run (this deployment keeps same-request outputs bit-identical); and it takes var = E[x^2] - mean^2 in float32 and
 normalizes by 1 when that is <= 0, which loses the variance of groups with a large mean.
 
+Status (2026-10-07): keep it off on the GB10 host. With it on, the host hard-locked twice under sustained load (after
+24 clean normal requests, and on a hires-fix request); see docs/gb10/notes/performance-pass-2-2026-10-07.md,
+"Re-evaluating the layout work", before enabling it again.
+
 Switch (default off): OPENCLAW_NHWC_GROUPNORM at import (an invalid value, or no Triton, fails the import, i.e.
 startup), or set_scopes() at runtime (POST /sdapi/v1/openclaw/nhwc-groupnorm). The value is "all", or a comma list of:
   unet        UNet GroupNorm32 / SpatialTransformer.norm (ldm and sgm) on channels_last input take the kernel, and the

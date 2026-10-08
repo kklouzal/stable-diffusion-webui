@@ -30,12 +30,15 @@ to disk also gain ~0.37 s at 1280²).
 
 ## Measured but not adopted
 
-- **All-NCHW deploy** (no `--opt-channelslast`): 8.5-16% faster, but the host hard-locked twice during hires-fix
-  requests on it (2 of 3 attempts). Ruled out.
+- **All-NCHW deploy** (no `--opt-channelslast`): 8.5-16% faster (plain txt2img 4.49 -> 3.78 s, img2img workload
+  14.52 -> 13.25 s, txt2img full stack 9.19 -> 8.41 s; images change at kernel-rounding level, same quality), but the
+  host hard-locked twice during hires-fix requests on it (2 of 3 hires attempts; ~27 non-hires requests ran clean).
+  Parked, see "Re-evaluating the layout work" below.
 - **NHWC GroupNorm(+SiLU) Triton kernels** (`modules/openclaw_nhwc_groupnorm*.py`, runtime switch
-  `POST /sdapi/v1/openclaw/nhwc-groupnorm`, default off): deterministic, at least as accurate as torch, 3-17x faster per
-  GroupNorm and 21-30% faster per request, but the host hard-locked on the first hires-fix request with it on. Stays off;
-  enabling it needs a root cause for the hang first.
+  `POST /sdapi/v1/openclaw/nhwc-groupnorm`, env `OPENCLAW_NHWC_GROUPNORM`, default off): deterministic, at least as
+  accurate as torch, 3-17x faster per GroupNorm and 21-30% faster per request (plain txt2img 3.12-3.5 s, img2img
+  workload 11.3-11.8 s, txt2img full stack 7.1-7.5 s). The host hard-locked on a hires-fix request with it on and again
+  during a non-hires stress test (24 clean requests, then a lockup ~3.5 min into sustained load). Parked.
 - apex.contrib.group_norm: rejected (fp32 atomicAdd two-pass statistics are nondeterministic run to run).
 - cuDNN SDPA (8-16% slower than flash on GB10), CUDA graphs for SEG/PAG/ControlNet (GPU-bound), PNG level 1 (+10-13%
   files across the 4 MB export threshold), cudnn.benchmark (cross-process nondeterminism).
@@ -45,7 +48,28 @@ to disk also gain ~0.37 s at 1280²).
 
 ## Host stability
 
-Three hard lockups on 2026-10-07 (15:43, 15:59, 17:31), each during a hires-fix request in a non-default kernel
-configuration (NCHW twice, NHWC GroupNorm once), GPU at ~96% and 80-84 C, >90 GiB memory free; the hard watchdog is
-disabled so nothing was logged. Default-kernel hires requests never hung. Experimental deploys now run with restart
-policy "no", a fsynced 1 s monitor and a low-memory interrupt.
+Four hard lockups on 2026-10-07 (15:43, 15:59, 17:31, 17:57), all during Claude's sustained GPU runs in a faster
+kernel configuration: NCHW twice (hires-fix requests), NHWC GroupNorm twice (one hires-fix request, one normal img2img
+after 24 clean requests). Each time the GPU had been at ~96% for minutes at 80-85 C with >85 GiB memory free; the
+journal just stops (the kernel's hard watchdog is disabled, so nothing is logged). The default kernels ran hundreds of
+requests that day without a hang (they did hang once on 2026-10-06 during a long replay). The kernels themselves look
+sound: NCHW uses only stock PyTorch/cuDNN kernels, and the NHWC kernels are masked, int64-indexed and deterministic.
+Working hypothesis: a platform-level instability under sustained heavy GPU load (driver/firmware, power or thermal)
+that the faster configurations, which keep the GPU busier, hit far more often. Experimental deploys run with restart
+policy "no", a fsynced 1 s monitor (`~/audit-artifacts/gb10-a1111-perf2-20261007/exp_lib.sh`) and a low-memory
+interrupt.
+
+## Re-evaluating the layout work
+
+Worth 8.5-16% (NCHW) or 21-30% (NHWC GroupNorm) per request once the host is stable under sustained load. Before
+retrying:
+1. Make a hang leave evidence: pstore/ramoops or netconsole and a hardware watchdog on the host; check for a newer GB10
+   driver/firmware than 580.178.04; review cooling (GPU peaked at 85 C).
+2. Find out whether other sustained GPU jobs (vLLM, tensorfold) also lock the host; if they do, the cause is the platform.
+3. Then rerun the stress protocol (idle host, nothing else on the GPU, the operator able to reset it):
+   `~/audit-artifacts/gb10-a1111-perf2-20261007/stress1.sh` (39 back-to-back n-w1/n-w2/plain requests with NHWC on; the
+   script disables the restart policy for the test and restores it), then the same with hires-fix requests (n-w3).
+   NHWC is switched with `curl -X POST :7860/sdapi/v1/openclaw/nhwc-groupnorm -d '{"scopes":"all"}'` (and `"off"`);
+   NCHW is a deploy without `--opt-channelslast` in `COMMANDLINE_ARGS`.
+4. Open detail: with NHWC on, the ControlNet img2img request gave a different (repeatable) pixel hash in two server
+   processes while txt2img matched; check cross-process determinism of the ControlNet layout conversion before adopting.

@@ -8,12 +8,16 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 - `latest` adds the 2026-10-07 correctness audit (`docs/gb10/notes/correctness-audit-2026-10-07.md`): image-changing fixes (rounded uint8 decode, deterministic SDXL VAE encode, fp32 LoRA merges, emphasis/tokenizer, schedulers, ControlNet/SEG row handling) and API contract changes (extension hook errors, LoRA tag errors and wrong-typed settings fail the request; mutating endpoints wait for `queue_lock`); CPU suites only, GPU verification list in the note
 - production `gb10-a1111-latest` runs `local/gb10-a1111:deploy9-75a94f59` (`sha256:2708c45d...`) = `latest` @75a94f59: the correctness audit plus performance pass 2 (`docs/gb10/notes/performance-pass-2-2026-10-07.md`: bitwise fused GEGLU, exact Dynamic Thresholding/SEG/TeaCache cuts, parallel PNG saves, decode-once inputs; NHWC GroupNorm switch present but off). Fixed-seed images are pixel-identical to deploy8; requests ~6% faster plus ~0.4 s faster disk saves. Rollback: `IMAGE_TAG=local/gb10-a1111:deploy8-2b5e4039 gb10/run.sh`
-- production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `local/gb10-a1111:deploy5-293d3e2c` (`sha256:59626c7c...`), built from `latest` @293d3e2c
+- earlier deploys: `deploy8-2b5e4039` (correctness audit), `deploy5-293d3e2c` (2026-10-06 static performance pass, built from `latest` @293d3e2c)
 - contains the 2026-10-06 static performance pass and its fixes (`docs/gb10/notes/performance-static-pass-2026-10-06.md`), plus float32 SDXL size/aesthetic conditioning and UNet/ControlNet timesteps (intentional output change) and no ControlNet image echo in API responses
 - rollback image: `local/gb10-a1111:pre-perf-20261006` (`sha256:7f954f2f...`, the 2026-09-27 deploy4 build); roll back with `IMAGE_TAG=local/gb10-a1111:pre-perf-20261006 gb10/run.sh`
 - verification at deploy: CPU test suites without new failures, GPU unit tests for the UNet/attention/graph changes, API startup and read-only endpoint smoke; no end-to-end generation was run before deploy (left to the operator)
 - dependency drift from the one-time re-resolve (BuildKit cache was pruned 2026-10-04): transformers 5.17.0 -> 5.19.0, gitpython 3.1.62 -> 3.2.0, numba 0.67.0 -> 0.68.0, llvmlite 0.49.0 -> 0.50.0, mslk 2026.9.26 -> 2026.10.7 (same pinned commit, rebuilt), plus 10 patch-level indirect bumps; NGC base layers identical
 - app-only builds now reuse the dependency closure (the wheelbuilder no longer copies the app source)
+- parked: NHWC GroupNorm kernels (21-30% faster per request; switch present, default off) and the all-NCHW layout
+  (8.5-16% faster) both hard-locked the host under sustained load on 2026-10-07; keep `--opt-channelslast` and the switch
+  off until the host is stable under sustained GPU load (`docs/gb10/notes/performance-pass-2-2026-10-07.md`,
+  "Re-evaluating the layout work")
 
 ## Status as of 2026-09-25
 
