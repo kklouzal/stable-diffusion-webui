@@ -1055,7 +1055,9 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
 
 
 def store_processing_override_settings(p: StableDiffusionProcessing):
-    return {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data}
+    # Every registered option the request overrides, as it reads now. An option never saved to the settings file is
+    # absent from opts.data and reads as its default; it must be stored too, or its override outlives the request.
+    return {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data_labels}
 
 
 def apply_processing_override_settings(p: StableDiffusionProcessing):
