@@ -2,16 +2,21 @@
 
 CPU tests pin the CondFunc installation, the dispatch/fallback and, by compiling the Triton kernel for sm_121 without a
 GPU, the instruction-level properties the bitwise argument relies on (round-to-nearest float32 ops, libdevice erff
-without FTZ, no narrowed bf16/fp16 arithmetic, 16-byte vector loads). The CUDA tests compare the fused kernel with
-the eager `a * F.gelu(gate)` bit for bit over every bf16/fp16 gate value and over SDXL feed-forward shapes run through
-the hijacked sgm GEGLU under bf16 autocast, and print eager vs fused timings. Run them on the GPU host with:
+without FTZ, no narrowed bf16/fp16 arithmetic, 16-byte vector loads). They also check that the kernel's erff constants
+are the ones in ATen's own GELU kernels (libtorch_cuda sm_120 SASS, read with cuobjdump), which fails for Triton's
+bundled libdevice. The CUDA tests compare the fused kernel with the eager `a * F.gelu(gate)` bit for bit over every
+bf16/fp16 gate and multiplicand value and over SDXL feed-forward shapes run through the hijacked sgm GEGLU under bf16
+autocast, and print eager vs fused timings. Run them on the GPU host with:
     python -m pytest -q -s test/test_openclaw_fused_geglu.py -k cuda
 OPENCLAW_FUSED_GEGLU_TIMING_JSON=<path> also writes the timings as JSON.
 """
 import json
 import os
 import re
+import shutil
 import statistics
+import struct
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,24 +156,54 @@ def test_fusable_needs_cuda():
     assert not fused.fusable(torch.zeros(2, 8, dtype=BF16))
 
 
-def test_kernel_compiles_for_sm121_with_aten_rounding():
-    """The PTX the bitwise argument relies on, compiled for GB10 (sm_121) without a GPU."""
+def _compile_ptx(dtype, block, **overrides):
+    """The fused kernel's PTX for GB10 (sm_121) with fused_geglu's launch options (and `overrides`), without a GPU."""
     triton = pytest.importorskip("triton")
     from triton.backends.compiler import GPUTarget
     from triton.compiler import ASTSource
     from modules.openclaw_fused_geglu_kernel import geglu_kernel
 
+    source = ASTSource(
+        fn=geglu_kernel,
+        signature={"h_ptr": f"*{dtype}", "out_ptr": f"*{dtype}", "inner": "i32", "BLOCK": "constexpr"},
+        constexprs={(3,): block},
+        attrs={(0,): [["tt.divisibility", 16]], (1,): [["tt.divisibility", 16]], (2,): [["tt.divisibility", 16]]},
+    )
+    options = {**fused._launch_options(block), **overrides}
+    return triton.compile(source, target=GPUTarget("cuda", 121, 32), options=options).asm["ptx"]
+
+
+def test_toolkit_libdevice_matches_torch_cuda(monkeypatch, tmp_path):
+    if torch.version.cuda is None:
+        pytest.skip("CPU-only torch build")
+    path = fused._toolkit_libdevice()
+    assert path.endswith(os.path.join("nvvm", "libdevice", "libdevice.10.bc")) and os.path.isfile(path)
+    if fused.ENABLED:
+        assert fused._EXTERN_LIBS == (("libdevice", path),)
+        assert fused._launch_options(1024)["extern_libs"] == fused._EXTERN_LIBS
+
+    monkeypatch.setattr(torch.version, "cuda", "12.1")
+    with pytest.raises(RuntimeError, match="expected 12010"):
+        fused._toolkit_libdevice()
+    monkeypatch.undo()
+    monkeypatch.setenv("CUDA_HOME", str(tmp_path))
+    with pytest.raises(RuntimeError, match="CUDA_VERSION None"):
+        fused._toolkit_libdevice()
+
+
+def test_launch_options_refuse_when_disabled(monkeypatch):
+    monkeypatch.setattr(fused, "_EXTERN_LIBS", None)
+    with pytest.raises(RuntimeError, match="OPENCLAW_FUSED_GEGLU=0"):
+        fused._launch_options(1024)
+
+
+def test_kernel_compiles_for_sm121_with_aten_rounding():
+    """The PTX the bitwise argument relies on, compiled for GB10 (sm_121) without a GPU."""
+    if fused._EXTERN_LIBS is None:
+        pytest.skip("fused GEGLU is off in this environment")
     for dtype, cvt in (("bf16", "cvt.rn.bf16"), ("fp16", "cvt.rn.f16")):
         for block in (512, 1024):
-            source = ASTSource(
-                fn=geglu_kernel,
-                signature={"h_ptr": f"*{dtype}", "out_ptr": f"*{dtype}", "inner": "i32", "BLOCK": "constexpr"},
-                constexprs={(3,): block},
-                attrs={(0,): [["tt.divisibility", 16]], (1,): [["tt.divisibility", 16]], (2,): [["tt.divisibility", 16]]},
-            )
-            # The launch options fused_geglu uses.
-            options = {"num_warps": max(1, block // 256), "enable_reflect_ftz": False}
-            ptx = triton.compile(source, target=GPUTarget("cuda", 121, 32), options=options).asm["ptx"]
+            ptx = _compile_ptx(dtype, block)
             body = "\n".join(line for line in ptx.splitlines() if not line.lstrip().startswith(("//", ".loc", ".b8")))
             # Float32 arithmetic outside libdevice's erff is explicitly round-to-nearest, nothing is flushed except
             # erff's own ex2.approx.ftz (which it also uses without FTZ), and no op is narrowed to bf16/fp16 math.
@@ -177,12 +212,72 @@ def test_kernel_compiles_for_sm121_with_aten_rounding():
             assert not re.search(r"\b(mul|fma|add|sub)(\.rn)?\.(bf16|f16)(x2)?\b", body)
             assert cvt in body
             assert "ld.global.v4" in body and "st.global.v4" in body
-            # erff's polynomial and branch constants are libdevice's __nv_erff.
-            assert "0f3F8060FE" in body and "0f3F3504F3" in body
+            assert "0f3F3504F3" in body  # kAlpha = (float)M_SQRT1_2; erff's own constants: the ATen SASS test below
+
+
+# Constants the kernel itself adds around erff: 0, 0.5, 1 and kAlpha.
+_KERNEL_OWN_CONSTANTS = {0x00000000, 0x3F000000, 0x3F800000, 0x3F3504F3}
+_MAGNITUDE = 0x7FFFFFFF
+
+
+def _ptx_constant_magnitudes(ptx):
+    return {int(v, 16) & _MAGNITUDE for v in re.findall(r"\b0f([0-9A-Fa-f]{8})\b", ptx)} - _KERNEL_OWN_CONSTANTS
+
+
+def _sass_constant_magnitudes(sass):
+    """The 32-bit float constants of a SASS listing, sign dropped: float immediates of FSETP/FSEL/FFMA/FMUL/FADD and
+    the constants ptxas materializes into registers with MOV, IMAD.MOV.U32 or HFMA2 (two halves)."""
+    def f32_bits(text):
+        return struct.unpack("<I", struct.pack("<f", float(text)))[0] & _MAGNITUDE
+
+    def f16_bits(text):
+        return struct.unpack("<H", struct.pack("<e", float(text)))[0]
+
+    found = set()
+    for operands in re.findall(r"\b(?:FSETP\.\S+|FSEL|FFMA|FMUL|FADD)\s+([^;]*);", sass):
+        found.update(f32_bits(v) for v in re.findall(r"(?<![\w.])-?\d+\.\d+(?:e[-+]\d+)?", operands))
+    found.update(int(v, 16) & _MAGNITUDE for v in re.findall(r"\bMOV\S*\s+R\d+,\s*(0x[0-9a-f]{1,8})\b", sass))
+    found.update(int(v, 16) & _MAGNITUDE for v in re.findall(r"\bIMAD\.MOV\.U32\s+R\d+,\s*RZ,\s*RZ,\s*(0x[0-9a-f]{1,8})\b", sass))
+    for high, low in re.findall(r"\bHFMA2(?:\.MMA)?\s+R\d+,\s*-RZ,\s*RZ,\s*([-0-9.e+]+),\s*([-0-9.e+]+)\s*;", sass):
+        found.add(((f16_bits(high) << 16) | f16_bits(low)) & _MAGNITUDE)
+    return found
+
+
+def _aten_gelu_kernels(aten_dtype):
+    """SASS of ATen's GELU kernels for one dtype from the sm_120 cubins in libtorch_cuda (GB10, sm_121, runs those)."""
+    cuobjdump = (os.environ.get("TRITON_CUOBJDUMP_PATH") or shutil.which("cuobjdump")
+                 or os.path.join(os.environ.get("CUDA_HOME", "/usr/local/cuda"), "bin", "cuobjdump"))
+    lib = Path(torch.__file__).parent / "lib" / "libtorch_cuda.so"
+    if not os.path.isfile(cuobjdump) or not lib.is_file():
+        pytest.skip("needs cuobjdump and libtorch_cuda.so")
+    symbols = subprocess.run([cuobjdump, "-symbols", "-arch", "sm_120", str(lib)], capture_output=True, text=True, check=True).stdout
+    tag = f"N3c10{len(aten_dtype)}{aten_dtype}E"
+    names = sorted({name for name in re.findall(r"\b_Z\w*GeluCUDAKernelImpl\w*", symbols) if tag in name})
+    assert names, f"no sm_120 {aten_dtype} GeluCUDAKernelImpl kernels in {lib}"
+    sass = subprocess.run([cuobjdump, "-sass", "-arch", "sm_120", "-fun", ",".join(names), str(lib)],
+                          capture_output=True, text=True, check=True).stdout
+    return dict(block.split("\n", 1) for block in re.split(r"\n\s*Function : ", sass)[1:])
+
+
+@pytest.mark.parametrize("dtype,aten_dtype", [("bf16", "BFloat16"), ("fp16", "Half")])
+def test_kernel_erff_constants_are_those_of_atens_gelu(dtype, aten_dtype):
+    """Every float constant of the fused kernel's erff (branch threshold, both polynomials) is in one of ATen's GELU
+    kernels, i.e. both link the same libdevice __nv_erff. Triton's bundled libdevice must fail this check: that is the
+    one-ULP mismatch the toolkit libdevice fixes (if it ever passes, the extern_libs override has become redundant)."""
+    if fused._EXTERN_LIBS is None:
+        pytest.skip("fused GEGLU is off in this environment")
+    ours = _ptx_constant_magnitudes(_compile_ptx(dtype, 1024))
+    bundled = _ptx_constant_magnitudes(_compile_ptx(dtype, 1024, extern_libs=None))
+    assert len(ours) >= 10 and len(bundled) >= 10 and ours != bundled
+    kernels = {name: _sass_constant_magnitudes(body) for name, body in _aten_gelu_kernels(aten_dtype).items()}
+    assert any(ours <= constants for constants in kernels.values()), {
+        name[:120]: sorted(hex(c) for c in ours - constants) for name, constants in kernels.items()}
+    assert not any(bundled <= constants for constants in kernels.values()), "Triton's bundled libdevice matches ATen's erff"
 
 
 def test_kernel_indexing_in_triton_interpreter(monkeypatch):
-    """Rows, column blocks, tail masks and the output layout, run on CPU by Triton's interpreter.
+    """fused_geglu's grid and launch, and the kernel's rows, column blocks, tail masks and output layout, run on CPU by
+    Triton's interpreter.
 
     The interpreter has no libdevice, so a private copy of the kernel module gets stand-ins: erf -> 0 and plain float32
     ops for mul_rn/add_rn. The kernel then computes round(float(a) * float(round((g * 0.5) * 1.0))), which torch's CPU
@@ -197,6 +292,9 @@ def test_kernel_indexing_in_triton_interpreter(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.libdevice = SimpleNamespace(erf=lambda x: x * 0.0, mul_rn=lambda a, b: a * b, add_rn=lambda a, b: a + b)
+    monkeypatch.setattr(fused, "_kernel", lambda: module.geglu_kernel)
+    if fused._EXTERN_LIBS is None:  # the interpreter ignores launch options; fused_geglu only needs them present
+        monkeypatch.setattr(fused, "_EXTERN_LIBS", (("libdevice", "unused by the interpreter"),))
 
     def truncate_to_bf16(t):
         return (t.contiguous().view(torch.int32) & -65536).view(torch.float32).to(BF16)
@@ -205,10 +303,7 @@ def test_kernel_indexing_in_triton_interpreter(monkeypatch):
     for shape in [(2, 3, 2 * 2560), (1, 2, 2 * 5120), (3, 2 * 48), (1, 2 * 3), (2, 2 * 1000)]:
         for dtype in (BF16, torch.float16):
             h = (torch.randn(shape, generator=generator) * 3).to(dtype)
-            inner = shape[-1] // 2
-            out = torch.full(shape[:-1] + (inner,), float("nan"), dtype=dtype)
-            block = fused._block_size(inner)
-            module.geglu_kernel[(h.numel() // shape[-1], -(-inner // block))](h, out, inner, BLOCK=block, num_warps=max(1, block // 256))
+            out = fused.fused_geglu(h)
             a, g = h.float().chunk(2, dim=-1)
             if dtype == BF16:
                 reference = truncate_to_bf16(a * truncate_to_bf16((g * 0.5) * 1.0).float())
@@ -221,15 +316,21 @@ def _all_values(dtype, device):
     return torch.arange(-(2 ** 15), 2 ** 15, dtype=torch.int32, device=device).to(torch.int16).view(dtype)
 
 
-def _assert_bitwise_equal(out, ref, label=""):
+def _mismatch_report(out, ref):
+    """None when `out` equals `ref` bit for bit (NaN payloads aside), else what differs."""
     assert out.shape == ref.shape and out.dtype == ref.dtype and out.stride() == ref.stride()
     nan = torch.isnan(ref)
-    assert torch.equal(torch.isnan(out), nan)
-    bits = torch.int16
-    mismatch = (out.view(bits) != ref.view(bits)) & ~nan
-    assert not bool(mismatch.any()), (
-        f"{label}: {int(mismatch.sum())} mismatches, e.g. {out[mismatch][:4]} vs {ref[mismatch][:4]}"
-    )
+    if not torch.equal(torch.isnan(out), nan):
+        return f"NaN positions differ ({int((torch.isnan(out) != nan).sum())})"
+    mismatch = (out.view(torch.int16) != ref.view(torch.int16)) & ~nan
+    if not bool(mismatch.any()):
+        return None
+    return f"{int(mismatch.sum())} mismatches, e.g. {out[mismatch][:4].tolist()} vs {ref[mismatch][:4].tolist()}"
+
+
+def _assert_bitwise_equal(out, ref, label=""):
+    report = _mismatch_report(out, ref)
+    assert report is None, f"{label}: {report}"
 
 
 @needs_cuda
@@ -244,12 +345,16 @@ def test_cuda_every_gate_value_is_bitwise_equal_to_eager(dtype):
         "wide": finite(torch.randn(every.shape, device="cuda", generator=generator)
                        * torch.exp2(torch.randint(-40, 40, every.shape, device="cuda", generator=generator).float())).to(dtype),
     }
+    failures = []
     with torch.inference_mode():
         for name, other in others.items():
             for role, (a, gate) in (("gate", (other, every)), ("multiplicand", (every, other))):
                 h = torch.cat([a, gate], dim=-1)
                 assert fused.fusable(h)
-                _assert_bitwise_equal(fused.fused_geglu(h), _eager(h), f"every {dtype} {role} value, other half {name}")
+                report = _mismatch_report(fused.fused_geglu(h), _eager(h))
+                if report is not None:
+                    failures.append(f"every {dtype} {role} value, other half {name}: {report}")
+    assert not failures, "\n".join(failures)
 
 
 # SDXL feed-forward GEGLUs: (tokens, model dim) at 1280² (latent 160²: 80² tokens at 640, 40² at 1280) and 1024²,
