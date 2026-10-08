@@ -1,5 +1,6 @@
 """Triton kernel behind modules/openclaw_fused_geglu.py (imported on the first fused CUDA call, so startup and CPU runs
-never import Triton). The bitwise contract is documented there."""
+never import Triton). The bitwise contract is documented there; it holds only with the launch options that module
+passes, which link the CUDA toolkit's libdevice (ATen's erff) instead of Triton's bundled one."""
 
 import triton
 import triton.language as tl

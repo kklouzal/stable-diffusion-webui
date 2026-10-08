@@ -7,12 +7,21 @@ ControlNet. The fused kernel reads each half once and writes the product once; p
 
 Bitwise contract for bf16/fp16 proj outputs, from ATen's CUDA kernels:
 - GeluCUDAKernelImpl (approximate='none') computes in float `x * 0.5f * (1.0f + erff(x * (float)M_SQRT1_2))` and rounds
-  to the tensor dtype. nvcc lowers erff to libdevice __nv_erff and builds without FTZ.
+  to the tensor dtype. nvcc builds it without FTZ and links erff as __nv_erff from the CUDA toolkit's libdevice
+  (nvvm/libdevice/libdevice.10.bc of the toolkit torch was built with).
 - mul_kernel_cuda multiplies the two values as floats and rounds the product once.
-The kernel (modules/openclaw_fused_geglu_kernel.py) evaluates the same expression in the same order with libdevice's
-__nv_erff and libdevice FTZ off. It rounds the gelu to the tensor dtype, multiplies in float32 and rounds once. Triton's
-down-conversions round to nearest even, like c10's float to bf16/fp16 conversions. test/test_openclaw_fused_geglu.py
-pins the generated PTX on CPU and, on the GPU, compares every bf16 and fp16 gate value against the eager path.
+The kernel (modules/openclaw_fused_geglu_kernel.py) evaluates the same expression in the same order with libdevice FTZ
+off. It rounds the gelu to the tensor dtype, multiplies in float32 and rounds once. Triton's down-conversions round to
+nearest even, like c10's float to bf16/fp16 conversions.
+erff must come from that same libdevice. By default Triton links its own bundled libdevice, whose __nv_erff is a
+different implementation (exp branch from |x| >= 1.00296 instead of 1.00376, other coefficients). On GB10 that moved
+the gelu of 4 of the 65536 bf16 and 98 of the 65536 fp16 gate values by one ULP (small negative outputs, where 1 + erf
+cancels). So every launch links the toolkit's libdevice, resolved once at import: CUDA_HOME (else CUDA_PATH, else
+/usr/local/cuda) must hold include/cuda.h with torch.version.cuda's CUDA_VERSION and nvvm/libdevice/libdevice.10.bc,
+or the import (startup) fails while the fused path is enabled.
+test/test_openclaw_fused_geglu.py pins the generated PTX on CPU, checks that the kernel's erff constants are those of
+ATen's own GELU kernels in libtorch_cuda (the sm_120 SASS that GB10 runs) and, on the GPU, compares every bf16 and fp16
+gate and multiplicand value against the eager path.
 
 Scope: CUDA bf16/fp16 tensors that do not need autograd (inference). Everything else, including the upcast-sampling
 path and CPU, runs the original forward. OPENCLAW_FUSED_GEGLU=0 (read once at import) restores the original forward
@@ -21,6 +30,9 @@ everywhere.
 
 from __future__ import annotations
 
+import os
+import re
+
 import torch
 import torch.nn.functional as F
 
@@ -28,6 +40,36 @@ from modules import devices, openclaw_env
 from modules.sd_hijack_utils import CondFunc
 
 ENABLED = openclaw_env.env_bool("OPENCLAW_FUSED_GEGLU", True)
+
+
+def _toolkit_libdevice() -> str:
+    """libdevice.10.bc of the CUDA toolkit torch was built with: the library nvcc linked ATen's erff from."""
+    home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "/usr/local/cuda"
+    major, minor = (int(part) for part in torch.version.cuda.split(".")[:2])
+    expected = major * 1000 + minor * 10
+    header = os.path.join(home, "include", "cuda.h")
+    path = os.path.join(home, "nvvm", "libdevice", "libdevice.10.bc")
+    found = None
+    try:
+        with open(header, encoding="utf-8") as f:
+            for line in f:
+                if (match := re.match(r"#define CUDA_VERSION (\d+)", line)) is not None:
+                    found = int(match.group(1))
+                    break
+    except OSError:
+        pass  # reported below as CUDA_VERSION None
+    if found != expected or not os.path.isfile(path):
+        raise RuntimeError(
+            f"fused GEGLU: erff must come from the libdevice of CUDA {torch.version.cuda} (torch's build toolkit) to "
+            f"match ATen bit for bit, but {header} has CUDA_VERSION {found} (expected {expected}) and {path} "
+            f"{'exists' if os.path.isfile(path) else 'is missing'}. Point CUDA_HOME at that toolkit, or set "
+            "OPENCLAW_FUSED_GEGLU=0."
+        )
+    return path
+
+
+# Resolved once at import (startup); None when the fused path is off or torch has no CUDA.
+_EXTERN_LIBS = (("libdevice", _toolkit_libdevice()),) if ENABLED and torch.version.cuda else None
 
 _FUSED_DTYPES = (torch.bfloat16, torch.float16)
 
@@ -42,6 +84,14 @@ def _block_size(inner: int) -> int:
         if inner % block == 0:
             return block
     return min(1024, 1 << max(0, (inner - 1).bit_length()))
+
+
+def _launch_options(block: int) -> dict:
+    """Triton options of every fused launch (the PTX/SASS tests compile with these too)."""
+    if _EXTERN_LIBS is None:
+        raise RuntimeError("fused GEGLU is off (OPENCLAW_FUSED_GEGLU=0) or torch has no CUDA")
+    # BLOCK // 256 warps: 8 elements per thread, one 16-byte vector per half for bf16/fp16.
+    return {"num_warps": max(1, block // 256), "enable_reflect_ftz": False, "extern_libs": _EXTERN_LIBS}
 
 
 def fusable(h: torch.Tensor) -> bool:
@@ -63,8 +113,7 @@ def fused_geglu(h: torch.Tensor) -> torch.Tensor:
     rows = h.numel() // h.shape[-1] if h.shape[-1] else 0
     if rows and inner:
         block = _block_size(inner)
-        # BLOCK // 256 warps: 8 elements per thread, one 16-byte vector per half for bf16/fp16.
-        _kernel()[(rows, -(-inner // block))](h, out, inner, BLOCK=block, num_warps=max(1, block // 256), enable_reflect_ftz=False)
+        _kernel()[(rows, -(-inner // block))](h, out, inner, BLOCK=block, **_launch_options(block))
     return out
 
 
