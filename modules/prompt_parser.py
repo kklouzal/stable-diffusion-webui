@@ -47,8 +47,8 @@ def get_learned_conditioning_prompt_schedules(prompts, base_steps, hires_steps=N
     [[10, 'a [unbalanced']]
     >>> g("a [b:.5] c")
     [[5, 'a  c'], [10, 'a b c']]
-    >>> g("a [{b|d{:.5] c")  # not handling this right now
-    [[5, 'a  c'], [10, 'a {b|d{ c']]
+    >>> g("a [{b|d{:.5] c")  # unparsable: the prompt is used as written
+    [[10, 'a [{b|d{:.5] c']]
     >>> g("((a][:b:c [d:3]")
     [[3, '((a][:b:c '], [10, '((a][:b:c d']]
     >>> g("[a|(b:1.1)]")
@@ -204,7 +204,8 @@ def get_learned_conditioning(model, prompts: SdConditioning | list[str], steps, 
 
 
 re_AND = re.compile(r"\bAND\b")
-re_weight = re.compile(r"^((?:\s|.)*?)(?:\s*:\s*([-+]?(?:\d+\.?|\d*\.\d+)))?\s*$")
+# A trailing ":<number>" is a subprompt's AND weight, except right after a digit: "16:9" and "10:30" stay text.
+re_weight = re.compile(r"^((?:\s|.)*?)(?:\s*(?<!\d):\s*([-+]?(?:\d+\.?|\d*\.\d+)))?\s*$")
 
 
 def get_multicond_prompt_list(prompts: SdConditioning | list[str]):
