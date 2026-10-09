@@ -2,8 +2,8 @@
 
 The extension is not part of the fork. These tests copy the installed checkout (the host deploy root, or the same
 checkout where run.sh mounts it inside a webui container) and skip when neither is present. The installed checkout
-may already be patched, so the fixture reverses every block to its upstream text and asserts the patcher reproduces
-the installed bytes. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
+may already be patched, by this release or by the previous one (PREVIOUS), so the fixture reverses every block to its
+upstream text and asserts the patcher turns that into the bytes it leaves or makes in the installed copy. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
 """
 from __future__ import annotations
 
@@ -35,7 +35,10 @@ INSTALLED_MD = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensio
 UPSTREAM_COMMIT = "22798f6"  # origin/main the blocks' ORIGINAL texts are taken from
 SGM_ROOT = ROOT / "repositories" / "generative-models"
 UTILS = "tile_utils/utils.py"
-TERMINAL_HELPER = "def _gb10_terminal_tile_origins"
+TERMINAL_HELPER = "def _gb10_tile_origins"
+TILEVAE = "scripts/tilevae.py"
+TILEVAE_SEMANTIC_BLOCKS = ("TV-NORM fused fp32 normalize", "TV-GN crop margins at any resolution", "TV-GN pooled statistics",
+                           "TV-ENC8 encoder tile grid", "TV-GN valid-region statistics")
 
 
 # The patcher imports patchlib as a sibling module, as under run.sh.
@@ -51,10 +54,17 @@ def snapshot(root: Path) -> dict[str, bytes]:
     return {relative: (root / relative).read_bytes() for relative in TARGETS}
 
 
-def unpatched(source: str, blocks) -> str:
-    for block in reversed(blocks):
+def unpatched(source: str, relative: str) -> str:
+    for block in [*reversed(PATCHER_MODULE.BLOCKS[relative]), *reversed(PATCHER_MODULE.PREVIOUS.get(relative, []))]:
         source = source.replace(block.patched, block.original)
     return source
+
+
+def copy_targets(source: Path, target: Path) -> Path:
+    for relative in TARGETS:
+        (target / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, target / relative)
+    return target
 
 
 def copy_multidiffusion(target: Path) -> Path:
@@ -63,18 +73,21 @@ def copy_multidiffusion(target: Path) -> Path:
         pytest.skip(f"installed MultiDiffusion fixture missing: {EXTENSION}")
     shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
     installed = snapshot(target)
-    for relative, blocks in PATCHER_MODULE.BLOCKS.items():
-        (target / relative).write_bytes(unpatched(installed[relative].decode("utf-8"), blocks).encode("utf-8"))
+    for relative in TARGETS:
+        (target / relative).write_bytes(unpatched(installed[relative].decode("utf-8"), relative).encode("utf-8"))
     if snapshot(target) != installed:
-        # The derived tree is only a valid upstream stand-in if the patcher turns it back into the installed bytes.
-        probe = target.parent / f"{target.name}-roundtrip"
-        for relative in TARGETS:
-            (probe / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(target / relative, probe / relative)
-        run_patcher(probe)
-        assert snapshot(probe) == installed
-        shutil.rmtree(probe)
+        # The derived tree is only a valid upstream stand-in if the patcher turns it into the bytes it leaves (or makes)
+        # in the installed copy: current targets unchanged, previous-release and new targets upgraded.
+        probe = run_patcher_on_copy(target, target.parent / f"{target.name}-roundtrip")
+        assert probe == run_patcher_on_copy(INSTALLED_MD, target.parent / f"{target.name}-upgraded")
     return target
+
+
+def run_patcher_on_copy(source: Path, probe: Path) -> dict[str, bytes]:
+    run_patcher(copy_targets(source, probe))
+    patched = snapshot(probe)
+    shutil.rmtree(probe)
+    return patched
 
 
 def apply_block(root: Path, relative: str, name: str) -> None:
@@ -132,6 +145,26 @@ def test_patcher_is_idempotent_and_check_mode_verifies(tmp_path: Path):
     assert patched[UTILS].decode("utf-8").count(TERMINAL_HELPER) == 1
 
 
+def test_patcher_upgrades_the_previous_release(tmp_path: Path):
+    fresh = copy_multidiffusion(tmp_path / "fresh")
+    run_patcher(fresh)
+    expected = snapshot(fresh)
+    root = copy_targets(fresh, tmp_path / "md")
+    for relative, blocks in PATCHER_MODULE.PREVIOUS.items():
+        text = unpatched((root / relative).read_text(encoding="utf-8"), relative)
+        for block in blocks:
+            text = text.replace(block.original, block.patched)
+        (root / relative).write_text(text, encoding="utf-8")
+    previous = snapshot(root)
+    assert previous != expected
+
+    result = run_patcher(root, "--check", check=False)
+    assert result.returncode != 0 and "MultiDiffusion patch outdated" in result.stderr
+    assert snapshot(root) == previous
+    assert run_patcher(root).stdout.count("Patched MultiDiffusion changes") == len(PATCHER_MODULE.PREVIOUS)
+    assert snapshot(root) == expected
+
+
 def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
     root = copy_multidiffusion(tmp_path / "md")
     tilevae = root / "scripts" / "tilevae.py"
@@ -175,15 +208,11 @@ def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
 def multidiffusion_origins(module_path: Path, extent: int, tile: int, overlap: int) -> list[int]:
     source = module_path.read_text(encoding="utf-8")
     if TERMINAL_HELPER in source:
-        match = re.search(
-            r"def _gb10_terminal_tile_origins\(extent:int, tile:int, overlap:int\).*?(?=\n\ndef split_bboxes)",
-            source,
-            flags=re.S,
-        )
-        assert match, "patched terminal-origin helper not found"
+        match = re.search(r"def _gb10_tile_origins\(extent:int, tile:int, overlap:int\).*?(?=\n\ndef split_bboxes)", source, flags=re.S)
+        assert match, "patched tile-origin helper not found"
         namespace: dict[str, object] = {}
-        exec("from typing import List\n" + match.group(0), namespace)
-        return namespace["_gb10_terminal_tile_origins"](extent, tile, overlap)  # type: ignore[index,operator]
+        exec("import math\nfrom typing import List\n" + match.group(0), namespace)
+        return namespace["_gb10_tile_origins"](extent, tile, overlap)  # type: ignore[index,operator]
 
     match = re.search(
         r"cols = math\.ceil\(\(w - overlap\) / \(tile_w - overlap\)\).*?x = min\(int\(col \* dx\), w - tile_w\)",
@@ -191,22 +220,19 @@ def multidiffusion_origins(module_path: Path, extent: int, tile: int, overlap: i
         flags=re.S,
     )
     assert match, "upstream MultiDiffusion origin calculation not found"
+    return upstream_origins(extent, tile, overlap)
+
+
+def upstream_origins(extent: int, tile: int, overlap: int) -> list[int]:
     cols = math.ceil((extent - overlap) / (tile - overlap))
     dx = (extent - tile) / (cols - 1) if cols > 1 else 0
     return [min(int(col * dx), extent - tile) for col in range(cols)]
 
 
-def assert_axis_coverage(origins: list[int], extent: int, tile: int) -> None:
-    assert origins == sorted(origins)
-    assert len(origins) == len(set(origins))
-    assert all(origin >= 0 for origin in origins)
-    assert origins[0] == 0
-    assert origins[-1] == max(0, extent - tile)
-    covered = [False] * extent
-    for origin in origins:
-        for idx in range(origin, min(origin + tile, extent)):
-            covered[idx] = True
-    assert all(covered)
+def covers(origins: list[int], extent: int, tile: int) -> bool:
+    """Sorted, distinct, from 0 to the terminal origin extent - tile, no gap: every row/column gets weight."""
+    gaps = [b - a for a, b in zip(origins, origins[1:])]
+    return origins[0] == 0 and origins[-1] == max(0, extent - tile) and all(0 < gap <= tile for gap in gaps)
 
 
 def test_upstream_tile_origins_still_have_the_proven_floor_rounding_gap(tmp_path: Path):
@@ -218,22 +244,54 @@ def test_upstream_tile_origins_still_have_the_proven_floor_rounding_gap(tmp_path
     assert origins[-1] != 555 - 64
 
 
-def test_patched_tile_origins_cover_the_terminal_edges(tmp_path: Path):
+def test_patched_tile_origins_pin_only_the_terminal_origin(tmp_path: Path):
     root = copy_multidiffusion(tmp_path / "md")
-    utils = root / UTILS
-    assert multidiffusion_origins(utils, extent=160, tile=64, overlap=16) == [0, 48, 96]
     run_patcher(root)
+    utils = root / UTILS
 
-    x_origins = multidiffusion_origins(utils, extent=555, tile=64, overlap=16)
-    y_origins = multidiffusion_origins(utils, extent=427, tile=64, overlap=16)
-    assert x_origins[-2:] == [480, 491]
-    assert y_origins[-2:] == [336, 363]
-    assert (x_origins[0], y_origins[0]) == (0, 0)
-    assert (x_origins[-1], y_origins[-1]) == (491, 363)
-    assert_axis_coverage(x_origins, 555, 64)
-    assert_axis_coverage(y_origins, 427, 64)
-    # A grid that already ends on the terminal origin is unchanged.
-    assert multidiffusion_origins(utils, extent=160, tile=64, overlap=16) == [0, 48, 96]
+    assert multidiffusion_origins(utils, extent=555, tile=64, overlap=16)[-3:] == [401, 446, 491]
+    # 2048 px SDXL, tile 96, overlap 48: upstream's even spacing (deploy10 stepped by 48: [0, 48, 96, 144, 160]).
+    assert multidiffusion_origins(utils, extent=256, tile=96, overlap=48) == [0, 40, 80, 120, 160]
+    # A tile spanning the extent is one origin, also when init_grid_bbox's clamp leaves overlap == extent (upstream:
+    # ZeroDivisionError).
+    assert multidiffusion_origins(utils, extent=48, tile=48, overlap=48) == [0]
+    with pytest.raises(ZeroDivisionError):
+        upstream_origins(48, 48, 48)
+    with pytest.raises(ValueError, match="tile overlap"):
+        multidiffusion_origins(utils, extent=100, tile=48, overlap=48)
+
+    # Every UI-reachable latent config (tile 16..256 step 16, overlap 0..tile-4 step 4, extent up to 8192 px): equal to
+    # upstream wherever upstream covers the extent, otherwise only the last origin moves, by one. The full grid (every
+    # tile 5..256 and overlap 0..tile-4) was checked the same way when the block was written: 27,374,592 configs,
+    # 204,933 uncovered by upstream, no other difference.
+    uncovered = 0
+    for tile in range(16, 257, 16):
+        for overlap in range(0, tile - 3, 4):
+            for extent in range(tile + 1, 1025):
+                upstream = upstream_origins(extent, tile, overlap)
+                origins = multidiffusion_origins(utils, extent, tile, overlap)
+                assert covers(origins, extent, tile), (extent, tile, overlap)
+                if covers(upstream, extent, tile):
+                    assert origins == upstream, (extent, tile, overlap)
+                else:
+                    uncovered += 1
+                    assert origins == upstream[:-1] + [upstream[-1] + 1], (extent, tile, overlap)
+    assert uncovered > 0
+
+
+def test_patched_split_bboxes_covers_every_latent_pixel(md_pair, import_extension):
+    _, patched = md_pair
+    (utils,) = import_extension(patched, "tile_utils.utils")
+    bboxes, weight = utils.split_bboxes(555, 427, 64, 64, overlap=16)
+
+    xs, ys = sorted({bbox.x for bbox in bboxes}), sorted({bbox.y for bbox in bboxes})
+    assert [(bbox.y, bbox.x) for bbox in bboxes] == [(y, x) for y in ys for x in xs]  # upstream's row-major order
+    assert (xs[-1], ys[-1]) == (555 - 64, 427 - 64)
+    assert weight.shape == (1, 1, 427, 555) and bool((weight > 0).all())
+    expected = torch.zeros_like(weight)
+    for bbox in bboxes:
+        expected[:, :, bbox.y:bbox.y + 64, bbox.x:bbox.x + 64] += 1
+    assert torch.equal(weight, expected)
 
 
 # ---------------------------------------------------------------- differential tests (CPU)
@@ -241,6 +299,14 @@ def test_patched_tile_origins_cover_the_terminal_edges(tmp_path: Path):
 
 class NansException(Exception):
     pass
+
+
+class SdConditioning(list):
+    """modules.prompt_parser.SdConditioning: the prompts plus the canvas size SDXL embeds."""
+
+    def __init__(self, prompts, is_negative_prompt=False, width=None, height=None, copy_from=None):
+        super().__init__(prompts)
+        self.width, self.height, self.is_negative_prompt = width, height, is_negative_prompt
 
 
 def fork_sdpa_helper():
@@ -294,8 +360,8 @@ def webui_stubs(monkeypatch):
         # modules.devices.without_autocast, for the CPU autocast these tests can run under.
         return torch.autocast("cpu", enabled=False) if torch.is_autocast_enabled("cpu") and not disable else contextlib.nullcontext()
 
-    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
-    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"))
+    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4, job_count=0, nextjob=lambda: None)
+    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"), parameterization="eps")
     shared = stub("modules.shared", state=state, opts=types.SimpleNamespace(upcast_attn=False), sd_model=sd_model, cmd_opts=types.SimpleNamespace())
     hijack = stub("modules.sd_hijack", model_hijack=types.SimpleNamespace(optimization_method="none"))
     packages = ("modules", "ldm", "ldm.modules", "ldm.modules.diffusionmodules", "ldm.models", "ldm.models.diffusion", "k_diffusion")
@@ -303,22 +369,26 @@ def webui_stubs(monkeypatch):
         **{name: stub(name, package=True) for name in packages},
         "gradio": stub("gradio"),
         "gradio.components": stub("gradio.components", Component=object),
-        "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object()),
+        "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object(), basedir=lambda: ""),
+        "modules.sd_samplers": stub("modules.sd_samplers"),
+        "modules.images": stub("modules.images"),
         "modules.devices": stub(
             "modules.devices", device=cpu, cpu=cpu, get_optimal_device=lambda: cpu, get_optimal_device_name=lambda: "cpu",
             torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException,
             without_autocast=without_autocast),
         "modules.shared": shared,
         "modules.ui": stub("modules.ui", gr_show=lambda *_args, **_kwargs: None),
-        "modules.processing": stub("modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object),
+        "modules.processing": stub(
+            "modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object,
+            get_fixed_seed=lambda seed: seed),
         "modules.sd_vae_approx": stub("modules.sd_vae_approx", cheap_approximation=cheap_approximation),
         "modules.sd_hijack": hijack,
         "modules.sd_hijack_optimizations": stub(
             "modules.sd_hijack_optimizations", get_available_vram=lambda: 2**40, get_xformers_flash_attention_op=lambda *_args: None,
             sub_quad_attention=None, run_scaled_dot_product_attention=run_scaled_dot_product_attention),
-        "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object),
+        "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object, SdConditioning=SdConditioning),
         "modules.extra_networks": stub("modules.extra_networks", ExtraNetworkParams=object),
-        "modules.sd_samplers_common": stub("modules.sd_samplers_common"),
+        "modules.sd_samplers_common": stub("modules.sd_samplers_common", setup_img2img_steps=lambda p, steps: (steps, steps), store_latent=lambda x: None),
         "modules.sd_samplers_kdiffusion": stub(
             "modules.sd_samplers_kdiffusion", KDiffusionSampler=type("KDiffusionSampler", (), {}), CFGDenoiser=object, CFGDenoiserKDiffusion=object),
         "modules.sd_samplers_timesteps": stub(
@@ -363,10 +433,12 @@ def import_extension(webui_stubs):
 
 @pytest.fixture()
 def md_pair(tmp_path: Path):
-    """(original, patched) checkouts. The original keeps the terminal tile origins patched, so every differential
-    isolates the other changes; the origin change itself is intentionally not bit-identical (see above)."""
+    """(original, patched) checkouts. The original has the blocks that change results applied too (the terminal tile
+    origins, the Tiled VAE group-norm statistics and normalize, the encoder tile grid), so every differential
+    isolates the performance changes; those blocks are tested against upstream and the untiled VAE on their own."""
     original = copy_multidiffusion(tmp_path / "original")
-    apply_block(original, UTILS, "MD terminal tile origins")
+    for relative, name in [(UTILS, "MD terminal tile origins"), *((TILEVAE, name) for name in TILEVAE_SEMANTIC_BLOCKS)]:
+        apply_block(original, relative, name)
     patched = copy_multidiffusion(tmp_path / "patched")
     run_patcher(patched)
     return original, patched
@@ -677,3 +749,347 @@ def test_mixture_of_diffusers_without_grid_tiles_precomputes_nothing(md_pair, im
     delegate.init_done()
     assert delegate.batched_tile_weights == []
     assert not hasattr(delegate, "tile_weights")
+
+
+# ---------------------------------------------------------------- noise inversion, ControlNet tiles, region control (CPU)
+
+
+def noise_inversion_setup(root: Path, import_extension):
+    """A MultiDiffusion delegate with noise inversion wired to a real Tiled Diffusion Script's cache; the inversion
+    itself is replaced by a recorder whose result differs per call."""
+    script_module, md = import_extension(root, "scripts/tilediffusion.py", "tile_methods.multidiffusion")
+    torch.manual_seed(0)
+    p = types.SimpleNamespace(
+        sampler_name="Euler", width=64, height=64, disable_extra_networks=False, batch_size=1, init_images=[],
+        all_prompts=["a cat <lora:x:1>", "a dog"], prompts=["a cat"], extra_network_data={"lora": [types.SimpleNamespace(items=["x", "1"])]},
+        init_latent=torch.randn((1, 4, 8, 8)), sd_model=types.SimpleNamespace(sd_model_hash="abc"))
+    sampler = md.KDiffusionSampler()
+    sampler.sample_img2img = lambda p, x, noise, *args: noise
+    sampler.get_sigmas = lambda p, steps: torch.tensor([2.0, 1.0])
+    sampler.model_wrap = None
+    delegate = md.MultiDiffusion(p, sampler)
+    script = script_module.Script()
+    calls = []
+
+    def find_noise(dnw, steps, prompts):
+        calls.append(list(prompts))
+        return torch.full_like(p.init_latent, float(len(calls)))
+
+    delegate.find_noise_for_image_sigma_adjustment = find_noise
+    delegate.init_noise_inverse(10, 1.0, script.noise_inverse_get_cache, lambda x0, xt, prompts: script.noise_inverse_set_cache(p, x0, xt, prompts, 10, 1.0), 0.0, 64)
+
+    def run():
+        x = torch.zeros_like(p.init_latent)
+        return delegate.sample_img2img(sampler, p, x, x, None, None)
+
+    return script, delegate, p, calls, run
+
+
+def test_upstream_noise_inversion_reuses_a_different_image_and_the_first_batch_prompts(md_pair, import_extension, webui_stubs):
+    original, _patched = md_pair
+    _script, _delegate, p, calls, run = noise_inversion_setup(original, import_extension)
+    run()
+    p.init_latent = p.init_latent.clone()
+    p.init_latent[0, 0, 0, 0] += 0.5
+    run()
+    assert calls == [["a cat <lora:x:1>"]]  # the raw first-batch prompt, then reused for a different init latent
+
+
+def test_noise_inversion_inverts_this_batch_and_reuses_only_exact_matches(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    script, delegate, p, calls, run = noise_inversion_setup(patched, import_extension)
+
+    first = run()
+    assert calls == [["a cat"]]  # p.prompts: this batch, extra networks parsed out
+    assert torch.equal(run(), first) and len(calls) == 1  # same batch inputs: reused
+
+    changes = [
+        lambda: p.init_latent.__setitem__((0, 0, 0, 0), p.init_latent[0, 0, 0, 0] + 1e-3),
+        lambda: setattr(p, "extra_network_data", {"lora": [types.SimpleNamespace(items=["x", "0.5"])]}),
+        lambda: setattr(delegate, "noise_inverse_retouch", 1.005),
+        lambda: setattr(p, "prompts", ["a dog"]),
+    ]
+    for count, change in enumerate(changes, start=2):
+        p.init_latent = p.init_latent.clone()
+        change()
+        run()
+        assert len(calls) == count
+
+    delegate.enable_controlnet = True
+    run()
+    assert len(calls) == len(changes) + 2  # never reused with ControlNet
+    delegate.enable_controlnet = False
+
+    webui_stubs.state.interrupted = True
+    p.prompts = ["a bird"]
+    run()
+    webui_stubs.state.interrupted = False
+    run()
+    assert calls[-2:] == [["a bird"], ["a bird"]]  # the interrupted (partial) inversion was not cached
+
+    assert script.noise_inverse_cache is not None
+    script.process(p, False, *([None] * 20))
+    assert script.noise_inverse_cache is None  # never outlives a request
+
+
+def test_noise_inversion_conditioning_carries_the_canvas_size(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    (md,) = import_extension(patched, "tile_methods.multidiffusion")
+    seen = []
+
+    def get_learned_conditioning(batch):
+        seen.append(batch)
+        return {"crossattn": torch.zeros((len(batch), 77, 8)), "vector": torch.zeros((len(batch), 4))}
+
+    p = types.SimpleNamespace(
+        sampler_name="Euler", width=1536, height=1024, disable_extra_networks=True, init_latent=torch.zeros((1, 4, 128, 192)),
+        image_conditioning=torch.zeros((1, 5, 1, 1)), sd_model=types.SimpleNamespace(get_learned_conditioning=get_learned_conditioning))
+    delegate = md.MultiDiffusion(p, md.KDiffusionSampler())
+    webui_stubs.state.interrupted = True  # stop before the first UNet step: only the conditioning is under test
+    delegate.find_noise_for_image_sigma_adjustment(types.SimpleNamespace(get_sigmas=lambda steps: torch.linspace(0.1, 10.0, steps + 1)), 4, ["a cat"])
+
+    (batch,) = seen
+    assert isinstance(batch, SdConditioning) and list(batch) == ["a cat"]
+    assert (batch.width, batch.height, batch.is_negative_prompt) == (1536, 1024, False)
+
+
+class FakeControlParams:
+    """ControlNet's ControlParams.hint_cond: every assignment drops the hint's derived state (counted here)."""
+
+    def __init__(self, hint):
+        self._hint_cond = hint
+        self.assigned = 0
+
+    @property
+    def hint_cond(self):
+        return self._hint_cond
+
+    @hint_cond.setter
+    def hint_cond(self, value):
+        self._hint_cond = value
+        self.assigned += 1
+
+
+def controlnet_delegate(module, hint, *, tile_batch_size, control_tensor_cpu=False, kdiff=True):
+    p = types.SimpleNamespace(sampler_name="Euler", width=512, height=384, disable_extra_networks=True)
+    delegate = module.MultiDiffusion(p, module.KDiffusionSampler() if kdiff else object())
+    delegate.init_grid_bbox(32, 32, 8, tile_batch_size)  # latent 64x48: 3x2 tiles
+    delegate.custom_bboxes = [module.CustomBBox(4, 6, 20, 18, "", "", module.BlendMode.BACKGROUND.value, 0.2, -1)]
+    param = FakeControlParams(hint.clone())
+    delegate.init_controlnet(types.SimpleNamespace(latest_network=types.SimpleNamespace(control_params=[param])), control_tensor_cpu)
+    return delegate, param
+
+
+@pytest.mark.parametrize("tile_batch_size", [4, 8], ids=["two-batches", "one-batch"])
+@pytest.mark.parametrize("kdiff", [True, False], ids=["kdiff", "timesteps"])
+@pytest.mark.parametrize("control_tensor_cpu", [False, True], ids=["device", "cpu"])
+def test_controlnet_tiles_are_built_once_and_bit_identical(md_pair, import_extension, webui_stubs, tile_batch_size, kdiff, control_tensor_cpu):
+    original, patched = md_pair
+    (old,) = import_extension(original, "tile_methods.multidiffusion")
+    (new,) = import_extension(patched, "tile_methods.multidiffusion")
+    hint = torch.rand((1, 3, 384, 512))
+    before, old_param = controlnet_delegate(old, hint, tile_batch_size=tile_batch_size, control_tensor_cpu=control_tensor_cpu, kdiff=kdiff)
+    after, new_param = controlnet_delegate(new, hint, tile_batch_size=tile_batch_size, control_tensor_cpu=control_tensor_cpu, kdiff=kdiff)
+
+    first_seen = {}
+    for step in range(3):
+        for batch_id, bboxes in enumerate(after.batched_bboxes):
+            for delegate in (before, after):
+                delegate.switch_controlnet_tensors(batch_id, 2, len(bboxes), is_denoise=step == 2)
+            assert torch.equal(new_param.hint_cond, old_param.hint_cond)
+            key = (batch_id, step == 2)
+            if key in first_seen and not control_tensor_cpu:
+                assert new_param.hint_cond is first_seen[key]  # built once per request
+            first_seen.setdefault(key, new_param.hint_cond)
+        for delegate in (before, after):
+            delegate.set_custom_controlnet_tensors(0, 2)
+        assert torch.equal(new_param.hint_cond, old_param.hint_cond)
+
+    # Grid batches and the region alternate, so every call here changes the tile and is still an assignment.
+    assert new_param.assigned == old_param.assigned == 3 * (len(after.batched_bboxes) + 1)
+    after.reset_controlnet_tensors()
+    assert new_param.hint_cond is after.org_control_tensor_batch[0]
+
+
+def test_controlnet_unchanged_tile_is_not_reassigned(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    (new,) = import_extension(patched, "tile_methods.multidiffusion")
+    delegate, param = controlnet_delegate(new, torch.rand((1, 3, 384, 512)), tile_batch_size=8)
+    for _step in range(5):
+        delegate.switch_controlnet_tensors(0, 2, len(delegate.batched_bboxes[0]))
+    assert param.assigned == 1  # one grid batch: ControlNet keeps the hint's derived state across steps
+
+    tile = param.hint_cond
+    delegate.reset_controlnet_tensors()  # postprocess_batch, then the next batch's create_sampler refresh:
+    delegate.prepare_controlnet_tensors(refresh=True)  # new ControlNet batch inputs, so the memo starts over
+    delegate.switch_controlnet_tensors(0, 2, len(delegate.batched_bboxes[0]))
+    assert param.hint_cond is not tile and torch.equal(param.hint_cond, tile) and param.assigned == 3
+
+
+def region_states(enable, x=0.1):
+    return [enable, x, 0.1, 0.5, 0.5, "a red ball", "", "Background", 0.2, -1]
+
+
+@pytest.mark.parametrize("model,enable_bbox_control,states,rejected", [
+    ("is_sdxl", True, region_states(True), True),
+    ("is_sd3", True, region_states(False) + region_states(True), True),
+    ("is_sdxl", True, region_states(False), False),
+    ("is_sdxl", True, region_states(True, x=1.5), False),  # skipped by init_custom_bbox: harmless
+    ("is_sdxl", False, region_states(True), False),
+    ("is_sd1", True, region_states(True), False),
+])
+def test_region_prompt_control_is_rejected_up_front_for_dict_conditioning(md_pair, import_extension, webui_stubs, model, enable_bbox_control, states, rejected):
+    _original, patched = md_pair
+    (script_module,) = import_extension(patched, "scripts/tilediffusion.py")
+    setattr(webui_stubs.shared.sd_model, model, True)
+    p = types.SimpleNamespace()  # no width: a request that passes the check fails on its first canvas access
+    args = (True, "MultiDiffusion", False, False, 1024, 1024, 96, 96, 48, 4, "None", 2.0, False, 10, 1.0, 1.0, 64, False, enable_bbox_control, True, False, *states)
+    if rejected:
+        with pytest.raises(RuntimeError, match="Region prompt control supports SD1/SD2 models only"):
+            script_module.Script().process(p, *args)
+        assert vars(p) == {}
+    else:
+        with pytest.raises(AttributeError, match="width"):
+            script_module.Script().process(p, *args)
+
+
+# ---------------------------------------------------------------- Tiled VAE group norm statistics (CPU, against the untiled VAE)
+
+
+def exact_stats_vae():
+    """tiny_vae with the mid attention's output zeroed (x + 0): every op left is local, so with a padding beyond the
+    receptive field a tiled pass with exact group-norm statistics equals the untiled VAE up to float reassociation."""
+    encoder, decoder = tiny_vae()
+    with torch.no_grad():
+        for net in (encoder, decoder):
+            net.mid.attn_1.proj_out.weight.zero_()
+            net.mid.attn_1.proj_out.bias.zero_()
+    return encoder, decoder
+
+
+def run_padded_hook(module, net, x, *, is_decoder, tile_size, pad, fast=False):
+    hook = module.VAEHook(net, tile_size, is_decoder=is_decoder, fast_decoder=fast, fast_encoder=fast, color_fix=False)
+    hook.pad = pad
+    return hook(x)
+
+
+def rms(a, b):
+    return float((a.float() - b.float()).pow(2).mean().sqrt())
+
+
+def varying_field(shape, seed):
+    """Noise plus a smooth horizontal ramp, so tiles have different statistics (as image content does)."""
+    torch.manual_seed(seed)
+    return torch.randn(shape) * 0.8 + torch.linspace(-1.5, 1.5, shape[-1])
+
+
+@pytest.fixture()
+def tilevae_upstream_and_patched(tmp_path: Path, import_extension):
+    upstream = copy_multidiffusion(tmp_path / "upstream")
+    patched = copy_multidiffusion(tmp_path / "patched")
+    run_patcher(patched)
+    (old,) = import_extension(upstream, "scripts/tilevae.py")
+    (new,) = import_extension(patched, "scripts/tilevae.py")
+    return old, new
+
+
+GN_CASES = [
+    # (is_decoder, input shape, tile size, pad)
+    pytest.param(True, (2, 4, 40, 90), 16, 24, id="decoder-batch2-tile-below-pad"),
+    pytest.param(True, (1, 4, 9, 100), 16, 24, id="decoder-thin"),
+    pytest.param(True, (1, 4, 61, 87), 16, 24, id="decoder-odd"),
+    pytest.param(False, (1, 3, 200, 360), 64, 128, id="encoder"),
+    pytest.param(False, (2, 3, 136, 344), 64, 128, id="encoder-batch2"),
+]
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size,pad", GN_CASES)
+def test_tiled_vae_synced_group_norm_matches_the_untiled_vae(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size, pad):
+    """Non-fast mode pools each group norm's statistics over all tiles. Upstream took them over whole padded tiles
+    (overlaps counted 2-4x) and averaged the per-tile variances only; TV-GN pools the valid regions exactly."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = exact_stats_vae()
+    net = decoder if is_decoder else encoder
+    x = varying_field(shape, 2)
+    with torch.no_grad():
+        reference = net(x)
+    scale = float(reference.pow(2).mean().sqrt())
+
+    before = run_padded_hook(old, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    after = run_padded_hook(new, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    assert after.shape == reference.shape
+    assert rms(after, reference) < 1e-4 * scale
+    assert rms(before, reference) > 1e-2 * scale
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size", [(True, (1, 4, 40, 48), 12), (False, (1, 3, 192, 168), 64)])
+def test_tiled_vae_fast_mode_is_unchanged_in_float32(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size):
+    """Fast mode estimates the statistics from a downsampled tile (a documented approximation, kept). TV-NORM only
+    folds the affine into the normalize, so float32 results agree to rounding."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = tiny_vae()
+    net = decoder if is_decoder else encoder
+    torch.manual_seed(3)
+    x = torch.randn(shape)
+    before = run_hook(old, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, fast=True)
+    after = run_hook(new, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, fast=True)
+    torch.testing.assert_close(after, before, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size,pad", [GN_CASES[0], GN_CASES[3]])
+def test_tiled_vae_bf16_group_norm_is_no_worse_than_native(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size, pad):
+    """TV-NORM keeps the statistics and the affine in float32 and rounds the output once, like F.group_norm; upstream
+    rounded the statistics to bfloat16 and then rounded after the normalize, the scale and the shift."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = exact_stats_vae()
+    net = decoder if is_decoder else encoder
+    x = varying_field(shape, 5)
+    with torch.no_grad():
+        reference = net(x)
+        native = copy.deepcopy(net).to(torch.bfloat16)(x.to(torch.bfloat16))
+    bf16_net = copy.deepcopy(net).to(torch.bfloat16)
+    bf16_net.original_forward = bf16_net.forward
+    after = run_padded_hook(new, bf16_net, x.to(torch.bfloat16), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    before = run_padded_hook(old, bf16_net, x.to(torch.bfloat16), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    assert after.dtype == torch.bfloat16
+    assert rms(after, reference) <= rms(native, reference) * 1.05
+    assert rms(after, reference) < rms(before, reference)
+
+
+def test_tiled_vae_encoder_tiles_stay_on_the_latent_grid(tilevae_upstream_and_patched, webui_stubs):
+    """An API tile size that is not a multiple of 8 put encoder tiles off the 8-pixel latent grid (TV-ENC8)."""
+    old, new = tilevae_upstream_and_patched
+    encoder, _decoder = exact_stats_vae()
+    x = varying_field((1, 3, 136, 856), 6)
+    with torch.no_grad():
+        reference = encoder(x)
+    scale = float(reference.pow(2).mean().sqrt())
+    off_grid = run_padded_hook(new, encoder, x.clone(), is_decoder=False, tile_size=300, pad=128)
+    assert torch.equal(off_grid, run_padded_hook(new, encoder, x.clone(), is_decoder=False, tile_size=296, pad=128))
+    assert rms(off_grid, reference) < 1e-4 * scale
+    # Upstream: the off-grid tile's latent crop does not even fit its output region here.
+    with pytest.raises(RuntimeError, match="expanded size"):
+        run_padded_hook(old, encoder, x.clone(), is_decoder=False, tile_size=300, pad=128)
+
+
+def test_tiled_vae_checks_nans_once_per_finished_tile(tilevae_upstream_and_patched, webui_stubs, monkeypatch):
+    old, new = tilevae_upstream_and_patched
+    _encoder, decoder = exact_stats_vae()
+    devices = sys.modules["modules.devices"]
+    checks = []
+    test_for_nans = devices.test_for_nans
+    monkeypatch.setattr(devices, "test_for_nans", lambda x, where: (checks.append(where), test_for_nans(x, where)))
+    torch.manual_seed(7)
+    z = torch.randn((1, 4, 40, 90))
+    counts = []
+    for module in (old, new):
+        checks.clear()
+        hook = module.VAEHook(decoder, 16, is_decoder=True, fast_decoder=False, fast_encoder=False, color_fix=False)
+        tiles = len(hook.split_tiles(40, 90)[0])
+        hook(z.clone())
+        counts.append(len(checks))
+    assert counts[1] == tiles < counts[0]  # one host sync per tile instead of one per tile per group-norm pass
+
+    z[0, 0, 0, 0] = float("nan")
+    with pytest.raises(NansException):
+        run_hook(new, decoder, z, is_decoder=True, tile_size=16, fast=False)

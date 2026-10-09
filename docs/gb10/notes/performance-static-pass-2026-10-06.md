@@ -64,6 +64,9 @@ Full audit evidence (findings per area, ledger, test logs, GPU microbenchmarks):
 - Tiled VAE/MultiDiffusion/USDU (deploy patchers, fail closed): no host round trips or gc in Tiled VAE, precomputed
   MoD weights, per-tile sub-canvas windows in USDU (bitwise over 70 layouts). Soft inpainting histogram filter
   vectorized (bit-identical, ~65x).
+  Update 2026-10-09: "no host round trips" was inaccurate. Non-fast Tiled VAE still synced per tile per group-norm
+  pass (the NaN check) and uploaded the tile pixel counts per pass; the NaN check now runs once per finished tile
+  (TV-NANEND), the small per-pass upload remains.
 - Build: the wheelbuilder no longer copies the app source, so app-only builds reuse the dependency closure instead
   of re-resolving released packages; `.dockerignore` excludes nested bytecode and agent worktrees.
 

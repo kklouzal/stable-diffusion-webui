@@ -1,101 +1,144 @@
 #!/usr/bin/env python3
-"""Patch and verify Ultimate Upscale state lifecycle.
+"""Patch and verify the Ultimate Upscale run lifecycle: shared state, override settings and the reported result.
 
-USDUpscaler.process() calls state.begin() first and state.end() last; an exception in between left the shared job
-state open. The patch wraps everything between them in try/finally so one begin always owns one end.
-The rewrite is an AST-checked re-indent rather than exact text blocks, but it follows gb10/patchlib.py's contract:
-UTF-8 with LF only, the rewrapped body must parse to exactly the original statements and the result must verify
-before anything is written, the file is replaced atomically, and --check writes nothing.
+Exact ORIGINAL -> PATCHED text blocks on gb10/patchlib.py's contract; ORIGINAL is upstream Coyote-A master 2322caa.
+- USDUpscaler.process() called state.begin() first and state.end() last. The request's job already owns the shared
+  state (modules/api/api.py begins and ends it around the script), so the nested begin cleared an interrupt sent
+  while the upscaler ran (every tile then ran and the request reported success), emptied the device cache once more,
+  and renamed the job; the nested end emptied it again. process() no longer touches the job state; an exception
+  leaves it to the caller's finally.
+- override_settings are applied once around all tiles and restored afterwards (process_images() applies and restores
+  them per tile, and an sd_vae override reloaded the VAE twice per tile). Each tile's process_images() then finds
+  them already applied: same options for every tile, so the same images.
+- A redraw pass that ran no tile (interrupted) raised UnboundLocalError on `processed`; a seams pass that ran no tile
+  (a single tile row or column, or interrupted) blanked the infotext and appended the unchanged image a second
+  time; the intersections pass dropped the half-tile pass's infotext when it ran no corner tile.
+The deploy10 release (the former AST re-indent, marker OPENCLAW_ULTIMATE_UPSCALE_STATE_FINALLY_V2) is upgraded.
+Runs before patch-ultimate-upscale-subcanvas.py; neither patcher's blocks overlap the other's.
 """
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
-from patchlib import parse_cli, read_lf, replace_atomically
+from patchlib import Block, apply_blocks, parse_cli
 
 LABEL = "Ultimate Upscale lifecycle"
 TARGET_RELATIVE = Path("scripts") / "ultimate-upscale.py"
-MARKER = "OPENCLAW_ULTIMATE_UPSCALE_STATE_FINALLY_V2"
+MARKER = "OPENCLAW_ULTIMATE_UPSCALE_LIFECYCLE_V3"
 
+PROCESS = '''    def process(self):
+        state.begin()
+        self.calc_jobs_count()
+        self.result_images = []
+        if self.redraw.enabled:
+            self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)
+            self.initial_info = self.redraw.initial_info
+        self.result_images.append(self.image)
+        if self.redraw.save:
+            self.save_image()
 
-def process_node(source: str, target: Path) -> ast.FunctionDef:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as exc:
-        raise SystemExit(f"invalid Ultimate Upscale source: {target}: {exc}") from exc
-    matches = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "process"]
-    if len(matches) != 1:
-        raise SystemExit(f"unsupported Ultimate Upscale process implementation: {target}")
-    return matches[0]
+        if self.seams_fix.enabled:
+            self.image = self.seams_fix.start(self.p, self.image, self.rows, self.cols)
+            self.initial_info = self.seams_fix.initial_info
+            self.result_images.append(self.image)
+            if self.seams_fix.save:
+                self.save_image()
+        state.end()
+'''
 
+BLOCKS = [
+    Block(
+        "process",
+        PROCESS,
+        f'''    def process(self):
+        # {MARKER} (gb10/patch-ultimate-upscale-state-lifecycle.py): the request's job owns shared.state, so no
+        # nested state.begin()/end() (it cleared an interrupt sent during the upscaler). override_settings apply once
+        # around all tiles instead of being applied and restored (an sd_vae override reloaded) per tile.
+        self.calc_jobs_count()
+        self.result_images = []
+        stored_opts = processing.store_processing_override_settings(self.p)
+        try:
+            processing.apply_processing_override_settings(self.p)
+            if self.redraw.enabled:
+                self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)
+                self.initial_info = self.redraw.initial_info
+            self.result_images.append(self.image)
+            if self.redraw.save:
+                self.save_image()
 
-def calls(node: ast.AST, name: str) -> list[ast.Call]:
-    return [
-        child
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call)
-        and isinstance(child.func, ast.Attribute)
-        and isinstance(child.func.value, ast.Name)
-        and child.func.value.id == "state"
-        and child.func.attr == name
-    ]
+            if self.seams_fix.enabled:
+                image = self.seams_fix.start(self.p, self.image, self.rows, self.cols)
+                # A seams pass that ran no tile returns its input unchanged and leaves initial_info None.
+                if self.seams_fix.initial_info is not None:
+                    self.image = image
+                    self.initial_info = self.seams_fix.initial_info
+                    self.result_images.append(self.image)
+                    if self.seams_fix.save:
+                        self.save_image()
+        finally:
+            if self.p.override_settings_restore_afterwards:
+                processing.restore_processing_override_settings(stored_opts)
+''',
+        sentinel=MARKER,
+    ),
+    Block(
+        "linear redraw without tiles",
+        "        mask, draw = self.init_draw(p, image.width, image.height)\n        for yi in range(rows):\n",
+        "        mask, draw = self.init_draw(p, image.width, image.height)\n        processed = None\n        for yi in range(rows):\n",
+    ),
+    Block(
+        "chess redraw without tiles",
+        "        mask, draw = self.init_draw(p, image.width, image.height)\n        tiles = []\n",
+        "        mask, draw = self.init_draw(p, image.width, image.height)\n        processed = None\n        tiles = []\n",
+    ),
+    Block(
+        "redraw infotext without tiles",
+        "\n        p.width = image.width\n        p.height = image.height\n        self.initial_info = processed.infotext(p, 0)\n",
+        "\n        p.width = image.width\n        p.height = image.height\n        if processed is not None:  # None: interrupted before the first tile\n"
+        "            self.initial_info = processed.infotext(p, 0)\n",
+        count=2,
+    ),
+    Block(
+        "intersections keep the half-tile infotext",
+        "        fixed_image = self.half_tile_process(p, image, rows, cols)\n        processed = None\n        self.init_draw(p)\n",
+        "        fixed_image = self.half_tile_process(p, image, rows, cols)\n        processed = None\n"
+        "        half_tile_info = self.initial_info\n        self.init_draw(p)\n"
+        "        self.initial_info = half_tile_info  # kept when no intersection tile runs\n",
+    ),
+]
 
+# deploy10: the former AST patch re-indented process() into try/finally around the nested begin/end.
+DEPLOY10 = [Block("process", PROCESS, '''    def process(self):
+        state.begin()
+        try:
+            # OPENCLAW_ULTIMATE_UPSCALE_STATE_FINALLY_V2: one begin owns one end.
+            self.calc_jobs_count()
+            self.result_images = []
+            if self.redraw.enabled:
+                self.image = self.redraw.start(self.p, self.image, self.rows, self.cols)
+                self.initial_info = self.redraw.initial_info
+            self.result_images.append(self.image)
+            if self.redraw.save:
+                self.save_image()
 
-def verify(source: str, target: Path) -> None:
-    node = process_node(source, target)
-    if source.count(MARKER) != 1 or len(calls(node, "begin")) != 1 or len(calls(node, "end")) != 1:
-        raise SystemExit(f"Ultimate Upscale lifecycle verification failed (partial markers): {target}")
-    finalizers = [child for child in node.body if isinstance(child, ast.Try)]
-    if len(finalizers) != 1 or len(finalizers[0].finalbody) != 1 or len(calls(finalizers[0].finalbody[0], "end")) != 1:
-        raise SystemExit(f"Ultimate Upscale lifecycle verification failed (state.end not in finally): {target}")
-
-
-def patch(source: str, target: Path) -> str:
-    node = process_node(source, target)
-    begins = calls(node, "begin")
-    ends = calls(node, "end")
-    if len(begins) != 1 or len(ends) != 1 or not node.body:
-        raise SystemExit(f"unsupported or partial Ultimate Upscale state lifecycle: {target}")
-    if not isinstance(node.body[0], ast.Expr) or node.body[0].value is not begins[0]:
-        raise SystemExit(f"unsupported Ultimate Upscale state.begin placement: {target}")
-    if not isinstance(node.body[-1], ast.Expr) or node.body[-1].value is not ends[0]:
-        raise SystemExit(f"unsupported Ultimate Upscale state.end placement: {target}")
-
-    lines = source.splitlines(keepends=True)
-    indent = " " * (node.col_offset + 4)
-    body_start = node.body[1].lineno - 1
-    body_end = node.body[-1].lineno - 1
-    body = lines[body_start:body_end]
-    indented_body = [indent + "    " + line[len(indent) :] if line.strip() else line for line in body]
-    replacement = [
-        f"{indent}try:\n",
-        f"{indent}    # {MARKER}: one begin owns one end.\n",
-        *indented_body,
-        f"{indent}finally:\n",
-        f"{indent}    state.end()\n",
-    ]
-    patched = "".join(lines[:body_start] + replacement + lines[body_end + 1 :])
-    # Re-indenting text lines is only valid when every body line is indented code (no multi-line string or
-    # continuation at a shallower indent); require the wrapped statements to parse to exactly the original ones.
-    wrapped = [child for child in process_node(patched, target).body if isinstance(child, ast.Try)]
-    if len(wrapped) != 1 or [ast.dump(stmt) for stmt in wrapped[0].body] != [ast.dump(stmt) for stmt in node.body[1:-1]]:
-        raise SystemExit(f"unsupported Ultimate Upscale process body (re-indentation changed its statements): {target}")
-    return patched
+            if self.seams_fix.enabled:
+                self.image = self.seams_fix.start(self.p, self.image, self.rows, self.cols)
+                self.initial_info = self.seams_fix.initial_info
+                self.result_images.append(self.image)
+                if self.seams_fix.save:
+                    self.save_image()
+        finally:
+            state.end()
+''')]
 
 
 def main() -> int:
     args = parse_cli(__doc__.splitlines()[0])
     target = args.path / TARGET_RELATIVE if args.path.is_dir() else args.path
-    source = read_lf(target, LABEL)
-    if args.check or MARKER in source:
-        verify(source, target)
-        print(f"Ultimate Upscale lifecycle verified: {target}")
-    else:
-        source = patch(source, target)
-        verify(source, target)
-        replace_atomically(target, source)
+    if apply_blocks({target: BLOCKS}, label=LABEL, check=args.check, previous={target: DEPLOY10}):
         print(f"Patched Ultimate Upscale state lifecycle: {target}")
+    else:
+        print(f"Ultimate Upscale lifecycle verified: {target}")
     return 0
 
 

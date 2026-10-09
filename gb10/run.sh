@@ -162,8 +162,9 @@ if (( ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} )); then
 fi
 
 # The owned extensions are mirrored from the tracked source below. The host-installed third-party extensions are
-# patched in place: each patcher (gb10/patchlib.py contract) patches upstream text or verifies already-patched text,
-# and fails on anything else, including a missing file. $1 is the Extensions directory to patch.
+# patched in place: each patcher (gb10/patchlib.py contract) patches upstream text, upgrades the previous release's
+# text or verifies already-patched text, and fails on anything else, including a missing file. $1 is the Extensions
+# directory to patch.
 patch_third_party_extensions() {
   local extensions_root="$1"
   if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then

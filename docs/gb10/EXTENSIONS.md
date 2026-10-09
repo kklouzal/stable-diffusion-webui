@@ -76,15 +76,34 @@ What the patches do:
 
 - **`patch-multidiffusion-performance.py`.** Its original text is upstream `22798f6`, so a fresh install patches
   cleanly. It covers:
-  - the MultiDiffusion terminal-tile fix (previously a separate patcher)
+  - the MultiDiffusion terminal-tile fix: upstream's tile origins with only the last one pinned to the edge, so the
+    last latent row or column is always covered; identical to upstream wherever upstream covers it
   - the Tiled VAE attention fallbacks (previously `patches/mounted-extensions/`)
-  - the Tiled VAE and MultiDiffusion performance changes
-- **`patch-ultimate-upscale-state-lifecycle.py`** makes Ultimate Upscale end its job state on every path.
-- **`patch-ultimate-upscale-subcanvas.py`** gives each Ultimate Upscale tile a window of the canvas instead of the whole
-  canvas. The output is bitwise identical.
+  - the Tiled VAE and MultiDiffusion performance changes, including ControlNet control tiles built once per request
+  - Tiled VAE results: exact group-norm statistics in non-fast mode (pooled over each tile's own region), float32
+    normalize, encoder tiles on the 8-pixel latent grid; fast mode keeps its estimated statistics
+  - noise inversion: this batch's prompts with extra networks parsed out, SDXL size conditioning, and an
+    inverted-noise cache that never outlives a request and is reused only for exact matches
+  - region prompt control on SDXL/SD3 fails before any work instead of with a TypeError mid-sampling
+- **`patch-ultimate-upscale-state-lifecycle.py`** fixes how Ultimate Upscale handles job state and reports results:
+  - The request's job owns the shared state; there is no nested `state.begin()`/`end()`, so an interrupt sent while
+    the upscaler runs stops the tiles.
+  - `override_settings` apply once around all tiles, so an `sd_vae` override no longer reloads the VAE twice per tile.
+  - A pass that runs no tile (interrupted, or a single tile row or column) keeps the infotext and does not repeat the
+    image.
+- **`patch-ultimate-upscale-subcanvas.py`** processes every tile at its crop region's own size:
+  - The padding grows by 0-7 px to reach a multiple of 8, so tiles are no longer resampled down and back up and the
+    band-pass seam is no longer stretched.
+  - Redraw tiles are exactly `tile_width x tile_height`.
+  - Each tile gets a window of the canvas, bitwise identical to processing the whole canvas at those sizes.
+  - This changes images on purpose compared with upstream and deploy10.
 
-Each patcher accepts either the original or the already-patched text and fails the deploy on anything else. run.sh
-rehearses every patcher on a scratch copy before it stops production.
+The Ultimate Upscale patchers apply exact blocks to upstream Coyote-A master `2322caa`. Each patcher accepts the
+original text or its already-patched text, and fails the deploy on anything else. A patcher whose blocks changed
+since deploy10 also upgrades the deploy10 text in place (`patchlib` `previous`: the target is reverted to upstream,
+proven by a round trip, and patched again); `--check` reports such a target as outdated. The `PREVIOUS`/`DEPLOY10`
+blocks can be deleted once every host runs this release. run.sh rehearses every patcher on a scratch copy before it
+stops production.
 
 Candidates for adoption as owned source:
 
