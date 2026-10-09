@@ -22,9 +22,7 @@ def main():
         patch_dir = PATCH_ROOT / patch_set
         patches = sorted(p for p in patch_dir.iterdir() if p.is_file() and p.suffix == '.patch')
         if not patches:
-            continue
-        if not repo.exists():
-            raise SystemExit(f'patch target missing for {patch_set}: {repo}')
+            raise SystemExit(f'no patches in {patch_dir}; drop {patch_set} from TARGETS instead of shipping an empty set')
         for patch in patches:
             run(['git', '-C', str(repo), 'apply', '--ignore-whitespace', '--check', str(patch)])
             run(['git', '-C', str(repo), 'apply', '--ignore-whitespace', str(patch)])
