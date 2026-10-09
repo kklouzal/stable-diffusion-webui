@@ -7,22 +7,22 @@ logged main-pass UNet call whole with the PAG perturbation enabled, which is wha
 was limited to cond rows.
 
 Module hygiene: stubs are installed only while the code under test is imported, and the private sgm import
-this file runs on is removed (sys.modules restored) when the file finishes.
+this file runs on is in sys.modules only while each of its tests runs.
 """
 
 from __future__ import annotations
 
 import contextlib
 import importlib
-import importlib.util
 import sys
 import types
-from pathlib import Path
 
 import pytest
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+from test.helpers import ROOT, load_source, stub_modules
+from test.helpers import module as stub
+
 SGM_ROOT = ROOT / "repositories" / "generative-models"
 LDM_ROOT = ROOT / "repositories" / "stable-diffusion-stability-ai"
 INC_SCRIPTS = ROOT / "extensions" / "sd-webui-incantations" / "scripts"
@@ -33,86 +33,67 @@ pytestmark = pytest.mark.skipif(
     reason="generative-models / stable-diffusion repositories are not checked out",
 )
 
-_REAL_MODULES = {}
-
-
-def _module(name, **attrs):
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    return module
-
-
-def _package(name, path=(), **attrs):
-    module = _module(name, **attrs)
-    module.__path__ = [str(p) for p in path]
-    return module
-
-
-def _load_module(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+_PRIVATE = {}  # "sgm" / "ldm": {name: module} of this file's own import of the real package, while the file runs
 
 
 @contextlib.contextmanager
 def isolated_modules(replacements, prefixes):
-    """Import with ``replacements`` in sys.modules and other modules under ``prefixes`` hidden.
+    """Run the block with ``replacements`` and nothing else under the top-level packages ``prefixes``.
 
-    Afterwards every module under ``prefixes`` is dropped and the hidden ones come back. Modules outside
-    ``prefixes`` imported meanwhile (lazy torch internals) stay: re-importing those is not safe.
+    The session's other modules under ``prefixes`` are hidden meanwhile, and the modules the block imports there
+    (against the replacements) are dropped afterwards; then exactly the hidden and replaced names are restored.
+    Modules outside ``prefixes`` imported meanwhile (lazy torch internals) stay: re-importing those is not safe.
     """
     assert all(key.split(".")[0] in prefixes for key in replacements)
-    hidden = {key: value for key, value in sys.modules.items() if key.split(".")[0] in prefixes}
-    for key in hidden:
-        del sys.modules[key]
-    sys.modules.update(replacements)
-    try:
-        yield
-    finally:
-        for key in [key for key in sys.modules if key.split(".")[0] in prefixes]:
-            del sys.modules[key]
-        sys.modules.update(hidden)
+
+    def under_prefixes():
+        return {key for key in sys.modules if key.split(".")[0] in prefixes}
+
+    with stub_modules({**dict.fromkeys(under_prefixes()), **replacements}):
+        try:
+            yield
+        finally:
+            for key in under_prefixes() - replacements.keys():
+                del sys.modules[key]
+
+
+def _import_private(package, root, names):
+    """Import ``names`` from the checkout ``root`` with the session's ``package`` modules hidden; returns every
+    ``package`` module that import created, by name, and leaves sys.modules as it was."""
+    with isolated_modules({}, {package}):
+        sys.path.insert(0, str(root))
+        try:
+            for name in names:
+                importlib.import_module(name)
+        finally:
+            sys.path.remove(str(root))
+        return {key: value for key, value in sys.modules.items() if key.split(".")[0] == package}
 
 
 @pytest.fixture(scope="module", autouse=True)
-def real_sgm_modules():
+def private_sgm_and_ldm():
     """A private import of the real sgm package (and ldm util) for this file only.
 
-    sgm must sit in sys.modules while its UNets run (it imports lazily at call time). Other files may have
-    left stub sgm packages, or real ones the WebUI hijacks patched; this file hides both and imports its own
-    unpatched copy. On teardown every sgm/ldm entry goes back to exactly what it was, so the private copy
-    never reaches later files.
+    Other files may have imported the real sgm, which the WebUI hijacks patch; this file imports its own unpatched
+    copy with the session's hidden, and nothing of it stays in sys.modules (private_sgm installs it per test).
     """
-    saved = {key: value for key, value in sys.modules.items() if key.split(".")[0] in ("sgm", "ldm")}
-    for key in [key for key in saved if key.split(".")[0] == "sgm"]:
-        del sys.modules[key]
-    sys.path.insert(0, str(SGM_ROOT))
-    try:
-        for name in ("sgm.modules.diffusionmodules.openaimodel", "sgm.modules.diffusionmodules.video_model", "sgm.modules.attention"):
-            _REAL_MODULES[name] = importlib.import_module(name)
-    finally:
-        sys.path.remove(str(SGM_ROOT))
-    with isolated_modules({}, {"ldm"}):
-        sys.path.insert(0, str(LDM_ROOT))
-        try:
-            _REAL_MODULES["ldm.modules.diffusionmodules.util"] = importlib.import_module("ldm.modules.diffusionmodules.util")
-            _REAL_MODULES["ldm.modules.diffusionmodules.upscaling"] = importlib.import_module("ldm.modules.diffusionmodules.upscaling")
-        finally:
-            sys.path.remove(str(LDM_ROOT))
-    try:
+    _PRIVATE["sgm"] = _import_private("sgm", SGM_ROOT, (
+        "sgm.modules.diffusionmodules.openaimodel", "sgm.modules.diffusionmodules.video_model", "sgm.modules.attention"))
+    _PRIVATE["ldm"] = _import_private("ldm", LDM_ROOT, ("ldm.modules.diffusionmodules.util", "ldm.modules.diffusionmodules.upscaling"))
+    yield
+    _PRIVATE.clear()
+
+
+@pytest.fixture(autouse=True)
+def private_sgm(private_sgm_and_ldm):
+    """sgm imports lazily while its UNets run: during each test the private copy stands in for the session's sgm."""
+    with isolated_modules(_PRIVATE["sgm"], {"sgm"}):
         yield
-    finally:
-        for key in [key for key in sys.modules if key.split(".")[0] in ("sgm", "ldm")]:
-            del sys.modules[key]
-        sys.modules.update(saved)
-        _REAL_MODULES.clear()
 
 
 def real_modules():
-    assert _REAL_MODULES, "real_sgm_modules fixture is not active"
-    return _REAL_MODULES
+    assert _PRIVATE, "private_sgm_and_ldm fixture is not active"
+    return {**_PRIVATE["sgm"], **_PRIVATE["ldm"]}
 
 
 class Callbacks:
@@ -155,7 +136,7 @@ class Callbacks:
             self.denoiser[:] = [c for c in self.denoiser if c != fn]
             self.denoised[:] = [c for c in self.denoised if c != fn]
 
-        return _module(
+        return stub(
             "modules.script_callbacks",
             CFGDenoiserParams=CFGDenoiserParams,
             CFGDenoisedParams=CFGDenoisedParams,
@@ -256,7 +237,7 @@ class Harness:
             cond_stage_model_empty_prompt=torch.zeros(1, 4, 16),
         )
         state = types.SimpleNamespace(interrupted=False, skipped=False, sampling_step=0, sampling_steps=4)
-        self.shared = _module(
+        self.shared = stub(
             "modules.shared",
             opts=self.opts,
             state=state,
@@ -265,13 +246,11 @@ class Harness:
         )
         self.script_callbacks = self.callbacks.module()
 
-        spec = importlib.util.spec_from_file_location("modules.sd_unet_row_memo", ROOT / "modules" / "sd_unet_row_memo.py")
-        self.row_memo = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.row_memo)
+        self.row_memo = load_source("modules.sd_unet_row_memo", "modules/sd_unet_row_memo.py")
 
         self.modules = {
-            "modules": _package("modules", sd_unet_row_memo=self.row_memo, shared=self.shared, script_callbacks=self.script_callbacks),
-            "modules.prompt_parser": _module(
+            "modules": stub("modules", package=True, sd_unet_row_memo=self.row_memo, shared=self.shared, script_callbacks=self.script_callbacks),
+            "modules.prompt_parser": stub(
                 "modules.prompt_parser",
                 reconstruct_multicond_batch=lambda cond, step: cond,
                 reconstruct_cond_batch=lambda uncond, step: uncond,
@@ -279,7 +258,7 @@ class Harness:
                 ComposableScheduledPromptConditioning=type("ComposableScheduledPromptConditioning", (), {}),
                 ScheduledPromptConditioning=type("ScheduledPromptConditioning", (), {}),
             ),
-            "modules.sd_samplers_common": _module(
+            "modules.sd_samplers_common": stub(
                 "modules.sd_samplers_common",
                 InterruptedException=Exception,
                 apply_refiner=lambda denoiser, sigma: False,
@@ -288,9 +267,9 @@ class Harness:
             "modules.shared": self.shared,
             "modules.script_callbacks": self.script_callbacks,
             "modules.sd_unet_row_memo": self.row_memo,
-            "modules.processing": _module("modules.processing", StableDiffusionProcessing=type("StableDiffusionProcessing", (), {})),
+            "modules.processing": stub("modules.processing", StableDiffusionProcessing=type("StableDiffusionProcessing", (), {})),
         }
-        self.modules["modules.devices"] = _module(
+        self.modules["modules.devices"] = stub(
             "modules.devices",
             dtype_unet=torch.float32,
             dtype_vae=torch.float32,
@@ -301,12 +280,8 @@ class Harness:
         )
         self.modules["modules"].devices = self.modules["modules.devices"]
         with isolated_modules(self.modules, {"modules"}):
-            spec = importlib.util.spec_from_file_location("cfg_denoiser_under_test", ROOT / "modules" / "sd_samplers_cfg_denoiser.py")
-            cfg_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cfg_module)
-            spec = importlib.util.spec_from_file_location("sd_unet_under_test", ROOT / "modules" / "sd_unet.py")
-            self.sd_unet = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(self.sd_unet)
+            cfg_module = load_source("cfg_denoiser_under_test", "modules/sd_samplers_cfg_denoiser.py")
+            self.sd_unet = load_source("sd_unet_under_test", "modules/sd_unet.py")
         if mode == "base":
             # sd_hijack installs this wrapper as UNetModel.forward; bind it to this instance only.
             wrapper = self.sd_unet.create_unet_forward(self.openaimodel.UNetModel.forward)
@@ -322,9 +297,9 @@ class Harness:
 
         pag_modules = dict(self.modules)
         pag_modules.update({
-            "scripts": _package("scripts", [INC_SCRIPTS]),
-            "modules.scripts": _module("modules.scripts", Script=object, AlwaysVisible=object()),
-            "modules.headless_ui": _module("modules.headless_ui"),
+            "scripts": stub("scripts", __path__=[str(INC_SCRIPTS)]),
+            "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object()),
+            "modules.headless_ui": stub("modules.headless_ui"),
         })
         with isolated_modules(pag_modules, {"modules", "scripts"}):
             self.pag = importlib.import_module("scripts.pag")
@@ -375,29 +350,29 @@ class Harness:
 
         cn_modules = dict(self.modules)
         cn_modules.update({
-            "scripts": _package("scripts", [CN_SCRIPTS]),
-            "scripts.logging": _module("scripts.logging", logger=logger),
-            "scripts.controlnet_lllite": _module("scripts.controlnet_lllite", clear_all_lllite=lambda: None),
-            "scripts.ipadapter": _package("scripts.ipadapter"),
-            "scripts.ipadapter.plugable_ipadapter": _module("scripts.ipadapter.plugable_ipadapter", clear_all_ip_adapter=lambda: None),
-            "scripts.ipadapter.ipadapter_model": _module("scripts.ipadapter.ipadapter_model", ImageEmbed=object),
+            "scripts": stub("scripts", __path__=[str(CN_SCRIPTS)]),
+            "scripts.logging": stub("scripts.logging", logger=logger),
+            "scripts.controlnet_lllite": stub("scripts.controlnet_lllite", clear_all_lllite=lambda: None),
+            "scripts.ipadapter": stub("scripts.ipadapter", package=True),
+            "scripts.ipadapter.plugable_ipadapter": stub("scripts.ipadapter.plugable_ipadapter", clear_all_ip_adapter=lambda: None),
+            "scripts.ipadapter.ipadapter_model": stub("scripts.ipadapter.ipadapter_model", ImageEmbed=object),
             "modules.devices": self.modules["modules.devices"],
             # The core's torch with a resizing cat; equal to torch for this harness's aligned shapes.
-            "modules.sd_hijack_unet": _module("modules.sd_hijack_unet", th=torch),
-            "modules.lowvram": _module("modules.lowvram", send_everything_to_cpu=lambda: None),
-            "modules.scripts": _module("modules.scripts", script_callbacks=self.script_callbacks),
+            "modules.sd_hijack_unet": stub("modules.sd_hijack_unet", th=torch),
+            "modules.lowvram": stub("modules.lowvram", send_everything_to_cpu=lambda: None),
+            "modules.scripts": stub("modules.scripts", script_callbacks=self.script_callbacks),
             # cldm keeps ControlNet weights' layout with the NHWC GroupNorm switch (real module: torch-only, off here).
-            "modules.openclaw_nhwc_groupnorm": _load_module("modules.openclaw_nhwc_groupnorm", ROOT / "modules" / "openclaw_nhwc_groupnorm.py"),
-            "ldm": _package("ldm"),
-            "ldm.modules": _package("ldm.modules"),
-            "ldm.modules.diffusionmodules": _package("ldm.modules.diffusionmodules"),
+            "modules.openclaw_nhwc_groupnorm": load_source("modules.openclaw_nhwc_groupnorm", "modules/openclaw_nhwc_groupnorm.py"),
+            "ldm": stub("ldm", package=True),
+            "ldm.modules": stub("ldm.modules", package=True),
+            "ldm.modules.diffusionmodules": stub("ldm.modules.diffusionmodules", package=True),
             "ldm.modules.diffusionmodules.util": ldm_util,
             "ldm.modules.diffusionmodules.upscaling": real["ldm.modules.diffusionmodules.upscaling"],
-            "ldm.modules.diffusionmodules.openaimodel": _module("ldm.modules.diffusionmodules.openaimodel", UNetModel=type("UNetModel", (), {})),
-            "ldm.modules.attention": _module("ldm.modules.attention", BasicTransformerBlock=type("BasicTransformerBlock", (), {})),
-            "ldm.models": _package("ldm.models"),
-            "ldm.models.diffusion": _package("ldm.models.diffusion"),
-            "ldm.models.diffusion.ddpm": _module("ldm.models.diffusion.ddpm", extract_into_tensor=extract_into_tensor),
+            "ldm.modules.diffusionmodules.openaimodel": stub("ldm.modules.diffusionmodules.openaimodel", UNetModel=type("UNetModel", (), {})),
+            "ldm.modules.attention": stub("ldm.modules.attention", BasicTransformerBlock=type("BasicTransformerBlock", (), {})),
+            "ldm.models": stub("ldm.models", package=True),
+            "ldm.models.diffusion": stub("ldm.models.diffusion", package=True),
+            "ldm.models.diffusion.ddpm": stub("ldm.models.diffusion.ddpm", extract_into_tensor=extract_into_tensor),
         })
         for name in ("devices", "lowvram", "scripts", "openclaw_nhwc_groupnorm"):
             setattr(cn_modules["modules"], name, cn_modules[f"modules.{name}"])
