@@ -163,42 +163,58 @@ _PNG_DROPPED_CHUNKS = frozenset((
 # images.read() (API decode) applies EXIF orientation from these info keys, so
 # dropping their chunks would change replayed pixels; such inputs are re-encoded.
 _ORIENTATION_INFO_KEYS = frozenset(("exif", "Raw profile type exif", "XML:com.adobe.xmp", "xmp"))
+# Pillow sets those keys only from eXIf and from text chunks with these keywords (the bytes before the first NUL,
+# decoded as Latin-1; iTXt "XML:com.adobe.xmp" also sets "xmp").
+_ORIENTATION_TEXT_KEYWORDS = frozenset(key.encode("latin-1") for key in _ORIENTATION_INFO_KEYS)
 
 
-def _png_without_metadata(raw: bytes) -> bytes | None:
-    """Return raw (unchanged object) or a copy without _PNG_DROPPED_CHUNKS; None if raw needs re-encoding."""
+def _png_without_metadata(raw: bytes) -> tuple[bytes | None, bool]:
+    """Return (png, may_orient): png is raw (unchanged object) or a copy without _PNG_DROPPED_CHUNKS, None if raw
+    needs re-encoding; may_orient tells whether a walked chunk can give the decoded image an _ORIENTATION_INFO_KEYS
+    entry (a superset: Pillow skips some malformed text chunks)."""
     if not raw.startswith(_PNG_SIGNATURE):
-        return None
+        return None, False
     view = memoryview(raw)
     chunks = [view[:len(_PNG_SIGNATURE)]]
     offset = len(_PNG_SIGNATURE)
     chunk_type = None
     dropped = False
+    may_orient = False
     while chunk_type != b"IEND":
         if offset + 12 > len(raw):
-            return None
+            return None, may_orient
         end = offset + 12 + int.from_bytes(raw[offset:offset + 4], "big")
         chunk_type = raw[offset + 4:offset + 8]
         if end > len(raw):
-            return None
+            return None, may_orient
         if chunk_type in _PNG_RETAINED_CHUNKS:
             chunks.append(view[offset:end])
         elif chunk_type in _PNG_DROPPED_CHUNKS:
             dropped = True
+            if chunk_type == b"eXIf":
+                may_orient = True
+            elif chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
+                nul = raw.find(b"\0", offset + 8, end - 4)
+                may_orient = may_orient or raw[offset + 8:end - 4 if nul < 0 else nul] in _ORIENTATION_TEXT_KEYWORDS
         else:
-            return None  # APNG frames, private or newer chunks: keep the decoded-pixel path.
+            return None, may_orient  # APNG frames, private or newer chunks: keep the decoded-pixel path.
         offset = end
     if not dropped and offset == len(raw):
-        return raw
-    return b"".join(chunks)  # also drops data after IEND, which decoders ignore
+        return raw, may_orient
+    return b"".join(chunks), may_orient  # also drops data after IEND, which decoders ignore
 
 
-def _decode_inline_image(value: str, keep_png: bool = True):
+def _decode_inline_image(value: str, keep_png: bool = True, api_decoded: bool = False):
     """Validate bounded inline base64 image data; never resolve paths or fetch URLs.
 
     Returns (retained_base64, None) for a PNG kept as sent minus metadata, so its
     pixels, mode, palette and transparency replay exactly (only when keep_png);
     else (None, decoded image).
+
+    api_decoded means the API's images.read() decoded value's image data completely in this request (it raised on
+    truncated or corrupt data), so the same bytes decode here too: a PNG that keeps no orientation-capable chunk is
+    then retained from its header and a chunk walk, without decoding its pixels again (~30 ms at 1280x1280). The
+    result is the same as with the full decode.
     """
     from PIL import Image
     import base64
@@ -214,21 +230,26 @@ def _decode_inline_image(value: str, keep_png: bool = True):
     with Image.open(io.BytesIO(raw)) as decoded:
         if decoded.width > 16384 or decoded.height > 16384 or decoded.width * decoded.height > 64 * 1024 * 1024:
             raise ValueError("Image dimensions exceed budget")
+        if api_decoded and keep_png:
+            png, may_orient = _png_without_metadata(raw)
+            if png is not None and not may_orient:
+                return (value if png is raw else base64.b64encode(png).decode("ascii")), None
         # Rejects truncated/corrupt data before retention and reads trailing text chunks into info.
         decoded.load()
-    png = _png_without_metadata(raw) if keep_png and _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
+    png = _png_without_metadata(raw)[0] if keep_png and _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
     if png is None:
         return None, decoded
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict):
+def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict, api_decoded: bool = False):
     """_decode_inline_image memoized in decoded_inline, which lives for one snapshot (a pure function of its
-    arguments; a decoded image it returns is only read). An init image's request data and a ControlNet unit image are
-    often the same string, decoded once per use before (~28 ms at 1280x1280). Failures are not memoized."""
+    arguments; a decoded image it returns is only read; api_decoded never changes the result, so it is not part of the
+    key). An init image's request data and a ControlNet unit image are often the same string, decoded once per use
+    before (~28 ms at 1280x1280). Failures are not memoized."""
     key = (value, keep_png)
     if key not in decoded_inline:
-        decoded_inline[key] = _decode_inline_image(value, keep_png)
+        decoded_inline[key] = _decode_inline_image(value, keep_png, api_decoded)
     return decoded_inline[key]
 
 
@@ -246,7 +267,7 @@ def _encode_api_png(value: Any, source: str | None, compress_level: int, keep_in
 
     if source is not None and keep_inline_png:
         try:
-            retained, _ = _decode_inline_image_once(source, True, decoded_inline)
+            retained, _ = _decode_inline_image_once(source, True, decoded_inline, api_decoded=True)
         except Exception:
             # The run accepted value through the API's own decoder; data this
             # stricter check rejects is simply encoded from value instead.

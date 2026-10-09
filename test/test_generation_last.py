@@ -453,6 +453,123 @@ class GenerationLastTests(unittest.TestCase):
             self.assertIs(self.module._image_to_api_base64(base64.b64encode(data).decode("ascii"), limitations, "image", {"images": 0}), self.module._OMIT)
             self.assertTrue(limitations)
 
+    def test_api_decoded_png_verdicts_match_the_full_decode(self):
+        """The header + chunk walk shortcut for inline data the API decoder already loaded answers exactly what the
+        full decode answers, over a corpus of valid, metadata-carrying, oriented, malformed and animated PNGs."""
+        import base64
+        import io
+        import struct
+        import zlib
+        from PIL import PngImagePlugin
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        def insert(png, before, *chunks):
+            index = png.index(before) - 4
+            return png[:index] + b"".join(chunks) + png[index:]
+
+        def exif_bytes(orientation):
+            exif = Image.Exif()
+            exif[0x0112] = orientation
+            return exif.tobytes()
+
+        def raw_profile(orientation):
+            data = exif_bytes(orientation)
+            return f"\nexif\n{len(data):8d}\n{data.hex()}\n".encode("latin-1")
+
+        def xmp(orientation, element):
+            attribute = "" if element else f' tiff:Orientation="{orientation}"'
+            child = f"<tiff:Orientation>{orientation}</tiff:Orientation>" if element else ""
+            return f'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description{attribute}>{child}</rdf:Description></x:xmpmeta>'.encode()
+
+        def itxt(key, text, compressed=False, broken=False):
+            payload = b"garbage" if broken else zlib.compress(text) if compressed else text
+            return chunk(b"iTXt", key + b"\0" + bytes((int(compressed or broken), 0)) + b"\0\0" + payload)
+
+        rgb = Image.frombytes("RGB", (24, 16), os.urandom(24 * 16 * 3))
+        palette = Image.frombytes("P", (24, 16), os.urandom(24 * 16))
+        palette.putpalette(os.urandom(768))
+        bases = {
+            "rgb": self._png(rgb), "rgba": self._png(rgb.convert("RGBA")), "l": self._png(rgb.convert("L")),
+            "la": self._png(rgb.convert("LA")), "p": self._png(palette, transparency=bytes(range(256))),
+            "rgb-trns": self._png(rgb, transparency=(1, 2, 3)), "i16": self._png(rgb.convert("L").convert("I;16")),
+        }
+        info = PngImagePlugin.PngInfo()
+        info.add_text("parameters", "prompt")
+        info.add_text("comment", "note", zip=True)
+        info.add_itxt("Description", "itxt", zip=True)
+        corpus = dict(bases)
+        corpus["text"] = self._png(rgb, pnginfo=info, dpi=(72, 72))
+        plain = bases["rgb"]
+        idat = plain.index(b"IDAT") - 4
+        idat_length = struct.unpack(">I", plain[idat:idat + 4])[0]
+        iend = b"IEND"
+        for orientation in range(1, 9):
+            corpus[f"exif-{orientation}"] = self._png(rgb, exif=exif_bytes(orientation))
+            corpus[f"exif-after-idat-{orientation}"] = insert(plain, iend, chunk(b"eXIf", exif_bytes(orientation)[6:]))
+            corpus[f"raw-profile-{orientation}"] = insert(plain, b"IDAT", chunk(b"tEXt", b"Raw profile type exif\0" + raw_profile(orientation)))
+            corpus[f"raw-profile-ztxt-after-idat-{orientation}"] = insert(plain, iend, chunk(b"zTXt", b"Raw profile type exif\0\0" + zlib.compress(raw_profile(orientation))))
+            for element in (False, True):
+                corpus[f"xmp-itxt-{orientation}-{element}"] = insert(plain, b"IDAT", itxt(b"XML:com.adobe.xmp", xmp(orientation, element)))
+                corpus[f"xmp-itxt-z-after-idat-{orientation}-{element}"] = insert(plain, iend, itxt(b"XML:com.adobe.xmp", xmp(orientation, element), compressed=True))
+                corpus[f"xmp-text-{orientation}-{element}"] = insert(plain, b"IDAT", chunk(b"tEXt", b"XML:com.adobe.xmp\0" + xmp(orientation, element)))
+        corpus["text-exif-key"] = insert(plain, b"IDAT", chunk(b"tEXt", b"exif\0" + exif_bytes(6)))
+        corpus["text-xmp-key"] = insert(plain, iend, chunk(b"tEXt", b"xmp\0" + xmp(6, False)))
+        corpus["text-no-nul-keyword"] = insert(plain, b"IDAT", chunk(b"tEXt", b"exif"))
+        corpus["itxt-broken-xmp"] = insert(plain, b"IDAT", itxt(b"XML:com.adobe.xmp", b"", broken=True))
+        corpus["itxt-bad-utf8-xmp"] = insert(plain, b"IDAT", itxt(b"XML:com.adobe.xmp", b"\xff" + xmp(6, False)))
+        corpus["ztxt-bad-method"] = insert(plain, b"IDAT", chunk(b"zTXt", b"comment\0\x01xx"))
+        corpus["ztxt-too-large"] = insert(plain, iend, chunk(b"zTXt", b"comment\0\0" + zlib.compress(bytes(PngImagePlugin.MAX_TEXT_CHUNK + 1))))
+        corpus["text-after-idat"] = insert(plain, iend, chunk(b"tEXt", b"parameters\0prompt"), chunk(b"tIME", bytes(7)), chunk(b"gAMA", bytes(4)))
+        corpus["private-chunk"] = insert(plain, b"IDAT", chunk(b"prVt", b"x"))
+        corpus["trailing-data"] = plain + b"after IEND"
+        corpus["idat-cut"] = plain[:idat + 8 + idat_length // 2]
+        corpus["iend-missing"] = plain[:plain.index(iend) - 4]
+        corpus["idat-garbage"] = plain[:idat + 8] + bytes(idat_length) + struct.pack(">I", zlib.crc32(b"IDAT" + bytes(idat_length))) + plain[idat + 12 + idat_length:]
+        corpus["idat-crc"] = plain[:idat + 8 + idat_length] + b"\0\0\0\0" + plain[idat + 12 + idat_length:]
+        text = chunk(b"tEXt", b"comment\0note")
+        corpus["text-crc"] = insert(plain, b"IDAT", text[:-4] + b"\0\0\0\0")
+        corpus["text-crc-after-idat"] = insert(plain, iend, text[:-4] + b"\0\0\0\0")
+        corpus["iend-crc"] = plain[:-4] + b"\0\0\0\0"
+        apng = io.BytesIO()
+        rgb.save(apng, format="PNG", save_all=True, append_images=[rgb.transpose(Image.Transpose.ROTATE_180)])
+        corpus["apng"] = apng.getvalue()
+
+        def verdict(value, **kwargs):
+            try:
+                retained, decoded = self.module._decode_inline_image(value, True, **kwargs)
+            except Exception as error:
+                return type(error)
+            if decoded is None:
+                return retained
+            return decoded.mode, decoded.size, decoded.tobytes(), decoded.info
+
+        def api_decodes(data):
+            try:
+                with Image.open(io.BytesIO(data)) as image:
+                    image.load()
+                return True
+            except Exception:
+                return False
+
+        original_load = PngImagePlugin.PngImageFile.load
+        shortcuts = []
+        for name, data in corpus.items():
+            value = base64.b64encode(data).decode("ascii")
+            if not api_decodes(data):
+                self.assertNotIsInstance(verdict(value), str, name)  # never retained, and the API never claims it
+                continue
+            full = verdict(value)
+            loads = []
+            with patch.object(PngImagePlugin.PngImageFile, "load", lambda image: loads.append(1) or original_load(image)):
+                self.assertEqual(verdict(value, api_decoded=True), full, name)
+            if not loads:
+                shortcuts.append(name)
+        # Every plain or metadata-only PNG takes the shortcut; oriented and animated ones are decoded.
+        self.assertTrue({*bases, "text", "text-after-idat", "trailing-data"} <= set(shortcuts), shortcuts)
+        self.assertFalse([name for name in shortcuts if "exif" in name or "xmp" in name or "raw" in name or name == "apng"], shortcuts)
+
     def test_one_snapshot_decodes_an_inline_image_once_for_every_use(self):
         import base64
         decoded = Image.frombytes("RGB", (16, 16), os.urandom(16 * 16 * 3))
@@ -466,9 +583,9 @@ class GenerationLastTests(unittest.TestCase):
         calls = []
         original = self.module._decode_inline_image
 
-        def counting(value, keep_png=True):
+        def counting(value, keep_png=True, api_decoded=False):
             calls.append((value, keep_png))
-            return original(value, keep_png)
+            return original(value, keep_png, api_decoded)
 
         with patch.object(self.module, "_decode_inline_image", counting):
             snapshot = self.module.build_snapshot(p, self.processed)
