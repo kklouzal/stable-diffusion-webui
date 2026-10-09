@@ -5,7 +5,7 @@ import logging
 from copy import copy
 from typing import Any, List, NamedTuple, Optional, Tuple
 import modules.scripts as scripts
-from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
+from internal_controlnet.cache_contract import AtomicLRU, callable_identity, controlnet_option_snapshot, runtime_identity
 from modules import shared, devices, script_callbacks, processing, masking, images
 import gradio as gr
 import time
@@ -299,15 +299,11 @@ class Script(scripts.Script, metaclass=(
         # The loaded checkpoint is not part of the key: only 'difference' models depend on it, and
         # load_control_model rebuilds those when it changes (see _checkpoint_revision).
         base_revision = (type(unet).__module__, type(unet).__qualname__, id(unet))
-        loader_options = {
-            key: value for key, value in shared.opts.data.items()
-            if key.startswith("control_net") or key.startswith("controlnet")
-        }
         return (
             "controlnet-model", 1, resolved_model, source_revision, base_revision,
             str(sd_model.dtype), str(getattr(devices, "dtype_unet", None)),
             str(getattr(devices, "device", None)), runtime_identity(torch),
-            callable_identity(build_model_by_guess), freeze(loader_options),
+            callable_identity(build_model_by_guess), controlnet_option_snapshot(shared.opts.data),
         )
 
     @staticmethod

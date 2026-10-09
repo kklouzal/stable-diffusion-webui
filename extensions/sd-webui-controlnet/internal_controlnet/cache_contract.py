@@ -67,6 +67,12 @@ def freeze(value: Any) -> Any:
     return (type(value).__module__, type(value).__qualname__, repr(value))
 
 
+def controlnet_option_snapshot(opts_data: Mapping[str, Any]) -> Any:
+    """Frozen snapshot of every ControlNet option ("control_net*"/"controlnet*" keys) for a cache key: the model
+    and preprocessor caches miss whenever any of them changes."""
+    return freeze({k: v for k, v in opts_data.items() if k.startswith(("control_net", "controlnet"))})
+
+
 def clone_result(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.copy()

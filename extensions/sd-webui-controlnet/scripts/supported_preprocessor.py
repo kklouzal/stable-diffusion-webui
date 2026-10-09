@@ -7,7 +7,9 @@ import torch
 from modules import shared, devices
 from scripts.enums import ControlNetUnionControlType
 from scripts.logging import logger
-from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
+from internal_controlnet.cache_contract import (
+    AtomicLRU, callable_identity, controlnet_option_snapshot, freeze, runtime_identity,
+)
 
 
 CACHE_SIZE = getattr(shared.cmd_opts, "controlnet_preprocessor_cache_size", 0)
@@ -201,10 +203,6 @@ class Preprocessor(ABC):
                 ]
             except Exception:
                 model_parameters = [("unavailable",)]
-        semantic_options = {
-            key: value for key, value in shared.opts.data.items()
-            if key.startswith("control_net") or key.startswith("controlnet")
-        }
         return (
             "controlnet-preprocessor", 1, self.name, self.label,
             callable_identity(self.__call__),
@@ -213,7 +211,7 @@ class Preprocessor(ABC):
             ),
             str(self.device), str(getattr(devices, "dtype", None)),
             str(getattr(devices, "dtype_unet", None)), runtime_identity(torch),
-            freeze(semantic_options), freeze(args),
+            controlnet_option_snapshot(shared.opts.data), freeze(args),
             freeze({k: v for k, v in kwargs.items() if k not in self.cache_ignored_kwargs}),
         )
 
