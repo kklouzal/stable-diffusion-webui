@@ -12,6 +12,8 @@ utils = importlib.import_module("extensions.sd-webui-controlnet.tests.utils", "u
 from annotator.depth_anything import DepthAnythingDetector, DepthAnythingV1  # noqa: E402
 from annotator.depth_anything_v2 import DepthAnythingV2Detector  # noqa: E402
 from annotator.zoe import ZoeDetector  # noqa: E402
+from scripts import utils as cn_utils  # noqa: E402
+from scripts.preprocessor.legacy import processor  # noqa: E402
 
 # sha256 of repr(sorted((key, shape))) of depth_anything_vitl14.pth (the v1 checkpoint), measured on the real file.
 V1_CHECKPOINT_MANIFEST = "2a4168920991e6d0830392f835535a0da25e41fbc8c1cf5ffc4f4753ab87fe5b"
@@ -84,3 +86,30 @@ class TestZoeDetector(unittest.TestCase):
         np.testing.assert_array_equal(out, np.rint(expected).astype(np.uint8))
         self.assertFalse(np.array_equal(out, expected.astype(np.uint8)))
 
+
+class TestDepthPreprocessorsSkipPadding(unittest.TestCase):
+    """The depth networks run on the resized image itself: edge padding to a multiple of 64 would enter the output
+    normalization (min/max, or ZoeDepth's 2nd/85th percentiles)."""
+
+    def test_network_input_is_the_resized_image_without_padding(self):
+        img = np.random.default_rng(1).integers(0, 256, (200, 140, 3), dtype=np.uint8)
+        resized = cn_utils.resize_image_short_side(img, 512)
+        self.assertEqual(resized.shape, (731, 512, 3))
+        padded, remove_pad = cn_utils.resize_image_with_pad(img, 512)
+        np.testing.assert_array_equal(remove_pad(padded), resized)
+
+        for name, attr in (("depth_anything", "model_depth_anything"),
+                           ("depth_anything_v2", "model_depth_anything_v2"),
+                           ("zoe_depth", "model_zoe_depth")):
+            with self.subTest(name=name):
+                seen = []
+
+                def model(x, **kwargs):
+                    seen.append(x)
+                    return np.full(x.shape[:2], 7, np.uint8)
+
+                with mock.patch.object(processor, attr, model):
+                    out, is_image = getattr(processor, name)(img, 512)
+                np.testing.assert_array_equal(seen[0], resized)
+                self.assertEqual(out.shape, (731, 512))
+                self.assertTrue(is_image)

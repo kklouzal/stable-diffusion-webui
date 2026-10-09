@@ -24,6 +24,11 @@ def resize_image_with_pad(img, res):
     return utils.resize_image_with_pad(HWC3(img), res)
 
 
+def resize_image_short_side(img, res):
+    """scripts.utils.resize_image_short_side on HWC3(img): the resized image without the 64-multiple edge padding."""
+    return utils.resize_image_short_side(HWC3(img), res)
+
+
 def tile_resample(img, res=512, thr_a=1.0, **kwargs):
     img = HWC3(img)
     if thr_a < 1.1:
@@ -106,14 +111,16 @@ model_depth_anything = None
 
 
 def depth_anything(img, res:int = 512, colored:bool = True, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
+    # No padding: the network takes any size, and the min-max normalization of its output must not see edge
+    # padding (the reference runs on the image as it is).
+    img = resize_image_short_side(img, res)
     global model_depth_anything
     if model_depth_anything is None:
         with Extra(torch_handler):
             from annotator.depth_anything import DepthAnythingDetector
             device = devices.get_device_for("controlnet")
             model_depth_anything = DepthAnythingDetector(device)
-    return remove_pad(model_depth_anything(img, colored=colored)), True
+    return model_depth_anything(img, colored=colored), True
 
 
 def unload_depth_anything():
@@ -125,14 +132,16 @@ model_depth_anything_v2 = None
 
 
 def depth_anything_v2(img, res:int = 512, colored:bool = True, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
+    # No padding: the network takes any size, and the min-max normalization of its output must not see edge
+    # padding (the reference runs on the image as it is).
+    img = resize_image_short_side(img, res)
     global model_depth_anything_v2
     if model_depth_anything_v2 is None:
         with Extra(torch_handler):
             from annotator.depth_anything_v2 import DepthAnythingV2Detector
             device = devices.get_device_for("controlnet")
             model_depth_anything_v2 = DepthAnythingV2Detector(device)
-    return remove_pad(model_depth_anything_v2(img, colored=colored)), True
+    return model_depth_anything_v2(img, colored=colored), True
 
 
 def unload_depth_anything_v2():
@@ -402,13 +411,15 @@ model_zoe_depth = None
 
 
 def zoe_depth(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
+    # No padding: ZoeDepth pads and resizes internally, and its 2nd/85th-percentile normalization must not count edge
+    # padding. The reference ZoeDetector (controlnet_aux 0.0.10, and the lllyasviel ControlNet 1.1 annotator its
+    # resize_image comes from) runs on the resized image without padding.
+    img = resize_image_short_side(img, res)
     global model_zoe_depth
     if model_zoe_depth is None:
         from annotator.zoe import ZoeDetector
         model_zoe_depth = ZoeDetector()
-    result = model_zoe_depth(img)
-    return remove_pad(result), True
+    return model_zoe_depth(img), True
 
 
 def unload_zoe_depth():
