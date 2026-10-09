@@ -4,10 +4,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import sd_models, torchao_weight_quant
 from modules.torchao_weight_quant import BACKENDS, MXFP8, NVFP4

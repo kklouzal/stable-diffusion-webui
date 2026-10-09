@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import torch
 
-# The registry-mutation watcher shared with the core sampler-registry test (no imports at module level).
-from test.test_sampler_registry_publication import _WatchingDict
+# The registry-mutation watcher shared with the core sampler-registry test (test/helpers.py imports only the stdlib).
+from test.helpers import WatchingDict
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXT_ROOT.parents[1]
@@ -349,7 +349,7 @@ def test_reregistering_never_drops_a_chain_that_stays_registered(multi, monkeypa
     monkeypatch.setattr(multi, "_load_custom_defs", lambda: [keep, gone])
     multi._register_definitions()
     registry = multi.sd_samplers
-    watched = _WatchingDict(registry.all_samplers_map, watch="Multi: keep")
+    watched = WatchingDict(registry.all_samplers_map, watch="Multi: keep")
     monkeypatch.setattr(registry, "all_samplers_map", watched)
     before = watched["Multi: keep"]
 

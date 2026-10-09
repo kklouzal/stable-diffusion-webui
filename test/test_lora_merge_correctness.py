@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from test.test_openclaw_lora_network_identity import lora_networks  # noqa: F401  (fixture)
 from modules.torchao_weight_quant import NVFP4
 
 torch = pytest.importorskip("torch")
@@ -42,7 +41,7 @@ def _grid(shape, generator, scale=2.0 ** -6):
 
 
 @pytest.fixture
-def bf16_lora(lora_networks, monkeypatch):  # noqa: F811  (the imported fixture)
+def bf16_lora(lora_networks, monkeypatch):
     networks = lora_networks
     monkeypatch.setattr(networks.devices, "dtype", torch.bfloat16)
     monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)

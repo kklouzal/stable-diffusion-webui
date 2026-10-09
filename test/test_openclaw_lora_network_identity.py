@@ -9,99 +9,6 @@ import pytest
 from modules.torchao_weight_quant import MXFP8, NVFP4
 
 
-class _TestOpts(SimpleNamespace):
-    def __getattr__(self, name):
-        return False
-
-
-@pytest.fixture
-def lora_networks(monkeypatch):
-    import importlib
-    import modules as modules_pkg
-    from modules import shared as imported_shared
-
-    shared = imported_shared
-    if getattr(shared, "__file__", None) is None:
-        sys.modules.pop("modules.shared", None)
-        if hasattr(modules_pkg, "shared"):
-            delattr(modules_pkg, "shared")
-        shared = importlib.import_module("modules.shared")
-
-    if not hasattr(shared, "cmd_opts"):
-        shared.cmd_opts = _TestOpts()
-    monkeypatch.setattr(shared.cmd_opts, "use_ipex", False, raising=False)
-    monkeypatch.setattr(shared.cmd_opts, "use_cpu", [], raising=False)
-
-    if not hasattr(shared, "state"):
-        shared.state = _TestOpts()
-
-    if shared.opts is None:
-        shared.opts = _TestOpts()
-    monkeypatch.setattr(shared.opts, "hide_samplers", [], raising=False)
-    monkeypatch.setattr(shared.opts, "samples_format", "png", raising=False)
-    monkeypatch.setattr(shared.opts, "lora_in_memory_limit", 10, raising=False)
-    # ExtraNetworkLora.activate reads sd_lora before its FatalLoraPreparationError wrapping: when an earlier test left a
-    # real Options without the Lora extension's options in shared.opts, reading it raises AttributeError instead.
-    monkeypatch.setattr(shared.opts, "sd_lora", "None", raising=False)
-    monkeypatch.setattr(shared.opts, "lora_bundled_ti_to_infotext", False, raising=False)
-    monkeypatch.setattr(shared.opts, "lora_not_found_warning_console", False, raising=False)
-    monkeypatch.setattr(shared.opts, "lora_not_found_gradio_warning", False, raising=False)
-
-    sys.path.insert(0, "extensions-builtin/Lora")
-    import networks
-
-    class FakeEmbeddingDB:
-        def __init__(self):
-            self.word_embeddings = {}
-            self.ids_lookup = {}
-            self.expected_shape = -1
-            self.skipped_embeddings = {}
-            self.register_calls = []
-            self._publication_lock = threading.RLock()
-            self.fail_name = None
-
-        def register_embedding_by_name(self, embedding, _model, name):
-            self.register_calls.append((name, embedding))
-            if embedding is not None and name == self.fail_name:
-                raise RuntimeError("injected register failure")
-            token = sum(name.encode())
-            entries = [entry for entry in self.ids_lookup.get(token, []) if entry[1].name != name]
-            if embedding is None:
-                self.word_embeddings.pop(name, None)
-            else:
-                entries.append(([token], embedding))
-                self.word_embeddings[name] = embedding
-            if entries:
-                self.ids_lookup[token] = entries
-            else:
-                self.ids_lookup.pop(token, None)
-            return embedding
-
-        def register_embedding(self, embedding, model):
-            return self.register_embedding_by_name(embedding, model, embedding.name)
-
-    embedding_db = FakeEmbeddingDB()
-    monkeypatch.setattr(networks.sd_hijack.model_hijack, "embedding_db", embedding_db, raising=False)
-    monkeypatch.setattr(networks.sd_hijack.model_hijack, "comments", [], raising=False)
-    monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(network_layer_mapping={}), raising=False)
-    monkeypatch.setattr(networks.devices, "torch_gc", lambda: None)
-    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: None)
-
-    on_disk = SimpleNamespace(filename="alpha.safetensors", shorthash="abc", read_hash=lambda: None)
-    monkeypatch.setattr(networks, "available_networks", {"alpha": on_disk}, raising=False)
-    monkeypatch.setattr(networks, "available_network_aliases", {"alpha-alias": on_disk, "alpha": on_disk}, raising=False)
-    monkeypatch.setattr(networks, "forbidden_network_aliases", {}, raising=False)
-    monkeypatch.setattr(networks, "networks_in_memory", {}, raising=False)
-    networks.loaded_networks.clear()
-    monkeypatch.setattr(networks, "loaded_bundle_embeddings", {}, raising=False)
-    monkeypatch.setattr(networks, "_applied_state_key", None, raising=False)
-    networks.openclaw_cache_epochs.reset_for_tests()
-    yield networks
-    networks.loaded_networks.clear()
-    networks.openclaw_cache_epochs.reset_for_tests()
-    sys.path = [p for p in sys.path if p != "extensions-builtin/Lora"]
-
-
 def _base_network(networks, name="alpha"):
     base = networks.network.Network(name, networks.available_networks["alpha"])
     base.mtime = 1
@@ -110,6 +17,23 @@ def _base_network(networks, name="alpha"):
     module = SimpleNamespace(network=base, tensor_payload=tensor_payload, marker="shared immutable weights")
     base.modules = {"layer": module}
     return base, module, tensor_payload
+
+
+def test_lora_off_on_change_off_crosses_each_applied_boundary_once(lora_networks, monkeypatch):
+    """LoRA off -> 0.5 -> 0.8 -> off crosses each applied boundary once."""
+    networks = lora_networks
+    base, _module, _payload = _base_network(networks)
+    base.source_key = ("opaque", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "network_source_key", lambda *_args: base.source_key)
+    monkeypatch.setattr(networks, "load_network", lambda *_args: base)
+
+    before = dict(networks.openclaw_cache_epochs.epoch_subset(("lora_applied_epoch",)))["lora_applied_epoch"]
+    networks.load_networks(["alpha"], [0.5], [0.5], [None])
+    networks.load_networks(["alpha"], [0.8], [0.8], [None])
+    networks.load_networks([])
+    after = dict(networks.openclaw_cache_epochs.epoch_subset(("lora_applied_epoch",)))["lora_applied_epoch"]
+    assert after == before + 3
 
 
 def test_duplicate_lora_mentions_keep_independent_multiplier_owners(lora_networks, monkeypatch):

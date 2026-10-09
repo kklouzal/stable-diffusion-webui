@@ -17,7 +17,6 @@ import shutil
 import statistics
 import struct
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,41 +24,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-_ROOT = Path(__file__).resolve().parents[1]
-for _repo in ("generative-models", "stable-diffusion-stability-ai"):
-    _path = str(_ROOT / "repositories" / _repo)
-    if os.path.isdir(_path) and _path not in sys.path:
-        sys.path.insert(0, _path)  # what modules/paths.py does at startup
+from test.helpers import ROOT as _ROOT, add_repositories_to_sys_path
 
+add_repositories_to_sys_path("generative-models", "stable-diffusion-stability-ai")
 pytest.importorskip("sgm.modules.attention")
 pytest.importorskip("ldm.modules.attention")
 
-
-def _import_runtime_modules():
-    """Import devices/sd_hijack_unet against the real modules.shared (see test_sd_hijack_unet.py: another test module
-    may leave a minimal modules.shared stub in sys.modules, which devices cannot import against)."""
-    import importlib
-    import modules
-
-    stub = sys.modules.get("modules.shared")
-    if stub is None or getattr(stub, "__file__", None) is not None:
-        from modules import devices, openclaw_fused_geglu, sd_hijack_unet  # noqa: F401
-        return devices, openclaw_fused_geglu
-    package_attribute = modules.__dict__.pop("shared", None)
-    del sys.modules["modules.shared"]
-    try:
-        importlib.import_module("modules.shared")
-        from modules import devices, openclaw_fused_geglu, sd_hijack_unet  # noqa: F401
-    finally:
-        sys.modules["modules.shared"] = stub
-        if package_attribute is None:
-            modules.__dict__.pop("shared", None)
-        else:
-            modules.shared = package_attribute
-    return devices, openclaw_fused_geglu
-
-
-devices, fused = _import_runtime_modules()
+from modules import devices, openclaw_fused_geglu as fused, sd_hijack_unet  # noqa: E402,F401  (sd_hijack_unet: the hijacks)
 import ldm.modules.attention as ldm_attention  # noqa: E402
 import sgm.modules.attention as sgm_attention  # noqa: E402
 

@@ -3,10 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 # sd_samplers first: importing sd_samplers_common on its own runs into an import cycle.
 from modules import sd_samplers, sd_samplers_common  # noqa: E402,F401

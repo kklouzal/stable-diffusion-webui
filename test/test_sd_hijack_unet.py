@@ -6,9 +6,7 @@ modules/sd_hijack_unet.py on device; run them on the GPU host with:
     python -m pytest -q test/test_sd_hijack_unet.py -k cuda
 """
 import contextlib
-import os
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -17,43 +15,13 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-_ROOT = Path(__file__).resolve().parents[1]
-for _repo in ("generative-models", "stable-diffusion-stability-ai"):
-    _path = str(_ROOT / "repositories" / _repo)
-    if os.path.isdir(_path) and _path not in sys.path:
-        sys.path.insert(0, _path)  # what modules/paths.py does at startup
+from test.helpers import add_repositories_to_sys_path, error_over_rms, random_activations, randomize
 
+add_repositories_to_sys_path("generative-models", "stable-diffusion-stability-ai")
 pytest.importorskip("sgm.modules.attention")
 pytest.importorskip("ldm.modules.attention")
 
-
-def _import_runtime_modules():
-    """Import devices/sd_hijack_unet against the real modules.shared.
-
-    Some test modules (test_openclaw_cuda_graphs.py) leave a minimal modules.shared stub in sys.modules; devices cannot
-    import against it. Load the real module for these imports only and put the stub back for its owner."""
-    import importlib
-    import modules
-
-    stub = sys.modules.get("modules.shared")
-    if stub is None or getattr(stub, "__file__", None) is not None:
-        from modules import devices, sd_hijack_unet
-        return devices, sd_hijack_unet
-    package_attribute = modules.__dict__.pop("shared", None)
-    del sys.modules["modules.shared"]
-    try:
-        importlib.import_module("modules.shared")
-        from modules import devices, sd_hijack_unet
-    finally:
-        sys.modules["modules.shared"] = stub
-        if package_attribute is None:
-            modules.__dict__.pop("shared", None)
-        else:
-            modules.shared = package_attribute
-    return devices, sd_hijack_unet
-
-
-devices, sd_hijack_unet = _import_runtime_modules()
+from modules import devices, sd_hijack_unet  # noqa: E402
 import ldm.modules.attention as ldm_attention  # noqa: E402
 import ldm.modules.diffusionmodules.model as ldm_vae  # noqa: E402
 import ldm.modules.diffusionmodules.util as ldm_util  # noqa: E402
@@ -63,16 +31,6 @@ import sgm.modules.diffusionmodules.util as sgm_util  # noqa: E402
 
 BF16 = torch.bfloat16
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16-native norms only run on CUDA")
-
-
-@pytest.fixture
-def default_runtime(monkeypatch):
-    """The production state the bf16-native path expects: no upcast, no quantized storage, no functional LoRA,
-    no hypernetworks, switch on."""
-    monkeypatch.setattr(sd_hijack_unet, "UNET_BF16_NATIVE_NORMS", True)
-    monkeypatch.setattr(sd_hijack_unet, "shared", SimpleNamespace(opts=SimpleNamespace(lora_functional=False), loaded_hypernetworks=[]))
-    for flag in ("unet_needs_upcast", "fp8", "mxfp8", "nvfp4"):
-        monkeypatch.setattr(devices, flag, False)
 
 
 def _cuda_autocast_state(enabled=True, dtype=BF16):
@@ -341,51 +299,18 @@ def test_sgm_spatial_transformer_single_context_feeds_every_block():
 # Distances in bf16 ULPs are meaningless for outputs near zero, where the affine terms cancel; errors are measured
 # against a float64 reference relative to the output RMS, as consumed downstream (rounded to bf16).
 
-def _error_over_rms(output, reference):
-    """(max, mean) |output - reference| / rms(reference)."""
-    diff = (output.double() - reference).abs()
-    rms = reference.pow(2).mean().sqrt()
-    return (diff.max() / rms).item(), (diff.mean() / rms).item()
-
-
 def _assert_native_error_within_autocast_plus_rounding(native, autocast, reference):
     """The native output may not be worse than the autocast path's (both as consumed, i.e. rounded to bf16) by more
     than the reference's own bf16 rounding error."""
-    native_max, native_mean = _error_over_rms(native, reference)
-    autocast_max, autocast_mean = _error_over_rms(autocast.to(BF16), reference)
-    floor_max, floor_mean = _error_over_rms(reference.to(BF16), reference)
+    native_max, native_mean = error_over_rms(native, reference)
+    autocast_max, autocast_mean = error_over_rms(autocast.to(BF16), reference)
+    floor_max, floor_mean = error_over_rms(reference.to(BF16), reference)
     assert native_max <= autocast_max + floor_max, (native_max, autocast_max, floor_max)
     assert native_mean <= autocast_mean + 0.01 * floor_mean, (native_mean, autocast_mean, floor_mean)
 
 
 def _bf16_eps(eps):
     return torch.tensor(eps, dtype=BF16).item()
-
-
-def _random_activations(shape, memory_format=torch.contiguous_format):
-    # Per-channel scales from 1e-3 to 10 and offsets of a few scales. For NCHW the scale is shared by each run of
-    # channels / 32 channels (one GroupNorm group), so group variances span 1e-6..100, including the range where eps
-    # matters most.
-    generator = torch.Generator(device="cuda").manual_seed(1234)
-    if len(shape) == 4:
-        channels = shape[1]
-        scale = torch.logspace(-3, 1, 32, device="cuda").repeat_interleave(channels // 32)
-        view = (1, channels, 1, 1)
-    else:
-        channels = shape[-1]
-        scale = torch.logspace(-3, 1, channels, device="cuda")
-        view = (channels,)
-    offset = torch.randn(channels, device="cuda", generator=generator) * scale * 3
-    x = torch.randn(shape, device="cuda", generator=generator) * scale.view(view) + offset.view(view)
-    return x.to(BF16).contiguous(memory_format=memory_format)
-
-
-def _randomize(module):
-    generator = torch.Generator().manual_seed(4321)
-    with torch.no_grad():
-        for parameter in module.parameters():
-            parameter.copy_(torch.randn(parameter.shape, generator=generator) * 0.5 + (1.0 if parameter.dim() == 1 else 0.0))
-    return module
 
 
 def _run(module, *args, native, **kwargs):
@@ -403,8 +328,8 @@ def test_cuda_bf16_group_norm_native_path_matches_float64_like_autocast(default_
     else:
         norm = sgm_attention.Normalize(channels)
         norm.__class__ = sd_hijack_unet.UnetGroupNorm
-    norm = _randomize(norm).to("cuda", BF16).to(memory_format=memory_format)
-    x = _random_activations((2, channels, size, size), memory_format)
+    norm = randomize(norm).to("cuda", BF16).to(memory_format=memory_format)
+    x = random_activations((2, channels, size, size), memory_format)
 
     with torch.no_grad(), torch.autocast("cuda", dtype=BF16):
         assert sd_hijack_unet.bf16_native_norm_eligible(norm, x)
@@ -425,8 +350,8 @@ def test_cuda_bf16_group_norm_native_path_matches_float64_like_autocast(default_
 def test_cuda_bf16_layer_norm_is_bitwise_equal_to_autocast_when_aligned(default_runtime, channels, tokens, offset):
     norm = torch.nn.LayerNorm(channels)
     norm.__class__ = sd_hijack_unet.UnetLayerNorm
-    norm = _randomize(norm).to("cuda", BF16)
-    full = _random_activations((2, tokens, channels))
+    norm = randomize(norm).to("cuda", BF16)
+    full = random_activations((2, tokens, channels))
     storage = torch.empty(full.numel() + offset, device="cuda", dtype=BF16)
     x = storage[offset:].view_as(full)
     x.copy_(full)
@@ -449,9 +374,9 @@ def test_cuda_bf16_layer_norm_is_bitwise_equal_to_autocast_when_aligned(default_
 
 @needs_cuda
 def test_cuda_transformer_block_is_bitwise_equal_to_autocast(default_runtime):
-    block = _randomize(sgm_attention.BasicTransformerBlock(640, 10, 64, context_dim=2048, checkpoint=False)).to("cuda", BF16)
-    x = _random_activations((2, 1024, 640))
-    context = _random_activations((2, 77, 2048))
+    block = randomize(sgm_attention.BasicTransformerBlock(640, 10, 64, context_dim=2048, checkpoint=False)).to("cuda", BF16)
+    x = random_activations((2, 1024, 640))
+    context = random_activations((2, 77, 2048))
 
     assert torch.equal(_run(block, x, context=context, native=True), _run(block, x, context=context, native=False))
 
@@ -473,12 +398,12 @@ def test_cuda_spatial_transformer_and_resblock_differ_only_by_group_norm_eps(def
 
     transformer = sgm_attention.SpatialTransformer(640, 10, 64, depth=2, context_dim=2048, use_linear=True, use_checkpoint=False)
     resblock = ResBlock(640, 1280, 0.0, out_channels=640)
-    x = _random_activations((2, 640, 32, 32), memory_format)
-    context = _random_activations((2, 77, 2048))
-    emb = _random_activations((2, 1280))
+    x = random_activations((2, 640, 32, 32), memory_format)
+    context = random_activations((2, 77, 2048))
+    emb = random_activations((2, 1280))
 
     for module, args in ((transformer, (x, [context])), (resblock, (x, emb))):
-        module = _randomize(module).to("cuda", BF16).to(memory_format=memory_format)
+        module = randomize(module).to("cuda", BF16).to(memory_format=memory_format)
         reference = copy.deepcopy(module)
         for norm in reference.modules():
             if isinstance(norm, torch.nn.GroupNorm):

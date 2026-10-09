@@ -9,10 +9,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import devices, processing  # noqa: E402
 from modules.processing import StableDiffusionProcessingTxt2Img  # noqa: E402

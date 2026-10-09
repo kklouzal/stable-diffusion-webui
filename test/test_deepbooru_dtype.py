@@ -3,10 +3,9 @@ import contextlib
 import torch
 from PIL import Image
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import deepbooru, devices
 

@@ -6,10 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import processing, prompt_parser  # noqa: E402
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img  # noqa: E402

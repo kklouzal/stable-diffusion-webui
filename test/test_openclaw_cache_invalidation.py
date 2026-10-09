@@ -5,10 +5,9 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image, ImageDraw
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import cache as cache_module, hashes, openclaw_lifecycle_epochs, processing, sd_models, sd_vae
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img

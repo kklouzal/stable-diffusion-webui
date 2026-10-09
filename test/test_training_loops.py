@@ -13,10 +13,9 @@ import pytest
 import torch
 from PIL import Image
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import cache as cache_module, devices, errors, hashes, images, processing, sd_hijack_checkpoint, sd_models  # noqa: E402
 from modules.hypernetworks import hypernetwork as hn  # noqa: E402
