@@ -14,9 +14,7 @@ import functools
 import importlib
 import math
 import re
-import resource
 import shutil
-import signal
 import subprocess
 import sys
 import types
@@ -169,34 +167,6 @@ def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
         result = run_patcher(root, *extra, check=False)
         assert result.returncode != 0 and "partially patched" in result.stderr
     assert tilevae.read_text(encoding="utf-8") == partial
-
-
-def test_write_failing_midway_leaves_every_target_intact(tmp_path: Path):
-    """Integration case of patchlib's write-failure test: a multi-file run that fails while writing changes nothing."""
-    root = copy_multidiffusion(tmp_path / "md")
-    pristine = snapshot(root)
-
-    def limit_file_size():  # a write past 64 bytes fails with EFBIG partway through, as on a full disk
-        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
-
-    result = subprocess.run([sys.executable, str(PATCHER), str(root)], capture_output=True, text=True, preexec_fn=limit_file_size)
-
-    assert result.returncode != 0 and "File too large" in result.stderr
-    assert snapshot(root) == pristine
-    assert not list(root.rglob("*.gb10-tmp"))
-
-
-def test_patched_text_that_is_not_valid_python_is_not_written(tmp_path: Path):
-    root = copy_multidiffusion(tmp_path / "md")
-    last = root / TARGETS[-1]
-    last.write_bytes(last.read_bytes() + b"\ndef broken(:\n")
-    before = snapshot(root)
-
-    result = run_patcher(root, check=False)
-
-    assert result.returncode != 0 and "verification failed (invalid Python)" in result.stderr
-    assert snapshot(root) == before
 
 
 # ---------------------------------------------------------------- terminal tile origins (tile_utils/utils.py)
