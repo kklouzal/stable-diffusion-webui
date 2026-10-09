@@ -278,3 +278,54 @@ def test_upstream_blanks_the_infotext_and_duplicates_the_image_when_no_seams_til
     upscaler.process()
     assert upscaler.initial_info is None
     assert len(upscaler.result_images) == 2
+
+
+class _VaeProcessing(_Processing):
+    """modules.processing's override handling as process_images() runs it per tile, with sd_vae reloads counted:
+    a reload happens whenever the selected VAE differs from the loaded one (sd_vae.reload_vae_weights)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.opts = {"sd_vae": "Automatic"}
+        self.loaded = "Automatic"
+        self.reloads = 0
+        self.tile_vaes: list[str] = []
+
+    def _reload(self):
+        if self.loaded != self.opts["sd_vae"]:
+            self.loaded = self.opts["sd_vae"]
+            self.reloads += 1
+
+    def store(self, p):
+        return {key: self.opts[key] for key in p.override_settings}
+
+    def apply(self, p):
+        self.opts.update(p.override_settings)
+        self._reload()
+
+    def restore(self, stored):
+        self.opts.update(stored)
+        self._reload()
+
+    def process_images(self, p):
+        stored = self.store(p)
+        self.apply(p)
+        try:
+            self.tile_vaes.append(self.loaded)
+            return super().process_images(p)
+        finally:
+            self.restore(stored)
+
+
+def test_vae_override_loads_once_per_run_instead_of_twice_per_tile(ultimate_copy: Path, tmp_path: Path):
+    upstream = ultimate_copy / "scripts" / "ultimate-upscale.py"
+    patched = tmp_path / "patched.py"
+    shutil.copyfile(upstream, patched)
+    run_patcher(UU_PATCHER, patched)
+    for path, reloads in ((upstream, 2 * 8), (patched, 2)):
+        recorder = _VaeProcessing()
+        usdu = load_usdu(path, _State(), recorder)
+        make_usdu(usdu, canvas=(128, 128), seams=2).process()
+        assert recorder.tiles == 8  # 4 redraw + 4 half-tile seams
+        assert recorder.tile_vaes == ["fixture.safetensors"] * 8 and recorder.loaded == "Automatic"
+        assert recorder.reloads == reloads
