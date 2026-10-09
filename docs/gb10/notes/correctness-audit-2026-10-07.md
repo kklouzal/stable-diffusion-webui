@@ -151,3 +151,33 @@ commit messages. All verification was on the CPU.
 - **GPU verification owed:**
   - A fixed-seed A/B of the production request (PAG 6 + SEG) for the PAG `to_out` change.
   - A SEG A/B with a long prompt and short negative (now blurred).
+
+## Follow-up fixes: processing, API and image input (2026-10-09)
+
+A second audit of img2img preparation, the API boundary, `generation_last` and `/progress`. Details are in the commit
+messages. All verification was on the CPU.
+
+- **Output-changing on the production path:** the VAE encoder input is mapped to [-1, 1] in float32 and rounded once
+  to the VAE dtype (it was rounded twice under the bf16 VAE; half of the 256 codes moved by up to half a code). Its own
+  commit, so a GPU A/B can revert it alone.
+- **Output-changing elsewhere:**
+  - Resize mode 3 with a mask: the mask stretches like the latent, and the overlay is built at the output size.
+  - A mask of another size than the init image is stretched onto it ("only masked" cropped the wrong region).
+  - LA/PA/P/L/RGB masks with transparency use their alpha.
+  - "Latent noise" fill uses each batch's seeds (the first batch is unchanged).
+  - 16-bit grayscale inputs round to 8 bits (they clipped to white); RGB/CMYK inputs with a non-sRGB ICC profile are
+    converted to sRGB (untagged and sRGB-tagged inputs keep their exact pixels).
+  - The img2img init cache keeps a caller's preset color corrections (Loopback) out of the cache.
+- **Contract:** `init_images: []` answers 422; I/F-mode images and malformed or mismatched ICC profiles answer 422;
+  a request whose extra-network cleanup fails no longer becomes the last generation snapshot; `/progress` returns
+  the preview the sampler thread produced (decoded on request between denoiser calls, never on the polling thread)
+  and requests none with `skip_current_image`.
+- **Exact (speed):** the conditioning cache keys on the LoRA state the text encoders run with (U-Net-only LoRA changes
+  hit) and on `lora_bundled_ti_to_infotext`; the snapshot JSON is written as ASCII (78 -> 14 ms for two 1280² inputs);
+  API-decoded inline PNGs are retained from a chunk walk (32.5 -> 2.6 ms at 1280²); no CUDA cache release around
+  per-image face restoration.
+- **Measured, not adopted:** the parallel PNG writer for API responses and snapshot re-encodes. On the production
+  1280² img2img output it was slower than Pillow's level 1 (median 99-101 vs 84-85 ms with the host at load 6-7;
+  faster on noisy or 1024² images). Re-measure on an idle host before revisiting.
+- **GPU verification owed:** a fixed-seed img2img A/B for the VAE encode rounding (init latent vs an fp32-VAE
+  reference), and one request with live previews enabled under CUDA graphs.
