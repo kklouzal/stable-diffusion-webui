@@ -34,10 +34,10 @@ optimizers = []
 current_optimizer: sd_hijack_optimizations.SdOptimization = None
 
 ldm_patched_forward = sd_unet.create_unet_forward(ldm.modules.diffusionmodules.openaimodel.UNetModel.forward)
-ldm_original_forward = patches.patch(__file__, ldm.modules.diffusionmodules.openaimodel.UNetModel, "forward", ldm_patched_forward)
+patches.patch(__file__, ldm.modules.diffusionmodules.openaimodel.UNetModel, "forward", ldm_patched_forward)
 
 sgm_patched_forward = sd_unet.create_unet_forward(sgm.modules.diffusionmodules.openaimodel.UNetModel.forward)
-sgm_original_forward = patches.patch(__file__, sgm.modules.diffusionmodules.openaimodel.UNetModel, "forward", sgm_patched_forward)
+patches.patch(__file__, sgm.modules.diffusionmodules.openaimodel.UNetModel, "forward", sgm_patched_forward)
 
 
 def list_optimizers():
@@ -230,17 +230,6 @@ class StableDiffusionModelHijack:
             return res
 
         self.layers = flatten(m)
-
-        import modules.models.diffusion.ddpm_edit
-
-        if isinstance(m, ldm.models.diffusion.ddpm.LatentDiffusion):
-            sd_unet.original_forward = ldm_original_forward
-        elif isinstance(m, modules.models.diffusion.ddpm_edit.LatentDiffusion):
-            sd_unet.original_forward = ldm_original_forward
-        elif isinstance(m, sgm.models.diffusion.DiffusionEngine):
-            sd_unet.original_forward = sgm_original_forward
-        else:
-            sd_unet.original_forward = None
 
 
     def undo_hijack(self, m):

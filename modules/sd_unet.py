@@ -7,7 +7,6 @@ from modules import script_callbacks, shared, devices, sd_unet_row_memo
 unet_options = []
 current_unet_option = None
 current_unet = None
-original_forward = None  # not used, only left temporarily for compatibility
 
 def list_unets():
     new_unets = script_callbacks.list_unets_callback()
