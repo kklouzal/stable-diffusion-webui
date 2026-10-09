@@ -32,9 +32,10 @@ def _interp_sigmas(sigmas: torch.Tensor, positions: torch.Tensor) -> torch.Tenso
     return sigmas[left] * (1.0 - frac) + sigmas[right] * frac
 
 
-def ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int, t_enc: int | None = None) -> torch.Tensor:
-    delta = _safe_float(getattr(p, "openclaw_denoise_step_delta", 0.0), 0.0)
-    if abs(delta) < 1e-9 or t_enc is None:
+def ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int, t_enc: int) -> torch.Tensor:
+    # process() stores the delta already parsed and clamped; a p it never ran for has no delta.
+    delta = getattr(p, "openclaw_denoise_step_delta", 0.0)
+    if abs(delta) < 1e-9:
         return sigmas
 
     total_transitions = max(1, min(steps, sigmas.shape[0] - 1))
@@ -57,7 +58,7 @@ def ramp_sigmas_for_img2img(p, sigmas: torch.Tensor, steps: int, t_enc: int | No
 
     # Small, bounded curvature: + values linger higher/noisier a little longer
     # then catch up; - values drop noise a little faster. Endpoints are fixed.
-    gamma = max(0.5, min(1.5, 1.0 + float(delta) * 5.0))
+    gamma = max(0.5, min(1.5, 1.0 + delta * 5.0))
     curved = torch.pow(progress, gamma)
     positions = float(start) + curved * float(tail_len - 1)
 
