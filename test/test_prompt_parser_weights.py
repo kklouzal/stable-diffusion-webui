@@ -1,4 +1,4 @@
-"""Prompt parsing: composable AND weights and the module's own doctests."""
+"""Prompt parsing: composable AND weights, attention brackets around BREAK, and the module's own doctests."""
 
 import doctest
 
@@ -36,6 +36,26 @@ def test_colon_after_a_digit_is_text_not_a_weight(prompt):
 ])
 def test_weights_keep_working(prompt, expected):
     assert multicond(prompt) == expected
+
+
+def test_break_inside_brackets_stays_a_break_marker():
+    parsed = prompt_parser.parse_prompt_attention("a (b BREAK c) [d BREAK e] ((f BREAK))")
+
+    markers = [entry for entry in parsed if entry[0] == "BREAK"]
+    assert markers == [["BREAK", -1]] * 3
+    assert ["c", 1.1] in parsed and ["e", 1 / 1.1] in parsed
+    assert parsed[1:4] == [["b", 1.1], ["BREAK", -1], ["c", 1.1]]
+
+
+def test_break_marker_never_merges_with_text_weighted_minus_one():
+    parsed = prompt_parser.parse_prompt_attention("(x BREAK y:-1)")
+
+    assert parsed == [["x", -1.0], ["BREAK", -1], ["y", -1.0]]
+
+
+def test_break_outside_brackets_is_unchanged():
+    assert prompt_parser.parse_prompt_attention("a BREAK b") == [["a", 1.0], ["BREAK", -1], ["b", 1.0]]
+    assert prompt_parser.parse_prompt_attention("(a) BREAK b") == [["a", 1.1], ["", 1.0], ["BREAK", -1], ["b", 1.0]]
 
 
 def test_module_doctests():

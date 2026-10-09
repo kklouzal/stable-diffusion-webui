@@ -391,6 +391,8 @@ def parse_prompt_attention(text):
     [['(literal]', 1.0]]
     >>> parse_prompt_attention('(unnecessary)(parens)')
     [['unnecessaryparens', 1.1]]
+    >>> parse_prompt_attention('a (b BREAK c) [d BREAK]')
+    [['a ', 1.0], ['b', 1.1], ['BREAK', -1], ['c', 1.1], [' ', 1.0], ['d', 0.9090909090909091], ['BREAK', -1], ['', 0.9090909090909091]]
     >>> parse_prompt_attention('a (((house:1.3)) [on] a (hill:0.5), sun, (((sky))).')
     [['a ', 1.0],
      ['house', 1.5730000000000004],
@@ -410,9 +412,14 @@ def parse_prompt_attention(text):
     round_bracket_multiplier = 1.1
     square_bracket_multiplier = 1 / 1.1
 
+    # BREAK markers are ["BREAK", -1] entries (the encoders split chunks on exactly that): the ones made here are kept
+    # by identity, so brackets around a BREAK never weight it and it never merges into text weighted -1.
+    break_markers = set()
+
     def multiply_range(start_position, multiplier):
         for p in range(start_position, len(res)):
-            res[p][1] *= multiplier
+            if id(res[p]) not in break_markers:
+                res[p][1] *= multiplier
 
     for m in re_attention.finditer(text):
         text = m.group(0)
@@ -434,7 +441,9 @@ def parse_prompt_attention(text):
             parts = re.split(re_break, text)
             for i, part in enumerate(parts):
                 if i > 0:
-                    res.append(["BREAK", -1])
+                    marker = ["BREAK", -1]
+                    break_markers.add(id(marker))
+                    res.append(marker)
                 res.append([part, 1.0])
 
     for pos in round_brackets:
@@ -449,7 +458,7 @@ def parse_prompt_attention(text):
     # merge runs of identical weights
     i = 0
     while i + 1 < len(res):
-        if res[i][1] == res[i + 1][1]:
+        if res[i][1] == res[i + 1][1] and id(res[i]) not in break_markers and id(res[i + 1]) not in break_markers:
             res[i][0] += res[i + 1][0]
             res.pop(i + 1)
         else:
