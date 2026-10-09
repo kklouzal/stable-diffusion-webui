@@ -856,22 +856,32 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         self.network_bias_backup = bias_backup
 
     if current_names != wanted_names:
-        network_restore_weights_from_backup(self)
-        # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
-        self.network_current_names = ()
+        # Weights and an existing bias are restored and merged in place (copy_), so the tensors captured CUDA graphs
+        # read stay the same objects. A bias-less layer is the exception: a network bias creates a Parameter on it and
+        # the restore removes it, so every merge change there replaces the object graphs captured. The published-state
+        # notification cannot see that when the state returns to an earlier key (a failed publish rolled back to the
+        # previous networks), so a replaced bias drops the graphs itself.
+        bias_parameter = getattr(self, "bias", None)
+        try:
+            network_restore_weights_from_backup(self)
+            # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
+            self.network_current_names = ()
 
-        target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
-        # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
-        # matmul/einsum results of calc_updown to bf16.
-        with torch.no_grad(), torch.autocast(target.device.type, enabled=False):
-            merged_weight, merged_bias = network_merge_loaded_deltas(self, network_layer_name)
-            if merged_weight is not None:
-                target.copy_(merged_weight)
-            if merged_bias is not None:
-                if self.bias is None:
-                    self.bias = torch.nn.Parameter(merged_bias.to(self.weight.dtype), requires_grad=False)
-                else:
-                    self.bias.copy_(merged_bias)
+            target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
+            # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
+            # matmul/einsum results of calc_updown to bf16.
+            with torch.no_grad(), torch.autocast(target.device.type, enabled=False):
+                merged_weight, merged_bias = network_merge_loaded_deltas(self, network_layer_name)
+                if merged_weight is not None:
+                    target.copy_(merged_weight)
+                if merged_bias is not None:
+                    if self.bias is None:
+                        self.bias = torch.nn.Parameter(merged_bias.to(self.weight.dtype), requires_grad=False)
+                    else:
+                        self.bias.copy_(merged_bias)
+        finally:
+            if getattr(self, "bias", None) is not bias_parameter:
+                openclaw_cuda_graphs.invalidate("lora_bias_parameter_replaced", network_layer_name)
 
         self.network_current_names = wanted_names
 

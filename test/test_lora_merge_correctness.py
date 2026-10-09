@@ -625,3 +625,45 @@ def test_functional_lora_keeps_float32_text_encoder_inputs_under_upcast_sampling
     unet_layer.network_layer_name = "diffusion_model_layer"
     with torch.no_grad():
         assert networks.network_forward(unet_layer, x, torch.nn.Linear.forward).dtype == torch.bfloat16
+
+
+def test_failed_publish_rollback_drops_graphs_that_read_a_replaced_bias(bf16_lora, monkeypatch):
+    """A network bias on a bias-less layer is a Parameter the merge creates and the restore removes. A failed publish
+    rolled back to the previous networks re-created it as a new object, while the applied-state key returned to the
+    previous one, so CUDA graphs captured before the failed publish replayed against the freed bias. A layer that has
+    its own bias keeps the same Parameter through merge, restore and rollback (copy_), so it drops no graphs."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(47)
+    biasless = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    biasless.network_layer_name = "diffusion_model_biasless"
+    biased = torch.nn.Linear(4, 4, bias=True, dtype=torch.bfloat16)
+    biased.network_layer_name = "diffusion_model_biased"
+    _publish_layers(networks, monkeypatch, biasless, biased)
+    diff, diff_b = torch.full((4, 4), 0.25, dtype=torch.float16), torch.arange(4, dtype=torch.float16)
+    good = _net(networks, "good")
+    _add_module(networks, good, biasless, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+    _add_module(networks, good, biased, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+    invalidations, notes = [], []
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "invalidate", lambda reason, details=None: invalidations.append((reason, details)))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: notes.append(networks._applied_state_key))
+
+    assert networks._publish_applied_state([good])
+    created, own_bias = biasless.bias, biased.bias
+    merged = (biasless.bias.detach().clone(), biased.bias.detach().clone())
+    assert invalidations == [("lora_bias_parameter_replaced", "diffusion_model_biasless")] and len(notes) == 1
+    invalidations.clear()
+
+    bad = _lora(networks, biasless, "bad", _grid((4, 1), g), _grid((1, 1), g), 1.0, 1.0)
+    with pytest.raises(RuntimeError, match="LoRA bad cannot be applied to layer diffusion_model_biasless"):
+        networks._publish_applied_state([good, bad])
+
+    assert len(notes) == 1  # the rolled-back state has the previous key: no published-state notification
+    assert biasless.bias is not created and torch.equal(biasless.bias, merged[0])
+    assert ("lora_bias_parameter_replaced", "diffusion_model_biasless") in invalidations
+    assert {details for _, details in invalidations} == {"diffusion_model_biasless"}
+    assert biased.bias is own_bias and torch.equal(biased.bias, merged[1])
+    invalidations.clear()
+
+    assert networks._publish_applied_state([])
+    assert biasless.bias is None and biased.bias is own_bias
+    assert invalidations == [("lora_bias_parameter_replaced", "diffusion_model_biasless")]
