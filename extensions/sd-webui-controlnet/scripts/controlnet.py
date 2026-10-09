@@ -1,3 +1,4 @@
+import functools
 import math
 import tracemalloc
 import os
@@ -948,45 +949,26 @@ class Script(scripts.Script, metaclass=(
                     m = cv2.blur(m, (sigma, sigma))[None, None]
                     final_inpaint_mask_post_cv.append(m)
                 final_inpaint_mask = np.concatenate(final_inpaint_mask_post_cv, axis=0)
-                _, _, Hmask, Wmask = final_inpaint_mask.shape
-                final_inpaint_raw = torch.from_numpy(final_inpaint_raw.copy())
-                final_inpaint_mask = torch.from_numpy(final_inpaint_mask.copy())
-
-                def inpaint_only_post_processing(x, i):
-                    if i >= final_inpaint_raw.shape[0]:
-                        i = 0
-                    _, H, W = x.shape
-                    if Hmask != H or Wmask != W:
-                        logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
-                        return x
-                    r = final_inpaint_raw[i].to(x.dtype).to(x.device)
-                    m = final_inpaint_mask[i].to(x.dtype).to(x.device)
-                    y = m * x.clip(0, 1) + (1 - m) * r
-                    y = y.clip(0, 1)
-                    return y
-
-                post_processors.append(inpaint_only_post_processing)
+                # Bind this unit's maps now: a closure over the loop variables would give every unit the last unit's.
+                post_processors.append(functools.partial(
+                    inpaint_only_post_processing,
+                    final_inpaint_raw=torch.from_numpy(final_inpaint_raw.copy()),
+                    final_inpaint_mask=torch.from_numpy(final_inpaint_mask.copy()),
+                ))
 
             if 'recolor' in unit.module:
                 final_feed = hr_control if hr_control is not None else control
                 final_feed = final_feed.detach().cpu().numpy().copy()
                 final_feed = final_feed[:, 0, :, :].astype(np.float32)
                 final_feed = (final_feed * 255).clip(0, 255).astype(np.uint8)
-                _, Hfeed, Wfeed = final_feed.shape
-
+                # Bound per unit (see inpaint_only above).
                 if 'luminance' in unit.module:
-
-                    def recolor_luminance_post_processing(x, i):
-                        return recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, cv2.COLOR_RGB2LAB, cv2.COLOR_LAB2RGB, 0)
-
-                    post_processors.append(recolor_luminance_post_processing)
+                    post_processors.append(functools.partial(
+                        recolor_post_processing, final_feed=final_feed, to_code=cv2.COLOR_RGB2LAB, from_code=cv2.COLOR_LAB2RGB, channel=0))
 
                 if 'intensity' in unit.module:
-
-                    def recolor_intensity_post_processing(x, i):
-                        return recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, cv2.COLOR_RGB2HSV, cv2.COLOR_HSV2RGB, 2)
-
-                    post_processors.append(recolor_intensity_post_processing)
+                    post_processors.append(functools.partial(
+                        recolor_post_processing, final_feed=final_feed, to_code=cv2.COLOR_RGB2HSV, from_code=cv2.COLOR_HSV2RGB, channel=2))
 
             if '+lama' in unit.module:
                 forward_param.used_hint_cond_latent = hook.UnetHook.call_vae_using_process(p, control)
@@ -1156,12 +1138,30 @@ class Script(scripts.Script, metaclass=(
             tracemalloc.stop()
 
 
-def recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, to_code, from_code, channel):
+def inpaint_only_post_processing(x, i, final_inpaint_raw, final_inpaint_mask):
+    """Paste the unit's unmasked source pixels `final_inpaint_raw[i]` (CHW, [0, 1]) back over output image `x` (CHW,
+    [0, 1]), blended by its dilated and blurred mask `final_inpaint_mask[i]` (1HW)."""
+    if i >= final_inpaint_raw.shape[0]:
+        i = 0
+    _, H, W = x.shape
+    _, _, Hmask, Wmask = final_inpaint_mask.shape
+    if Hmask != H or Wmask != W:
+        logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
+        return x
+    r = final_inpaint_raw[i].to(x.dtype).to(x.device)
+    m = final_inpaint_mask[i].to(x.dtype).to(x.device)
+    y = m * x.clip(0, 1) + (1 - m) * r
+    y = y.clip(0, 1)
+    return y
+
+
+def recolor_post_processing(x, i, final_feed, to_code, from_code, channel):
     """Replace `channel` of output image `x` (CHW, [0, 1]) in the `to_code` colour space with the recolor
     preprocessor's map `final_feed[i]` (uint8, NHW), then convert back with `from_code`."""
     if i >= final_feed.shape[0]:
         i = 0
     C, H, W = x.shape
+    _, Hfeed, Wfeed = final_feed.shape
     if Hfeed != H or Wfeed != W or C != 3:
         logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
         return x

@@ -372,5 +372,34 @@ class TestHiresCondsMarked(unittest.TestCase):
         self.assertIs(process.hr_uc[0][0], seen["uc"][0][0])
 
 
+class TestPostProcessorsBindTheirUnit(unittest.TestCase):
+    """Post-processors are built in a loop over units; each must keep its own unit's map (they used to be closures over
+    the loop variables, so with two recolor or inpaint_only units every post-processor applied the last unit's map)."""
+
+    def test_recolor_uses_the_feed_it_was_bound_to(self):
+        import functools
+        import cv2
+
+        x = torch.full((3, 4, 4), 0.5)
+        feeds = [np.full((1, 4, 4), value, dtype=np.uint8) for value in (40, 200)]
+        processors = [functools.partial(controlnet_script.recolor_post_processing, final_feed=feed,
+                                        to_code=cv2.COLOR_RGB2LAB, from_code=cv2.COLOR_LAB2RGB, channel=0) for feed in feeds]
+        first, second = (processor(x, 0) for processor in processors)
+        self.assertLess(first.mean().item(), second.mean().item())
+        self.assertTrue(torch.equal(first, controlnet_script.recolor_post_processing(
+            x, 0, feeds[0], cv2.COLOR_RGB2LAB, cv2.COLOR_LAB2RGB, 0)))
+
+    def test_inpaint_only_pastes_its_own_source_outside_its_mask(self):
+        import functools
+
+        x = torch.full((3, 2, 2), 0.25)
+        mask = torch.zeros((1, 1, 2, 2))  # 0 everywhere: the output is the unit's source image
+        processors = [functools.partial(controlnet_script.inpaint_only_post_processing,
+                                        final_inpaint_raw=torch.full((1, 3, 2, 2), value), final_inpaint_mask=mask)
+                      for value in (0.1, 0.9)]
+        self.assertTrue(torch.allclose(processors[0](x, 0), torch.full((3, 2, 2), 0.1)))
+        self.assertTrue(torch.allclose(processors[1](x, 0), torch.full((3, 2, 2), 0.9)))
+
+
 if __name__ == "__main__":
     unittest.main()
