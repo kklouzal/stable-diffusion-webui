@@ -334,11 +334,13 @@ def spatial_transformer_init(orig_func, self, *args, **kwargs):
 
 
 class GELUHijack(torch.nn.GELU, torch.nn.Module):
+    """OpenCLIP's MLP activation (text encoders only), upcast under --upcast-sampling; returns the input's dtype,
+    which is float32 for a float32 text encoder (sd_models.float32_text_encoder_names)."""
     def __init__(self, *args, **kwargs):
         torch.nn.GELU.__init__(self, *args, **kwargs)
     def forward(self, x):
         if devices.unet_needs_upcast:
-            return torch.nn.GELU.forward(self.float(), x.float()).to(devices.dtype_unet)
+            return torch.nn.GELU.forward(self.float(), x.float()).to(x.dtype)
         else:
             return torch.nn.GELU.forward(self, x)
 

@@ -349,3 +349,75 @@ def test_in_place_weight_load_does_not_depend_on_the_checkpoint_limit(monkeypatc
 
     assert sd_models.weights_load_in_place_on_device(TinySD()) is True
     assert sd_models.checkpoint_switch_in_place_on_device(TinySD()) is False
+
+
+def _source_tensor(state_dict, key):
+    return state_dict[key].to(torch.float32)
+
+
+def test_text_encoder_keeps_the_checkpoint_weights_in_float32(monkeypatch):
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    model, _ = _loaded_model()
+    _, base_state_dict = _checkpoint("base", 1)
+
+    for name, tensor in model.cond_stage_model.state_dict().items():
+        assert tensor.dtype == torch.float32, name
+        assert torch.equal(tensor, _source_tensor(base_state_dict, f"cond_stage_model.{name}")), name
+    assert model.model.diffusion_model[0].weight.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_in_place_switch_restores_a_lower_precision_text_encoder_to_exact_float32(monkeypatch, device):
+    # A model loaded under another policy (fp8 storage or TorchAO conditioner coverage turned off since) holds a
+    # lower-precision text encoder; loading into it before the float32 cast would round the new checkpoint.
+    recorder = _environment(monkeypatch, device, unified=True)
+    model, _ = _loaded_model()
+    model.cond_stage_model.to(torch.bfloat16)
+    alternate_info, alternate_state_dict = _checkpoint("alternate", 2)
+    monkeypatch.setattr(sd_models, "get_checkpoint_state_dict", lambda info, _timer: {key: value.clone() for key, value in alternate_state_dict.items()})
+    recorder.events.clear()
+
+    sd_models.reload_model_weights(model, alternate_info)
+
+    assert "send_model_to_cpu" not in recorder.events
+    for name, tensor in model.cond_stage_model.state_dict().items():
+        assert tensor.dtype == torch.float32, name
+        assert torch.equal(tensor.cpu(), _source_tensor(alternate_state_dict, f"cond_stage_model.{name}")), name
+
+
+def test_fp8_storage_keeps_the_text_encoder_on_the_low_precision_path(monkeypatch):
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    monkeypatch.setitem(shared.opts.data, "fp8_storage", "Enable")
+    monkeypatch.setitem(shared.opts.data, "cache_fp16_weight", False)
+
+    model, _ = _loaded_model()
+
+    assert sd_models.float32_text_encoder_names(model) == ()
+    assert model.cond_stage_model[0].weight.dtype == torch.float8_e4m3fn
+    assert model.cond_stage_model[1].weight.dtype == torch.bfloat16  # LayerNorm: model.to(devices.dtype), as before
+
+
+@pytest.mark.parametrize(("coverage", "expected"), [(["unet_other"], ("cond_stage_model",)), (["unet_other", "conditioner"], ())])
+def test_torchao_conditioner_coverage_keeps_the_text_encoder_quantizable(monkeypatch, coverage, expected):
+    # TorchAO quantizes bfloat16 Linear weights only; a requested conditioner coverage keeps the text encoder there.
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    monkeypatch.setattr(sd_models, "weight_quant_storage_enabled", lambda backend, _model: backend.name == "mxfp8")
+    monkeypatch.setattr(sd_models, "selected_linear_coverage", lambda _backend: set(coverage))
+
+    assert sd_models.float32_text_encoder_names(TinySD()) == expected
+
+
+class SD3Like(torch.nn.Module):
+    """SD3's model: cond_stage_model is a property over the text_encoders submodule."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_encoders = torch.nn.Linear(1, 1)
+
+    @property
+    def cond_stage_model(self):
+        return self.text_encoders
+
+
+def test_sd3_text_encoders_are_not_float32_text_encoders():
+    assert sd_models.float32_text_encoder_names(SD3Like()) == ()

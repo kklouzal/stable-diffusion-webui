@@ -383,6 +383,27 @@ def torchao_weight_quant_requested(model):
     return any(weight_quant_storage_enabled(backend, model) for backend in torchao_weight_quant.BACKENDS.values())
 
 
+FLOAT32_TEXT_ENCODER_MODULES = ("conditioner", "cond_stage_model")
+
+
+def float32_text_encoder_names(model):
+    """Names of `model`'s text encoder submodules that keep float32 weights under a lower-precision devices.dtype.
+
+    The SD1/SD2 cond_stage_model and the SDXL conditioner (CLIP-L, OpenCLIP-G) keep float32 weights and run with
+    autocast off (sd_hijack_clip.text_encoder_precision): with bfloat16 weights and residual stream their output
+    is ~1e-2 (CLIP-L) to 3e-2 (OpenCLIP-G penultimate) relative L2 off a float64 reference, against 1e-6..2e-5 in
+    float32. A low-precision weight storage that covers the text encoder keeps the devices.dtype path instead:
+    fp8 storage, or TorchAO quantization with the "conditioner" coverage (it quantizes bfloat16 weights only).
+    SD3's text encoders (text_encoders) keep their own precision handling.
+    """
+    if check_fp8(model) or any(
+        weight_quant_storage_enabled(backend, model) and torchao_weight_quant.LINEAR_COVERAGE_CONDITIONER in selected_linear_coverage(backend)
+        for backend in torchao_weight_quant.BACKENDS.values()
+    ):
+        return ()
+    return tuple(name for name in FLOAT32_TEXT_ENCODER_MODULES if name in model._modules)
+
+
 class DisableFastModelLoadingForTorchAOQuant:
     def __enter__(self):
         self.previous = None
@@ -650,6 +671,11 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         model.before_load_weights(state_dict)
 
     restore_torchao_quantized_linears_for_reload(model)
+    float32_text_encoders = float32_text_encoder_names(model) if devices.dtype != torch.float32 else ()
+    for name in float32_text_encoders:
+        # Before the load: copy_ into the lower-precision parameters a model loaded under another policy kept (or
+        # model.half() above) would round the checkpoint's weights.
+        getattr(model, name).float()
     model.load_state_dict(state_dict, strict=False)
     timer.record("apply weights to model")
 
@@ -691,12 +717,18 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         if shared.cmd_opts.upcast_sampling and depth_model:
             model.depth_model = None
 
+        text_encoders = {name: getattr(model, name) for name in float32_text_encoders}
+        for name in text_encoders:
+            setattr(model, name, None)
+
         alphas_cumprod = model.alphas_cumprod
         model.alphas_cumprod = None
         model.to(devices.dtype)
         model.alphas_cumprod = alphas_cumprod
         model.alphas_cumprod_original = alphas_cumprod
         model.first_stage_model = vae
+        for name, text_encoder in text_encoders.items():
+            setattr(model, name, text_encoder)
         if depth_model:
             model.depth_model = depth_model
 
@@ -1233,6 +1265,9 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
         weight_dtype_conversion = {
             'first_stage_model': None,
             'alphas_cumprod': None,
+            # float32_text_encoder_names: the text encoders load as float32; where a low-precision storage covers
+            # them, load_model_weights then casts them to devices.dtype (the same single rounding of the source).
+            **{name: torch.float32 for name in FLOAT32_TEXT_ENCODER_MODULES},
             '': devices.dtype,
         }
 
