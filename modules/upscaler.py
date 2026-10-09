@@ -19,6 +19,10 @@ def scaled_size(size: int, scale: float) -> int:
 
 
 class Upscaler:
+    """Base of every upscaler. `modelloader.load_upscalers` instantiates each direct subclass with its
+    `--<classname minus "upscaler">-models-path` flag value, so shared behaviour lives here as methods rather than in
+    an intermediate class."""
+
     name = None
     model_path = None
     model_name = None
@@ -68,8 +72,57 @@ class Upscaler:
     def load_model(self, path: str):
         pass
 
+    def load_model_or_fail(self, path: str):
+        """`load_model(path)`, raising RuntimeError on any failure: returning the input image instead would silently
+        LANCZOS-resize it while infotext still names this model."""
+        try:
+            return self.load_model(path)
+        except Exception as e:
+            raise RuntimeError(f"Unable to load {self.name} model {path}: {e}") from e
+
     def find_models(self, ext_filter=None) -> list:
         return modelloader.load_models(model_path=self.model_path, model_url=self.model_url, command_path=self.user_path, ext_filter=ext_filter)
+
+    def scalers_from_files(self, ext_filter, scale=4) -> list:
+        """One `UpscalerData` per model file found; with none found, `find_models` lists `model_url` instead, which is
+        named `model_name`."""
+        return [
+            UpscalerData(self.model_name if path.startswith("http") else modelloader.friendly_name(path), path, self, scale)
+            for path in self.find_models(ext_filter=ext_filter)
+        ]
+
+    def local_model_file(self, path: str, file_name: str = None) -> str:
+        """`path`, or for a URL the file downloaded from it into `model_download_path` (as `file_name` if given, else
+        under the URL's basename), downloading only when that file is missing."""
+        if path.startswith("http"):
+            return modelloader.load_file_from_url(path, model_dir=self.model_download_path, file_name=file_name)
+        return path
+
+    def listed_model_file(self, path: str, redownload_below_bytes: int = None) -> str:
+        """The local file of the listed scaler whose `data_path` is `path`. A URL is downloaded on first use, checked
+        against the scaler's `sha256` if it has one, and downloaded again if the file is smaller than
+        `redownload_below_bytes` (a Git LFS pointer instead of the weights)."""
+        for scaler in self.scalers:
+            if scaler.data_path == path:
+                if scaler.local_data_path.startswith("http"):
+                    scaler.local_data_path = modelloader.load_file_from_url(
+                        scaler.data_path,
+                        model_dir=self.model_download_path,
+                        hash_prefix=scaler.sha256,
+                    )
+
+                    if redownload_below_bytes is not None and os.path.getsize(scaler.local_data_path) < redownload_below_bytes:
+                        scaler.local_data_path = modelloader.load_file_from_url(
+                            scaler.data_path,
+                            model_dir=self.model_download_path,
+                            hash_prefix=scaler.sha256,
+                            re_download=True,
+                        )
+
+                if not os.path.exists(scaler.local_data_path):
+                    raise FileNotFoundError(f"{self.name} data missing: {scaler.local_data_path}")
+                return scaler.local_data_path
+        raise ValueError(f"Unable to find model info: {path}")
 
 
 class UpscalerData:

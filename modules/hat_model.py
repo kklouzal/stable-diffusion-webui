@@ -2,30 +2,22 @@ import os
 
 from modules import modelloader, devices
 from modules.shared import opts
-from modules.upscaler import Upscaler, UpscalerData
+from modules.upscaler import Upscaler
 from modules.upscaler_utils import upscale_with_model
 
 
 class UpscalerHAT(Upscaler):
+    name = "HAT"
+
     def __init__(self, dirname):
-        self.name = "HAT"
-        self.scalers = []
         self.user_path = dirname
         super().__init__()
-        for file in self.find_models(ext_filter=[".pt", ".pth"]):
-            name = modelloader.friendly_name(file)
-            scale = 4  # TODO: scale might not be 4, but we can't know without loading the model
-            scaler_data = UpscalerData(name, file, upscaler=self, scale=scale)
-            self.scalers.append(scaler_data)
+        # TODO: scale might not be 4, but we can't know without loading the model
+        self.scalers = self.scalers_from_files([".pt", ".pth"])
 
     def do_upscale(self, img, selected_model):
-        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
-        try:
-            model = self.load_model(selected_model)
-        except Exception as e:
-            raise RuntimeError(f"Unable to load HAT model {selected_model}: {e}") from e
         return upscale_with_model(
-            model,
+            self.load_model_or_fail(selected_model),
             img,
             tile_size=opts.ESRGAN_tile,  # TODO: should probably be HAT_tile
             tile_overlap=opts.ESRGAN_tile_overlap,  # TODO: should probably be HAT_tile_overlap

@@ -1,45 +1,26 @@
 import PIL.Image
 
 import modules.upscaler
-from modules import devices, errors, modelloader, script_callbacks, shared, upscaler_utils
+from modules import devices, modelloader, script_callbacks, shared, upscaler_utils
 
 
 class UpscalerScuNET(modules.upscaler.Upscaler):
+    name = "ScuNET"
+    model_name = "ScuNET GAN"
+    model_url = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_gan.pth"
+    model_name2 = "ScuNET PSNR"
+    model_url2 = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth"
+
     def __init__(self, dirname):
-        self.name = "ScuNET"
-        self.model_name = "ScuNET GAN"
-        self.model_name2 = "ScuNET PSNR"
-        self.model_url = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_gan.pth"
-        self.model_url2 = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth"
         self.user_path = dirname
         super().__init__()
-        model_paths = self.find_models(ext_filter=[".pth"])
-        scalers = []
-        add_model2 = True
-        for file in model_paths:
-            if file.startswith("http"):
-                name = self.model_name
-            else:
-                name = modelloader.friendly_name(file)
-            if name == self.model_name2 or file == self.model_url2:
-                add_model2 = False
-            try:
-                scaler_data = modules.upscaler.UpscalerData(name, file, self, 4)
-                scalers.append(scaler_data)
-            except Exception:
-                errors.report(f"Error loading ScuNET model: {file}", exc_info=True)
-        if add_model2:
-            scaler_data2 = modules.upscaler.UpscalerData(self.model_name2, self.model_url2, self)
-            scalers.append(scaler_data2)
-        self.scalers = scalers
+        self.scalers = self.scalers_from_files([".pth"])
+        if not any(scaler.name == self.model_name2 or scaler.data_path == self.model_url2 for scaler in self.scalers):
+            self.scalers.append(modules.upscaler.UpscalerData(self.model_name2, self.model_url2, self))
 
     def do_upscale(self, img: PIL.Image.Image, selected_file):
         devices.torch_gc()
-        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
-        try:
-            model = self.load_model(selected_file)
-        except Exception as e:
-            raise RuntimeError(f"Unable to load ScuNET model {selected_file}: {e}") from e
+        model = self.load_model_or_fail(selected_file)
 
         img = upscaler_utils.upscale_2(
             img,
@@ -53,13 +34,12 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
         return img
 
     def load_model(self, path: str):
-        device = devices.get_device_for('scunet')
-        if path.startswith("http"):
-            # Saved under the URL's basename: spandrel picks its reader from the .pth extension.
-            filename = modelloader.load_file_from_url(path, model_dir=self.model_download_path)
-        else:
-            filename = path
-        return modelloader.load_cached_spandrel_model(filename, device=device, expected_architecture='SCUNet')
+        # A URL model is saved under the URL's basename: spandrel picks its reader from the .pth extension.
+        return modelloader.load_cached_spandrel_model(
+            self.local_model_file(path),
+            device=devices.get_device_for('scunet'),
+            expected_architecture='SCUNet',
+        )
 
 
 def on_ui_settings():
