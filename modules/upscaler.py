@@ -5,11 +5,7 @@ from abc import abstractmethod
 import PIL
 from PIL import Image
 
-import modules.shared
 from modules import modelloader, shared
-
-LANCZOS = (Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)
-NEAREST = (Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST)
 
 
 def scaled_size(size: int, scale: float) -> int:
@@ -27,36 +23,18 @@ class Upscaler:
     model_path = None
     model_name = None
     model_url = None
-    enable = True
-    filter = None
-    model = None
     user_path = None
     scalers: list
-    tile = True
 
     def __init__(self, create_dirs=False):
-        self.mod_pad_h = None
-        self.tile_size = modules.shared.opts.ESRGAN_tile
-        self.tile_pad = modules.shared.opts.ESRGAN_tile_overlap
-        self.device = modules.shared.device
-        self.img = None
-        self.output = None
+        self.device = shared.device
         self.scale = 1
-        self.half = not modules.shared.cmd_opts.no_half
-        self.pre_pad = 0
-        self.mod_scale = None
         self.model_download_path = None
 
         if self.model_path is None and self.name:
             self.model_path = os.path.join(shared.models_path, self.name)
         if self.model_path and create_dirs:
             os.makedirs(self.model_path, exist_ok=True)
-
-        try:
-            import cv2  # noqa: F401
-            self.can_tile = True
-        except Exception:
-            pass
 
     @abstractmethod
     def do_upscale(self, img: PIL.Image, selected_model: str):
@@ -82,7 +60,7 @@ class Upscaler:
                 break
 
         if img.width != dest_w or img.height != dest_h:
-            img = img.resize((int(dest_w), int(dest_h)), resample=LANCZOS)
+            img = img.resize((int(dest_w), int(dest_h)), resample=Image.Resampling.LANCZOS)
 
         return img
 
@@ -133,7 +111,7 @@ class UpscalerLanczos(Upscaler):
     scalers = []
 
     def do_upscale(self, img, selected_model=None):
-        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=LANCZOS)
+        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=Image.Resampling.LANCZOS)
 
     def load_model(self, _):
         pass
@@ -148,7 +126,7 @@ class UpscalerNearest(Upscaler):
     scalers = []
 
     def do_upscale(self, img, selected_model=None):
-        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=NEAREST)
+        return img.resize((scaled_size(img.width, self.scale), scaled_size(img.height, self.scale)), resample=Image.Resampling.NEAREST)
 
     def load_model(self, _):
         pass

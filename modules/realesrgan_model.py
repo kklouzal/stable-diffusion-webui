@@ -11,7 +11,6 @@ class UpscalerRealESRGAN(Upscaler):
         self.name = "RealESRGAN"
         self.user_path = path
         super().__init__()
-        self.enable = True
         self.scalers = []
         scalers = get_realesrgan_models(self)
 
@@ -27,9 +26,6 @@ class UpscalerRealESRGAN(Upscaler):
                 self.scalers.append(scaler)
 
     def do_upscale(self, img, path):
-        if not self.enable:
-            return img
-
         # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
         try:
             info = self.load_model(path)

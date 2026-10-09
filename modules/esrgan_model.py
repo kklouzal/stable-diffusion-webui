@@ -13,10 +13,6 @@ class UpscalerESRGAN(Upscaler):
         self.user_path = dirname
         super().__init__()
         model_paths = self.find_models(ext_filter=[".pt", ".pth"])
-        scalers = []
-        if len(model_paths) == 0:
-            scaler_data = UpscalerData(self.model_name, self.model_url, self, 4)
-            scalers.append(scaler_data)
         for file in model_paths:
             if file.startswith("http"):
                 name = self.model_name

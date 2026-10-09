@@ -92,7 +92,6 @@ def _instance(module, class_name, **attributes):
     upscaler = getattr(module, class_name).__new__(getattr(module, class_name))
     upscaler.scalers = []
     upscaler.device = "cpu"
-    upscaler.enable = True
     upscaler.model_download_path = None
     for key, value in attributes.items():
         setattr(upscaler, key, value)
