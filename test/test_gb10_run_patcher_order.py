@@ -20,7 +20,7 @@ def test_every_patcher_runs_exactly_once_per_pass_and_every_referenced_patcher_e
     # already-patched target, so a separate --check run would re-prove the same bytes.
     assert len(re.findall(r"gb10/patch-[\w-]+\.py", RUN_SH)) == len(on_disk)
     assert not re.search(r'gb10/patch-[\w-]+\.py" --check', RUN_SH)
-    md_guard = function.index('if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then')
+    md_guard = function.index('if sudo test -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111"; then')
     assert md_guard < function.index("patch-multidiffusion-performance.py") < function.index("\n  fi\n", md_guard)
     assert function.index("patch-ultimate-upscale-state-lifecycle.py") < function.index("patch-ultimate-upscale-subcanvas.py")
 
