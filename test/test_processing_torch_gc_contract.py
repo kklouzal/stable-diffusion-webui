@@ -54,3 +54,15 @@ def test_job_end_still_releases_device_cache():
     calls = _torch_gc_calls(ROOT / "modules" / "shared_state.py")
 
     assert ("State.end", []) in calls
+
+
+def test_upscalers_and_face_restoration_leave_device_cache_release_to_the_job():
+    # One release per job (State.begin/State.end): a release per tile pass or per face only stalls the request.
+    for relative in (
+        "modules/upscaler.py",
+        "modules/upscaler_utils.py",
+        "modules/face_restoration_utils.py",
+        "extensions-builtin/SwinIR/scripts/swinir_model.py",
+        "extensions-builtin/ScuNET/scripts/scunet_model.py",
+    ):
+        assert _torch_gc_calls(ROOT / relative) == [], relative

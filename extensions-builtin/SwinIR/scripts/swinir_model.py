@@ -45,7 +45,6 @@ class UpscalerSwinIR(Upscaler):
             scale=model.scale,
             desc="SwinIR",
         )
-        devices.torch_gc()
         return img
 
     def load_model(self, path):

@@ -86,7 +86,6 @@ def restore_with_face_helper(
             # unrestored crop would leave faces unrestored while infotext names this restorer.
             with torch.no_grad():
                 cropped_face_t = restore_face(cropped_face_t)
-            devices.torch_gc()
 
             restored_face = rgb_tensor_to_bgr_image(cropped_face_t, min_max=(-1, 1))
             # Round like the reference GFPGAN/CodeFormer post-processing (basicsr tensor2img); astype truncates.
