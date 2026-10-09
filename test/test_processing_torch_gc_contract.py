@@ -38,16 +38,14 @@ def test_processing_releases_device_cache_only_at_recovery_and_model_offload_poi
     assert sorted(scope for scope, _guards in calls) == [
         "decode_latent_batch",
         "process_images_inner",
-        "process_images_inner",
-        "process_images_inner",
     ]
     guards = [guards for _scope, guards in calls]
     # OOM retry path of the batched VAE decode.
     assert ["except torch.cuda.OutOfMemoryError"] in guards
     # lowvram/medvram offload after decode.
     assert any(g and g[0] == "lowvram.is_enabled(shared.sd_model)" for g in guards)
-    # Face restoration loads its own models.
-    assert sum(1 for g in guards if g and g[0] == "p.restore_faces") == 2
+    # Face restoration runs per image inside the request: the job's single release (State.end) covers it.
+    assert not any("p.restore_faces" in g for g in guards)
 
 
 def test_job_end_still_releases_device_cache():

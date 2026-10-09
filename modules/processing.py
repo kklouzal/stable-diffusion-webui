@@ -1284,10 +1284,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     if save_samples and opts.save_images_before_face_restoration:
                         images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-before-face-restoration")
 
-                    devices.torch_gc()
-
                     x_sample = modules.face_restoration.restore_faces(x_sample)
-                    devices.torch_gc()
 
                 image = Image.fromarray(x_sample)
 
