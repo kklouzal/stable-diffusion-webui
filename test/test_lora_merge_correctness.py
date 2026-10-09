@@ -526,3 +526,34 @@ def test_lora_set_change_touches_only_the_layers_of_changed_networks(bf16_lora, 
     assert torch.equal(untouched.weight, untouched_values[0]) and torch.equal(untouched.bias, untouched_values[1])
     assert torch.equal(merged_a, (base_shared.double() + 0.5 * (a.modules[shared.network_layer_name].up_model.weight.double() @ a.modules[shared.network_layer_name].down_model.weight.double())).to(torch.bfloat16))
     assert torch.equal(shared.weight, base_shared) and torch.equal(only_b.weight, base_b)
+
+
+def test_switching_lora_functional_republishes_the_same_networks(bf16_lora, monkeypatch):
+    """A lora_functional request restores the base weights in its forwards. The next merged request with the same
+    networks was an applied-state hit: nothing re-merged before sampling, and CUDA graphs captured on the merged
+    weights (which replay without running the lazy merge) read the base weights."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(43)
+    layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    _publish_layers(networks, monkeypatch, layer)
+    base = layer.weight.detach().clone()
+    net = _lora(networks, layer, "a", _grid((8, 2), g), _grid((2, 8), g), 2.0, 1.0)
+    notes = []
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: notes.append(networks.shared.opts.lora_functional))
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", False, raising=False)
+    assert networks._publish_applied_state([net])
+    merged = layer.weight.detach().clone()
+    assert not torch.equal(merged, base)
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", True)
+    assert networks._publish_applied_state([net])
+    networks.network_forward(layer, torch.ones(1, 8, dtype=torch.bfloat16), torch.nn.Linear.forward)
+    assert torch.equal(layer.weight, base)
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", False)
+    assert networks._publish_applied_state([net])
+    assert torch.equal(layer.weight, merged)  # re-merged at publication, before any forward
+    assert notes == [False, True, False]
+    assert not networks._publish_applied_state([net])  # an unchanged mode is still a hit

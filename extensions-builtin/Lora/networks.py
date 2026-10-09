@@ -244,6 +244,14 @@ def _execution_identity():
         str(getattr(devices, "dtype_unet", None)),
     )
 
+def _application_mode():
+    """How the published networks reach the forwards: merged into the layer weights, or added per forward
+    (lora_functional, whose forwards restore the base weights in place). Part of the applied state: switching it
+    with the same networks must publish again, so merged weights are re-applied before sampling and CUDA graphs
+    captured in the other mode are dropped (openclaw_cuda_graphs.note_lora_loaded)."""
+    return "functional" if getattr(shared.opts, "lora_functional", False) else "merged"
+
+
 def clone_network_for_use(net):
     """Return an independent per-prompt-use Network wrapper.
 
@@ -286,7 +294,7 @@ def network_applied_state_key(networks_to_apply):
         getattr(net, "dyn_dim", None),
         tuple(sorted(getattr(net, "modules", {}).keys())),
     ) for net in networks_to_apply)
-    return (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+    return (ordered, _execution_identity(), _application_mode(), LORA_APPLIED_IMPLEMENTATION_REVISION)
 
 
 def current_network_state_identity():
@@ -296,7 +304,7 @@ def current_network_state_identity():
 
 
 def _apply_loaded_state_to_model():
-    if getattr(shared.opts, "lora_functional", False):
+    if _application_mode() == "functional":
         return
     model = getattr(shared, "sd_model", None)
     mapping = getattr(model, "network_layer_mapping", {})
@@ -614,7 +622,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     cached_by_key = {getattr(net, "source_key", None): net for net in loaded_networks}
     cached_by_key.update({key: net for key, net in networks_in_memory.items() if key in source_keys})
     ordered = tuple((source_key, float(te).hex(), float(unet).hex(), dyn, tuple(sorted(getattr(cached_by_key.get(source_key), "modules", {}).keys()))) for source_key, te, unet, dyn in zip(source_keys, te_values, unet_values, dyn_values))
-    wanted_key = (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+    wanted_key = (ordered, _execution_identity(), _application_mode(), LORA_APPLIED_IMPLEMENTATION_REVISION)
     with _network_application_lock:
         if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key and _published_bundles_current(emb_db):
             elapsed = (time.perf_counter() - started) * 1000.0

@@ -165,6 +165,20 @@ class CudaGraphInvalidationTests(GraphTestCase):
         self.assertEqual(repeated_again["invalidation_reasons"], {"model_changed": 1})
 
 
+    def test_note_lora_loaded_drops_graphs_when_lora_functional_switches(self):
+        """Functional forwards restore the base weights under graphs captured on merged weights; with an unchanged
+        LoRA set only the mode distinguishes the lifecycle states."""
+        opts = shared_stub.opts
+        with mock.patch.object(opts, "lora_functional", False, create=True):
+            openclaw_cuda_graphs.note_lora_loaded()
+            self.seed_graph_state()
+            self.assertEqual(openclaw_cuda_graphs.note_lora_loaded()["cache_size"], 1)
+            opts.lora_functional = True
+            switched = openclaw_cuda_graphs.note_lora_loaded()
+
+        self.assertEqual(switched["cache_size"], 0)
+        self.assertEqual(switched["invalidation_reasons"], {"lora_changed": 1})
+
     def test_note_model_and_vae_loaded_are_noops_for_same_state(self):
         checkpoint = types.SimpleNamespace(filename="a.safetensors", hash="short", sha256="long")
         model = types.SimpleNamespace(sd_checkpoint_info=checkpoint, used_config="cfg", loaded_vae_file="vae.pt", first_stage_model=object())
