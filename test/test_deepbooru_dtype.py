@@ -7,7 +7,7 @@ from test.helpers import init_shared
 
 shared = init_shared()
 
-from modules import deepbooru, devices
+from modules import deepbooru, devices  # noqa: E402
 
 
 class FakeDeepDanbooru(torch.nn.Module):

@@ -9,8 +9,8 @@ from test.helpers import init_shared
 
 shared = init_shared()
 
-from modules import cache as cache_module, hashes, openclaw_lifecycle_epochs, processing, sd_models, sd_vae
-from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img
+from modules import cache as cache_module, hashes, openclaw_lifecycle_epochs, processing, sd_models, sd_vae  # noqa: E402
+from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img  # noqa: E402
 
 
 def _init_cache_key_processing(monkeypatch, checkpoint_hash="abcd", checkpoint_sha256="sha256", vae_hash="vae-hash"):

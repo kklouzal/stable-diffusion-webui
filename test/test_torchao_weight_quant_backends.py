@@ -8,8 +8,8 @@ from test.helpers import init_shared
 
 shared = init_shared()
 
-from modules import sd_models, torchao_weight_quant
-from modules.torchao_weight_quant import BACKENDS, MXFP8, NVFP4
+from modules import sd_models, torchao_weight_quant  # noqa: E402
+from modules.torchao_weight_quant import BACKENDS, MXFP8, NVFP4  # noqa: E402
 
 
 def _opts(monkeypatch, **values):
