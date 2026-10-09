@@ -84,7 +84,8 @@ def get_packages():
 
 
 def get_dict():
-    config = get_config()
+    config = get_config()  # the settings, or the error text when they cannot be read
+    disabled_extensions = config.get('disabled_extensions', []) if isinstance(config, dict) else []
     res = {
         "Platform": platform.platform(),
         "Python": platform.python_version(),
@@ -100,8 +101,8 @@ def get_dict():
         "Exceptions": errors.get_exceptions(),
         "CPU": get_cpu_info(),
         "RAM": get_ram_info(),
-        "Extensions": get_extensions(enabled=True, fallback_disabled_extensions=config.get('disabled_extensions', [])),
-        "Inactive extensions": get_extensions(enabled=False, fallback_disabled_extensions=config.get('disabled_extensions', [])),
+        "Extensions": get_extensions(enabled=True, fallback_disabled_extensions=disabled_extensions),
+        "Inactive extensions": get_extensions(enabled=False, fallback_disabled_extensions=disabled_extensions),
         "Environment": get_environment(),
         "Config": config,
         "Startup": timer.startup_record,

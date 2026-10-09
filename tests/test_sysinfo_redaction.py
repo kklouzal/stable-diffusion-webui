@@ -72,3 +72,15 @@ def test_dump_sysinfo_hides_credentials_in_argv_and_commandline_args(monkeypatch
     assert dump["Environment"]["COMMANDLINE_ARGS"] == "--listen --api-auth '<hidden>' '--ngrok-options=<hidden>'"
     assert set(dump["Environment"]) <= sysinfo.environment_whitelist
     assert dump["Config"] == {"disabled_extensions": []}
+
+
+def test_dump_sysinfo_reports_an_unreadable_settings_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(shared, "opts", None)
+    monkeypatch.setattr(shared_cmd_options.cmd_opts, "ui_settings_file", str(tmp_path / "missing.json"))
+    monkeypatch.chdir(tmp_path)
+
+    dump = json.loads((tmp_path / launch_utils.dump_sysinfo()).read_text(encoding="utf8"))
+
+    assert "missing.json" in dump["Config"]
+    assert isinstance(dump["Extensions"], list)
+    assert isinstance(dump["Inactive extensions"], list)
