@@ -30,8 +30,9 @@ The design keeps the system reproducible and reviewable:
     `config.json`.
   - The app rewrites `config.json` in place and fsyncs it, because rename cannot replace a single-file bind mount
     (`modules/settings_file.py`). A file it cannot use (truncated, empty, not a JSON object) is reported, copied to
-    `tmp/config.json.corrupt-<UTC time>` and reset to `{}`, so the settings revert to their defaults instead of the
-    container crash-looping. `tmp/` survives restarts of the container but not its replacement.
+    `cache/config-recovery/config.json.corrupt-<UTC time>` (fsynced) and reset to `{}`, so the settings revert to
+    their defaults instead of the container crash-looping. `cache/` is the host mount `${HOST_ROOT}/Caches/app`, so
+    the copy survives the container's replacement and a rollback.
   - It then drops to user `a1111` (UID/GID 2323) and runs the launcher (`docker/launch-a1111.sh`).
   - The launcher's default flags and the override rules are in [launch/README.md](launch/README.md#launch-flags).
 - **User data** (models, outputs, config, embeddings, extensions) stays on the host. It reaches the container through

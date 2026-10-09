@@ -10,7 +10,7 @@ import json
 import os
 
 from modules import errors
-from modules.paths_internal import script_path
+from modules.paths_internal import cache_dir
 
 
 def _write_durably(filename, data: bytes, mode):
@@ -18,6 +18,14 @@ def _write_durably(filename, data: bytes, mode):
         file.write(data)
         file.flush()
         os.fsync(file.fileno())
+
+
+def _fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write(filename, text: str):
@@ -28,9 +36,11 @@ def write(filename, text: str):
 def read(filename) -> dict:
     """The settings stored in `filename`, or {} when the file does not exist.
 
-    A file that is not a UTF-8 JSON object, including an empty file, is copied to tmp/<name>.corrupt-<UTC time> and
-    then rewritten in place as {}, and the error is reported: the settings revert to their defaults. The copy is
-    written before the file is reset, and any OS error (an unreadable file, a full disk) propagates instead.
+    A file that is not a UTF-8 JSON object, including an empty file, is copied to
+    <cache_dir>/config-recovery/<name>.corrupt-<UTC time> (the app cache, a host mount in the gb10 deployment, so the
+    copy survives the container's replacement or rollback) and then rewritten in place as {}, and the error is
+    reported: the settings revert to their defaults. The copy and its directory entry are fsynced before the file is
+    reset, and any OS error (an unreadable file, a full disk) propagates instead, leaving the file untouched.
     """
     try:
         with open(filename, "rb") as file:
@@ -43,11 +53,13 @@ def read(filename) -> dict:
         if not isinstance(settings, dict):
             raise ValueError(f"expected a JSON object, got {type(settings).__name__}")
     except ValueError:
-        tmp_dir = os.path.join(script_path, "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
+        recovery_dir = os.path.join(cache_dir, "config-recovery")
+        os.makedirs(recovery_dir, exist_ok=True)
         stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        backup = os.path.join(tmp_dir, f"{os.path.basename(filename)}.corrupt-{stamp}")
+        backup = os.path.join(recovery_dir, f"{os.path.basename(filename)}.corrupt-{stamp}")
         _write_durably(backup, raw, "xb")
+        _fsync_directory(recovery_dir)
+        _fsync_directory(cache_dir)  # the entry of a just-created config-recovery/
         write(filename, "{}")
         errors.report(f'\nCould not load settings\nThe config file "{filename}" is likely corrupted\nIts content was copied to "{backup}" and the file was reset to {{}}\nReverting config to default\n\n', exc_info=True)
         return {}

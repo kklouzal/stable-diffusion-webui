@@ -7,9 +7,8 @@ from contextlib import contextmanager
 
 import diskcache
 
-from modules.paths import data_path
+from modules.paths_internal import cache_dir
 
-cache_dir = os.environ.get('SD_WEBUI_CACHE_DIR', os.path.join(data_path, "cache"))
 caches = {}
 cache_lock = threading.Lock()
 _entry_locks = {}
