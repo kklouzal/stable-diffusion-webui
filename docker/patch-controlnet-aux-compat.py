@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import py_compile
 import subprocess
 import sys
 
@@ -27,6 +28,8 @@ def main() -> int:
             patched = patched.replace(old, new)
         if patched != text:
             path.write_text(patched, encoding='utf-8')
+            # A stale timestamp pyc would be recompiled in memory on every start (the runtime user cannot rewrite it).
+            py_compile.compile(str(path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
             changed.append(str(path.relative_to(root)))
 
     init_path = root / '__init__.py'
@@ -35,6 +38,7 @@ def main() -> int:
     new = '''try:\n    import mediapipe as _gb10_mediapipe\n    if not hasattr(_gb10_mediapipe, "solutions"):\n        raise ImportError("mediapipe solutions API unavailable")\n    from .mediapipe_face import MediapipeFaceDetector\nexcept Exception as _gb10_mediapipe_exc:\n    class MediapipeFaceDetector:\n        unavailable_reason = str(_gb10_mediapipe_exc)\n\n        @classmethod\n        def from_pretrained(cls, *args, **kwargs):\n            raise RuntimeError("MediapipeFaceDetector unavailable: " + cls.unavailable_reason)\n\n'''
     if old in init_text and 'unavailable_reason = str(_gb10_mediapipe_exc)' not in init_text:
         init_path.write_text(init_text.replace(old, new), encoding='utf-8')
+        py_compile.compile(str(init_path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
         changed.append('__init__.py:mediapipe_face_guard')
 
     print(f'controlnet_aux compatibility patch: files={len(changed)}')

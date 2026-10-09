@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import py_compile
 import subprocess
 import sys
 
@@ -19,6 +20,8 @@ def main() -> int:
         patched = original.replace("@torch.jit.script\n", "")
         if patched != original:
             path.write_text(patched, encoding="utf-8")
+            # A stale timestamp pyc would be recompiled in memory on every start (the runtime user cannot rewrite it).
+            py_compile.compile(str(path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
             changed.append(str(path.relative_to(root)))
 
     print(f"kornia torch.jit compatibility patch: files={len(changed)}")
