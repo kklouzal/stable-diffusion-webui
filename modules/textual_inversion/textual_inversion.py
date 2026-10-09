@@ -93,21 +93,22 @@ class Embedding:
 class DirWithTextualInversionEmbeddings:
     def __init__(self, path):
         self.path = path
-        self.mtime = None
+        self.signature = None
+        """tree_signature() of the loaded contents; None before the first load or while the directory is missing"""
 
-    def has_changed(self):
+    def tree_signature(self):
+        """Revisions (cache.file_cache_key) of the directory and of every folder and file below it, in the sorted walk
+        order load_from_dir uses; None when the directory does not exist. Adding, removing, renaming or rewriting an
+        embedding in any subfolder changes it; the top directory's mtime only changed for its direct entries."""
         if not os.path.isdir(self.path):
-            return False
+            return None
 
-        mt = os.path.getmtime(self.path)
-        if self.mtime is None or mt > self.mtime:
-            return True
-
-    def update(self):
-        if not os.path.isdir(self.path):
-            return
-
-        self.mtime = os.path.getmtime(self.path)
+        entries = []
+        for root, dirs, fns in os.walk(self.path, followlinks=True):
+            dirs.sort()
+            entries.append(cache.file_cache_key(root))
+            entries.extend(cache.file_cache_key(os.path.join(root, fn)) for fn in sorted(fns))
+        return tuple(entries)
 
 
 class EmbeddingDatabase:
@@ -207,6 +208,12 @@ class EmbeddingDatabase:
             embedding = create_embedding_from_data(data, name, filename=filename, filepath=path)
             embedding.file_revision = revision
 
+            duplicate = self.word_embeddings.get(name) or self.skipped_embeddings.get(name)
+            if duplicate is not None:
+                # Files load in a sorted walk, so the same file wins on every load.
+                errors.report(f"Textual inversion embedding {path} is not loaded: {duplicate.filename} has the same name '{name}'")
+                return
+
             if self.expected_shape == -1 or self.expected_shape == embedding.shape:
                 self.register_embedding(embedding, shared.sd_model)
             else:
@@ -218,8 +225,9 @@ class EmbeddingDatabase:
         if not os.path.isdir(embdir.path):
             return
 
-        for root, _, fns in os.walk(embdir.path, followlinks=True):
-            for fn in fns:
+        for root, dirs, fns in os.walk(embdir.path, followlinks=True):
+            dirs.sort()
+            for fn in sorted(fns):
                 try:
                     fullfn = os.path.join(root, fn)
 
@@ -250,7 +258,9 @@ class EmbeddingDatabase:
         )
 
     def load_textual_inversion_embeddings(self, force_reload=False):
-        if not force_reload and not any(embdir.has_changed() for embdir in self.embedding_dirs.values()):
+        # Taken before any file is read, so a change made during the load shows on the next call.
+        signatures = {embdir: embdir.tree_signature() for embdir in self.embedding_dirs.values()}
+        if not force_reload and all(embdir.signature == signature for embdir, signature in signatures.items()):
             openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped")
             return False
 
@@ -274,8 +284,8 @@ class EmbeddingDatabase:
                 with self._publication_lock:
                     # the loaded model can change what fits even when the folder contents produce the same maps
                     self.expected_shape = staged.expected_shape
-                for embdir in self.embedding_dirs.values():
-                    embdir.update()
+                for embdir, signature in signatures.items():
+                    embdir.signature = signature
                 openclaw_cache_epochs.observe("E07", "bypass", reason="capture_skipped", semantic_key=new_signature)
                 return False
 
@@ -284,8 +294,8 @@ class EmbeddingDatabase:
                     staged.ids_lookup, staged.word_embeddings, staged.skipped_embeddings
                 )
                 self.expected_shape = staged.expected_shape
-                for embdir in self.embedding_dirs.values():
-                    embdir.update()
+                for embdir, signature in signatures.items():
+                    embdir.signature = signature
                 openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="textual_inversion_reloaded")
                 openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="textual_inversion_reloaded")
 
