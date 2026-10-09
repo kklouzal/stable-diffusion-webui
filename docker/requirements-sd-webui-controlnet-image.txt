@@ -6,3 +6,10 @@
 # repo-owned controlnet_aux patch makes only its MediaPipe face detector
 # unavailable while preserving the rest of controlnet_aux.
 controlnet_aux>=0.0.9
+# Depth Anything v1/v2 preprocessors (annotator/depth_anything*.py): the wheels
+# the extension's installer used, pinned by URL and sha256 (pip verifies the
+# fragment). Neither is on PyPI under this version; PyPI's unrelated
+# depth-anything-v2 0.1.0 must never be picked. docker/patch-headless-opencv-wheels.py
+# swaps their opencv-python requirement for opencv-python-headless.
+depth_anything @ https://github.com/huchenlei/Depth-Anything/releases/download/v1.0.0/depth_anything-2024.1.22.0-py2.py3-none-any.whl#sha256=26c1d38b8c3c306b4a2197d725a4b989ff65f7ebcf4fb5a96a1b6db7fbd56780
+depth_anything_v2 @ https://github.com/MackinationsAi/UDAV2-ControlNet/releases/download/v1.0.0/depth_anything_v2-2024.7.1.0-py2.py3-none-any.whl#sha256=6848128867d1f7c7519d88df0f88bfab89100dc5225259c4d7cb90325c308c9f

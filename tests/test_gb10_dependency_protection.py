@@ -5,6 +5,8 @@ import subprocess
 import sys
 import zipfile
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -304,3 +306,49 @@ def test_stack_checker_snapshot_is_its_own_output_path(tmp_path: Path):
     assert result.returncode == 2 and "--snapshot writes a baseline" in result.stderr
     assert not (tmp_path / "a.json").exists() and not (tmp_path / "b.json").exists()
 
+
+def make_wheel(directory: Path, name: str, version: str, requires: list[str]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / f"{name}-{version}-py2.py3-none-any.whl"
+    dist_info = f"{name}-{version}.dist-info"
+    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n" + "".join(f"Requires-Dist: {req}\n" for req in requires)
+    metadata += "Description-Content-Type: text/markdown\n\nbody\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(f"{name}/dpt.py", "x = 1\n")
+        archive.writestr(f"{dist_info}/METADATA", metadata)
+        archive.writestr(f"{dist_info}/WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        archive.writestr(f"{dist_info}/RECORD", "")
+    return wheel
+
+
+def test_headless_opencv_wheel_override_rewrites_only_the_opencv_requirement(tmp_path: Path):
+    patcher = load_script_module("patch_headless_opencv_wheels", "docker/patch-headless-opencv-wheels.py")
+    source = make_wheel(tmp_path / "src", "depth_anything_v2", "2024.7.1.0", ["opencv-python", "torch", "torchvision"])
+    target = tmp_path / patcher.patched_wheel_name(source)
+    assert target.name == "depth_anything_v2-2024.7.1.0-1gb10opencvheadless-py2.py3-none-any.whl"
+
+    patcher.patch_wheel(source, target)
+
+    with zipfile.ZipFile(target) as archive:
+        metadata = archive.read("depth_anything_v2-2024.7.1.0.dist-info/METADATA").decode()
+        record = archive.read("depth_anything_v2-2024.7.1.0.dist-info/RECORD").decode()
+        module = archive.read("depth_anything_v2/dpt.py")
+    assert "Requires-Dist: opencv-python-headless\nRequires-Dist: torch\nRequires-Dist: torchvision\n" in metadata
+    assert "Requires-Dist: opencv-python\n" not in metadata
+    assert metadata.endswith("Description-Content-Type: text/markdown\n\nbody\n")
+    assert f"depth_anything_v2/dpt.py,{patcher.record_hash(module)},{len(module)}" in record
+
+    # A wheel without exactly one opencv-python requirement fails the build instead of passing unpatched.
+    plain = make_wheel(tmp_path / "plain", "facexlib", "0.3.0", ["numpy"])
+    with pytest.raises(SystemExit, match="matches: 0"):
+        patcher.patch_wheel(plain, tmp_path / "plain-out.whl")
+
+
+def test_headless_opencv_override_matches_requirement_names_exactly():
+    patcher = load_script_module("patch_headless_opencv_wheels_names", "docker/patch-headless-opencv-wheels.py")
+
+    assert patcher.requirement_name("depth_anything @ https://x/depth_anything-2024.1.22.0-py2.py3-none-any.whl#sha256=00") == "depth-anything"
+    assert patcher.requirement_name("depth_anything_v2 @ https://x/y.whl") == "depth-anything-v2"
+    assert patcher.requirement_name("facexlib>=0.3") == "facexlib"
+    assert patcher.requirement_name("# depth_anything") is None
+    assert set(patcher.PACKAGES) == {"facexlib", "depth-anything", "depth-anything-v2"}

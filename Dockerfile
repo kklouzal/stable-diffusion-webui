@@ -177,7 +177,7 @@ COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-s
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
 COPY docker/prepare-resolver-input.py /opt/build/prepare-resolver-input.py
 COPY docker/create-protected-package-stubs.py /opt/build/create-protected-package-stubs.py
-COPY docker/patch-facexlib-wheel.py /opt/build/patch-facexlib-wheel.py
+COPY docker/patch-headless-opencv-wheels.py /opt/build/patch-headless-opencv-wheels.py
 COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 
 # Builder-stage wheel doctrine:
@@ -197,7 +197,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     rustc --version \
     && cargo --version \
     && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-names-file /opt/build/base-python-protected-names.txt \
-    && python /opt/build/patch-facexlib-wheel.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
+    && python /opt/build/patch-headless-opencv-wheels.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
     && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt --released-floors /opt/build/base-python-released-floors.txt --dependents-out /opt/build/protected-resolver-dependents.txt \
     && python -m venv /opt/build/resolver-venv \
     && python -m pip --python /opt/build/resolver-venv install --force-reinstall -c /opt/build/base-python-protected-constraints.txt pip \
@@ -208,6 +208,9 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && python /opt/build/assert-resolved-package.py --package huggingface-hub --min-version 1.13.0 \
     && python /opt/build/assert-resolved-package.py --package mediapipe --absent \
     && python /opt/build/assert-resolved-package.py --package controlnet_aux --min-version 0.0.9 \
+    && python /opt/build/assert-resolved-package.py --package depth_anything --min-version 2024.1.22.0 \
+    && python /opt/build/assert-resolved-package.py --package depth_anything_v2 --min-version 2024.7.1.0 \
+    && python /opt/build/assert-resolved-package.py --package opencv-python --absent \
     && python /opt/build/assert-resolved-package.py --package gradio --absent \
     && python /opt/build/assert-resolved-package.py --package gradio-client --absent \
     && python /opt/build/render-resolved-requirements.py
@@ -225,6 +228,7 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && test "$(command -v g++)" = /usr/lib/ccache/g++ \
     && printf '[ccache] compiler wrappers: CC=%s CXX=%s CUDAHOSTCXX=%s CMAKE_ARGS=%s\n' "$CC" "$CXX" "$CUDAHOSTCXX" "$CMAKE_ARGS" \
     && python -m pip wheel --no-deps --prefer-binary --find-links=/opt/build/resolve-wheel-overrides --wheel-dir /opt/wheels -r /opt/build/requirements-resolved.txt \
+    && for wheel in /opt/build/resolve-wheel-overrides/*.whl; do cmp "${wheel}" "/opt/wheels/${wheel##*/}"; done \
     && test -n "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --no-build-isolation --wheel-dir /opt/wheels "${CLIP_PACKAGE_URL}" \
     && python -m pip wheel --no-deps --wheel-dir /opt/wheels "dctorch==${DCTORCH_VERSION}" \
