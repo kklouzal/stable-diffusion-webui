@@ -31,7 +31,7 @@ def fake_card(monkeypatch, capability, name):
     return probes
 
 
-@pytest.mark.filterwarnings("ignore:User provided device_type of 'cuda'")
+@pytest.mark.filterwarnings("ignore:CUDA is not available")  # torch.autocast("cuda") on the CPU test container
 @pytest.mark.parametrize("capability,name,manual", [
     ((7, 5), "NVIDIA GeForce GTX 1660 SUPER", True),
     ((7, 5), "NVIDIA GeForce RTX 2080", False),
