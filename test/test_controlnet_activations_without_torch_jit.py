@@ -1,11 +1,11 @@
-import importlib.util
 import warnings
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
-ANNOTATOR = Path(__file__).resolve().parents[1] / "extensions" / "sd-webui-controlnet" / "annotator"
+from test.helpers import ROOT, load_source
+
+ANNOTATOR = ROOT / "extensions" / "sd-webui-controlnet" / "annotator"
 GEFFNET_ACTIVATIONS = ANNOTATOR / "normalbae" / "models" / "submodules" / "efficientnet_repo" / "geffnet" / "activations"
 
 
@@ -13,9 +13,7 @@ def _load(path):
     # torch 2.14 deprecates torch.jit.script and warns when the decorator runs, i.e. while the module executes.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        spec = importlib.util.spec_from_file_location(f"_controlnet_{path.stem}", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = load_source(f"_controlnet_{path.stem}", path)
     assert not [w for w in caught if "torch.jit" in str(w.message)], path
     return module
 

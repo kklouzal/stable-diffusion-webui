@@ -5,14 +5,14 @@ Precedence: the control_net_preprocessor_models_path option, then the legacy con
 """
 from __future__ import annotations
 
-import importlib.util
 import io
 import os
 import shutil
-import sys
 import types
 from contextlib import redirect_stdout
 from pathlib import Path
+
+from test.helpers import load_source, module
 
 ANNOTATOR_PATH = Path(__file__).resolve().parents[1] / "extensions" / "sd-webui-controlnet" / "annotator" / "annotator_path.py"
 
@@ -24,31 +24,17 @@ def resolve_annotator_models_path(tmp_path, opts_data, cmd_path=None, data_path=
     module_path = annotator_dir / "annotator_path.py"
     shutil.copy2(ANNOTATOR_PATH, module_path)
 
-    shared = types.SimpleNamespace(
+    shared = module(
+        "modules.shared",
         opts=types.SimpleNamespace(data=dict(opts_data)),
         cmd_opts=types.SimpleNamespace(controlnet_annotator_models_path=cmd_path),
         data_path=str(data_path or tmp_path / "data"),
     )
-    # The stubs live only while the module executes: a SimpleNamespace left as sys.modules["modules"] broke every
-    # later test file that imports the real webui package (or stubs only some of its submodules).
-    saved = {name: sys.modules.get(name) for name in ("modules", "modules.shared", "annotator_path")}
-    sys.modules.pop("annotator_path", None)
-    sys.modules["modules"] = types.SimpleNamespace(shared=shared)
-    sys.modules["modules.shared"] = shared
-    try:
-        spec = importlib.util.spec_from_file_location("annotator_path", module_path)
-        module = importlib.util.module_from_spec(spec)
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            spec.loader.exec_module(module)
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        annotator_path = load_source("annotator_path", module_path, {"modules": module("modules", shared=shared), "modules.shared": shared})
 
-    return module.models_path, stdout.getvalue(), annotator_dir
+    return annotator_path.models_path, stdout.getvalue(), annotator_dir
 
 
 def test_preprocessor_models_path_takes_precedence_over_legacy_modules_path(tmp_path):

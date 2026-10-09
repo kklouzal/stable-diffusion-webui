@@ -1,8 +1,10 @@
-import sys
+import types
 from pathlib import Path
 
 import pytest
 import torch
+
+from test.helpers import load_source, module
 
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "extensions" / "sd-webui-controlnet" / "scripts" / "hook.py"
@@ -380,148 +382,68 @@ class _FakeUNet:
 
 
 def _load_hook_module(source, tmp_path):
-    import importlib.util
-
     path = tmp_path / "hook_under_test.py"
     path.write_text(source, encoding="utf-8")
-    # The stubs exist only for this import (the loaded module keeps references to them); afterwards every
-    # stubbed package goes back to what it was so later test files see the real sgm/ldm/modules/scripts.
-    stubbed = {"scripts", "modules", "ldm", "sgm"}
-    saved = {key: value for key, value in sys.modules.items() if key.split(".")[0] in stubbed}
-    try:
-        _install_hook_import_stubs()
-        spec = importlib.util.spec_from_file_location("controlnet_hook_under_test", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module.stubs = {key: value for key, value in sys.modules.items() if key.split(".")[0] in stubbed}
-    finally:
-        for key in [key for key in sys.modules if key.split(".")[0] in stubbed]:
-            del sys.modules[key]
-        sys.modules.update(saved)
-    return module
+    # The stubs are installed only while the hook module executes (it keeps references to them).
+    stubs = _hook_import_stubs()
+    hook = load_source("controlnet_hook_under_test", path, stubs)
+    hook.stubs = stubs
+    return hook
 
 
-def _install_hook_import_stubs():
-    import sys
-    import types
-
-    import torch
-
-    scripts_pkg = types.ModuleType("scripts")
-    scripts_pkg.__path__ = []
-    sys.modules["scripts"] = scripts_pkg
-
-    logging_mod = types.ModuleType("scripts.logging")
-    logging_mod.logger = types.SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
-    sys.modules["scripts.logging"] = logging_mod
-
-    enums_mod = types.ModuleType("scripts.enums")
-    enums_mod.ControlModelType = types.SimpleNamespace(AttentionInjection="AttentionInjection")
-    enums_mod.AutoMachine = types.SimpleNamespace(Read="Read", Write="Write")
-    enums_mod.HiResFixOption = types.SimpleNamespace(BOTH="BOTH")
-    enums_mod.ControlNetUnionControlType = types.SimpleNamespace()
-    sys.modules["scripts.enums"] = enums_mod
-
-    ipadapter_pkg = types.ModuleType("scripts.ipadapter")
-    ipadapter_model = types.ModuleType("scripts.ipadapter.ipadapter_model")
-    ipadapter_model.ImageEmbed = object
-    plugable_ipadapter = types.ModuleType("scripts.ipadapter.plugable_ipadapter")
-    plugable_ipadapter.clear_all_ip_adapter = lambda: None
-    sys.modules["scripts.ipadapter"] = ipadapter_pkg
-    sys.modules["scripts.ipadapter.ipadapter_model"] = ipadapter_model
-    sys.modules["scripts.ipadapter.plugable_ipadapter"] = plugable_ipadapter
-
-    lllite_mod = types.ModuleType("scripts.controlnet_lllite")
-    lllite_mod.clear_all_lllite = lambda: None
-    sys.modules["scripts.controlnet_lllite"] = lllite_mod
-
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    sys.modules["modules"] = modules_pkg
-
-    import importlib.util
-
-    row_memo_spec = importlib.util.spec_from_file_location("modules.sd_unet_row_memo", ROOT / "modules" / "sd_unet_row_memo.py")
-    row_memo_mod = importlib.util.module_from_spec(row_memo_spec)
-    row_memo_spec.loader.exec_module(row_memo_mod)
-    modules_pkg.sd_unet_row_memo = row_memo_mod
-    sys.modules["modules.sd_unet_row_memo"] = row_memo_mod
-
-    devices_mod = types.ModuleType("modules.devices")
-    devices_mod.dtype_vae = torch.float32
-    devices_mod.dtype_unet = torch.float32
-    devices_mod.device = "cpu"
-    devices_mod.autocast = lambda: types.SimpleNamespace(__enter__=lambda self: None, __exit__=lambda self, *exc: False)
-    devices_mod.get_device_for = lambda _name: "cpu"
-    devices_mod.cond_cast_unet = lambda x: x
-    sys.modules["modules.devices"] = devices_mod
-
-    # The core's torch with a resizing cat; equal to torch for these tests' aligned shapes.
-    hijack_unet_mod = types.ModuleType("modules.sd_hijack_unet")
-    hijack_unet_mod.th = torch
-    sys.modules["modules.sd_hijack_unet"] = hijack_unet_mod
-
-    lowvram_mod = types.ModuleType("modules.lowvram")
-    lowvram_mod.send_everything_to_cpu = lambda: None
-    sys.modules["modules.lowvram"] = lowvram_mod
-
-    shared_mod = types.ModuleType("modules.shared")
-    shared_mod.cmd_opts = types.SimpleNamespace(lowvram=False, medvram=False, medvram_sdxl=False)
-    sys.modules["modules.shared"] = shared_mod
-
+def _hook_import_stubs():
+    """Stand-ins for what hook.py imports from ControlNet's scripts package, the webui and ldm/sgm, with the real
+    modules.sd_unet_row_memo and modules.prompt_parser (the conditioning containers; prompt_parser only needs lark)."""
     callbacks = []
-    scripts_mod = types.ModuleType("modules.scripts")
-    scripts_mod.script_callbacks = types.SimpleNamespace(
-        callbacks=callbacks,
-        on_cfg_denoiser=lambda fn: callbacks.append(fn),
-        remove_callbacks_for_function=lambda fn: callbacks.remove(fn) if fn in callbacks else None,
-    )
-    sys.modules["modules.scripts"] = scripts_mod
-
-    # The real conditioning containers (prompt_parser only needs lark).
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("modules.prompt_parser", ROOT / "modules" / "prompt_parser.py")
-    prompt_parser_mod = importlib.util.module_from_spec(spec)
-    sys.modules["modules.prompt_parser"] = prompt_parser_mod
-    spec.loader.exec_module(prompt_parser_mod)
-
-    ldm_pkg = types.ModuleType("ldm")
-    ldm_pkg.__path__ = []
-    ldm_modules_pkg = types.ModuleType("ldm.modules")
-    ldm_modules_pkg.__path__ = []
-    ldm_diff_pkg = types.ModuleType("ldm.modules.diffusionmodules")
-    ldm_diff_pkg.__path__ = []
-    upscaling_mod = types.ModuleType("ldm.modules.diffusionmodules.upscaling")
-    upscaling_mod.AbstractLowScaleModel = type("AbstractLowScaleModel", (torch.nn.Module,), {
-        "__init__": lambda self, noise_schedule_config=None: torch.nn.Module.__init__(self)})
-    openaimodel_mod = types.ModuleType("ldm.modules.diffusionmodules.openaimodel")
-    openaimodel_mod.UNetModel = type("UNetModel", (), {})
-    attention_mod = types.ModuleType("ldm.modules.attention")
-    attention_mod.BasicTransformerBlock = type("BasicTransformerBlock", (), {})
-    ldm_models_pkg = types.ModuleType("ldm.models")
-    ldm_models_pkg.__path__ = []
-    ldm_models_diff_pkg = types.ModuleType("ldm.models.diffusion")
-    ldm_models_diff_pkg.__path__ = []
-    ddpm_mod = types.ModuleType("ldm.models.diffusion.ddpm")
-    ddpm_mod.extract_into_tensor = lambda *args, **kwargs: None
-    sys.modules.update({
-        "ldm": ldm_pkg,
-        "ldm.modules": ldm_modules_pkg,
-        "ldm.modules.diffusionmodules": ldm_diff_pkg,
-        "ldm.modules.diffusionmodules.upscaling": upscaling_mod,
-        "ldm.modules.diffusionmodules.openaimodel": openaimodel_mod,
-        "ldm.modules.attention": attention_mod,
-        "ldm.models": ldm_models_pkg,
-        "ldm.models.diffusion": ldm_models_diff_pkg,
-        "ldm.models.diffusion.ddpm": ddpm_mod,
-    })
-
-    sgm_pkg = types.ModuleType("sgm")
-    sgm_pkg.__path__ = []
-    sgm_modules_pkg = types.ModuleType("sgm.modules")
-    sgm_modules_pkg.__path__ = []
-    sgm_attention_mod = types.ModuleType("sgm.modules.attention")
-    sgm_attention_mod.BasicTransformerBlock = attention_mod.BasicTransformerBlock
-    sys.modules["sgm"] = sgm_pkg
-    sys.modules["sgm.modules"] = sgm_modules_pkg
-    sys.modules["sgm.modules.attention"] = sgm_attention_mod
+    row_memo = load_source("modules.sd_unet_row_memo", "modules/sd_unet_row_memo.py")
+    basic_transformer_block = type("BasicTransformerBlock", (), {})
+    return {
+        "scripts": module("scripts", package=True),
+        "scripts.logging": module("scripts.logging", logger=types.SimpleNamespace(
+            debug=lambda *a, **k: None, info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)),
+        "scripts.enums": module(
+            "scripts.enums",
+            ControlModelType=types.SimpleNamespace(AttentionInjection="AttentionInjection"),
+            AutoMachine=types.SimpleNamespace(Read="Read", Write="Write"),
+            HiResFixOption=types.SimpleNamespace(BOTH="BOTH"),
+            ControlNetUnionControlType=types.SimpleNamespace(),
+        ),
+        "scripts.ipadapter": module("scripts.ipadapter"),
+        "scripts.ipadapter.ipadapter_model": module("scripts.ipadapter.ipadapter_model", ImageEmbed=object),
+        "scripts.ipadapter.plugable_ipadapter": module("scripts.ipadapter.plugable_ipadapter", clear_all_ip_adapter=lambda: None),
+        "scripts.controlnet_lllite": module("scripts.controlnet_lllite", clear_all_lllite=lambda: None),
+        "modules": module("modules", package=True, sd_unet_row_memo=row_memo),
+        "modules.sd_unet_row_memo": row_memo,
+        "modules.devices": module(
+            "modules.devices",
+            dtype_vae=torch.float32,
+            dtype_unet=torch.float32,
+            device="cpu",
+            autocast=lambda: types.SimpleNamespace(__enter__=lambda self: None, __exit__=lambda self, *exc: False),
+            get_device_for=lambda _name: "cpu",
+            cond_cast_unet=lambda x: x,
+        ),
+        # The core's torch with a resizing cat; equal to torch for these tests' aligned shapes.
+        "modules.sd_hijack_unet": module("modules.sd_hijack_unet", th=torch),
+        "modules.lowvram": module("modules.lowvram", send_everything_to_cpu=lambda: None),
+        "modules.shared": module("modules.shared", cmd_opts=types.SimpleNamespace(lowvram=False, medvram=False, medvram_sdxl=False)),
+        "modules.scripts": module("modules.scripts", script_callbacks=types.SimpleNamespace(
+            callbacks=callbacks,
+            on_cfg_denoiser=lambda fn: callbacks.append(fn),
+            remove_callbacks_for_function=lambda fn: callbacks.remove(fn) if fn in callbacks else None,
+        )),
+        "modules.prompt_parser": load_source("modules.prompt_parser", "modules/prompt_parser.py"),
+        "ldm": module("ldm", package=True),
+        "ldm.modules": module("ldm.modules", package=True),
+        "ldm.modules.diffusionmodules": module("ldm.modules.diffusionmodules", package=True),
+        "ldm.modules.diffusionmodules.upscaling": module("ldm.modules.diffusionmodules.upscaling", AbstractLowScaleModel=type(
+            "AbstractLowScaleModel", (torch.nn.Module,), {"__init__": lambda self, noise_schedule_config=None: torch.nn.Module.__init__(self)})),
+        "ldm.modules.diffusionmodules.openaimodel": module("ldm.modules.diffusionmodules.openaimodel", UNetModel=type("UNetModel", (), {})),
+        "ldm.modules.attention": module("ldm.modules.attention", BasicTransformerBlock=basic_transformer_block),
+        "ldm.models": module("ldm.models", package=True),
+        "ldm.models.diffusion": module("ldm.models.diffusion", package=True),
+        "ldm.models.diffusion.ddpm": module("ldm.models.diffusion.ddpm", extract_into_tensor=lambda *args, **kwargs: None),
+        "sgm": module("sgm", package=True),
+        "sgm.modules": module("sgm.modules", package=True),
+        "sgm.modules.attention": module("sgm.modules.attention", BasicTransformerBlock=basic_transformer_block),
+    }

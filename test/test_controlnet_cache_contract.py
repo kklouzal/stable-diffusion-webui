@@ -1,18 +1,15 @@
-import importlib.util
 import os
-import sys
 import threading
 import time
 from pathlib import Path
 
 import numpy as np
 
+from test.helpers import load_source
+
 CONTROLNET = Path(__file__).parents[1] / "extensions/sd-webui-controlnet"
 MODULE_PATH = CONTROLNET / "internal_controlnet/cache_contract.py"
-spec = importlib.util.spec_from_file_location("controlnet_cache_contract", MODULE_PATH)
-cache_contract = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = cache_contract
-spec.loader.exec_module(cache_contract)
+cache_contract = load_source("controlnet_cache_contract", MODULE_PATH)
 AtomicLRU = cache_contract.AtomicLRU
 callable_identity = cache_contract.callable_identity
 freeze = cache_contract.freeze
@@ -125,13 +122,7 @@ def test_callable_and_runtime_identity_change_with_implementation(tmp_path):
     first.write_text("def f(): return 1\n")
     second.write_text("def f(): return 2\n")
 
-    def load(path, name):
-        spec = importlib.util.spec_from_file_location(name, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.f
-
-    assert callable_identity(load(first, "first")) != callable_identity(load(second, "second"))
+    assert callable_identity(load_source("first", first).f) != callable_identity(load_source("second", second).f)
     assert len(runtime_identity()) == 5
 
 
