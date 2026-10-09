@@ -33,16 +33,20 @@ samplers_data_k_diffusion = [
     if callable(funcname) or hasattr(k_diffusion.sampling, funcname)
 ]
 
+# Keyed by the sampler function's __name__; restart_sampler is ours (sd_samplers_extra), the rest are k-diffusion's.
 sampler_extra_params = {
     'sample_euler': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
+    'sample_euler_ancestral': ['s_noise'],
     'sample_heun': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
     'sample_dpm_2': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
     'sample_dpm_fast': ['s_noise'],
+    'sample_dpm_adaptive': ['s_noise'],
     'sample_dpm_2_ancestral': ['s_noise'],
     'sample_dpmpp_2s_ancestral': ['s_noise'],
     'sample_dpmpp_sde': ['s_noise'],
     'sample_dpmpp_2m_sde': ['s_noise'],
     'sample_dpmpp_3m_sde': ['s_noise'],
+    'restart_sampler': ['s_noise'],
 }
 
 k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
@@ -112,7 +116,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
     def __init__(self, funcname, sd_model, options=None):
         super().__init__(funcname)
 
-        self.extra_params = sampler_extra_params.get(funcname, [])
+        self.extra_params = sampler_extra_params.get(funcname if isinstance(funcname, str) else funcname.__name__, [])
 
         self.options = options or {}
         self.func = funcname if callable(funcname) else getattr(k_diffusion.sampling, self.funcname)

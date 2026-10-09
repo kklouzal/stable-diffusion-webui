@@ -256,6 +256,33 @@ class TorchHijack:
         return self.rng.next()
 
 
+sigma_params_defaults = {'s_churn': 0.0, 's_tmin': 0.0, 's_tmax': float('inf'), 's_noise': 1.0}
+"""k-diffusion's defaults for its stochasticity parameters: a sampler function is called with these when not given."""
+
+sigma_params_infotext = {'s_churn': 'Sigma churn', 's_tmin': 'Sigma tmin', 's_tmax': 'Sigma tmax', 's_noise': 'Sigma noise'}
+
+
+def sigma_params_kwargs(p, param_names):
+    """Keyword arguments for the stochasticity parameters (s_churn, s_tmin, s_tmax, s_noise) a sampler function takes.
+
+    The values are p's: the request's, else the settings' (StableDiffusionProcessing.fill_fields_from_opts; s_tmax 0 is
+    infinity). A value is passed, and recorded in infotext, only where it differs from k-diffusion's default, so the
+    default call stays exactly the sampler function's own."""
+    kwargs = {}
+    for name in param_names:
+        value = getattr(p, name, None)
+        if value is None:
+            value = getattr(opts, name)
+        if name == 's_tmax':
+            value = value or float('inf')
+
+        if value != sigma_params_defaults[name]:
+            kwargs[name] = value
+            p.extra_generation_params[sigma_params_infotext[name]] = value
+
+    return kwargs
+
+
 class Sampler:
     def __init__(self, funcname):
         self.funcname = funcname
@@ -266,10 +293,6 @@ class Sampler:
         self.config: SamplerData = None  # set by the function calling the constructor
         self.last_latent = None
         self.s_min_uncond = None
-        self.s_churn = 0.0
-        self.s_tmin = 0.0
-        self.s_tmax = float('inf')
-        self.s_noise = 1.0
 
         self.eta_option_field = 'eta_ancestral'
         self.eta_infotext_field = 'Eta'
@@ -321,39 +344,14 @@ class Sampler:
 
         k_diffusion.sampling.torch = TorchHijack(p)
 
-        extra_params_kwargs = {}
-        for param_name in self.extra_params:
-            if hasattr(p, param_name) and param_name in inspect.signature(self.func).parameters:
-                extra_params_kwargs[param_name] = getattr(p, param_name)
+        parameters = inspect.signature(self.func).parameters
+        extra_params_kwargs = sigma_params_kwargs(p, [name for name in self.extra_params if name in parameters])
 
-        if 'eta' in inspect.signature(self.func).parameters:
+        if 'eta' in parameters:
             if self.eta != self.eta_default:
                 p.extra_generation_params[self.eta_infotext_field] = self.eta
 
             extra_params_kwargs['eta'] = self.eta
-
-        if len(self.extra_params) > 0:
-            s_churn = getattr(opts, 's_churn', p.s_churn)
-            s_tmin = getattr(opts, 's_tmin', p.s_tmin)
-            s_tmax = getattr(opts, 's_tmax', p.s_tmax) or self.s_tmax # 0 = inf
-            s_noise = getattr(opts, 's_noise', p.s_noise)
-
-            if 's_churn' in extra_params_kwargs and s_churn != self.s_churn:
-                extra_params_kwargs['s_churn'] = s_churn
-                p.s_churn = s_churn
-                p.extra_generation_params['Sigma churn'] = s_churn
-            if 's_tmin' in extra_params_kwargs and s_tmin != self.s_tmin:
-                extra_params_kwargs['s_tmin'] = s_tmin
-                p.s_tmin = s_tmin
-                p.extra_generation_params['Sigma tmin'] = s_tmin
-            if 's_tmax' in extra_params_kwargs and s_tmax != self.s_tmax:
-                extra_params_kwargs['s_tmax'] = s_tmax
-                p.s_tmax = s_tmax
-                p.extra_generation_params['Sigma tmax'] = s_tmax
-            if 's_noise' in extra_params_kwargs and s_noise != self.s_noise:
-                extra_params_kwargs['s_noise'] = s_noise
-                p.s_noise = s_noise
-                p.extra_generation_params['Sigma noise'] = s_noise
 
         return extra_params_kwargs
 
