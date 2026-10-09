@@ -394,3 +394,49 @@ def test_custom_sampler_mutating_routes_hold_registration_lock():
     assert "with _LOCK:" in preview_block
     assert "_TRANSIENT_DEFS[PREVIEW_NAME] = definition" in preview_block
     assert preview_block.index("with _LOCK:") < preview_block.index("_TRANSIENT_DEFS[PREVIEW_NAME] = definition")
+
+
+def _recording_core_get_sigmas(multi, monkeypatch):
+    """The core get_sigmas contract the chain relies on: it reads p.hr_scheduler in the hires pass and p.scheduler
+    otherwise, and records the schedule label plus option-derived schedule keys."""
+    used = []
+
+    def get_sigmas(self, p, steps):
+        scheduler = p.hr_scheduler if p.is_hr_pass else p.scheduler
+        used.append(scheduler)
+        p.extra_generation_params["Hires schedule type" if p.is_hr_pass else "Schedule type"] = scheduler
+        p.extra_generation_params["Schedule rho"] = 5.0
+        return torch.linspace(float(steps), 0.0, steps + 1)
+
+    monkeypatch.setattr(multi.sd_samplers_kdiffusion.KDiffusionSampler, "get_sigmas", get_sigmas)
+    return used
+
+
+@pytest.mark.parametrize("is_hr_pass", [False, True])
+def test_stage_scheduler_applies_in_both_passes_and_keeps_the_request_schedulers(multi, monkeypatch, is_hr_pass):
+    used = _recording_core_get_sigmas(multi, monkeypatch)
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.config = "base config"
+    p = types.SimpleNamespace(is_hr_pass=is_hr_pass, scheduler="Karras", hr_scheduler="Normal", extra_generation_params={})
+
+    sampler._sigmas_for_scheduler(p, 4, "Euler", "Exponential")
+
+    assert used == ["Exponential"]
+    assert (p.scheduler, p.hr_scheduler, sampler.config) == ("Karras", "Normal", "base config")
+
+
+def test_stage_schedule_calls_keep_schedule_keys_but_not_the_stage_label(multi, monkeypatch):
+    _recording_core_get_sigmas(multi, monkeypatch)
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.config = None
+    first = types.SimpleNamespace(is_hr_pass=False, scheduler="Automatic", hr_scheduler=None, extra_generation_params={"Seed": 1})
+    hires = types.SimpleNamespace(is_hr_pass=True, scheduler="Automatic", hr_scheduler="Automatic",
+                                  extra_generation_params={"Schedule type": "Karras", "Hires schedule type": None, "Seed": 1})
+
+    sampler._sigmas_for_scheduler(first, 4, "Euler", "Exponential")
+    sampler._sigmas_for_scheduler(hires, 4, "Euler", "Exponential")
+
+    # The option-derived schedule key survives; the stage label neither replaces nor adds the request's.
+    assert first.extra_generation_params == {"Seed": 1, "Schedule rho": 5.0}
+    assert hires.extra_generation_params == {"Schedule type": "Karras", "Hires schedule type": None, "Seed": 1, "Schedule rho": 5.0}
+    assert list(hires.extra_generation_params) == ["Schedule type", "Hires schedule type", "Seed", "Schedule rho"]

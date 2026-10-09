@@ -33,6 +33,8 @@ _DENOISE_RAMP_FUNC = None
 _DENOISE_RAMP_FUNC_LOADED = False
 _SIGNATURE_PARAM_CACHE: dict[int, set[str]] = {}
 _SAMPLER_FUNC_CACHE: dict[str, tuple[Any, str]] = {}
+# The schedule labels the core get_sigmas records; a scheduler chain records its stage schedulers itself.
+_SCHEDULE_LABEL_KEYS = ("Schedule type", "Hires schedule type")
 logger = logging.getLogger(__name__)
 
 
@@ -324,19 +326,30 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.extra_params = []
 
     def _sigmas_for_scheduler(self, p, steps: int, sampler_name: str, scheduler_name: str) -> torch.Tensor:
+        """The full schedule of one stage's scheduler, from the core get_sigmas.
+
+        get_sigmas reads the scheduler from p.hr_scheduler in the hires pass and from p.scheduler otherwise; the stage
+        scheduler goes into that field for the call. Its infotext stays, except the schedule label: "Schedule type" /
+        "Hires schedule type" would name whichever stage ran last, while "Sampler chain schedulers" records them all,
+        so those two keys keep the values they had before the call."""
+        scheduler_field = "hr_scheduler" if getattr(p, "is_hr_pass", False) else "scheduler"
         old_config = self.config
-        old_scheduler = getattr(p, "scheduler", None)
-        old_extra_generation_params = dict(getattr(p, "extra_generation_params", {}) or {})
+        old_scheduler = getattr(p, scheduler_field, None)
+        params = getattr(p, "extra_generation_params", None)
+        old_labels = {key: params[key] for key in _SCHEDULE_LABEL_KEYS if key in params} if params is not None else {}
         try:
             self.config = _k_sampler_config(sampler_name)
-            p.scheduler = _normalize_scheduler_name(scheduler_name)
+            setattr(p, scheduler_field, _normalize_scheduler_name(scheduler_name))
             return super().get_sigmas(p, steps)
         finally:
             self.config = old_config
-            p.scheduler = old_scheduler
-            if hasattr(p, "extra_generation_params"):
-                p.extra_generation_params.clear()
-                p.extra_generation_params.update(old_extra_generation_params)
+            setattr(p, scheduler_field, old_scheduler)
+            if params is not None:
+                for key in _SCHEDULE_LABEL_KEYS:
+                    if key in old_labels:
+                        params[key] = old_labels[key]
+                    else:
+                        params.pop(key, None)
 
     def _base_sigmas(self, p, steps: int) -> torch.Tensor:
         sampler_names = _chain_sampler_names(self.definition)
