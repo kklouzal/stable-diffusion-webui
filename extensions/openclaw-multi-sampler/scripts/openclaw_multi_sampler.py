@@ -69,6 +69,20 @@ def _slug(text: str) -> str:
     return slug[:80] or "multi-sampler"
 
 
+def _confined_snapshot_dir(value: Any) -> Path:
+    """The snapshot directory a request names, resolved inside SNAPSHOT_ROOT.
+
+    Requests (API alwayson script args) choose it, and snapshots create it and write PNGs into it, so it must not
+    reach anywhere else: a relative path is taken under SNAPSHOT_ROOT, and a path that resolves outside it (through
+    "..", an absolute path elsewhere or a symlink) is rejected."""
+    root = SNAPSHOT_ROOT.resolve()
+    path = Path(str(value))
+    resolved = (path if path.is_absolute() else root / path).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"Multi-sampler snapshot directory must be inside {root}: {value}")
+    return resolved
+
+
 def _k_sampler_names() -> list[str]:
     return [item[0] for item in sd_samplers_kdiffusion.samplers_k_diffusion]
 
@@ -452,7 +466,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         out_dir_value = str(cfg.get("dir") or "").strip()
         if not out_dir_value:
             return
-        out_dir = Path(out_dir_value).expanduser()
+        out_dir = _confined_snapshot_dir(out_dir_value)
         out_dir.mkdir(parents=True, exist_ok=True)
         approximation = cfg.get("approximation")
         if approximation in ("Full", "full", 0, "0"):
@@ -683,7 +697,8 @@ class OpenClawMultiSamplerScript(scripts.Script):
         if enabled and snapshot_dir:
             p.openclaw_multi_sampler_snapshots = {
                 "enabled": True,
-                "dir": str(snapshot_dir),
+                # Fails the request before sampling when the directory is outside SNAPSHOT_ROOT.
+                "dir": str(_confined_snapshot_dir(snapshot_dir)),
                 "every": _safe_int(every, 1) or 1,
                 "max_count": _safe_int(max_count, 0),
                 "approximation": approximation or "Approx cheap",

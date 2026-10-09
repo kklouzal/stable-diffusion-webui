@@ -410,6 +410,7 @@ def test_snapshots_round_to_uint8_like_generated_images(multi, monkeypatch, tmp_
     saved = []
     image = types.SimpleNamespace(save=lambda path: saved.append(path))
     monkeypatch.setattr(multi, "Image", types.SimpleNamespace(fromarray=lambda array: saved.append(array) or image))
+    monkeypatch.setattr(multi, "SNAPSHOT_ROOT", tmp_path)
     sampler = object.__new__(multi.MultiKDiffusionSampler)
     p = types.SimpleNamespace(openclaw_multi_sampler_snapshots={"enabled": True, "dir": str(tmp_path)})
 
@@ -551,3 +552,50 @@ def test_stage_sigma_params_at_the_defaults_pass_nothing(multi):
 
     assert not {"s_churn", "s_tmin", "s_tmax", "s_noise"} & set(kwargs)
     assert p.extra_generation_params == {}
+
+
+@pytest.fixture
+def snapshot_root(multi, monkeypatch, tmp_path):
+    root = tmp_path / "data" / "snapshots"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(multi, "SNAPSHOT_ROOT", root)
+    return root.resolve()
+
+
+def _process_snapshot_dir(multi, snapshot_dir):
+    p = types.SimpleNamespace()
+    multi.OpenClawMultiSamplerScript().process(p, enabled=True, snapshot_dir=snapshot_dir)
+    return p.openclaw_multi_sampler_snapshots["dir"]
+
+
+def test_snapshot_dir_inside_the_root_is_accepted(multi, snapshot_root):
+    # The preview route hands out SNAPSHOT_ROOT / run_id; relative names are taken under the root.
+    assert _process_snapshot_dir(multi, str(snapshot_root / "run-1")) == str(snapshot_root / "run-1")
+    assert _process_snapshot_dir(multi, "run-2/sub") == str(snapshot_root / "run-2" / "sub")
+
+
+@pytest.mark.parametrize("escape", ["../outside", "run/../../outside", "/tmp/elsewhere", "{root}/../outside", "link/inside"])
+def test_snapshot_dir_outside_the_root_fails_the_request(multi, snapshot_root, tmp_path, escape):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (snapshot_root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must be inside"):
+        _process_snapshot_dir(multi, escape.format(root=snapshot_root))
+    assert list(outside.iterdir()) == []
+
+
+def test_snapshot_writes_recheck_the_directory(multi, snapshot_root, tmp_path):
+    outside = tmp_path / "outside"
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    p = types.SimpleNamespace(openclaw_multi_sampler_snapshots={"enabled": True, "dir": str(outside)})
+
+    with pytest.raises(ValueError, match="must be inside"):
+        sampler._save_snapshot(p, torch.zeros(1, 4, 1, 1), step=0, final=True)
+    assert not outside.exists()
+
+
+def test_disabled_snapshots_ignore_the_directory(multi, snapshot_root):
+    p = types.SimpleNamespace()
+    multi.OpenClawMultiSamplerScript().process(p, enabled=False, snapshot_dir="/tmp/elsewhere")
+    assert p.openclaw_multi_sampler_snapshots == {"enabled": False}
