@@ -63,7 +63,7 @@ def upscale_pil_patch(model, img: Image.Image) -> Image.Image:
             return torch_bgr_to_pil_image(model(tensor))
 
 
-def keeping_alpha(img: Image.Image, upscale_rgb: Callable[[Image.Image], Image.Image]) -> Image.Image:
+def _keeping_alpha(img: Image.Image, upscale_rgb: Callable[[Image.Image], Image.Image]) -> Image.Image:
     """`upscale_rgb(img)`, except that an RGBA image keeps its alpha: models upscale colour only, so its RGB is
     upscaled and its alpha resized (LANCZOS) to the result's size and re-attached. Other modes go to `upscale_rgb`
     unchanged (it converts them to RGB). `upscale_rgb` returns its input when interrupted; then `img` comes back."""
@@ -85,9 +85,9 @@ def upscale_with_model(
     tile_overlap: int = 0,
     desc="tiled upscale",
 ) -> Image.Image:
-    """`img` upscaled by `model` (tiled through `images.Grid` unless `tile_size` <= 0); see `keeping_alpha` for RGBA
+    """`img` upscaled by `model` (tiled through `images.Grid` unless `tile_size` <= 0); see `_keeping_alpha` for RGBA
     images. An interrupted upscale returns `img`."""
-    return keeping_alpha(img, lambda rgb: _upscale_rgb_with_model(model, rgb, tile_size=tile_size, tile_overlap=tile_overlap, desc=desc))
+    return _keeping_alpha(img, lambda rgb: _upscale_rgb_with_model(model, rgb, tile_size=tile_size, tile_overlap=tile_overlap, desc=desc))
 
 
 def _upscale_rgb_with_model(model, img: Image.Image, *, tile_size: int, tile_overlap: int, desc: str) -> Image.Image:
@@ -235,7 +235,7 @@ def upscale_2(
     Convenience wrapper around `tiled_upscale_2` that handles PIL images.
 
     Like `upscale_with_model`, the model runs in its own dtype even when the caller (hires fix) is inside the
-    sampler's autocast, an RGBA image keeps its alpha (`keeping_alpha`), and an interrupted or skipped upscale
+    sampler's autocast, an RGBA image keeps its alpha (`_keeping_alpha`), and an interrupted or skipped upscale
     returns `img` unchanged.
     """
     param = torch_utils.get_param(model)
@@ -257,4 +257,4 @@ def upscale_2(
                 return rgb
             return torch_bgr_to_pil_image(output)
 
-    return keeping_alpha(img, upscale_rgb)
+    return _keeping_alpha(img, upscale_rgb)
