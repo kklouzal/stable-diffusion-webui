@@ -1,114 +1,90 @@
-# Stable Diffusion web UI
-A web interface for Stable Diffusion, implemented using Gradio library.
+# Stable Diffusion web UI: GB10 API fork
 
-![](screenshot.png)
+This is a fork of [AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui),
+branched from upstream `dev` at `1937682a` (2026-03-02). It runs only as an API server in a Docker image on an NVIDIA GB10
+(aarch64, NVIDIA NGC PyTorch base). The HTTP API (`/sdapi/v1/*`, plus this fork's `/sdapi/v1/openclaw/*` routes) listens
+on port 7860. There is no browser UI.
 
-## Features
-[Detailed feature showcase with images](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Features):
-- Original txt2img and img2img modes
-- One click install and run script (but you still must install python and git)
-- Outpainting
-- Inpainting
-- Color Sketch
-- Prompt Matrix
-- Stable Diffusion Upscale
-- Attention, specify parts of text that the model should pay more attention to
-    - a man in a `((tuxedo))` - will pay more attention to tuxedo
-    - a man in a `(tuxedo:1.21)` - alternative syntax
-    - select text and press `Ctrl+Up` or `Ctrl+Down` (or `Command+Up` or `Command+Down` if you're on a MacOS) to automatically adjust attention to selected text (code contributed by anonymous user)
-- Loopback, run img2img processing multiple times
-- X/Y/Z plot, a way to draw a 3 dimensional plot of images with different parameters
-- Textual Inversion
-    - have as many embeddings as you want and use any names you like for them
-    - use multiple embeddings with different numbers of vectors per token
-    - works with half precision floating point numbers
-    - train embeddings on 8GB (also reports of 6GB working)
-- Extras tab with:
-    - GFPGAN, neural network that fixes faces
-    - CodeFormer, face restoration tool as an alternative to GFPGAN
-    - RealESRGAN, neural network upscaler
-    - ESRGAN, neural network upscaler with a lot of third party models
-    - SwinIR and Swin2SR ([see here](https://github.com/AUTOMATIC1111/stable-diffusion-webui/pull/2092)), neural network upscalers
-    - LDSR, Latent diffusion super resolution upscaling
-- Resizing aspect ratio options
-- Sampling method selection
-    - Adjust sampler eta values (noise multiplier)
-    - More advanced noise setting options
-- Interrupt processing at any time
-- 4GB video card support (also reports of 2GB working)
-- Correct seeds for batches
-- Live prompt token length validation
-- Generation parameters
-     - parameters you used to generate images are saved with that image
-     - in PNG chunks for PNG, in EXIF for JPEG
-     - can drag the image to PNG info tab to restore generation parameters and automatically copy them into UI
-     - can be disabled in settings
-     - drag and drop an image/text-parameters to promptbox
-- Read Generation Parameters Button, loads parameters in promptbox to UI
-- Settings page
-- Running arbitrary python code from UI (must run with `--allow-code` to enable)
-- Mouseover hints for most UI elements
-- Possible to change defaults/mix/max/step values for UI elements via text config
-- Tiling support, a checkbox to create images that can be tiled like textures
-- Progress bar and live image generation preview
-    - Can use a separate neural network to produce previews with almost none VRAM or compute requirement
-- Negative prompt, an extra text field that allows you to list what you don't want to see in generated image
-- Styles, a way to save part of prompt and easily apply them via dropdown later
-- Variations, a way to generate same image but with tiny differences
-- Seed resizing, a way to generate same image but at slightly different resolution
-- CLIP interrogator, a button that tries to guess prompt from an image
-- Prompt Editing, a way to change prompt mid-generation, say to start making a watermelon and switch to anime girl midway
-- Batch Processing, process a group of files using img2img
-- Img2img Alternative, reverse Euler method of cross attention control
-- Highres Fix, a convenience option to produce high resolution pictures in one click without usual distortions
-- Reloading checkpoints on the fly
-- Checkpoint Merger, a tab that allows you to merge up to 3 checkpoints into one
-- [Custom scripts](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Custom-Scripts) with many extensions from community
-- [Composable-Diffusion](https://energy-based-model.github.io/Compositional-Visual-Generation-with-Composable-Diffusion-Models/), a way to use multiple prompts at once
-     - separate prompts using uppercase `AND`
-     - also supports weights for prompts: `a cat :1.2 AND a dog AND a penguin :2.2`
-- No token limit for prompts (original stable diffusion lets you use up to 75 tokens)
-- DeepDanbooru integration, creates danbooru style tags for anime prompts
-- via extension: [History tab](https://github.com/yfszzx/stable-diffusion-webui-images-browser): view, direct and delete images conveniently within the UI
-- Generate forever option
-- Training tab
-     - hypernetworks and embeddings options
-     - Preprocessing images: cropping, mirroring, autotagging using BLIP or deepdanbooru (for anime)
-- Clip skip
-- Hypernetworks
-- Loras (same as Hypernetworks but more pretty)
-- A separate UI where you can choose, with preview, which embeddings, hypernetworks or Loras to add to your prompt
-- Can select to load a different VAE from settings screen
-- Estimated completion time in progress bar
-- API
-- Support for dedicated [inpainting model](https://github.com/runwayml/stable-diffusion#inpainting-with-stable-diffusion) by RunwayML
-- via extension: [Aesthetic Gradients](https://github.com/AUTOMATIC1111/stable-diffusion-webui-aesthetic-gradients), a way to generate images with a specific aesthetic by using clip images embeds (implementation of [https://github.com/vicgalle/stable-diffusion-aesthetic-gradients](https://github.com/vicgalle/stable-diffusion-aesthetic-gradients))
-- [Stable Diffusion 2.0](https://github.com/Stability-AI/stablediffusion) support - see [wiki](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Features#stable-diffusion-20) for instructions
-- [Alt-Diffusion](https://arxiv.org/abs/2211.06679) support - see [wiki](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Features#alt-diffusion) for instructions
-- Now without any bad letters!
-- Load checkpoints in safetensors format
-- Eased resolution restriction: generated image's dimensions must be a multiple of 8 rather than 64
-- Now with a license!
-- Reorder elements in the UI from settings screen
-- [Segmind Stable Diffusion](https://huggingface.co/segmind/SSD-1B) support
+## Build
 
-## Installation and Running
-This fork runs only as the GB10 container image (API/headless, NGC PyTorch on aarch64 CUDA). The upstream
-Windows/Linux/macOS launchers (`webui.sh`, `webui-user.sh`, `webui.bat`, `webui-user.bat`) are not part of it.
-Build the image with `gb10/build.sh` and start it with `gb10/run.sh`; see [docs/gb10/README.md](docs/gb10/README.md)
-and [docs/gb10/launch/README.md](docs/gb10/launch/README.md).
+```bash
+gb10/build.sh
+```
 
-## Contributing
-Here's how to add code to this repo: [Contributing](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Contributing)
+This builds `local/gb10-a1111:latest` from this checkout with the [Dockerfile](Dockerfile), using `sudo docker build`
+with BuildKit. The base image is `nvcr.io/nvidia/pytorch:26.08-py3`. BuildKit steps run in the `gb10build.slice`
+systemd unit. If that unit is not installed, set `BUILD_CGROUP_PARENT=`.
+
+The build context is an allowlist ([.dockerignore](.dockerignore)): only the runtime source goes into the image. Tests,
+docs, `gb10/` and the owned extensions under `extensions/` do not.
+
+## Deploy
+
+```bash
+gb10/run.sh                                                  # deploy local/gb10-a1111:latest
+IMAGE_TAG=local/gb10-a1111:deploy8-2b5e4039 gb10/run.sh      # deploy (or roll back to) another tag
+```
+
+`run.sh` does all of its checks before it removes the running container, so a failed check leaves production running.
+The checks cover the image, the host driver, the compile-cache namespace and a rehearsal of the extension patchers.
+After the checks it:
+
+- replaces the container `gb10-a1111-latest`
+- bind-mounts the host data under `/opt/gb10/stable-diffusion`
+- mirrors the owned extensions (`extensions/*`) into the host `Extensions/` directory
+- patches the host-installed third-party extensions with `gb10/patch-*.py`
+- starts the image's API-only launcher with host networking and `--gpus all`
+
+`gb10/smoke-test.sh` checks a running container without generating anything. `gb10/stop.sh` removes the container.
+
+## Test
+
+The tests need the image's Python environment (torch and the companion repositories), but no GPU. Run them in a
+throwaway container from the image:
+
+1. Replace the app tree `/opt/stable-diffusion-webui` with this checkout. Keep the image's `repositories/` and
+   `models/`.
+2. Run `pip install pytest pytest-base-url`, because the image does not ship pytest.
+3. Run the suites:
+
+```bash
+python -m pytest test                                       # core CPU suite
+python -m pytest extensions/<name>/tests                    # each owned extension, in its own pytest process
+python -m pytest test/live --base-url http://<host>:<port>  # live-server API tests
+```
+
+The live tests are skipped without `--base-url`. They POST generations and settings changes, so point them at a test
+server, not production.
 
 ## Documentation
 
-The documentation was moved from this README over to the project's [wiki](https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki).
+- [docs/gb10/README.md](docs/gb10/README.md): architecture, image layout and dependency policy
+- [docs/gb10/launch/README.md](docs/gb10/launch/README.md): operations (script overrides, launch flags, host mounts)
+- [docs/gb10/STATUS.md](docs/gb10/STATUS.md): what is deployed, rollback images and parked work
+- [docs/gb10/EXTENSIONS.md](docs/gb10/EXTENSIONS.md): owned and third-party extensions
+- [docs/gb10/notes/](docs/gb10/notes/README.md): dated records of audits, performance passes and cleanups
 
-For the purposes of getting Google and other search engines to crawl the wiki, here's a link to the (not for humans) [crawlable wiki](https://github-wiki-see.page/m/AUTOMATIC1111/stable-diffusion-webui/wiki).
+## Differences from upstream
+
+Removed:
+
+- **The browser UI.** Gradio and the front end are gone. `webui.py` exits unless it is started with `--nowebui`; the
+  image launcher's default flags include `--nowebui --api`.
+- **The upstream bootstrap.** That covers `prepare_environment`, `webui.sh`, `webui-user.*` and the `.bat` launchers.
+  The image owns its Python environment. Bootstrap flags such as `--skip-prepare-environment` are still accepted and
+  do nothing.
+- **The LDSR upscaler.** Its `ldsr_*` options and `--ldsr-models-path` are still registered and do nothing.
+- **Alt-Diffusion checkpoints**, **macOS/MPS and Ascend NPU support**, and **ngrok**.
+
+Added:
+
+- GB10 runtime work: CUDA graphs, TorchAO weight quantization, conditioning and artifact caches, and diagnostics routes.
+- Owned extensions: vendored ControlNet, Incantations and TeaCache, plus the `openclaw-*` extensions.
 
 ## Credits
-Licenses for borrowed code can be found in `Settings -> Licenses` screen, and also in `html/licenses.html` file.
+
+Licenses for borrowed code are in [html/licenses.html](html/licenses.html). The full license of this project is in
+[LICENSE.txt](LICENSE.txt).
 
 - Stable Diffusion - https://github.com/Stability-AI/stablediffusion, https://github.com/CompVis/taming-transformers, https://github.com/mcmonkey4eva/sd3-ref
 - k-diffusion - https://github.com/crowsonkb/k-diffusion.git
@@ -118,7 +94,6 @@ Licenses for borrowed code can be found in `Settings -> Licenses` screen, and al
   - ESRGAN - https://github.com/xinntao/ESRGAN
   - SwinIR - https://github.com/JingyunLiang/SwinIR
   - Swin2SR - https://github.com/mv-lab/swin2sr
-- LDSR - https://github.com/Hafiidz/latent-diffusion
 - MiDaS - https://github.com/isl-org/MiDaS
 - Ideas for optimizations - https://github.com/basujindal/stable-diffusion
 - Cross Attention layer optimization - Doggettx - https://github.com/Doggettx/stable-diffusion, original idea for prompt editing.
