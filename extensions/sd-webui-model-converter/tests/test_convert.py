@@ -65,12 +65,14 @@ def install_a1111_stubs():
             "modules.shared": shared_mod,
         }
     )
-    # A1111's real walker (modules/util.py), which the Lora extension lists LoRAs with
-    util_spec = importlib.util.spec_from_file_location("modules.util", EXT_ROOT.parents[1] / "modules" / "util.py")
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules["modules.util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-    shared_mod.walk_files = util_mod.walk_files
+    # A1111's real walker (modules/util.py), which the Lora extension lists LoRAs with, and the stdlib-only module it
+    # imports for its file hashing.
+    for name in ("persistent_artifact_cache", "util"):
+        spec = importlib.util.spec_from_file_location(f"modules.{name}", EXT_ROOT.parents[1] / "modules" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[f"modules.{name}"] = module
+        spec.loader.exec_module(module)
+    shared_mod.walk_files = sys.modules["modules.util"].walk_files
 
 
 class RecordingLock:
