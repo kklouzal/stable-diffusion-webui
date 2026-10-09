@@ -1,5 +1,6 @@
 import contextlib
 import math
+import threading
 from collections import namedtuple
 
 import ftfy
@@ -17,29 +18,46 @@ def clip_text_embeddings(transformer):
     return clip_text_transformer_module(transformer).embeddings
 
 
+# Serializes text_encoder_precision scopes: each saves and restores process-wide matmul precision state, so two
+# overlapping scopes on different threads could restore out of order and leave float32 matmuls at IEEE (or TF32)
+# for the rest of the process. Reentrant: a nested scope on the same thread saves and restores in stack order.
+_matmul_precision_lock = threading.RLock()
+
+
 @contextlib.contextmanager
 def text_encoder_precision(text_encoder):
     """Run a float32 text encoder (sd_models.float32_text_encoder_names) in float32.
 
     CUDA autocast is off and float32 matmuls are IEEE instead of the process-wide TF32 (devices.enable_tf32), whose
     10-bit mantissa would give back most of the accuracy float32 weights buy. The matmul precision is process-wide
-    torch state, restored on exit; text encoding runs inside the one generation at a time, and another thread's
-    float32 matmul overlapping it only runs at the higher precision. A text encoder kept at a lower precision (fp8
-    or TorchAO storage) runs under the caller's autocast as before.
+    torch state, so scopes are serialized (_matmul_precision_lock) and each restores exactly the state it found; a
+    float32 matmul on another thread overlapping a scope only runs at the higher precision.
+
+    The precision is set with torch.set_float32_matmul_precision("highest"), which moves the legacy setting and the
+    per-backend settings (cuda.matmul and mkldnn.matmul to "ieee") together: setting only cuda.matmul.fp32_precision
+    makes legacy readers inside the window (torch.backends.cuda.matmul.allow_tf32, torch.get_float32_matmul_precision,
+    which Inductor and Dynamo's global-state guard read) raise "mix of the legacy and new APIs" (torch 2.14). The exit
+    restores the legacy setting first, then the per-backend values it saved, which leaves both views consistent again.
+    A torch.compile trace running on another thread across a scope boundary still sees the global state change, as
+    with any process-wide setting; compilation and text encoding both run on the one generation thread.
+
+    A text encoder kept at a lower precision (fp8 or TorchAO storage) runs under the caller's autocast as before.
     """
     weight = next(text_encoder.parameters(), None)
     if weight is None or weight.dtype != torch.float32:
         yield
         return
 
-    matmul = torch.backends.cuda.matmul
-    previous = matmul.fp32_precision
-    matmul.fp32_precision = "ieee"
-    try:
-        with devices.without_autocast():
-            yield
-    finally:
-        matmul.fp32_precision = previous
+    backends = torch.backends
+    with _matmul_precision_lock:
+        previous = (torch.get_float32_matmul_precision(), backends.cuda.matmul.fp32_precision, backends.mkldnn.matmul.fp32_precision)
+        torch.set_float32_matmul_precision("highest")
+        try:
+            with devices.without_autocast():
+                yield
+        finally:
+            torch.set_float32_matmul_precision(previous[0])
+            backends.cuda.matmul.fp32_precision, backends.mkldnn.matmul.fp32_precision = previous[1:]
 
 
 class PromptChunk:
