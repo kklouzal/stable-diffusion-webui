@@ -175,44 +175,121 @@ def test_forced_clean_equivalence_for_deterministic_array_result():
     assert np.array_equal(cache.get_or_compute(key, preprocess, clone=True), forced_clean)
 
 
+def _parse(rel):
+    import ast
+
+    return ast.parse((CONTROLNET / rel).read_text(encoding="utf-8"))
+
+
+def _exec_definitions(rel, wanted, namespace, class_name=None):
+    """Execute the named top-level functions of a ControlNet source file (or methods of its class_name) in
+    namespace; methods come back on a class of the same name holding only them."""
+    import ast
+
+    tree = _parse(rel)
+    body = tree.body if class_name is None else next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name).body
+    nodes = [node for node in body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    assert {node.name for node in nodes} == set(wanted)
+    if class_name is not None:
+        nodes = [ast.ClassDef(name=class_name, bases=[], keywords=[], body=nodes, decorator_list=[])]
+    module = ast.Module(body=nodes, type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(CONTROLNET / rel), "exec"), namespace)
+    return namespace
+
+
 def test_cache_helper_lives_outside_scanned_scripts_root():
+    import ast
+
     # A1111 executes every module under an extension's scripts/ as a script.
     assert not (CONTROLNET / "scripts/cache_contract.py").exists()
     for rel in ("scripts/controlnet.py", "scripts/supported_preprocessor.py"):
-        source = (CONTROLNET / rel).read_text(encoding="utf-8")
-        assert "from internal_controlnet.cache_contract import" in source
-        assert "from scripts.cache_contract import" not in source
+        imported = {node.module for node in ast.walk(_parse(rel)) if isinstance(node, ast.ImportFrom)}
+        assert "internal_controlnet.cache_contract" in imported
+        assert "scripts.cache_contract" not in imported
 
 
 def test_controlnet_correctness_fixes_live_in_tracked_source():
-    hook = (CONTROLNET / "scripts/hook.py").read_text(encoding="utf-8")
-    assert "param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(" in hook
-    assert "device=x.device, dtype=x.dtype" in hook
-    body = (CONTROLNET / "annotator/openpose/body.py").read_text(encoding="utf-8")
+    # Source checks (normalized by ast.unparse): the inpaint hijack runs only inside a full ControlNet UNet forward
+    # of a 9-channel inpaint model, and the openpose average differs only with several scales (scale_search has one).
+    import ast
+
+    def statements(rel):
+        return {ast.unparse(node) for node in ast.walk(_parse(rel)) if isinstance(node, (ast.Assign, ast.AugAssign))}
+
+    # The cached inpaint latent follows x's device/dtype (the .to() result was discarded before).
+    assert "param.used_hint_inpaint_hijack = param.used_hint_inpaint_hijack.to(device=x.device, dtype=x.dtype)" in statements("scripts/hook.py")
+    body = statements("annotator/openpose/body.py")
     assert "heatmap_avg += heatmap / len(multiplier)" in body
-    assert "heatmap_avg += heatmap_avg +" not in body
+    assert "heatmap_avg += heatmap_avg + heatmap / len(multiplier)" not in body
 
 
-def test_deploy_time_cache_patch_is_retired_and_settings_survive():
-    root = Path(__file__).parents[1]
-    assert not (root / "gb10/controlnet-cache-correctness.patch").exists()
-    assert not (root / "gb10/patch-controlnet-cache-correctness.py").exists()
-    assert not (root / "gb10/controlnet_cache_contract.py").exists()
-    assert "patch-controlnet-cache-correctness" not in (root / "gb10/run.sh").read_text(encoding="utf-8")
-    # The retired patch's settings hunk dropped this option at deploy time.
-    controlnet = (CONTROLNET / "scripts/controlnet.py").read_text(encoding="utf-8")
-    assert controlnet.count('add_option("control_net_modules_path"') == 1
-    assert controlnet.count('add_option("control_net_preprocessor_models_path"') == 1
+def test_both_preprocessor_path_settings_are_registered_once():
+    # annotator_path.py reads both options (test_controlnet_preprocessor_path_contract.py).
+    from types import SimpleNamespace
+
+    registered = []
+
+    class OptionInfo:
+        def __init__(self, default=None, label="", component=None, component_args=None, section=None):
+            self.default, self.section, self.reload_ui = default, section, False
+
+        def needs_reload_ui(self):
+            self.reload_ui = True
+            return self
+
+    shared = SimpleNamespace(OptionInfo=OptionInfo, opts=SimpleNamespace(add_option=lambda key, info: registered.append((key, info))))
+    namespace = {"shared": shared, "global_state": SimpleNamespace(default_detectedmap_dir="detected_maps"),
+                 "gr": SimpleNamespace(Slider="Slider", Checkbox="Checkbox")}
+    _exec_definitions("scripts/controlnet.py", ["on_ui_settings"], namespace)["on_ui_settings"]()
+
+    keys = [key for key, _info in registered]
+    infos = dict(registered)
+    for key in ("control_net_modules_path", "control_net_preprocessor_models_path"):
+        assert keys.count(key) == 1
+        assert infos[key].default == "" and infos[key].reload_ui
+        assert infos[key].section == ("control_net", "ControlNet")
 
 
-def test_option_snapshot_covers_exactly_the_controlnet_options():
+def test_option_snapshot_covers_exactly_the_controlnet_options(tmp_path):
     # One snapshot for both cache keys (Script._model_cache_key, Preprocessor result keys): every
     # "control_net*"/"controlnet*" option and nothing else, independent of insertion order.
+    from types import SimpleNamespace
+
+    import torch
+
     data = {"control_net_unit_count": 3, "sd_model_checkpoint": "x", "controlnet_clip_detector_on_cpu": False,
             "CN_other": 1}
     snapshot = cache_contract.controlnet_option_snapshot(data)
     assert snapshot == freeze({"control_net_unit_count": 3, "controlnet_clip_detector_on_cpu": False})
     assert snapshot == cache_contract.controlnet_option_snapshot(dict(reversed(list(data.items()))))
     assert snapshot != cache_contract.controlnet_option_snapshot({**data, "control_net_unit_count": 4})
-    for rel in ("scripts/controlnet.py", "scripts/supported_preprocessor.py"):
-        assert "controlnet_option_snapshot(shared.opts.data)" in (CONTROLNET / rel).read_text(encoding="utf-8")
+
+    # Both keys read the live options through it.
+    opts = SimpleNamespace(data=dict(data))
+    common = {"shared": SimpleNamespace(opts=opts), "torch": torch,
+              "devices": SimpleNamespace(device="cpu", dtype=torch.float32, dtype_unet=torch.float32),
+              "runtime_identity": runtime_identity, "callable_identity": callable_identity,
+              "controlnet_option_snapshot": cache_contract.controlnet_option_snapshot, "freeze": freeze}
+    script = _exec_definitions("scripts/controlnet.py", ["_model_cache_key"],
+                               {**common, "os": os, "build_model_by_guess": lambda *args: None}, "Script")["Script"]
+    model_file = tmp_path / "control.safetensors"
+    model_file.write_bytes(b"weights")
+    script._resolve_model_path = staticmethod(lambda model: (model, str(model_file)))
+    preprocessor_class = _exec_definitions("scripts/supported_preprocessor.py", ["_cache_identity"], dict(common), "Preprocessor")["Preprocessor"]
+    preprocessor_class.__call__ = lambda self, *args, **kwargs: None
+    preprocessor = preprocessor_class()
+    preprocessor.__dict__.update(model=None, name="canny", label="Canny", device="cpu", cache_ignored_kwargs=set())
+    p = SimpleNamespace(sd_model=SimpleNamespace(dtype=torch.float16))
+    unet = object()
+
+    def keys():
+        return script._model_cache_key(p, unet, "control"), preprocessor._cache_identity((1,), {"low": 100})
+
+    before = keys()
+    opts.data["sd_model_checkpoint"] = "y"
+    assert keys() == before
+    opts.data["control_net_unit_count"] = 4
+    after = keys()
+    assert after[0] != before[0] and after[1] != before[1]

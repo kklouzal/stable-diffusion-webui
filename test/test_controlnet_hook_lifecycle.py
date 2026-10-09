@@ -13,22 +13,6 @@ def load_hook(tmp_path):
     return _load_hook_module(source, tmp_path)
 
 
-def test_controlnet_hook_source_carries_owner_aware_lifecycle():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert source.count("OPENCLAW_CONTROLNET_FORWARD_OWNER_V2") == 1
-    assert "model._original_forward = model.forward" not in source
-    assert "self._forward_hook_installed" not in source
-    assert "if not outer.control_params:" in source
-    for fragment in (
-        'getattr(model, "_controlnet_forward_hook_owner", None) is self._forward_hook_owner_token',
-        "model._controlnet_forward_hook_baseline",
-        "model._controlnet_forward_hook_wrapper",
-        "self._forward_hook_wrapper = None",
-        "self.control_params = None",
-    ):
-        assert fragment in source
-
-
 def test_controlnet_wrapper_calls_bound_baseline_once_and_restores(tmp_path):
     hook = load_hook(tmp_path)
     calls = []
@@ -84,6 +68,28 @@ def test_restore_never_clobbers_foreign_forward_or_owner_metadata(tmp_path):
     # A later request fails closed rather than binding through stale ownership.
     with pytest.raises(RuntimeError, match="another live hook"):
         hook.UnetHook().hook(model, type("SD", (), {"is_sdxl": False})(), [], type("P", (), {"sample": lambda self, *a, **k: None})())
+
+
+def test_restore_releases_lllite_ipadapter_hacks_and_control_model_request_state(tmp_path):
+    hook = load_hook(tmp_path)
+    released = []
+    hook.clear_all_lllite = lambda: released.append("lllite")
+    hook.clear_all_ip_adapter = lambda: released.append("ip-adapter")
+
+    class ControlModel:
+        def release_request_state(self):
+            released.append(self)
+
+    class Param(_ProbeParam):
+        control_model = ControlModel()
+
+    params = [Param(), Param()]
+    params[1].control_model = None  # control models without per-request state are skipped
+    owner = hook.UnetHook()
+    owner.hook(_FakeUNet(lambda x, **kwargs: x), _SD, params, _Process(lambda: None))
+    owner.restore()
+    assert released == ["lllite", "ip-adapter", Param.control_model]
+    assert owner.control_params is None
 
 
 def _leak_hook_through_failed_generation(hook, model, context):
