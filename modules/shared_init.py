@@ -18,10 +18,7 @@ def initialize():
     shared.options_templates = shared_options.options_templates
     shared.opts = options.Options(shared_options.options_templates, shared_options.restricted_opts)
     shared.restricted_opts = shared_options.restricted_opts
-    try:
-        shared.opts.load(shared.config_filename)
-    except FileNotFoundError:
-        pass
+    shared.opts.load(shared.config_filename)
 
     from modules import devices
     devices.device, devices.device_interrogate, devices.device_gfpgan, devices.device_esrgan, devices.device_codeformer = \

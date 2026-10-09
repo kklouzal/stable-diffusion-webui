@@ -3,11 +3,10 @@
 import os
 import subprocess
 import sys
-import json
 import shlex
 from functools import lru_cache
 
-from modules import cmd_args, errors
+from modules import cmd_args, settings_file
 from modules.paths_internal import script_path, extensions_dir
 from modules.timer import startup_timer
 from modules import logging_config
@@ -55,17 +54,8 @@ def git_tag():
         return "<none>"
 
 
-def list_extensions(settings_file):
-    settings = {}
-
-    try:
-        with open(settings_file, "r", encoding="utf8") as file:
-            settings = json.load(file)
-    except FileNotFoundError:
-        pass
-    except Exception:
-        errors.report(f'\nCould not load settings\nThe config file "{settings_file}" is likely corrupted\nIt has been moved to the "tmp/config.json"\nReverting config to default\n\n''', exc_info=True)
-        os.replace(settings_file, os.path.join(script_path, "tmp", "config.json"))
+def list_extensions(settings_filename):
+    settings = settings_file.read(settings_filename)
 
     disabled_extensions = set(settings.get('disabled_extensions', []))
     disable_all_extensions = settings.get('disable_all_extensions', 'none')

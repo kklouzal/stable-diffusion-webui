@@ -55,8 +55,11 @@ else
 fi
 
 sudo mkdir -p "${HOST_ROOT}/config/generation-last"
-sudo touch "${HOST_ROOT}/config/config.json" \
-           "${HOST_ROOT}/config/styles.csv"
+# A new settings file starts as {}: the app treats an empty one as damaged (modules/settings_file.py).
+if [[ ! -e "${HOST_ROOT}/config/config.json" ]]; then
+  printf '{}\n' | sudo tee "${HOST_ROOT}/config/config.json" >/dev/null
+fi
+sudo touch "${HOST_ROOT}/config/styles.csv"
 
 OWNED_EXTENSIONS=()
 while IFS= read -r -d "" extension_path; do
