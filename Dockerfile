@@ -301,6 +301,8 @@ ENV A1111_HOME=/opt/stable-diffusion-webui
 ENV GB10_A1111_CLIP_VIT_LARGE_PATCH14_PATH=/opt/gb10/hf-cache/openai-clip-vit-large-patch14
 ENV A1111_RUN_AS_USER=a1111
 ENV COMMANDLINE_ARGS=
+# stdout is a pipe in the container: unbuffered, log lines reach `docker logs` when written, in order with stderr.
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/local/bin/gb10-a1111-entrypoint"]

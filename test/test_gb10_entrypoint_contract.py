@@ -30,3 +30,10 @@ def test_run_sh_leaves_the_default_flags_to_the_image_launcher():
     assert '-e COMMANDLINE_ARGS="${COMMANDLINE_ARGS:-}"' in run
     assert '-e A1111_PORT="${PORT}"' in run
     assert "--nowebui" not in run
+
+
+def test_runtime_image_runs_python_unbuffered():
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    runtime = dockerfile[dockerfile.index("FROM torch-base AS runtime"):]
+
+    assert "\nENV PYTHONUNBUFFERED=1\n" in runtime
