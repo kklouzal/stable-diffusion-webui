@@ -3,6 +3,7 @@ import os
 import torch
 from torch import nn
 from modules import devices, paths, shared
+from modules.util import load_file_from_url
 
 sd_vae_approx_models = {}
 
@@ -31,14 +32,6 @@ class VAEApprox(nn.Module):
         return x
 
 
-def download_model(model_path, model_url):
-    if not os.path.exists(model_path):
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-
-        print(f'Downloading VAEApprox model to: {model_path}')
-        torch.hub.download_url_to_file(model_url, model_path)
-
-
 def model():
     if shared.sd_model.is_sd3:
         model_name = "vaeapprox-sd3.pt"
@@ -55,8 +48,11 @@ def model():
             model_path = os.path.join(paths.script_path, "models", "VAE-approx", model_name)
 
         if not os.path.exists(model_path):
-            model_path = os.path.join(paths.models_path, "VAE-approx", model_name)
-            download_model(model_path, 'https://github.com/AUTOMATIC1111/stable-diffusion-webui/releases/download/v1.0.0-pre/' + model_name)
+            model_path = load_file_from_url(
+                'https://github.com/AUTOMATIC1111/stable-diffusion-webui/releases/download/v1.0.0-pre/' + model_name,
+                model_dir=os.path.join(paths.models_path, "VAE-approx"),
+                file_name=model_name,
+            )
 
         loaded_model = VAEApprox(latent_channels=shared.sd_model.latent_channels)
         loaded_model.load_state_dict(torch.load(model_path, map_location='cpu' if devices.device.type != 'cuda' else None, weights_only=True))
