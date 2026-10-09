@@ -711,10 +711,12 @@ class UnetHook(nn.Module):
                 control = param.control_model(**control_inputs, control_type=control_type)
 
                 if cond_rows is not None:
+                    # Zero uncond rows in the dtype c * cond_mark has: this already is the cond_mark product (cond_mark
+                    # is exactly 1 on cond_rows and 0 elsewhere), so the multiply below is skipped.
                     control_rows = control
                     control = []
                     for c in control_rows:
-                        full = c.new_zeros((batch_size, *c.shape[1:]))
+                        full = c.new_zeros((batch_size, *c.shape[1:]), dtype=torch.promote_types(c.dtype, cond_mark.dtype))
                         full[cond_rows] = c
                         control.append(full)
 
@@ -723,7 +725,7 @@ class UnetHook(nn.Module):
                 else:
                     control_scales = [param.weight] * 13
 
-                if param.cfg_injection or param.global_average_pooling:
+                if (param.cfg_injection or param.global_average_pooling) and cond_rows is None:
                     if param.control_model_type == ControlModelType.T2I_Adapter:
                         control = [torch.cat([c.clone() for _ in range(batch_size)], dim=0) for c in control]
                     control = [c * cond_mark for c in control]
@@ -760,8 +762,10 @@ class UnetHook(nn.Module):
                             f"ControlNet advanced_weighting has {len(control_scales)} weights, but the "
                             f"{param.control_model_type.name} model returns {len(control)} control outputs")
 
+                # x * 1.0 == x bitwise and keeps the dtype (a Python scalar does not promote); the residuals are never
+                # modified in place, so an unscaled one may stay the control model's tensor.
                 control = [
-                    param.apply_effective_region_mask(c * scale)
+                    param.apply_effective_region_mask(c if scale == 1.0 else c * scale)
                     for c, scale
                     in zip(control, control_scales)
                 ]
