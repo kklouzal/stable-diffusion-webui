@@ -1,6 +1,6 @@
 # Build context allowlist. Only what the image build reads is sent, so the image never depends on untracked
 # host state (config.json, params.txt, ui-config.json, styles.csv, cache/, config_states/, tmp/, outputs/,
-# logs, caches) or ships non-runtime tracked content (test/, tests/, docs/, gb10/, README, changelog, ...).
+# logs, caches) or ships non-runtime tracked content (test/, docs/, gb10/, README, changelog, ...).
 # Patterns are relative to the context root. Add a new top-level runtime path here when the app gains one.
 *
 !webui.py

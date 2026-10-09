@@ -1,6 +1,6 @@
 """Multi-threaded PNG encoder for 8-bit RGB/RGBA images, equivalent to Pillow's default PNG save.
 
-Contract (tests/test_png_writer.py checks it against Pillow on the same image):
+Contract (test/test_png_writer.py checks it against Pillow on the same image):
 - The chunks of ``image.save(fp, "PNG", pnginfo=info)`` in the same order: IHDR (same size, bit depth and color
   type), the text chunks of ``info`` byte-identical, IDAT, IEND. Decoding gives the same pixels.
 - The same filtered scanlines (the decompressed IDAT stream is byte-identical): per row, the first filter with the

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from test_generation_last import load_generation_last, restore_modules
+from test.test_generation_last import load_generation_last, restore_modules
 import tempfile
 
 

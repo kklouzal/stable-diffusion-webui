@@ -1,5 +1,4 @@
-import os
-from test.conftest import test_files_path, test_outputs_path
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -8,7 +7,7 @@ from PIL import Image
 
 @pytest.mark.usefixtures("initialize")
 @pytest.mark.parametrize("restorer_name", ["gfpgan", "codeformer"])
-def test_face_restorers(restorer_name):
+def test_face_restorers(restorer_name, tmp_path):
     from modules import shared
 
     if restorer_name == "gfpgan":
@@ -21,9 +20,9 @@ def test_face_restorers(restorer_name):
         restorer = codeformer_model.codeformer.restore
     else:
         raise NotImplementedError("...")
-    img = Image.open(os.path.join(test_files_path, "two-faces.jpg"))
+    img = Image.open(Path(__file__).parent / "test_files" / "two-faces.jpg")
     np_img = np.array(img, dtype=np.uint8)
     fixed_image = restorer(np_img)
     assert fixed_image.shape == np_img.shape
     assert not np.allclose(fixed_image, np_img)  # should have visibly changed
-    Image.fromarray(fixed_image).save(os.path.join(test_outputs_path, f"{restorer_name}.png"))
+    Image.fromarray(fixed_image).save(tmp_path / f"{restorer_name}.png")

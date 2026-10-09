@@ -188,7 +188,7 @@ def test_saved_geninfo_reads_back(images, tmp_path, extension):
         assert images.read_info_from_image(image)[0] == text
 
 
-# --- PNG encoder selection (tests/test_png_writer.py covers the encoder itself) -----------------------------------------
+# --- PNG encoder selection (test/test_png_writer.py covers the encoder itself) -----------------------------------------
 
 def _decoded_png(path):
     with Image.open(path) as image:

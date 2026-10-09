@@ -20,7 +20,7 @@ shared_stub.sd_model = None
 
 # The graph modules resolve `shared` at call time (sys.modules / `from modules import shared`). Install the stub
 # only while this file's tests run: left in sys.modules it replaced the real modules.shared for every test file
-# collected after this one (tests/test_inpainting_geometry_contract.py failed on a missing cmd_opts).
+# collected after this one (test/test_inpainting_geometry_contract.py failed on a missing cmd_opts).
 # (Only this key is swapped and restored: mock.patch.dict(sys.modules) would also drop every module imported meanwhile.)
 _MISSING = object()
 _saved_shared_module = _MISSING
