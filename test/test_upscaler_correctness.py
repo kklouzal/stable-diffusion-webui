@@ -299,6 +299,43 @@ def test_interrupted_upscale_2_returns_input_unchanged(env, interrupt_after):
     assert len(calls) == interrupt_after
 
 
+# --- alpha (the extras run keeps RGBA input on purpose, modules/postprocessing.to_postprocessing_mode) ----------
+
+def _rgba_image(width, height, seed):
+    rng = np.random.default_rng(seed)
+    pixels = rng.integers(0, 256, size=(height, width, 4), dtype=np.uint8)
+    pixels[..., 3] = 0
+    pixels[height // 4:3 * height // 4, width // 4:3 * width // 4, 3] = 255  # opaque centre on transparent ground
+    return Image.fromarray(pixels, "RGBA")
+
+
+@pytest.mark.parametrize("upscale", [
+    lambda utils, model, img: utils.upscale_with_model(model, img, tile_size=0),
+    lambda utils, model, img: utils.upscale_with_model(model, img, tile_size=16, tile_overlap=4),
+    lambda utils, model, img: utils.upscale_2(img, model, tile_size=16, tile_overlap=4, scale=2, desc="t"),
+], ids=["untiled", "grid-tiled", "upscale_2"])
+def test_model_upscale_keeps_alpha(env, upscale):
+    model = _ReplicatePadUpscaler().eval()
+    img = _rgba_image(40, 36, seed=12)
+
+    result = upscale(env.upscaler_utils, model, img)
+
+    assert result.mode == "RGBA" and result.size == (80, 72)
+    # Colour exactly as for the RGB image (RGB inputs are unchanged), alpha resized once to the output size.
+    rgb = upscale(env.upscaler_utils, model, img.convert("RGB"))
+    assert rgb.mode == "RGB"
+    assert np.array_equal(np.asarray(result.convert("RGB")), np.asarray(rgb))
+    assert np.array_equal(np.asarray(result.getchannel("A")), np.asarray(img.getchannel("A").resize((80, 72), resample=LANCZOS)))
+
+
+def test_interrupted_rgba_upscale_returns_input_unchanged(env):
+    env.shared.state.interrupted = True
+    img = _rgba_image(40, 40, seed=2)
+
+    assert env.upscaler_utils.upscale_2(img, _ReplicatePadUpscaler().eval(), tile_size=16, tile_overlap=4, scale=2, desc="t") is img
+    assert env.upscaler_utils.upscale_with_model(_ReplicatePadUpscaler().eval(), img, tile_size=16) is img
+
+
 # --- model load failures --------------------------------------------------------------------------------------
 
 def _load_script(env, relative):
@@ -409,6 +446,35 @@ def test_crop_to_fit_resamples_the_model_output_once(env, pp_upscale):
     # (formerly 4x -> 1000x664, short of 1001 wide -> stretched again to 1001x668).
     covering = img.resize((1200, 800), resample=Image.Resampling.NEAREST).resize((1001, 667), resample=LANCZOS)
     assert np.array_equal(np.asarray(result), np.asarray(covering)[33:634])
+
+
+def test_crop_to_fit_keeps_alpha(env, pp_upscale):
+    upscaler = SimpleNamespace(name="Lanczos", data_path=None, scaler=env.upscaler.UpscalerLanczos())
+    img = _rgba_image(64, 64, seed=3)
+
+    result = pp_upscale.ScriptPostprocessingUpscale().upscale(img, {}, upscaler, 1, 2.0, 0, 128, 96, True)
+
+    # Formerly pasted onto an RGB canvas: the transparent ground became opaque.
+    assert result.mode == "RGBA" and result.size == (128, 96)
+    alpha = np.asarray(result.getchannel("A"))
+    assert alpha[0, 0] == 0 and alpha[48, 64] == 255
+
+
+def test_second_upscaler_blend_keeps_alpha(env, pp_upscale):
+    model = _model_upscaler(env)
+    network = _ReplicatePadUpscaler().eval()
+    model.do_upscale = lambda img, selected_model: env.upscaler_utils.upscale_with_model(network, img, tile_size=0)
+    lanczos = env.upscaler.UpscalerLanczos()
+    env.shared.sd_upscalers = [*model.scalers, *lanczos.scalers]
+    pp = SimpleNamespace(image=_rgba_image(64, 64, seed=7), info={})
+
+    pp_upscale.ScriptPostprocessingUpscale().process(
+        pp, upscale_mode=0, upscale_by=2.0, upscaler_1_name="model", upscaler_2_name="Lanczos", upscaler_2_visibility=0.5,
+    )
+
+    assert pp.image.mode == "RGBA" and pp.image.size == (128, 128)
+    alpha = np.asarray(pp.image.getchannel("A"))
+    assert alpha[0, 0] == 0 and alpha[64, 64] == 255
 
 
 def test_scale_by_target_is_not_a_pixel_short(env, pp_upscale):

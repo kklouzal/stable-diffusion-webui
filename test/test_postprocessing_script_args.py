@@ -62,6 +62,31 @@ def test_blend_with_original_resizes_and_converts_processed_image():
     assert blended.getpixel((0, 0)) == (60, 70, 80, 255)
 
 
+def test_blend_with_original_keeps_the_alpha_of_an_rgba_original():
+    from PIL import Image
+
+    # A face restorer's RGB result over an RGBA original: half transparent, half opaque.
+    alpha = Image.new("L", (4, 2), 0)
+    alpha.paste(255, (2, 0, 4, 2))
+    original = Image.new("RGB", (4, 2), (10, 20, 30))
+    original.putalpha(alpha)
+    restored = Image.new("RGB", (4, 2), (110, 120, 130))
+
+    for visibility, color in ((1.0, (110, 120, 130)), (0.5, (60, 70, 80))):
+        blended = scripts_postprocessing.blend_with_original(original, restored, visibility)
+        assert blended.mode == "RGBA"
+        assert blended.getpixel((0, 0)) == (*color, 0) and blended.getpixel((3, 1)) == (*color, 255)
+
+
+def test_blend_with_original_returns_an_rgb_result_at_full_visibility_unchanged():
+    from PIL import Image
+
+    original = Image.new("RGB", (2, 2), (10, 20, 30))
+    restored = Image.new("RGB", (2, 2), (110, 120, 130))
+
+    assert scripts_postprocessing.blend_with_original(original, restored, 1.0) is restored
+
+
 def test_create_args_for_run_preserves_ui_defaults_for_omitted_keys(monkeypatch):
     runner = make_runner(monkeypatch, [DummyPostprocessingScript])
 

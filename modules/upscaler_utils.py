@@ -63,6 +63,20 @@ def upscale_pil_patch(model, img: Image.Image) -> Image.Image:
             return torch_bgr_to_pil_image(model(tensor))
 
 
+def keeping_alpha(img: Image.Image, upscale_rgb: Callable[[Image.Image], Image.Image]) -> Image.Image:
+    """`upscale_rgb(img)`, except that an RGBA image keeps its alpha: models upscale colour only, so its RGB is
+    upscaled and its alpha resized (LANCZOS) to the result's size and re-attached. Other modes go to `upscale_rgb`
+    unchanged (it converts them to RGB). `upscale_rgb` returns its input when interrupted; then `img` comes back."""
+    if img.mode != "RGBA":
+        return upscale_rgb(img)
+    rgb = img.convert("RGB")
+    output = upscale_rgb(rgb)
+    if output is rgb:
+        return img
+    output.putalpha(img.getchannel("A").resize(output.size, resample=Image.Resampling.LANCZOS))
+    return output
+
+
 def upscale_with_model(
     model: Callable[[torch.Tensor], torch.Tensor],
     img: Image.Image,
@@ -71,6 +85,12 @@ def upscale_with_model(
     tile_overlap: int = 0,
     desc="tiled upscale",
 ) -> Image.Image:
+    """`img` upscaled by `model` (tiled through `images.Grid` unless `tile_size` <= 0); see `keeping_alpha` for RGBA
+    images. An interrupted upscale returns `img`."""
+    return keeping_alpha(img, lambda rgb: _upscale_rgb_with_model(model, rgb, tile_size=tile_size, tile_overlap=tile_overlap, desc=desc))
+
+
+def _upscale_rgb_with_model(model, img: Image.Image, *, tile_size: int, tile_overlap: int, desc: str) -> Image.Image:
     if tile_size <= 0:
         logger.debug("Upscaling %s without tiling", img)
         output = upscale_pil_patch(model, img)
@@ -191,22 +211,26 @@ def upscale_2(
     Convenience wrapper around `tiled_upscale_2` that handles PIL images.
 
     Like `upscale_with_model`, the model runs in its own dtype even when the caller (hires fix) is inside the
-    sampler's autocast, and an interrupted or skipped upscale returns `img` unchanged.
+    sampler's autocast, an RGBA image keeps its alpha (`keeping_alpha`), and an interrupted or skipped upscale
+    returns `img` unchanged.
     """
     param = torch_utils.get_param(model)
 
-    with torch.inference_mode(), devices.without_autocast():
-        # Uploaded once; bitwise the same tensor as the CPU float64 conversion followed by a per-tile copy.
-        tensor = pil_image_to_device_bgr(img, param.device, param.dtype)
-        output = tiled_upscale_2(
-            tensor,
-            model,
-            tile_size=tile_size,
-            tile_overlap=tile_overlap,
-            scale=scale,
-            desc=desc,
-            device=param.device,
-        )
-        if output is None:
-            return img
-        return torch_bgr_to_pil_image(output)
+    def upscale_rgb(rgb: Image.Image) -> Image.Image:
+        with torch.inference_mode(), devices.without_autocast():
+            # Uploaded once; bitwise the same tensor as the CPU float64 conversion followed by a per-tile copy.
+            tensor = pil_image_to_device_bgr(rgb, param.device, param.dtype)
+            output = tiled_upscale_2(
+                tensor,
+                model,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                scale=scale,
+                desc=desc,
+                device=param.device,
+            )
+            if output is None:
+                return rgb
+            return torch_bgr_to_pil_image(output)
+
+    return keeping_alpha(img, upscale_rgb)
