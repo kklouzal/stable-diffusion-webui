@@ -153,12 +153,12 @@ class EmbeddingDatabase:
         vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
         return vec.shape[1]
 
-    def read_embedding_from_image(self, path, name):
+    def read_embedding_from_image(self, path, name, revision):
         try:
-            ondisk_mtime = os.path.getmtime(path)
-            semantic_key = (os.path.realpath(path), ondisk_mtime)
+            # Keyed by the file revision (cache.file_cache_key): mtime alone keeps a same-mtime replacement (cp -p).
+            semantic_key = (os.path.realpath(path), revision)
 
-            if (cache_embedding := self.image_embedding_cache.get(path)) and ondisk_mtime == cache_embedding.get('mtime', 0):
+            if (cache_embedding := self.image_embedding_cache.get(path)) and revision is not None and revision == cache_embedding.get('revision'):
                 openclaw_cache_epochs.observe("E07", "hit", reason="cache_hit", semantic_key=semantic_key)
                 return cache_embedding.get('data', None), cache_embedding.get('name', None)
 
@@ -173,7 +173,7 @@ class EmbeddingDatabase:
             if data is None or shared.opts.textual_inversion_image_embedding_data_cache:
                 # data of image embeddings only will be cached if the option textual_inversion_image_embedding_data_cache is enabled
                 # results of images that are not embeddings will allways be cached to reduce unnecessary future disk reads
-                self.image_embedding_cache[path] = {'data': data, 'name': None if data is None else name, 'mtime': ondisk_mtime}
+                self.image_embedding_cache[path] = {'data': data, 'name': None if data is None else name, 'revision': revision}
                 openclaw_cache_epochs.observe("E07", "publish", reason="published", semantic_key=semantic_key)
 
             return data, name
@@ -192,7 +192,7 @@ class EmbeddingDatabase:
             if second_ext.upper() == '.PREVIEW':
                 return
 
-            data, name = self.read_embedding_from_image(path, name)
+            data, name = self.read_embedding_from_image(path, name, revision)
             if data is None:
                 return
 

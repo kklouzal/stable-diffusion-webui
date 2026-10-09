@@ -18,7 +18,7 @@ from modules import shared, shared_init
 if getattr(shared, "opts", None) is None:
     shared_init.initialize()
 
-from modules import devices, errors, hashes, images, processing, sd_hijack_checkpoint, sd_models  # noqa: E402
+from modules import cache as cache_module, devices, errors, hashes, images, processing, sd_hijack_checkpoint, sd_models  # noqa: E402
 from modules.hypernetworks import hypernetwork as hn  # noqa: E402
 from modules.textual_inversion import dataset, textual_inversion as ti  # noqa: E402
 from modules.textual_inversion.learn_schedule import LearnRateScheduler  # noqa: E402
@@ -475,3 +475,21 @@ Last saved image: {html.escape(saved_image)}<br/>
 
     for kind, markup in previous.items():
         assert ti.training_textinfo(loss_step, steps_done, prompt, kind, saved_file, saved_image) == markup
+
+
+def test_image_embedding_cache_is_keyed_by_the_file_revision(tmp_path):
+    # A replacement that keeps the mtime (cp -p, rsync -t) must not be served from the disk cache: the entry is keyed
+    # by cache.file_cache_key's revision, which also changes with the inode/ctime, not by the mtime alone.
+    path = tmp_path / "plain.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(path)
+    owner = SimpleNamespace(image_embedding_cache={})
+    read = ti.EmbeddingDatabase.read_embedding_from_image
+
+    first = cache_module.file_cache_key(path)[1]
+    assert read(owner, str(path), "plain", first) == (None, "plain")  # not an embedding image: read, then cached
+    assert owner.image_embedding_cache[str(path)]["revision"] == first
+
+    owner.image_embedding_cache[str(path)]["name"] = "served-from-cache"
+    assert read(owner, str(path), "plain", first) == (None, "served-from-cache")  # same revision: a hit
+    assert read(owner, str(path), "plain", first[:-1] + ("other",)) == (None, "plain")  # new revision: re-read
+    assert read(owner, str(path), "plain", None) == (None, "plain")  # unknown revision: never a hit
