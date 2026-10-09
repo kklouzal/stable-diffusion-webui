@@ -289,5 +289,6 @@ All of these were checked on the GPU. Sample sheets were shown to the operator.
 
 ## VAE-only layout
 
-The owner decided the parked NHWC GroupNorm / all-NCHW work stays parked. A VAE-only layout change is to be
-re-evaluated at the very end of this pass, if the host stays stable. The result is recorded below.
+The owner decided the parked NHWC GroupNorm / all-NCHW work stays parked, and deferred the VAE-only layout
+re-evaluation (about 1.1 s of strided copies per n-w1 request at the VAE's full-resolution sizes, per the profile above)
+to a later date. Nothing in this pass changes the layout.
