@@ -265,7 +265,12 @@ def note_vae_loaded(model: Any) -> dict[str, Any]:
 
 
 def note_lora_loaded() -> dict[str, Any]:
-    return invalidate_if_changed("lora", _lora_signature(), "lora_changed")
+    """Called when the Lora extension publishes an applied state. lora_functional is part of the lifecycle state:
+    functional forwards restore the base weights in place, under graphs captured on merged weights, and a merged
+    publish rewrites the weights functional graphs captured, so no graph survives a mode switch, even with the
+    same LoRA set (the key's lora_functional part alone would let the old mode's graphs replay after switching back).
+    """
+    return invalidate_if_changed("lora", (_lora_signature(), _lora_functional()), "lora_changed")
 
 
 def _evict_if_needed_locked() -> None:
@@ -380,6 +385,11 @@ def _attention_key() -> str | None:
     return sd_hijack_optimizations.active_sdpa_backend() if sd_hijack_optimizations is not None else None
 
 
+def _lora_functional() -> bool:
+    opts = getattr(sys.modules.get("modules.shared"), "opts", None)
+    return bool(getattr(opts, "lora_functional", False))
+
+
 def _runtime_branch_key() -> tuple[Any, ...]:
     """Process-wide Python state the captured UNet call branches on, which a replay never re-reads.
 
@@ -398,7 +408,7 @@ def _runtime_branch_key() -> tuple[Any, ...]:
     return (
         getattr(cross_attention, "forward", None),
         bool(getattr(opts, "upcast_attn", False)),
-        bool(getattr(opts, "lora_functional", False)),
+        _lora_functional(),
         nhwc_group_norm.state_key() if nhwc_group_norm is not None else None,
     )
 

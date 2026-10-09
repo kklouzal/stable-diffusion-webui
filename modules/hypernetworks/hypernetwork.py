@@ -1,3 +1,4 @@
+import copy
 import datetime
 import glob
 import html
@@ -9,7 +10,7 @@ import torch
 import tqdm
 from einops import rearrange, repeat
 from ldm.util import default
-from modules import devices, sd_models, shared, hashes, errors
+from modules import devices, sd_models, shared, hashes
 from modules.textual_inversion import textual_inversion, saving_settings
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
 from torch import einsum
@@ -194,6 +195,13 @@ class Hypernetwork:
 
         return self
 
+    def with_multiplier(self, multiplier):
+        """A copy that shares this hypernetwork's parameters and applies `multiplier`: one per prompt mention, so two
+        mentions of one file keep their own multipliers."""
+        use = copy.copy(self)
+        use.layers = {size: tuple(copy.copy(layer) for layer in layers) for size, layers in self.layers.items()}
+        return use.set_multiplier(multiplier)
+
     def eval(self):
         for layers in self.layers.values():
             for layer in layers:
@@ -231,7 +239,9 @@ class Hypernetwork:
             optimizer_saved_dict['optimizer_state_dict'] = self.optimizer_state_dict
             torch.save(optimizer_saved_dict, filename + '.optim')
 
-    def load(self, filename):
+    def load(self, filename, load_optimizer_state=True):
+        """Load the hypernetwork file `filename`; with load_optimizer_state (training) also the optimizer state saved
+        beside it in `filename`.optim, which inference never uses."""
         self.filename = filename
         if self.name is None:
             self.name = os.path.splitext(os.path.basename(filename))[0]
@@ -263,21 +273,22 @@ class Hypernetwork:
             print(f"  Activate last layer: {self.activate_output}")
             print(f"  Dropout structure: {self.dropout_structure}")
 
-        optimizer_saved_dict = torch.load(self.filename + '.optim', map_location='cpu') if os.path.exists(self.filename + '.optim') else {}
+        if load_optimizer_state:
+            optimizer_saved_dict = torch.load(self.filename + '.optim', map_location='cpu') if os.path.exists(self.filename + '.optim') else {}
 
-        if self.shorthash() == optimizer_saved_dict.get('hash', None):
-            self.optimizer_state_dict = optimizer_saved_dict.get('optimizer_state_dict', None)
-        else:
-            self.optimizer_state_dict = None
-        if self.optimizer_state_dict:
-            self.optimizer_name = optimizer_saved_dict.get('optimizer_name', 'AdamW')
-            if shared.opts.print_hypernet_extra:
-                print("Loaded existing optimizer from checkpoint")
-                print(f"Optimizer name is {self.optimizer_name}")
-        else:
-            self.optimizer_name = "AdamW"
-            if shared.opts.print_hypernet_extra:
-                print("No saved optimizer exists in checkpoint")
+            if self.shorthash() == optimizer_saved_dict.get('hash', None):
+                self.optimizer_state_dict = optimizer_saved_dict.get('optimizer_state_dict', None)
+            else:
+                self.optimizer_state_dict = None
+            if self.optimizer_state_dict:
+                self.optimizer_name = optimizer_saved_dict.get('optimizer_name', 'AdamW')
+                if shared.opts.print_hypernet_extra:
+                    print("Loaded existing optimizer from checkpoint")
+                    print(f"Optimizer name is {self.optimizer_name}")
+            else:
+                self.optimizer_name = "AdamW"
+                if shared.opts.print_hypernet_extra:
+                    print("No saved optimizer exists in checkpoint")
 
         for size, sd in state_dict.items():
             if type(size) == int:
@@ -311,39 +322,40 @@ def list_hypernetworks(path):
 
 
 def load_hypernetwork(name):
+    """The hypernetwork listed as `name`, loaded for inference. Raises when none is listed or its file cannot be
+    loaded."""
     path = shared.hypernetworks.get(name, None)
 
     if path is None:
-        return None
+        raise RuntimeError(f"hypernetwork not found: {name}")
 
+    hypernetwork = Hypernetwork()
     try:
-        hypernetwork = Hypernetwork()
-        hypernetwork.load(path)
-        return hypernetwork
-    except Exception:
-        errors.report(f"Error loading hypernetwork {path}", exc_info=True)
-        return None
+        hypernetwork.load(path, load_optimizer_state=False)
+    except Exception as e:
+        raise RuntimeError(f"Error loading hypernetwork {path}") from e
+    return hypernetwork
 
 
 def load_hypernetworks(names, multipliers=None):
-    already_loaded = {}
+    """Publish one hypernetwork per mention in `names`, in order, each applying its own multiplier.
 
-    for hypernetwork in shared.loaded_hypernetworks:
-        if hypernetwork.name in names:
-            already_loaded[hypernetwork.name] = hypernetwork
-
-    shared.loaded_hypernetworks.clear()
+    A mentioned hypernetwork that is not listed or cannot be loaded raises before anything is published:
+    generating without it is never an option (extra_networks.activate fails the request). Files loaded by the
+    previous activation are reused.
+    """
+    already_loaded = {hypernetwork.filename: hypernetwork for hypernetwork in shared.loaded_hypernetworks}
+    uses = []
 
     for i, name in enumerate(names):
-        hypernetwork = already_loaded.get(name, None)
+        hypernetwork = already_loaded.get(shared.hypernetworks.get(name, None))
         if hypernetwork is None:
             hypernetwork = load_hypernetwork(name)
+            already_loaded[hypernetwork.filename] = hypernetwork
 
-        if hypernetwork is None:
-            continue
+        uses.append(hypernetwork.with_multiplier(multipliers[i] if multipliers else 1.0))
 
-        hypernetwork.set_multiplier(multipliers[i] if multipliers else 1.0)
-        shared.loaded_hypernetworks.append(hypernetwork)
+    shared.loaded_hypernetworks[:] = uses
 
 
 def apply_single_hypernetwork(hypernetwork, context_k, context_v, layer=None):

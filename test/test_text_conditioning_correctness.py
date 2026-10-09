@@ -168,3 +168,59 @@ def test_embedding_replaced_in_place_is_republished_without_hashes(monkeypatch, 
     assert torch.equal(db.skipped_embeddings["style"].vec.cpu(), torch.ones(1, 768))
     assert openclaw_cache_epochs.epoch_subset(("textual_inversion_epoch",)) != epoch
     assert not db.load_textual_inversion_embeddings(force_reload=True)  # unchanged file: nothing to publish
+
+
+def _embedding_db(monkeypatch, tmp_path):
+    from modules import hashes
+    from modules.textual_inversion import textual_inversion as ti
+
+    monkeypatch.setattr(hashes, "sha256", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ti.EmbeddingDatabase, "get_expected_shape", lambda self: 2048)  # 768-wide files are skipped
+    db = ti.EmbeddingDatabase()
+    db.add_embedding_dir(str(tmp_path))
+    return ti, db
+
+
+def _save_embedding(path, value):
+    import safetensors.torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file({"emb_params": torch.full((1, 768), float(value))}, str(path))
+
+
+def test_embedding_changes_in_subfolders_are_reloaded(monkeypatch, tmp_path):
+    """Only the top folder's mtime was checked: files added to or rewritten in a subfolder stayed unloaded until a
+    forced reload."""
+    _ti, db = _embedding_db(monkeypatch, tmp_path)
+    _save_embedding(tmp_path / "styles" / "first.safetensors", 0)
+    assert db.load_textual_inversion_embeddings()
+    assert not db.load_textual_inversion_embeddings()  # unchanged tree: no reload
+
+    _save_embedding(tmp_path / "styles" / "second.safetensors", 1)
+    assert db.load_textual_inversion_embeddings()
+    assert sorted(db.skipped_embeddings) == ["first", "second"]
+
+    _save_embedding(tmp_path / "styles" / "first.safetensors", 2)
+    assert db.load_textual_inversion_embeddings()
+    assert torch.equal(db.skipped_embeddings["first"].vec.cpu(), torch.full((1, 768), 2.0))
+
+    (tmp_path / "styles" / "second.safetensors").unlink()
+    assert db.load_textual_inversion_embeddings()
+    assert sorted(db.skipped_embeddings) == ["first"]
+
+
+def test_duplicate_embedding_names_load_one_file_deterministically_and_are_reported(monkeypatch, tmp_path):
+    ti, db = _embedding_db(monkeypatch, tmp_path)
+    reports = []
+    monkeypatch.setattr(ti.errors, "report", lambda message, **_kwargs: reports.append(message))
+    for folder, value in (("b", 2), ("a", 1)):
+        _save_embedding(tmp_path / folder / "style.safetensors", value)
+    _save_embedding(tmp_path / "style.safetensors", 0)
+
+    assert db.load_textual_inversion_embeddings()
+
+    assert torch.equal(db.skipped_embeddings["style"].vec.cpu(), torch.zeros(1, 768))  # top folder first, then a/, b/
+    assert reports == [
+        f"Textual inversion embedding {tmp_path / 'a' / 'style.safetensors'} is not loaded: {tmp_path / 'style.safetensors'} has the same name 'style'",
+        f"Textual inversion embedding {tmp_path / 'b' / 'style.safetensors'} is not loaded: {tmp_path / 'style.safetensors'} has the same name 'style'",
+    ]

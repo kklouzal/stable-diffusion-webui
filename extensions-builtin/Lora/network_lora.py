@@ -63,7 +63,10 @@ class NetworkModuleLora(network.NetworkModule):
                 weight = weight.reshape(module.weight.shape)
             module.weight.copy_(weight)
 
-        module.to(device=devices.cpu, dtype=devices.dtype)
+        # The factors keep the file's dtype: calc_updown computes the delta in float32, and rounding fp16/fp32 factors
+        # to a bf16 devices.dtype first moved every merged weight away from the file's exact delta. forward() casts
+        # them to the activations' dtype where they are used.
+        module.to(device=devices.cpu, dtype=weight.dtype)
         module.weight.requires_grad_(False)
 
         return module
@@ -93,6 +96,14 @@ class NetworkModuleLora(network.NetworkModule):
         self.up_model.to(device=devices.device)
         self.down_model.to(device=devices.device)
 
-        return y + self.up_model(self.down_model(x)) * self.multiplier() * self.calc_scale()
+        return y + self._apply_factor(self.up_model, self._apply_factor(self.down_model, x)) * self.multiplier() * self.calc_scale()
+
+    @staticmethod
+    def _apply_factor(factor, x):
+        """factor(x) with factor's weight cast to x's dtype (the stored factors keep the file's dtype)."""
+        weight = factor.weight.to(x.dtype)
+        if isinstance(factor, torch.nn.Conv2d):
+            return torch.nn.functional.conv2d(x, weight, None, factor.stride, factor.padding, factor.dilation, factor.groups)
+        return torch.nn.functional.linear(x, weight)
 
 

@@ -185,11 +185,14 @@ def test_in_memory_cache_evicts_least_recently_requested(lora_networks, monkeypa
     monkeypatch.setattr(networks, "load_network", lambda name, on_disk: parsed.append(name) or SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={}))
     monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
     monkeypatch.setattr(networks.shared.opts, "lora_in_memory_limit", 2, raising=False)
+    gcs = []
+    monkeypatch.setattr(networks.devices, "torch_gc", lambda: gcs.append(len(networks.networks_in_memory)))
 
     for names in (["a"], ["b"], ["a"], ["c"], ["a"]):  # "a" stays in use; "b" is the stale entry
         networks.load_networks(names)
 
     assert parsed == ["a", "b", "c"]
+    assert gcs == [2]  # the device cache is released only after the eviction of "b", not on every activation
     assert [key[0].rsplit("/", 1)[-1] for key in networks.networks_in_memory] == ["c.safetensors", "a.safetensors"]
 
 
@@ -529,7 +532,7 @@ def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora
         network_mxfp8_managed_modules=[("layer", linear)],
         network_mxfp8_active_config_ready=True,
     )
-    net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None)
+    net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None, modules={})
     networks.loaded_networks[:] = [net]
 
     assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
@@ -885,7 +888,6 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
         mha.network_layer_name + "_out_proj": _mha_delta_module(torch, 4.0),
     })
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
 
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
@@ -899,13 +901,11 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
     assert torch.equal(mha.in_proj_weight, expected_qkv)
     assert torch.equal(mha.out_proj.weight, base_out + 4)
     monkeypatch.setattr(networks, "loaded_networks", [])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: ())
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
     assert torch.equal(mha.in_proj_weight, base_qkv)
     assert torch.equal(mha.out_proj.weight, base_out)
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
     assert torch.equal(mha.in_proj_weight, expected_qkv)
@@ -916,7 +916,6 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
 def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch):
     torch = pytest.importorskip("torch")
     networks = lora_networks
-    monkeypatch.setattr(networks, "extra_network_lora", SimpleNamespace(errors={}))
     mha = torch.nn.MultiheadAttention(4, 1, bias=False, batch_first=True)
     mha.network_layer_name = "1_model_transformer_resblocks_0_attn"
     base_qkv = mha.in_proj_weight.detach().clone()
@@ -929,10 +928,10 @@ def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch)
         mha.network_layer_name + "_v_proj": _mha_delta_module(torch, 3.0),
     })
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("broken", 1.0, 1.0, None),))
-    networks.network_apply_weights(mha)
+    with pytest.raises(RuntimeError, match="LoRA broken cannot be applied to layer 1_model_transformer_resblocks_0_attn_k_proj: injected failure"):
+        networks.network_apply_weights(mha)
     assert torch.equal(mha.in_proj_weight, base_qkv)
-    assert mha.network_current_names == (("broken", 1.0, 1.0, None),)
+    assert mha.network_current_names == ()  # the layer holds its base weights, which the next apply sees
 
 
 def test_model_level_apply_includes_mha_and_deduplicates_out_proj(lora_networks, monkeypatch):
@@ -1030,7 +1029,7 @@ def test_wanted_names_are_built_once_per_published_set(lora_networks, monkeypatc
     assert networks.network_wanted_names() == (signature(beta),)
     networks._set_loaded_networks([])
     assert networks.network_wanted_names() == ()
-    assert networks._wanted_names_memo == ((), ())  # no reference to the unloaded set is kept
+    assert networks._wanted_names_memo == ((), (), {})  # no reference to the unloaded set is kept
 
 
 def test_apply_weights_returns_early_without_loras(lora_networks, monkeypatch):
@@ -1039,7 +1038,7 @@ def test_apply_weights_returns_early_without_loras(lora_networks, monkeypatch):
     linear = torch.nn.Linear(2, 2)
     linear.network_layer_name = "layer"
     weight = linear.weight.detach().clone()
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (_ for _ in ()).throw(AssertionError("no-LoRA forward must not build names")))
+    monkeypatch.setattr(networks, "_wanted_names_state", lambda: (_ for _ in ()).throw(AssertionError("no-LoRA forward must not build names")))
 
     networks.network_apply_weights(linear)
 
@@ -1127,7 +1126,162 @@ def test_lora_activation_errors_stop_generation_instead_of_dropping_every_lora(l
         extra_networks.activate(p, {"lora": [extra_networks.ExtraNetworkParams(items=["missing", "0.8"])]})
 
     monkeypatch.setattr(networks, "load_networks", lambda *args: loaded.append(args))
-    for items in (["alpha", "nan"], ["alpha", "1", "inf"], ["alpha", "te=-inf"], ["alpha", "abc"], ["alpha", "1", "1", "8.5"]):
+    for items in (["alpha", "nan"], ["alpha", "1", "inf"], ["alpha", "te=-inf"], ["alpha", "abc"], ["alpha", "1", "1", "8.5"], ["alpha", "1", "1", "0"], ["alpha", "dyn=-2"]):
         with pytest.raises(extra_networks_lora.FatalLoraPreparationError):
             lora.activate(p, [extra_networks.ExtraNetworkParams(items=items)])
     assert loaded == []
+
+
+def _activation(networks, monkeypatch, parsed):
+    import extra_networks_lora
+    from modules import extra_networks
+
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "load_network", lambda *_args: parsed)
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    monkeypatch.setattr(networks.shared.opts, "lora_add_hashes_to_infotext", True, raising=False)
+    lora = extra_networks_lora.ExtraNetworkLora()
+
+    def activate(name, p=None, is_hr_pass=False):
+        p = p or SimpleNamespace(all_prompts=["x"], extra_generation_params={})
+        p.is_hr_pass = is_hr_pass
+        lora.activate(p, [extra_networks.ExtraNetworkParams(items=[name, "0.5"])])
+        return p
+    return activate
+
+
+def test_unmatched_lora_keys_are_reported_on_every_activation(lora_networks, monkeypatch):
+    """Keys that name no model layer cannot be applied; the request reports them ("Lora errors"), also when the
+    applied state is reused (no parse, no merge) and when the hires pass activates again."""
+    networks = lora_networks
+    parsed = networks.network.Network("alpha", networks.available_networks["alpha"])
+    parsed.unmatched_keys = ("lora_te2_text_projection.alpha", "lora_te2_text_projection.lora_down.weight", "lora_te2_text_projection.lora_up.weight")
+    activate = _activation(networks, monkeypatch, parsed)
+
+    first = activate("alpha")
+    assert first.extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+
+    loads = []
+    real_load_networks = networks.load_networks
+    monkeypatch.setattr(networks, "load_networks", lambda *args: loads.append(real_load_networks(*args)))
+    second = activate("alpha")
+    assert loads == [False]  # the applied state was reused
+    assert second.extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+    assert activate("alpha", p=second, is_hr_pass=True).extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+
+    parsed.unmatched_keys = ()
+    networks.loaded_networks.clear()
+    monkeypatch.setattr(networks, "_applied_state_key", None)
+    assert "Lora errors" not in activate("alpha").extra_generation_params
+
+
+def test_lora_hashes_name_the_alias_this_request_used(lora_networks, monkeypatch):
+    """Switching between two names of one file with equal multipliers reuses the applied state, whose networks
+    carry the previous request's mentioned_name; the infotext used that stale alias."""
+    networks = lora_networks
+    parsed = networks.network.Network("alpha", networks.available_networks["alpha"])
+    activate = _activation(networks, monkeypatch, parsed)
+
+    assert activate("alpha-alias").extra_generation_params["Lora hashes"] == "alpha-alias: abc"
+    second = activate("alpha")
+    assert networks.loaded_networks[0].mentioned_name == "alpha-alias"  # the applied state was reused
+    assert second.extra_generation_params["Lora hashes"] == "alpha: abc"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_bundled_ti_hash_follows_the_infotext_option(lora_networks, monkeypatch, enabled):
+    """sd_hijack_clip skips embeddings whose shorthash is false and writes f"{name}: {shorthash}"; with the option off
+    a bundled embedding wrote "<embedding>: " (the hash str is the LoRA name, so it was always true)."""
+    networks = lora_networks
+    monkeypatch.setattr(networks.shared.opts, "lora_bundled_ti_to_infotext", enabled)
+    shorthash = networks.BundledTIHash("my_lora")
+
+    entries = [f"emb: {h}" for h in (shorthash,) if h]
+
+    assert str(shorthash) == ("my_lora" if enabled else "")
+    assert entries == (["emb: my_lora"] if enabled else [])
+
+
+def _sd1_like_model(torch):
+    model = torch.nn.Module()
+    model.is_sdxl = False
+    model.cond_stage_model = torch.nn.Linear(2, 2)
+    model.model = torch.nn.Module()
+    model.model.diffusion_model = torch.nn.Linear(2, 2)
+    return model
+
+
+def test_parsed_networks_and_applied_state_belong_to_one_model(lora_networks, monkeypatch):
+    """Parsed networks hold the layers they were matched against and the applied key describes weights merged into
+    one model: a replaced model (load callback) or a switch to another cached model (no callback) drops both."""
+    import torch
+    networks = lora_networks
+    parses = []
+
+    def load_network(name, _on_disk):
+        net = networks.network.Network(name, networks.available_networks["alpha"])
+        parses.append(networks.shared.sd_model)
+        return net
+
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "load_network", load_network)
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    first, second = _sd1_like_model(torch), _sd1_like_model(torch)
+
+    monkeypatch.setattr(networks.shared, "sd_model", first)
+    networks.assign_network_names_to_compvis_modules(first)
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None])
+    published_key = networks._applied_state_key
+
+    networks.assign_network_names_to_compvis_modules(first)  # e.g. a VAE reload: same model, same layers
+    assert len(networks.networks_in_memory) == 1 and networks._applied_state_key == published_key
+    assert not networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first]
+
+    monkeypatch.setattr(networks.shared, "sd_model", second)
+    networks.assign_network_names_to_compvis_modules(second)
+    assert networks.networks_in_memory == {} and networks.loaded_networks == [] and networks._applied_state_key is None
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first, second]
+
+    monkeypatch.setattr(networks.shared, "sd_model", first)  # a cached model made current again: no callback runs
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first, second, first]
+
+
+def test_trashed_model_drops_lora_weight_backups(lora_networks):
+    import torch
+    from modules import sd_models
+    model = _sd1_like_model(torch)
+    layer = model.model.diffusion_model
+    layer.network_weights_backup = layer.weight.detach().clone()
+    layer.network_bias_backup = layer.bias.detach().clone()
+
+    sd_models.send_model_to_trash(model)
+
+    assert not hasattr(layer, "network_weights_backup") and not hasattr(layer, "network_bias_backup")
+
+
+def test_network_listing_publishes_new_registries_under_iterating_readers(lora_networks, monkeypatch, tmp_path):
+    """GET /sdapi/v1/loras iterates available_networks on the event loop while a refresh or a generation's lookup of
+    a new name rebuilt it in place ("dictionary changed size during iteration", or a half-built list)."""
+    import safetensors.torch
+    import torch
+    networks = lora_networks
+    lora_dir = tmp_path / "Lora"
+    lora_dir.mkdir()
+    for name in ("a", "b"):
+        safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / f"{name}.safetensors"))
+    monkeypatch.setattr(networks.shared.cmd_opts, "lora_dir", str(lora_dir), raising=False)
+    monkeypatch.setattr(networks.shared.cmd_opts, "lyco_dir_backcompat", str(tmp_path / "LyCORIS"), raising=False)
+    networks.list_available_networks()
+    listing = networks.available_networks
+    reader = iter(listing.values())
+    next(reader)
+
+    safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / "c.safetensors"))
+    networks.list_available_networks()
+    safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / "d.safetensors"))
+    networks.update_available_networks_by_names(["d"])
+
+    assert [entry.name for entry in reader] == ["b"]  # the reader finishes the registry it started on
+    assert sorted(listing) == ["a", "b"]
+    assert sorted(networks.available_networks) == ["a", "b", "c", "d"]
+    assert networks.forbidden_network_aliases == {"none": 1, "Addams": 1}

@@ -85,6 +85,8 @@ def lora_networks(monkeypatch):
     networks.loaded_networks.clear()
     monkeypatch.setattr(networks, "loaded_bundle_embeddings", {}, raising=False)
     monkeypatch.setattr(networks, "_applied_state_key", None, raising=False)
+    monkeypatch.setattr(networks, "_model_token", None, raising=False)
+    networks._adopt_model(networks.shared.sd_model)  # the networks state below belongs to this model
     networks.openclaw_cache_epochs.reset_for_tests()
     yield networks
     networks.loaded_networks.clear()

@@ -54,6 +54,9 @@ def _record_lora_steady_state(*, hit, reason, identity_ms, load_parse_ms=0.0, pu
             for operation in t["avoided"]:
                 t["avoided"][operation] += 1
 _applied_state_key = None
+_model_token = None
+"""Identity token of the model loaded_networks, networks_in_memory and _applied_state_key refer to; that model holds
+it as network_lora_model_token (see _adopt_model)."""
 
 
 module_types = [
@@ -85,7 +88,7 @@ suffix_conversion = {
 }
 
 
-def convert_diffusers_name_to_compvis(key, is_sd2):
+def convert_diffusers_name_to_compvis(key, is_sd2, layer_mapping):
     def match(match_list, regex_text):
         regex = re_compiled.get(regex_text)
         if regex is None:
@@ -127,7 +130,11 @@ def convert_diffusers_name_to_compvis(key, is_sd2):
         return f"diffusion_model_input_blocks_{3 + m[0] * 3}_0_op"
 
     if match(m, r"lora_unet_up_blocks_(\d+)_upsamplers_0_conv"):
-        return f"diffusion_model_output_blocks_{2 + m[0] * 3}_{2 if m[0]>0 else 1}_conv"
+        # The upsampler follows the up block's last resnet and, when the block has them, its attentions: index 1 in the
+        # attention-free first up block of SD1/SD2, index 2 in every other block (SDXL's first two up blocks have
+        # attentions, so its first upsampler is output_blocks_2_2, as ComfyUI and diffusers map it).
+        block = f"diffusion_model_output_blocks_{2 + m[0] * 3}"
+        return f"{block}_1_conv" if f"{block}_1_conv" in layer_mapping else f"{block}_2_conv"
 
     if match(m, r"lora_te_text_model_encoder_layers_(\d+)_(.+)"):
         if is_sd2:
@@ -176,15 +183,56 @@ def assign_network_names_to_compvis_modules(sd_model):
         network_layer_mapping[network_name] = module
         module.network_layer_name = network_name
 
+    previous = getattr(sd_model, "network_layer_mapping", None)
+    layers_replaced = previous is None or previous.keys() != network_layer_mapping.keys() or any(previous[name] is not layer for name, layer in network_layer_mapping.items())
     sd_model.network_layer_mapping = network_layer_mapping
+    _adopt_model(sd_model, layers_replaced)
+
+
+def _adopt_model(sd_model, layers_replaced=False):
+    """Make `sd_model` the model that parsed networks and the applied state refer to.
+
+    Parsed networks hold the layers of the model they were matched against (NetworkModule.sd_module, the key match,
+    the shapes), and the applied state key describes weights merged into that model. When another model becomes
+    current (a load, or a switch to a cached model, which runs no model_loaded callback) or the model's layers were
+    replaced, both are dropped: the cache would otherwise keep the old model's layers (and their CPU weight backups)
+    alive and apply stale parses, and an equal applied key would skip merging into the new model. Layers carry their
+    own merge state (network_current_names and backups), so the next publication reconciles every layer.
+    """
+    global _applied_state_key, _model_token
+    if not layers_replaced and _model_token is not None and getattr(sd_model, "network_lora_model_token", None) is _model_token:
+        return
+    with openclaw_cache_epochs.epoch_transaction():
+        with _network_application_lock:
+            dropped_sources = list(networks_in_memory)
+            had_applied_state = bool(loaded_networks) or _applied_state_key is not None
+            networks_in_memory.clear()
+            for source_key in dropped_sources:
+                openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=source_key)
+            openclaw_cache_epochs.set_size("E12", current_size=0, capacity=shared.opts.lora_in_memory_limit)
+            _set_loaded_networks([])
+            _applied_state_key = None
+            _model_token = object()
+            sd_model.network_lora_model_token = _model_token
+            if dropped_sources:
+                openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="checkpoint_loaded")
+            if had_applied_state:
+                openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="checkpoint_loaded")
 
 
 class BundledTIHash(str):
+    """The "TI hashes" infotext value of a LoRA-bundled embedding: the LoRA's name while lora_bundled_ti_to_infotext
+    is on. While it is off the value is empty and false, so sd_hijack_clip leaves the embedding out (`if not
+    shorthash`) instead of writing "<embedding>: "."""
+
     def __init__(self, hash_str):
         self.hash = hash_str
 
     def __str__(self):
         return self.hash if shared.opts.lora_bundled_ti_to_infotext else ''
+
+    def __bool__(self):
+        return bool(str(self))
 
 
 def network_file_signature(filename):
@@ -233,6 +281,14 @@ def _execution_identity():
         str(getattr(devices, "dtype_unet", None)),
     )
 
+def _application_mode():
+    """How the published networks reach the forwards: merged into the layer weights, or added per forward
+    (lora_functional, whose forwards restore the base weights in place). Part of the applied state: switching it
+    with the same networks must publish again, so merged weights are re-applied before sampling and CUDA graphs
+    captured in the other mode are dropped (openclaw_cuda_graphs.note_lora_loaded)."""
+    return "functional" if getattr(shared.opts, "lora_functional", False) else "merged"
+
+
 def clone_network_for_use(net):
     """Return an independent per-prompt-use Network wrapper.
 
@@ -275,7 +331,7 @@ def network_applied_state_key(networks_to_apply):
         getattr(net, "dyn_dim", None),
         tuple(sorted(getattr(net, "modules", {}).keys())),
     ) for net in networks_to_apply)
-    return (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+    return (ordered, _execution_identity(), _application_mode(), LORA_APPLIED_IMPLEMENTATION_REVISION)
 
 
 def current_network_state_identity():
@@ -285,7 +341,7 @@ def current_network_state_identity():
 
 
 def _apply_loaded_state_to_model():
-    if getattr(shared.opts, "lora_functional", False):
+    if _application_mode() == "functional":
         return
     model = getattr(shared, "sd_model", None)
     mapping = getattr(model, "network_layer_mapping", {})
@@ -432,6 +488,22 @@ def _publish_applied_state(new_networks, emb_db=None):
             return True
 
 
+def network_layer_for_key(layer_mapping, key):
+    """(layer name, layer) of the converted LoRA key `key` in `layer_mapping`; (key, None) when no layer has it.
+
+    LoRAs name CLIP text encoder layers in the text_model layout (`..._transformer_text_model_encoder_...`). The
+    CLIPTextModel of transformers 5 holds its embeddings/encoder/final_layer_norm directly (no text_model submodule;
+    sd_models remaps checkpoints the same way), so its layers are mapped as `..._transformer_encoder_...`.
+    """
+    layer = layer_mapping.get(key)
+    if layer is None and "transformer_text_model_" in key:
+        flat = key.replace("transformer_text_model_", "transformer_", 1)
+        layer = layer_mapping.get(flat)
+        if layer is not None:
+            return flat, layer
+    return key, layer
+
+
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
@@ -445,7 +517,8 @@ def load_network(name, network_on_disk):
         assign_network_names_to_compvis_modules(shared.sd_model)
 
     keys_failed_to_match = {}
-    is_sd2 = 'model_transformer_resblocks' in shared.sd_model.network_layer_mapping
+    layer_mapping = shared.sd_model.network_layer_mapping
+    is_sd2 = 'model_transformer_resblocks' in layer_mapping
     if hasattr(shared.sd_model, 'diffusers_weight_map'):
         diffusers_weight_map = shared.sd_model.diffusers_weight_map
     elif hasattr(shared.sd_model, 'diffusers_weight_mapping'):
@@ -476,42 +549,38 @@ def load_network(name, network_on_disk):
             else:
                 emb_dict[vec_name] = weight
             bundle_embeddings[emb_name] = emb_dict
+            continue
 
         if diffusers_weight_map:
             key = diffusers_weight_map.get(key_network_without_network_parts, key_network_without_network_parts)
         else:
-            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2)
+            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2, layer_mapping)
 
-        sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+        key, sd_module = network_layer_for_key(layer_mapping, key)
 
         if sd_module is None:
             m = re_x_proj.match(key)
             if m:
-                sd_module = shared.sd_model.network_layer_mapping.get(m.group(1), None)
+                sd_module = layer_mapping.get(m.group(1), None)
 
         # SDXL loras seem to already have correct compvis keys, so only need to replace "lora_unet" with "diffusion_model"
         if sd_module is None and "lora_unet" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_unet", "diffusion_model"))
         elif sd_module is None and "lora_te1_text_model" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model"))
 
             # some SD1 Loras also have correct compvis keys
             if sd_module is None:
-                key = key_network_without_network_parts.replace("lora_te1_text_model", "transformer_text_model")
-                sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+                key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_te1_text_model", "transformer_text_model"))
 
         # kohya_ss OFT module
         elif sd_module is None and "oft_unet" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("oft_unet", "diffusion_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("oft_unet", "diffusion_model"))
 
         # KohakuBlueLeaf OFT module
         if sd_module is None and "oft_diag" in key:
-            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model")
-            key = key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model").replace("lora_te1_text_model", "0_transformer_text_model")
+            key, sd_module = network_layer_for_key(layer_mapping, key)
 
         if sd_module is None:
             keys_failed_to_match[key_network] = key
@@ -542,6 +611,9 @@ def load_network(name, network_on_disk):
         embeddings[emb_name] = embedding
 
     net.bundle_embeddings = embeddings
+    # Keys that name no layer of the loaded model: their weights cannot be applied. ExtraNetworkLora.activate reports
+    # them in the "Lora errors" infotext of every request that uses the network (cached parses included).
+    net.unmatched_keys = tuple(sorted(keys_failed_to_match))
 
     if keys_failed_to_match:
         logging.debug(f"Network {network_on_disk.filename} didn't match keys: {keys_failed_to_match}")
@@ -550,19 +622,25 @@ def load_network(name, network_on_disk):
 
 
 def purge_networks_from_memory():
+    evicted = False
     while len(networks_in_memory) > shared.opts.lora_in_memory_limit and len(networks_in_memory) > 0:
         name = next(iter(networks_in_memory))
         networks_in_memory.pop(name, None)
         openclaw_cache_epochs.observe("E12", "eviction", reason="capacity", semantic_key=name)
+        evicted = True
 
     openclaw_cache_epochs.set_size("E12", current_size=len(networks_in_memory), capacity=shared.opts.lora_in_memory_limit)
-    devices.torch_gc()
+    # Only an evicted network can free device memory (functional forwards move LoRA factors to the device); an
+    # unconditional empty_cache on every activation released the allocator's cached blocks mid-request.
+    if evicted:
+        devices.torch_gc()
 
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):
     """Stage parsing off-lock, then atomically publish source and applied state."""
     started = time.perf_counter()
     emb_db = sd_hijack.model_hijack.embedding_db
+    _adopt_model(shared.sd_model)
 
     def resolve(name):
         return available_networks.get(name) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name)
@@ -587,7 +665,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     cached_by_key = {getattr(net, "source_key", None): net for net in loaded_networks}
     cached_by_key.update({key: net for key, net in networks_in_memory.items() if key in source_keys})
     ordered = tuple((source_key, float(te).hex(), float(unet).hex(), dyn, tuple(sorted(getattr(cached_by_key.get(source_key), "modules", {}).keys()))) for source_key, te, unet, dyn in zip(source_keys, te_values, unet_values, dyn_values))
-    wanted_key = (ordered, _execution_identity(), LORA_APPLIED_IMPLEMENTATION_REVISION)
+    wanted_key = (ordered, _execution_identity(), _application_mode(), LORA_APPLIED_IMPLEMENTATION_REVISION)
     with _network_application_lock:
         if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key and _published_bundles_current(emb_db):
             elapsed = (time.perf_counter() - started) * 1000.0
@@ -720,7 +798,11 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         return
 
     current_names = getattr(self, "network_current_names", ())
-    wanted_names = network_wanted_names()
+    wanted_names = network_layer_wanted_names(network_layer_name)
+    # No published network touches this layer and none is merged into it: its weights are the base, so a LoRA set
+    # change that does not involve it needs no backup, restore or merge.
+    if not wanted_names and not current_names:
+        return
 
     weights_backup = getattr(self, "network_weights_backup", None)
     # The weight and bias backups describe the same unmodified layer, so they are taken together. A bias-less
@@ -757,6 +839,8 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
 
     if current_names != wanted_names:
         network_restore_weights_from_backup(self)
+        # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
+        self.network_current_names = ()
 
         target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
         # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
@@ -780,8 +864,9 @@ def network_merge_loaded_deltas(self, network_layer_name):
     Each network's delta is added to a float32 copy of the restored base (the fp16 master when fp8 storage keeps
     one) and the caller rounds the sum to the stored dtype once, as reference merges do (diffusers fuse_lora,
     kohya-ss merge_lora, ComfyUI). Adding each delta into the bf16/fp8 weight in turn rounded W + delta once per
-    network, which swamps the small deltas of stacked LoRAs. A network that fails on this layer is skipped and
-    counted in extra_network_lora.errors. Callers hold no_grad and disable autocast.
+    network, which swamps the small deltas of stacked LoRAs. A network that cannot be applied to this layer raises
+    (network_layer_delta): generating with some of a requested network's layers silently left out is never an
+    option. Callers hold no_grad and disable autocast.
     """
     merged_weight = None
     merged_bias = None
@@ -789,53 +874,71 @@ def network_merge_loaded_deltas(self, network_layer_name):
     for net in loaded_networks:
         module = net.modules.get(network_layer_name, None)
         if module is not None and hasattr(self, 'weight') and not isinstance(module, modules.models.sd3.mmdit.QkvLinear):
-            try:
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
-                updown, ex_bias = module.calc_updown(weight)
-
-                if len(weight.shape) == 4 and weight.shape[1] == 9:
-                    # inpainting model. zero pad updown to make channel[1]  4 to 9
-                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
-
-                merged_weight = weight + updown
-                if ex_bias is not None and hasattr(self, 'bias'):
-                    bias = merged_bias if merged_bias is not None else network_merge_base(self, 'bias')
-                    merged_bias = ex_bias.float() if bias is None else bias + ex_bias
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
+            weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+            updown, ex_bias = network_layer_delta(net, network_layer_name, module, weight)
+            merged_weight = weight + updown
+            if ex_bias is not None and hasattr(self, 'bias'):
+                bias = merged_bias if merged_bias is not None else network_merge_base(self, 'bias')
+                if bias is not None and ex_bias.shape != bias.shape:
+                    raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: bias delta shape {tuple(ex_bias.shape)} != bias shape {tuple(bias.shape)}")
+                merged_bias = ex_bias.float() if bias is None else bias + ex_bias
             continue
 
-        module_q = net.modules.get(network_layer_name + "_q_proj", None)
-        module_k = net.modules.get(network_layer_name + "_k_proj", None)
-        module_v = net.modules.get(network_layer_name + "_v_proj", None)
-        if isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)) and module_q and module_k and module_v:
-            try:
-                # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
-                # separately mapped Linear module) or SD3 QkvLinear's weight.
-                field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
-                qw, kw, vw = weight.chunk(3, 0)
-                updown_q, _ = module_q.calc_updown(qw)
-                updown_k, _ = module_k.calc_updown(kw)
-                updown_v, _ = module_v.calc_updown(vw)
-                del qw, kw, vw
-                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
-
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
+        projections = network_qkv_projections(net, network_layer_name)
+        if any(projections):
+            if not isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)):
+                raise RuntimeError(f"LoRA {net.name}: q/k/v projection keys for layer {network_layer_name}, which is a {type(self).__name__}, not a combined q/k/v projection")
+            # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
+            # separately mapped Linear module) or SD3 QkvLinear's weight.
+            field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
+            weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
+            merged_weight = weight + network_qkv_delta(net, network_layer_name, projections, weight)
             continue
 
         if module is None:
             continue
 
-        logging.debug(f"Network {net.name} layer {network_layer_name}: couldn't find supported operation")
-        extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        raise RuntimeError(f"LoRA {net.name}: no supported way to apply {type(module).__name__} to layer {network_layer_name} ({type(self).__name__})")
 
     return merged_weight, merged_bias
+
+
+def network_layer_delta(net, network_layer_name, module, weight):
+    """(weight delta, extra bias or None) of network module `module` for the float32 layer weight `weight`.
+
+    Raises naming the network and layer when the delta cannot be computed or does not have weight's shape: adding a
+    broadcastable delta of another shape (an SD1 LoRA's 768-wide cross-attention on SDXL's 2048) applies a wrong
+    update, and skipping the layer silently drops part of the requested network.
+    """
+    try:
+        updown, ex_bias = module.calc_updown(weight)
+    except Exception as e:
+        raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: {e}") from e
+
+    if len(weight.shape) == 4 and weight.shape[1] == 9 and updown.shape[1] == 4:
+        # inpainting model. zero pad updown to make channel[1]  4 to 9
+        updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+
+    if updown.shape != weight.shape:
+        raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: delta shape {tuple(updown.shape)} != weight shape {tuple(weight.shape)}")
+    return updown, ex_bias
+
+
+def network_qkv_projections(net, network_layer_name):
+    """The q, k and v projection modules `net` has for the combined q/k/v layer `network_layer_name` (None when absent)."""
+    return tuple(net.modules.get(f"{network_layer_name}_{projection}_proj", None) for projection in "qkv")
+
+
+def network_qkv_delta(net, network_layer_name, projections, weight):
+    """Delta of the combined [q; k; v] float32 weight `weight`. A LoRA may train only some projections (commonly q
+    and v); the others get a zero delta."""
+    deltas = []
+    for projection, module, chunk in zip("qkv", projections, weight.chunk(3, 0)):
+        if module is None:
+            deltas.append(torch.zeros_like(chunk))
+        else:
+            deltas.append(network_layer_delta(net, f"{network_layer_name}_{projection}_proj", module, chunk)[0])
+    return torch.vstack(deltas)
 
 
 def network_merge_base(self, field):
@@ -896,27 +999,48 @@ def network_loaded_weight_signature(net):
     )
 
 
-# (published Network objects, their wanted names); see network_wanted_names().
-_wanted_names_memo = ((), ())
+# (published Network objects, their wanted names, wanted names per layer); see _wanted_names_state().
+_wanted_names_memo = ((), (), {})
+
+
+def _wanted_names_state():
+    """(published networks, their signatures in application order, {layer name: signatures of the networks that
+    touch that layer, in application order}).
+
+    Every patched Linear/Conv/norm forward reads this, so it is built once per published set (at publish, by
+    _set_loaded_networks) and reused while loaded_networks holds exactly the same Network objects; the memo holds
+    them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks stamps
+    source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always arrives as
+    different objects. A network touches the layers its modules are keyed by, and through q/k/v projection modules
+    the combined projection they belong to.
+    """
+    global _wanted_names_memo
+    published = _wanted_names_memo[0]
+    if len(published) == len(loaded_networks) and all(held is net for held, net in zip(published, loaded_networks)):
+        return _wanted_names_memo
+    published = tuple(loaded_networks)
+    names = tuple(network_loaded_weight_signature(x) for x in published)
+    by_layer = {}
+    for net, name in zip(published, names):
+        layers = set(net.modules)
+        layers.update(m.group(1) for m in map(re_x_proj.match, net.modules) if m)
+        for layer in layers:
+            by_layer.setdefault(layer, []).append(name)
+    _wanted_names_memo = (published, names, {layer: tuple(layer_names) for layer, layer_names in by_layer.items()})
+    return _wanted_names_memo
 
 
 def network_wanted_names():
-    """Signatures of the published LoRA set in application order; layers compare it with network_current_names.
+    """Signatures of the published LoRA set in application order: the state quant-managed layers compare with
+    their network_current_names (prepare_quant_active_config rebuilds all of them for a set)."""
+    return _wanted_names_state()[1]
 
-    Every patched Linear/Conv/norm forward calls this, so the tuple is built once per published set (at publish,
-    by _set_loaded_networks) and reused while loaded_networks holds exactly the same Network objects; the memo
-    holds them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks
-    stamps source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always
-    arrives as different objects.
-    """
-    global _wanted_names_memo
-    published, names = _wanted_names_memo
-    if len(published) == len(loaded_networks) and all(held is net for held, net in zip(published, loaded_networks)):
-        return names
-    published = tuple(loaded_networks)
-    names = tuple(network_loaded_weight_signature(x) for x in published)
-    _wanted_names_memo = (published, names)
-    return names
+
+def network_layer_wanted_names(network_layer_name):
+    """Signatures of the published networks that touch layer `network_layer_name`, in application order; the
+    generic merge compares them with the layer's network_current_names, so a LoRA set change re-merges only the
+    layers whose networks changed (the merge of the others would be bit-identical)."""
+    return _wanted_names_state()[2].get(network_layer_name, ())
 
 
 def _set_loaded_networks(networks_to_load):
@@ -1158,13 +1282,11 @@ def network_quant_lora_ops_for_layer(self, network_layer_name):
             ops.append(("direct", net, module))
             continue
 
-        module_q = net.modules.get(network_layer_name + "_q_proj", None)
-        module_k = net.modules.get(network_layer_name + "_k_proj", None)
-        module_v = net.modules.get(network_layer_name + "_v_proj", None)
+        module_q, module_k, module_v = projections = network_qkv_projections(net, network_layer_name)
         module_out = net.modules.get(network_layer_name + "_out_proj", None)
 
-        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v and module_out is None:
-            ops.append(("qkv", net, (module_q, module_k, module_v)))
+        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and any(projections) and module_out is None:
+            ops.append(("qkv", net, projections))
             continue
 
         if module_q or module_k or module_v or module_out:
@@ -1200,23 +1322,14 @@ def network_apply_quant_merged_lora(backend, self, quantize_config=None, quantiz
             with torch.autocast(devices.device.type, enabled=False):
                 for op_kind, net, payload in ops_for_layer:
                     if op_kind == "direct":
-                        module = payload
-                        updown, ex_bias = module.calc_updown(weight)
-                        if len(weight.shape) == 4 and weight.shape[1] == 9:
-                            updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                        updown, ex_bias = network_layer_delta(net, network_layer_name, payload, weight)
                         weight = weight + updown
                         if ex_bias is not None:
                             bias = ex_bias.to(device=devices.device, dtype=torch.float32) if bias is None else bias + ex_bias
                         continue
 
                     if op_kind == "qkv":
-                        module_q, module_k, module_v = payload
-                        qw, kw, vw = weight.chunk(3, 0)
-                        updown_q, _ = module_q.calc_updown(qw)
-                        updown_k, _ = module_k.calc_updown(kw)
-                        updown_v, _ = module_v.calc_updown(vw)
-                        del qw, kw, vw
-                        weight = weight + torch.vstack([updown_q, updown_k, updown_v])
+                        weight = weight + network_qkv_delta(net, network_layer_name, payload, weight)
                         continue
 
                     raise RuntimeError(f"unsupported {label} LoRA operation kind: {op_kind}")
@@ -1240,11 +1353,7 @@ def network_apply_quant_merged_lora(backend, self, quantize_config=None, quantiz
         # Restore the pre-call quantized/base state before reporting preparation
         # failure so callers never see partially merged effective weights.
         network_quant_restore_state(backend, original_snapshot)
-        logging.debug(f"Network {network_layer_name}: {label} merged LoRA failed: {e}", exc_info=True)
-        for op_kind, net, _payload in ops_for_layer:
-            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-        for net, _parts in unsupported_ops:
-            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        logging.warning(f"Network {network_layer_name}: {label} merged LoRA failed: {e}", exc_info=True)
         return False
 
 
@@ -1350,7 +1459,9 @@ def network_MultiheadAttention_load_state_dict(self, *args, **kwargs):
     return originals.MultiheadAttention_load_state_dict(self, *args, **kwargs)
 
 
-def process_network_files(names: list[str] | None = None):
+def process_network_files(names: list[str] | None, available: dict, aliases: dict, forbidden: dict):
+    """Add the network files under the Lora directories (only those named in `names` when given) to the registries
+    `available`, `aliases` and `forbidden` (forbidden aliases) that the caller publishes."""
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates = [x for x in candidates if not any(torchao_model_cache.is_cache_path(x, backend.cache_dir_name) for backend in torchao_weight_quant.BACKENDS.values())]
@@ -1367,29 +1478,36 @@ def process_network_files(names: list[str] | None = None):
             errors.report(f"Failed to load network {name} from {filename}", exc_info=True)
             continue
 
-        available_networks[name] = entry
+        available[name] = entry
 
-        if entry.alias in available_network_aliases:
-            forbidden_network_aliases[entry.alias.lower()] = 1
+        if entry.alias in aliases:
+            forbidden[entry.alias.lower()] = 1
 
-        available_network_aliases[name] = entry
-        available_network_aliases[entry.alias] = entry
+        aliases[name] = entry
+        aliases[entry.alias] = entry
+
+
+def _publish_available_networks(available, aliases, forbidden):
+    """Replace the registries with complete new ones instead of rebuilding them in place: GET /sdapi/v1/loras
+    iterates available_networks on the event loop, outside queue_lock, and saw "dictionary changed size during
+    iteration" or a half-built registry while a refresh or a generation's name lookup rebuilt it."""
+    global available_networks, available_network_aliases, forbidden_network_aliases, available_network_hash_lookup
+    hash_lookup = {entry.shorthash: entry for entry in available.values() if entry.shorthash}
+    available_networks, available_network_aliases, forbidden_network_aliases, available_network_hash_lookup = available, aliases, forbidden, hash_lookup
 
 
 def update_available_networks_by_names(names: list[str]):
-    process_network_files(names)
+    available, aliases, forbidden = dict(available_networks), dict(available_network_aliases), dict(forbidden_network_aliases)
+    process_network_files(names, available, aliases, forbidden)
+    _publish_available_networks(available, aliases, forbidden)
 
 
 def list_available_networks():
-    available_networks.clear()
-    available_network_aliases.clear()
-    forbidden_network_aliases.clear()
-    available_network_hash_lookup.clear()
-    forbidden_network_aliases.update({"none": 1, "Addams": 1})
-
     os.makedirs(shared.cmd_opts.lora_dir, exist_ok=True)
 
-    process_network_files()
+    available, aliases, forbidden = {}, {}, {"none": 1, "Addams": 1}
+    process_network_files(None, available, aliases, forbidden)
+    _publish_available_networks(available, aliases, forbidden)
 
 
 re_network_name = re.compile(r"(.*)\s*\([0-9a-fA-F]+\)")

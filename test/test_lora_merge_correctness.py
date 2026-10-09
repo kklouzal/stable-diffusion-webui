@@ -44,7 +44,6 @@ def bf16_lora(lora_networks, monkeypatch):
     networks = lora_networks
     monkeypatch.setattr(networks.devices, "dtype", torch.bfloat16)
     monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
-    monkeypatch.setattr(networks, "extra_network_lora", SimpleNamespace(errors={}), raising=False)
     return networks
 
 
@@ -177,7 +176,6 @@ def test_oft_merges_into_bf16_layer(bf16_lora, autocast):
     eye = torch.eye(4, dtype=torch.float64)
     r = (eye + q) @ torch.linalg.inv(eye - q)
     expected = torch.einsum("k n m, k n i -> k m i", r, base.double().reshape(2, 4, 8)).reshape(8, 8)
-    assert networks.extra_network_lora.errors == {}
     # float32 math rounded once: within half a bf16 ulp of the fp64 rotation (one ulp of slack for float32 inverse error)
     assert ((layer.weight.double() - expected).abs() <= 2.0 ** -8 * expected.abs() + 1e-12).all()
     assert not torch.equal(layer.weight, base)
@@ -271,7 +269,6 @@ def _merge_fp32(networks, layer, nets):
     networks._set_loaded_networks(nets)
     with _autocast(True):
         networks.network_apply_weights(layer)
-    assert networks.extra_network_lora.errors == {}
     return layer.weight.detach().double()
 
 
@@ -377,3 +374,228 @@ def test_functional_lora_forward_applies_dyn_dim(bf16_lora):
 
     delta = up[:, :2].float() @ down[:2].float()
     assert torch.allclose(out, y + x @ delta.T, atol=1e-6)
+
+
+def _publish_layers(networks, monkeypatch, *layers):
+    monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(network_layer_mapping={layer.network_layer_name: layer for layer in layers}), raising=False)
+
+
+def test_mis_shaped_lora_fails_publication_and_keeps_the_previous_state(bf16_lora, monkeypatch):
+    """A delta that only broadcasts to the layer (an [out, 1] column) used to be added to every column; one that does
+    not broadcast was counted and the layer skipped. Either way the request ran without the requested network."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(31)
+    layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_attn2_to_k"
+    _publish_layers(networks, monkeypatch, layer)
+    good = _lora(networks, layer, "good", _grid((8, 2), g), _grid((2, 8), g), 2.0, 1.0)
+    networks._publish_applied_state([good])
+    merged = layer.weight.detach().clone()
+    published_key = networks._applied_state_key
+
+    bad = _lora(networks, layer, "bad", _grid((8, 1), g), _grid((1, 1), g), 1.0, 1.0)
+    with pytest.raises(RuntimeError, match=r"LoRA bad cannot be applied to layer diffusion_model_attn2_to_k: delta shape \(8, 1\) != weight shape \(8, 8\)"):
+        networks._publish_applied_state([good, bad])
+
+    assert torch.equal(layer.weight, merged)
+    assert networks.loaded_networks == [good] and networks._applied_state_key == published_key
+
+
+def test_failing_lora_merge_raises_naming_network_and_layer(bf16_lora):
+    networks = bf16_lora
+    layer = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    base = layer.weight.detach().clone()
+    net = _lora(networks, layer, "broken", torch.ones(4, 1), torch.ones(1, 4), 1.0, 1.0)
+    net.modules[layer.network_layer_name].calc_updown = lambda _weight: (_ for _ in ()).throw(ValueError("injected"))
+
+    networks._set_loaded_networks([net])
+    with pytest.raises(RuntimeError, match="LoRA broken cannot be applied to layer diffusion_model_layer: injected"):
+        networks.network_apply_weights(layer)
+    assert torch.equal(layer.weight, base) and layer.network_current_names == ()
+
+
+def test_qkv_projection_keys_on_a_plain_layer_raise(bf16_lora):
+    networks = bf16_lora
+    layer = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    proj = torch.nn.Linear(4, 4, bias=False)
+    proj.network_layer_name = "diffusion_model_layer_q_proj"
+    net = _lora(networks, proj, "qonly", torch.ones(4, 1), torch.ones(1, 4), 1.0, 1.0)
+
+    networks._set_loaded_networks([net])
+    with pytest.raises(RuntimeError, match="q/k/v projection keys for layer diffusion_model_layer, which is a Linear"):
+        networks.network_apply_weights(layer)
+
+
+def _qkv_layer(layer_kind):
+    if layer_kind == "mha":
+        layer = torch.nn.MultiheadAttention(8, 2, bias=False, batch_first=True, dtype=torch.bfloat16)
+        layer.network_layer_name = "1_model_transformer_resblocks_0_attn"
+        return layer, "in_proj_weight"
+    from modules.models.sd3.mmdit import QkvLinear
+    layer = QkvLinear(8, 24, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_joint_blocks_0_x_block_attn_qkv"
+    return layer, "weight"
+
+
+def _partial_qkv_net(networks, layer, generator, parts):
+    """A LoRA with modules for the projections in `parts` only; returns it and the expected [q; k; v] float64 delta."""
+    net = _net(networks, "partial")
+    proj = torch.nn.Linear(8, 8, bias=False)
+    deltas = []
+    for part in "qkv":
+        if part not in parts:
+            deltas.append(torch.zeros(8, 8, dtype=torch.float64))
+            continue
+        proj.network_layer_name = f"{layer.network_layer_name}_{part}_proj"
+        up, down = _grid((8, 1), generator), _grid((1, 8), generator)
+        _add_module(networks, net, proj, {"lora_up.weight": up, "lora_down.weight": down}, networks.network_lora.NetworkModuleLora)
+        deltas.append(up.double() @ down.double())
+    return net, torch.cat(deltas)
+
+
+@pytest.mark.parametrize("layer_kind", ["mha", "sd3_qkv_linear"])
+@pytest.mark.parametrize("parts", ["qv", "k"])
+def test_lora_with_only_some_qkv_projections_applies_them(bf16_lora, layer_kind, parts):
+    """clip_g's MultiheadAttention LoRA with q and v but no k was dropped whole without any error."""
+    networks = bf16_lora
+    layer, field = _qkv_layer(layer_kind)
+    base = getattr(layer, field).detach().clone()
+    net, delta = _partial_qkv_net(networks, layer, torch.Generator().manual_seed(33), parts)
+
+    networks._set_loaded_networks([net])
+    networks.network_apply_weights(layer)
+
+    assert torch.equal(getattr(layer, field), (base.double() + delta).to(torch.bfloat16))
+    assert not torch.equal(getattr(layer, field), base)
+
+
+def test_quant_managed_qkv_linear_applies_partial_qkv_lora(bf16_lora, monkeypatch):
+    networks = bf16_lora
+    layer, _field = _qkv_layer("sd3_qkv_linear")
+    layer.network_nvfp4_base_weight = layer.weight.detach().clone()
+    layer.network_nvfp4_base_bias = None
+    net, delta = _partial_qkv_net(networks, layer, torch.Generator().manual_seed(35), "qv")
+    networks._set_loaded_networks([net])
+    seen = []
+    monkeypatch.setitem(sys.modules, "torchao.quantization", SimpleNamespace(quantize_=lambda module, *_a, **_k: seen.append(module.weight.detach().clone())))
+    backend = dataclasses.replace(NVFP4, make_config=lambda: "cfg", validate_config=lambda _config: None, tensor_type=lambda: torch.nn.Parameter)
+
+    assert networks.network_apply_quant_merged_lora(backend, layer)
+    assert torch.equal(seen[0], (layer.network_nvfp4_base_weight.double() + delta).to(torch.bfloat16))
+
+
+def test_lora_set_change_touches_only_the_layers_of_changed_networks(bf16_lora, monkeypatch):
+    """A layer no old or new network touches was backed up to the CPU and copied back from the backup on every LoRA
+    set change; a layer whose networks did not change was restored and re-merged to the same bits."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(41)
+    shared = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    shared.network_layer_name = "diffusion_model_shared"
+    only_b = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    only_b.network_layer_name = "diffusion_model_only_b"
+    untouched = torch.nn.Linear(8, 8, bias=True, dtype=torch.bfloat16)
+    untouched.network_layer_name = "diffusion_model_untouched"
+    a = _lora(networks, shared, "a", _grid((8, 2), g), _grid((2, 8), g), 2.0, 0.5)
+    b = _lora(networks, only_b, "b", _grid((8, 2), g), _grid((2, 8), g), 2.0, 0.75)
+    base_shared, base_b = shared.weight.detach().clone(), only_b.weight.detach().clone()
+    untouched_storage = (untouched.weight.data_ptr(), untouched.bias.data_ptr())
+    untouched_values = (untouched.weight.detach().clone(), untouched.bias.detach().clone())
+    merges, restores = [], []
+    calc = a.modules[shared.network_layer_name].calc_updown
+    monkeypatch.setattr(a.modules[shared.network_layer_name], "calc_updown", lambda w: merges.append("a") or calc(w))
+    real_restore = networks.restore_weights_backup
+    monkeypatch.setattr(networks, "restore_weights_backup", lambda obj, field, w: restores.append(obj.network_layer_name) or real_restore(obj, field, w))
+
+    def apply(nets):
+        networks._set_loaded_networks(nets)
+        for layer in (shared, only_b, untouched):
+            networks.network_apply_weights(layer)
+
+    apply([a])
+    merged_a = shared.weight.detach().clone()
+    apply([a, b])
+    apply([b])
+    apply([])
+
+    assert merges == ["a"]  # [a] -> [a, b] keeps shared's merge; [a, b] -> [b] restores it once
+    assert sorted(set(restores)) == ["diffusion_model_only_b", "diffusion_model_shared"]
+    assert not hasattr(untouched, "network_weights_backup") and not hasattr(untouched, "network_current_names")
+    assert (untouched.weight.data_ptr(), untouched.bias.data_ptr()) == untouched_storage
+    assert torch.equal(untouched.weight, untouched_values[0]) and torch.equal(untouched.bias, untouched_values[1])
+    assert torch.equal(merged_a, (base_shared.double() + 0.5 * (a.modules[shared.network_layer_name].up_model.weight.double() @ a.modules[shared.network_layer_name].down_model.weight.double())).to(torch.bfloat16))
+    assert torch.equal(shared.weight, base_shared) and torch.equal(only_b.weight, base_b)
+
+
+def test_switching_lora_functional_republishes_the_same_networks(bf16_lora, monkeypatch):
+    """A lora_functional request restores the base weights in its forwards. The next merged request with the same
+    networks was an applied-state hit: nothing re-merged before sampling, and CUDA graphs captured on the merged
+    weights (which replay without running the lazy merge) read the base weights."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(43)
+    layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    _publish_layers(networks, monkeypatch, layer)
+    base = layer.weight.detach().clone()
+    net = _lora(networks, layer, "a", _grid((8, 2), g), _grid((2, 8), g), 2.0, 1.0)
+    notes = []
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: notes.append(networks.shared.opts.lora_functional))
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", False, raising=False)
+    assert networks._publish_applied_state([net])
+    merged = layer.weight.detach().clone()
+    assert not torch.equal(merged, base)
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", True)
+    assert networks._publish_applied_state([net])
+    networks.network_forward(layer, torch.ones(1, 8, dtype=torch.bfloat16), torch.nn.Linear.forward)
+    assert torch.equal(layer.weight, base)
+
+    monkeypatch.setattr(networks.shared.opts, "lora_functional", False)
+    assert networks._publish_applied_state([net])
+    assert torch.equal(layer.weight, merged)  # re-merged at publication, before any forward
+    assert notes == [False, True, False]
+    assert not networks._publish_applied_state([net])  # an unchanged mode is still a hit
+
+
+def test_lora_factors_keep_the_file_dtype_and_merge_closer_to_the_fp64_reference(bf16_lora):
+    """The factors were rounded to devices.dtype (bf16) at parse: 8 mantissa bits for fp16 files' 11."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(45)
+    layer = torch.nn.Linear(64, 64, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(64, 64, generator=g) * 0.03)
+    base = layer.weight.detach().clone()
+    up, down = (torch.randn(64, 8, generator=g) * 0.02).half(), (torch.randn(8, 64, generator=g) * 0.05).half()
+    net = _lora(networks, layer, "fp16", up, down, 4.0, 0.8)
+    module = net.modules[layer.network_layer_name]
+    assert module.up_model.weight.dtype == torch.float16 and torch.equal(module.up_model.weight, up)
+    assert module.down_model.weight.dtype == torch.float16 and torch.equal(module.down_model.weight, down)
+
+    networks._set_loaded_networks([net])
+    networks.network_apply_weights(layer)
+
+    scale = 0.8 * 4.0 / 8
+    reference = base.double() + scale * (up.double() @ down.double())
+    bf16_factors = (base.float() + scale * (up.bfloat16().float() @ down.bfloat16().float())).bfloat16()
+    error = (layer.weight.double() - reference).abs().sum()
+    assert error < (bf16_factors.double() - reference).abs().sum()
+    assert (layer.weight != reference.bfloat16()).sum() < (bf16_factors != reference.bfloat16()).sum()
+
+
+def test_functional_lora_forward_casts_file_dtype_factors_to_the_input(bf16_lora):
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(47)
+    layer = torch.nn.Conv2d(4, 4, 3, padding=1, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_conv"
+    up, down = _grid((4, 2, 1, 1), g), _grid((2, 4, 3, 3), g)
+    module = _lora(networks, layer, "conv", up, down, 2.0, 1.0).modules[layer.network_layer_name]
+    x = torch.randn(1, 4, 5, 5, generator=g).bfloat16()
+    y = layer(x)
+
+    out = module.forward(x, y)
+
+    expected = y + torch.nn.functional.conv2d(torch.nn.functional.conv2d(x, down.bfloat16(), padding=1), up.bfloat16())
+    assert out.dtype == torch.bfloat16 and torch.equal(out, expected)
