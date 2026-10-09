@@ -2,63 +2,33 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
+from test.helpers import load_source, module
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("spandrel")
-
-MODULES_DIR = Path(__file__).resolve().parents[1] / "modules"
-MODULE_PATH = MODULES_DIR / "modelloader.py"
-_STUBBED = ("modules", "modules.cache", "modules.paths", "modules.shared", "modules.upscaler", "modules.util", "modules.modelloader")
-
-
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.fixture()
 def modelloader(tmp_path):
-    previous = {name: sys.modules.get(name) for name in _STUBBED}
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    upscaler = types.ModuleType("modules.upscaler")
-    for name in ("Upscaler", "UpscalerLanczos", "UpscalerNearest", "UpscalerNone"):
-        setattr(upscaler, name, type(name, (), {}))
-    util = types.ModuleType("modules.util")
-    util.load_file_from_url = lambda *args, **kwargs: None
-    paths = types.ModuleType("modules.paths")
-    paths.data_path = paths.script_path = str(tmp_path)
-    sys.modules.update({
-        "modules": modules_pkg,
-        "modules.paths": paths,
-        "modules.shared": types.ModuleType("modules.shared"),
-        "modules.upscaler": upscaler,
-        "modules.util": util,
-    })
-    try:
-        modules_pkg.cache = _load("modules.cache", MODULES_DIR / "cache.py")  # the real file identity helpers
-        yield _load("modules.modelloader", MODULE_PATH)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+    stubs = {
+        "modules": module("modules", package=True),
+        "modules.paths": module("modules.paths", data_path=str(tmp_path), script_path=str(tmp_path)),
+        "modules.shared": module("modules.shared"),
+        "modules.upscaler": module("modules.upscaler", **{name: type(name, (), {}) for name in ("Upscaler", "UpscalerLanczos", "UpscalerNearest", "UpscalerNone")}),
+        "modules.util": module("modules.util", load_file_from_url=lambda *args, **kwargs: None),
+    }
+    stubs["modules.cache"] = load_source("modules.cache", "modules/cache.py", stubs)  # the real file identity helpers
+    return load_source("modules.modelloader", "modules/modelloader.py", stubs)
 
 
 def _write_tiny_esrgan(path: Path, seed: int) -> None:
-    # safetensors, not .pth: torch.load is routed through modules.safe once another test imported the real
-    # webui modules, and modules.safe would then read this file's stubbed modules.shared.
+    # safetensors, not .pth: a .pth goes through torch.load, which modules.safe replaces once another test imported
+    # the real webui modules.
     from safetensors.torch import save_file
     from spandrel.architectures.ESRGAN import ESRGAN
 

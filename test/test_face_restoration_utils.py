@@ -4,51 +4,26 @@ instead of silently returning the unrestored image."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from test.helpers import load_source, module
+
 torch = pytest.importorskip("torch")
 cv2 = pytest.importorskip("cv2")
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture()
 def fr_utils():
-    pkg = types.ModuleType("modules")
-    pkg.__path__ = []
-    shared = types.ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(face_restoration_unload=False, face_restoration_model=None)
-    shared.face_restorers = []
-    devices = types.ModuleType("modules.devices")
-    devices.torch_gc = lambda: None
-    devices.cpu = torch.device("cpu")
-    stubs = {"modules": pkg, "modules.shared": shared, "modules.devices": devices,
-             "modules.face_restoration": None, "modules.face_restoration_utils": None}
-    previous = {name: sys.modules.get(name) for name in stubs}
-    sys.modules.update(stubs)
-    try:
-        for name in ("shared", "devices"):
-            setattr(pkg, name, stubs[f"modules.{name}"])
-        for name in ("face_restoration", "face_restoration_utils"):
-            spec = importlib.util.spec_from_file_location(f"modules.{name}", ROOT / "modules" / f"{name}.py")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[f"modules.{name}"] = module
-            spec.loader.exec_module(module)
-            setattr(pkg, name, module)
-        yield pkg.face_restoration_utils
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+    stubs = {
+        "modules": module("modules", package=True),
+        "modules.shared": module("modules.shared", opts=SimpleNamespace(face_restoration_unload=False, face_restoration_model=None), face_restorers=[]),
+        "modules.devices": module("modules.devices", torch_gc=lambda: None, cpu=torch.device("cpu")),
+    }
+    stubs["modules.face_restoration"] = load_source("modules.face_restoration", "modules/face_restoration.py", stubs)
+    return load_source("modules.face_restoration_utils", "modules/face_restoration_utils.py", stubs)
 
 
 class _FakeFaceHelper:

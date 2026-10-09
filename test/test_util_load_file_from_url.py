@@ -3,15 +3,13 @@ are saved under the URL's basename unless a file name is given."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-_STUBBED = ("modules", "modules.shared", "modules.paths_internal", "modules.util", "requests")
+from modules import persistent_artifact_cache
+from test.helpers import ROOT, load_source, module, stub_modules
 
 
 class _Response:
@@ -38,37 +36,22 @@ class _Response:
 
 @pytest.fixture()
 def util():
-    previous = {name: sys.modules.get(name) for name in _STUBBED}
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    paths_internal = types.ModuleType("modules.paths_internal")
-    paths_internal.cwd = str(ROOT)
-    requests = types.ModuleType("requests")
-    requests.calls = []
+    requests = module("requests", calls=[])
 
     def get(url, **kwargs):
         requests.calls.append((url, kwargs))
         return requests.response
 
     requests.get = get
-    sys.modules.update({
-        "modules": modules_pkg,
-        "modules.shared": types.ModuleType("modules.shared"),
-        "modules.paths_internal": paths_internal,
+    # load_file_from_url imports requests when called: the stubs stay installed for the test.
+    with stub_modules({
+        "modules": module("modules", package=True),
+        "modules.shared": module("modules.shared"),
+        "modules.paths_internal": module("modules.paths_internal", cwd=str(ROOT)),
+        "modules.persistent_artifact_cache": persistent_artifact_cache,
         "requests": requests,
-    })
-    try:
-        spec = importlib.util.spec_from_file_location("modules.util", ROOT / "modules" / "util.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["modules.util"] = module
-        spec.loader.exec_module(module)
-        yield types.SimpleNamespace(module=module, requests=requests)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+    }):
+        yield SimpleNamespace(module=load_source("modules.util", "modules/util.py"), requests=requests)
 
 
 def test_download_has_connect_and_read_timeouts(util, tmp_path):

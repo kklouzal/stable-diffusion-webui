@@ -4,56 +4,30 @@ former CPU numpy/float64 pipeline (kept below as the oracle)."""
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import math
-import sys
-import types
 from fractions import Fraction
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from test.helpers import load_source, module
+
 torch = pytest.importorskip("torch")
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "upscaler_utils.py"
-_STUBBED = ("modules", "modules.devices", "modules.images", "modules.shared", "modules.torch_utils", "modules.upscaler_utils")
 DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 
 
 @pytest.fixture()
 def upscaler_utils():
-    previous = {name: sys.modules.get(name) for name in _STUBBED}
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    devices = types.ModuleType("modules.devices")
-    devices.without_autocast = lambda disable=False: contextlib.nullcontext()
-    shared = types.ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(enable_upscale_progressbar=False)
-    shared.state = SimpleNamespace(interrupted=False, skipped=False)
-    torch_utils = types.ModuleType("modules.torch_utils")
-    torch_utils.get_param = lambda model: next(model.parameters())
-    sys.modules.update({
-        "modules": modules_pkg,
-        "modules.devices": devices,
-        "modules.images": types.ModuleType("modules.images"),
-        "modules.shared": shared,
-        "modules.torch_utils": torch_utils,
+    return load_source("modules.upscaler_utils", "modules/upscaler_utils.py", {
+        "modules": module("modules", package=True),
+        "modules.devices": module("modules.devices", without_autocast=lambda disable=False: contextlib.nullcontext()),
+        "modules.images": module("modules.images"),
+        "modules.shared": module("modules.shared", opts=SimpleNamespace(enable_upscale_progressbar=False), state=SimpleNamespace(interrupted=False, skipped=False)),
+        "modules.torch_utils": module("modules.torch_utils", get_param=lambda model: next(model.parameters())),
     })
-    try:
-        spec = importlib.util.spec_from_file_location("modules.upscaler_utils", MODULE_PATH)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["modules.upscaler_utils"] = module
-        spec.loader.exec_module(module)
-        yield module
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
 
 
 # --- oracle: the pre-change implementation -------------------------------------------------------

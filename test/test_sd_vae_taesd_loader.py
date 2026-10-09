@@ -4,61 +4,38 @@ caching the loaded network."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-torch = pytest.importorskip("torch")
+from test.helpers import load_source, module, stub_modules
 
-ROOT = Path(__file__).resolve().parents[1]
-_STUBBED = ("modules", "modules.devices", "modules.paths_internal", "modules.shared", "modules.util", "modules.sd_vae_taesd")
+torch = pytest.importorskip("torch")
 
 
 @pytest.fixture()
 def taesd(tmp_path):
-    previous = {name: sys.modules.get(name) for name in _STUBBED}
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    devices = types.ModuleType("modules.devices")
-    devices.device = torch.device("cpu")
-    devices.dtype = torch.float32
-    paths_internal = types.ModuleType("modules.paths_internal")
-    paths_internal.models_path = str(tmp_path)
-    shared = types.ModuleType("modules.shared")
-    # Read by modules.safe's torch.load wrapper once another test has imported the real webui modules.
-    shared.cmd_opts = SimpleNamespace(disable_safe_unpickle=False)
-    util = types.ModuleType("modules.util")
+    # cmd_opts: read by modules.safe's torch.load wrapper (once another test has imported the real webui modules),
+    # which imports modules.shared when called, so the stubs stay installed for the test.
+    shared = module("modules.shared", cmd_opts=SimpleNamespace(disable_safe_unpickle=False))
     downloads = []
 
     def load_file_from_url(url, *, model_dir, file_name):
         downloads.append((url, model_dir, file_name))
         return str(Path(model_dir) / file_name)
 
-    util.load_file_from_url = load_file_from_url
-    modules_pkg.devices, modules_pkg.paths_internal, modules_pkg.shared = devices, paths_internal, shared
-    sys.modules.update({
-        "modules": modules_pkg,
-        "modules.devices": devices,
-        "modules.paths_internal": paths_internal,
+    with stub_modules({
+        "modules": module("modules", package=True),
+        "modules.devices": module("modules.devices", device=torch.device("cpu"), dtype=torch.float32),
+        "modules.paths_internal": module("modules.paths_internal", models_path=str(tmp_path)),
         "modules.shared": shared,
-        "modules.util": util,
-    })
-    try:
-        spec = importlib.util.spec_from_file_location("modules.sd_vae_taesd", ROOT / "modules" / "sd_vae_taesd.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["modules.sd_vae_taesd"] = module
-        spec.loader.exec_module(module)
-        yield SimpleNamespace(module=module, shared=shared, downloads=downloads, model_dir=tmp_path / "VAE-taesd")
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+        "modules.util": module("modules.util", load_file_from_url=load_file_from_url),
+    }):
+        yield SimpleNamespace(
+            module=load_source("modules.sd_vae_taesd", "modules/sd_vae_taesd.py"), shared=shared, downloads=downloads,
+            model_dir=tmp_path / "VAE-taesd",
+        )
 
 
 @pytest.mark.parametrize("kind", ["decoder", "encoder"])

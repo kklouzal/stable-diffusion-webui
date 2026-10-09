@@ -5,11 +5,9 @@ and failing (not silently LANCZOS-resizing) upscalers whose model cannot be load
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import math
 import random
 import sys
-import types
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,54 +16,27 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from test.helpers import ROOT, load_source, module, stub_modules
+
 torch = pytest.importorskip("torch")
 
-ROOT = Path(__file__).resolve().parents[1]
 LANCZOS = Image.Resampling.LANCZOS
 
 
-@contextlib.contextmanager
-def _modules(stubs: dict):
-    """Install `stubs` into sys.modules for the duration of the block, then restore every touched name."""
-    previous = {name: sys.modules.get(name) for name in stubs}
-    sys.modules.update(stubs)
-    try:
-        yield
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
-
-
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _package(name):
-    module = types.ModuleType(name)
-    module.__path__ = []
-    return module
-
-
 def _shared():
-    shared = types.ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(
-        ESRGAN_tile=192, ESRGAN_tile_overlap=8, enable_upscale_progressbar=False, upscaling_max_images_in_cache=5,
-        SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8,
-        font="", n_rows=-1,
+    return module(
+        "modules.shared",
+        opts=SimpleNamespace(
+            ESRGAN_tile=192, ESRGAN_tile_overlap=8, enable_upscale_progressbar=False, upscaling_max_images_in_cache=5,
+            SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8,
+            font="", n_rows=-1,
+        ),
+        cmd_opts=SimpleNamespace(no_half=False, upcast_sampling=False, unix_filenames_sanitization=False, filenames_max_length=128),
+        state=SimpleNamespace(interrupted=False, skipped=False),
+        device="cpu",
+        models_path=str(ROOT / "models"),
+        sd_upscalers=[],
     )
-    shared.cmd_opts = SimpleNamespace(no_half=False, upcast_sampling=False, unix_filenames_sanitization=False, filenames_max_length=128)
-    shared.state = SimpleNamespace(interrupted=False, skipped=False)
-    shared.device = "cpu"
-    shared.models_path = str(ROOT / "models")
-    shared.sd_upscalers = []
-    return shared
 
 
 def _cpu_without_autocast():
@@ -76,52 +47,42 @@ def _cpu_without_autocast():
 @pytest.fixture()
 def env(tmp_path):
     shared = _shared()
-    devices = types.ModuleType("modules.devices")
-    devices.without_autocast = lambda disable=False: _cpu_without_autocast()
-    devices.torch_gc = lambda: None
-    devices.cpu = torch.device("cpu")
-    devices.dtype = torch.bfloat16
-    devices.get_device_for = lambda name: torch.device("cpu")
     loader_calls = []
-    modelloader = types.ModuleType("modules.modelloader")
-    modelloader.friendly_name = lambda file: Path(file).stem
-    modelloader.load_models = lambda **kwargs: []
 
     def failing_loader(path, **kwargs):
         loader_calls.append((path, kwargs))
         raise OSError("truncated checkpoint")
 
-    modelloader.load_spandrel_model = failing_loader
-    modelloader.load_cached_spandrel_model = failing_loader
-    modelloader.load_file_from_url = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline"))
-    paths_internal = types.ModuleType("modules.paths_internal")
-    paths_internal.roboto_ttf_file = ""
-    script_callbacks = types.ModuleType("modules.script_callbacks")
-    script_callbacks.on_ui_settings = lambda fn: None
-    errors = types.ModuleType("modules.errors")
-    errors.report = lambda *args, **kwargs: None
+    modelloader = module(
+        "modules.modelloader",
+        friendly_name=lambda file: Path(file).stem,
+        load_models=lambda **kwargs: [],
+        load_spandrel_model=failing_loader,
+        load_cached_spandrel_model=failing_loader,
+        load_file_from_url=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
     stubs = {
-        "modules": _package("modules"),
         "modules.shared": shared,
-        "modules.devices": devices,
+        "modules.devices": module(
+            "modules.devices", without_autocast=lambda disable=False: _cpu_without_autocast(), torch_gc=lambda: None,
+            cpu=torch.device("cpu"), dtype=torch.bfloat16, get_device_for=lambda name: torch.device("cpu"),
+        ),
         "modules.modelloader": modelloader,
-        "modules.paths_internal": paths_internal,
-        "modules.script_callbacks": script_callbacks,
-        "modules.errors": errors,
-        "modules.sd_samplers": types.ModuleType("modules.sd_samplers"),
-        "modules.png_writer": None, "modules.images": None, "modules.torch_utils": None, "modules.upscaler": None,
-        "modules.upscaler_utils": None,
+        "modules.paths_internal": module("modules.paths_internal", roboto_ttf_file=""),
+        "modules.script_callbacks": module("modules.script_callbacks", on_ui_settings=lambda fn: None),
+        "modules.errors": module("modules.errors", report=lambda *args, **kwargs: None),
+        "modules.sd_samplers": module("modules.sd_samplers"),
     }
-    with _modules(stubs):
-        for name in ("modules.png_writer", "modules.images", "modules.torch_utils", "modules.upscaler", "modules.upscaler_utils"):
-            sys.modules.pop(name)
-        pkg = sys.modules["modules"]
-        for attr in ("shared", "devices", "modelloader", "errors", "script_callbacks", "sd_samplers", "paths_internal"):
-            setattr(pkg, attr, sys.modules[f"modules.{attr}"])
-        for attr in ("png_writer", "torch_utils", "images", "upscaler", "upscaler_utils"):
-            setattr(pkg, attr, _load(f"modules.{attr}", ROOT / "modules" / f"{attr}.py"))
+    pkg = module("modules", package=True, **{name.removeprefix("modules."): stub for name, stub in stubs.items()})
+    real = ("png_writer", "torch_utils", "images", "upscaler", "upscaler_utils")
+    # The real sources are hidden at first, then loaded under their own names in dependency order and kept registered
+    # (and as package attributes) for the test: the scripts the tests load import them; the block restores every name.
+    with stub_modules({"modules": pkg, **stubs, **{f"modules.{name}": None for name in real}}):
+        for name in real:
+            sys.modules[f"modules.{name}"] = load_source(f"modules.{name}", f"modules/{name}.py")
+            setattr(pkg, name, sys.modules[f"modules.{name}"])
         yield SimpleNamespace(
-            shared=shared, devices=devices, modelloader=modelloader, loader_calls=loader_calls,
+            shared=shared, devices=stubs["modules.devices"], modelloader=modelloader, loader_calls=loader_calls,
             images=pkg.images, upscaler=pkg.upscaler, upscaler_utils=pkg.upscaler_utils, tmp_path=tmp_path,
         )
 
@@ -293,15 +254,8 @@ def test_interrupted_upscale_2_returns_input_unchanged(env, interrupt_after):
 
 # --- model load failures --------------------------------------------------------------------------------------
 
-def _load_private(name, path):
-    module = _load(name, path)
-    sys.modules.pop(name, None)
-    return module
-
-
 def _load_script(env, relative):
-    path = ROOT / relative
-    return _load_private(f"_c2_{path.stem}", path)
+    return load_source(f"_c2_{Path(relative).stem}", relative)
 
 
 @pytest.mark.parametrize("relative, cls", [
@@ -355,21 +309,16 @@ def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
 
 @pytest.fixture()
 def pp_upscale(env):
-    scripts_postprocessing = types.ModuleType("modules.scripts_postprocessing")
-    scripts_postprocessing.ScriptPostprocessing = type("ScriptPostprocessing", (), {})
-    scripts_postprocessing.PostprocessedImage = object  # annotations only
-    ui_components = types.ModuleType("modules.ui_components")
-    ui_components.FormRow = ui_components.InputAccordion = None
-    stubs = {
-        "modules.scripts_postprocessing": scripts_postprocessing, "modules.ui_components": ui_components,
-        "modules.headless_ui": types.ModuleType("modules.headless_ui"),
-    }
-    with _modules(stubs):
-        pkg = sys.modules["modules"]
-        pkg.scripts_postprocessing, pkg.headless_ui = scripts_postprocessing, stubs["modules.headless_ui"]
-        module = _load_private("_c2_postprocessing_upscale", ROOT / "scripts/postprocessing_upscale.py")
-    module.upscale_cache.clear()
-    return module
+    script = load_source("_c2_postprocessing_upscale", "scripts/postprocessing_upscale.py", {
+        "modules.scripts_postprocessing": module(
+            "modules.scripts_postprocessing", ScriptPostprocessing=type("ScriptPostprocessing", (), {}),
+            PostprocessedImage=object,  # annotations only
+        ),
+        "modules.ui_components": module("modules.ui_components", FormRow=None, InputAccordion=None),
+        "modules.headless_ui": module("modules.headless_ui"),
+    })
+    script.upscale_cache.clear()
+    return script
 
 
 @pytest.mark.parametrize("source, target", [((300, 200), (1001, 999)), ((640, 360), (1000, 1004)), ((616, 616), (640, 640))])

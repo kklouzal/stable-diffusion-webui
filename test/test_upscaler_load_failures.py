@@ -4,21 +4,15 @@ shared cached descriptor is used as-is (never moved by the caller)."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
+from test.helpers import load_source, module
+
 _MODEL_MODULES = ("esrgan_model", "realesrgan_model", "dat_model", "hat_model")
-_STUBBED = (
-    "modules", "modules.shared", "modules.modelloader", "modules.devices", "modules.upscaler_utils",
-    "modules.upscaler", *(f"modules.{name}" for name in _MODEL_MODULES),
-)
 
 
 class _LoaderStub:
@@ -36,56 +30,39 @@ class _LoaderStub:
 
 @pytest.fixture()
 def upscalers(tmp_path):
-    previous = {name: sys.modules.get(name) for name in _STUBBED}
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    shared = types.ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(
-        ESRGAN_tile=0, ESRGAN_tile_overlap=0, DAT_tile=0, DAT_tile_overlap=0,
-        realesrgan_enabled_models=[], dat_enabled_models=[],
+    shared = module(
+        "modules.shared",
+        opts=SimpleNamespace(
+            ESRGAN_tile=0, ESRGAN_tile_overlap=0, DAT_tile=0, DAT_tile_overlap=0,
+            realesrgan_enabled_models=[], dat_enabled_models=[],
+        ),
+        cmd_opts=SimpleNamespace(no_half=True, upcast_sampling=False),
+        state=SimpleNamespace(interrupted=False),
+        device="cpu",
+        models_path=str(tmp_path),
+        hf_endpoint="https://huggingface.invalid",
     )
-    shared.cmd_opts = SimpleNamespace(no_half=True, upcast_sampling=False)
-    shared.state = SimpleNamespace(interrupted=False)
-    shared.device = "cpu"
-    shared.models_path = str(tmp_path)
-    shared.hf_endpoint = "https://huggingface.invalid"
     loader = _LoaderStub()
-    modelloader = types.ModuleType("modules.modelloader")
-    modelloader.load_cached_spandrel_model = loader
-    modelloader.friendly_name = lambda file: Path(file).stem
-    devices = types.ModuleType("modules.devices")
-    devices.device_esrgan = "cuda:0"
-    upscaler_utils = types.ModuleType("modules.upscaler_utils")
+    modelloader = module("modules.modelloader", load_cached_spandrel_model=loader, friendly_name=lambda file: Path(file).stem)
+    devices = module("modules.devices", device_esrgan="cuda:0")
     upscaled = []
 
     def upscale_with_model(model, img, *, tile_size, tile_overlap=0):
         upscaled.append(model)
         return img.resize((img.width * 2, img.height * 2))
 
-    upscaler_utils.upscale_with_model = upscale_with_model
-    modules_pkg.shared, modules_pkg.modelloader, modules_pkg.devices = shared, modelloader, devices
-    sys.modules.update({
-        "modules": modules_pkg,
+    stubs = {
+        "modules": module("modules", package=True),
         "modules.shared": shared,
         "modules.modelloader": modelloader,
         "modules.devices": devices,
-        "modules.upscaler_utils": upscaler_utils,
-    })
-    try:
-        loaded = {}
-        for name in ("upscaler", *_MODEL_MODULES):
-            spec = importlib.util.spec_from_file_location(f"modules.{name}", ROOT / "modules" / f"{name}.py")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[f"modules.{name}"] = module
-            spec.loader.exec_module(module)
-            loaded[name] = module
-        yield SimpleNamespace(modules=loaded, loader=loader, upscaled=upscaled, tmp_path=tmp_path)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+        "modules.upscaler_utils": module("modules.upscaler_utils", upscale_with_model=upscale_with_model),
+    }
+    loaded = {"upscaler": load_source("modules.upscaler", "modules/upscaler.py", stubs)}
+    stubs["modules.upscaler"] = loaded["upscaler"]  # the model modules subclass the real Upscaler
+    for name in _MODEL_MODULES:
+        loaded[name] = load_source(f"modules.{name}", f"modules/{name}.py", stubs)
+    return SimpleNamespace(modules=loaded, loader=loader, upscaled=upscaled, tmp_path=tmp_path)
 
 
 def _instance(module, class_name, **attributes):
