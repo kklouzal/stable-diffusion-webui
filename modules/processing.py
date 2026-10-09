@@ -90,6 +90,10 @@ def apply_overlay(image, paste_loc, overlay):
     return image, original_denoised_image
 
 def create_binary_mask(image, round=True):
+    if image.mode != 'RGBA' and image.has_transparency_data:
+        # LA/PA/La/RGBa, and P/L/RGB with a "transparency" key: their alpha is the mask, as for RGBA (images.flatten)
+        image = image.convert('RGBA')
+
     if image.mode == 'RGBA' and image.getextrema()[-1] != (255, 255):
         if round:
             image = image.split()[-1].convert("L").point(lambda x: 255 if x > 128 else 0)
