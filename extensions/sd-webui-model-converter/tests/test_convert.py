@@ -397,6 +397,30 @@ class ConversionCorrectnessTests(unittest.TestCase):
         self.assertEqual(sorted(out), ["model.diffusion_model.w", "v_pred", "ztsnr"])
         self.assertEqual(out["v_pred"].dtype, torch.float32)
 
+    def test_bake_in_vae_refreshes_the_vae_list_and_rejects_unknown_or_conflicting_names(self):
+        vae = {"encoder.conv_in.weight": torch.full((3,), 2.0)}
+        vae_dict = self.convert.sd_vae.vae_dict
+
+        def refresh():
+            vae_dict.clear()
+            vae_dict["new.safetensors"] = "/vae/new.safetensors"
+
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(vae_dict, clear=True), \
+                mock.patch.object(self.convert.sd_vae, "refresh_vae_list", side_effect=refresh), \
+                mock.patch.object(self.convert.sd_vae, "load_vae_dict", create=True, return_value=vae) as load_vae:
+            source = self._source(tmpdir)
+            with self.assertRaisesRegex(ValueError, "not found: 'missing.safetensors'"):
+                self._convert(source, bake_in_vae="missing.safetensors")
+            with self.assertRaisesRegex(ValueError, "VAE action is 'delete'"):
+                self._convert(source, bake_in_vae="new.safetensors", vae_conv="delete")
+            self.assertEqual(os.listdir(tmpdir), ["model.safetensors"])
+            report = self._convert(source, bake_in_vae="new.safetensors")
+            out = load_file(os.path.join(tmpdir, "out.safetensors"))
+
+        load_vae.assert_called_once_with("/vae/new.safetensors", map_location="cpu")
+        self.assertIn('"openclaw_converter_baked_vae": "new.safetensors"', report)
+        self.assertTrue(torch.equal(out["first_stage_model.encoder.conv_in.weight"], torch.full((3,), 2.0, dtype=torch.float16)))
+
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outside = Path(tmpdir) / "outside.safetensors"

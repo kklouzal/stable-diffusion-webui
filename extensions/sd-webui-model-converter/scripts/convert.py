@@ -738,6 +738,21 @@ def resolve_model_info(model: str) -> MockModelInfo | None:
     return None
 
 
+def resolve_bake_in_vae(bake_in_vae: str, vae_action: str) -> str | None:
+    """The file of the VAE to bake in, or None for "None"/"". The VAE list is re-read first (the options route
+    lists it the same way), and a name it does not hold, or a bake under "vae: delete" (which would drop every baked
+    weight), raises instead of writing a checkpoint without the requested VAE."""
+    if bake_in_vae in ("None", ""):
+        return None
+    if vae_action == "delete":
+        raise ValueError(f"cannot bake in VAE {bake_in_vae!r} while the VAE action is 'delete'")
+    sd_vae.refresh_vae_list()
+    filename = sd_vae.vae_dict.get(bake_in_vae)
+    if filename is None:
+        raise ValueError(f"VAE to bake in was not found: {bake_in_vae!r}")
+    return filename
+
+
 def conversion_metadata(
     model_info: MockModelInfo,
     *,
@@ -827,6 +842,7 @@ def do_convert(
             "other-weights precision", other_precision, COMPONENT_PRECISIONS
         ),
     }
+    bake_in_vae_filename = resolve_bake_in_vae(bake_in_vae, extra_opt["vae"])
     float8_components = {
         component
         for component in ("unet", "clip", "vae", "other")
@@ -908,7 +924,6 @@ def do_convert(
             for key in [k for k in ok if is_known_junk_key(str(k))]:
                 removed_junk.append(str(key))
                 del ok[key]
-        bake_in_vae_filename = sd_vae.vae_dict.get(bake_in_vae)
         if bake_in_vae_filename is not None:
             print(
                 f"[OpenClaw Model Converter] Baking in VAE from {bake_in_vae_filename}"
