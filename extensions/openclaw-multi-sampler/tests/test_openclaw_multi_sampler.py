@@ -266,24 +266,90 @@ def test_stage_sigma_validation_rejects_rising_or_non_finite_sigmas(multi):
         multi._validate_stage_sigmas(torch.tensor([1.0, float("nan"), 0.0]), 0, 2, "Euler", None)
 
 
-def test_brownian_noise_sampler_uses_stage_sigmas_not_full_chain(multi):
+def _brownian_chain(multi, monkeypatch, samplers, switch_ats, sigmas):
+    """Run a chain whose stage functions record the noise sampler they get; create_noise_sampler records its sigmas."""
+    created, received = [], []
     sampler = object.__new__(multi.MultiKDiffusionSampler)
-    stage_sigmas = torch.tensor([3.0, 2.0, 0.0])
-    seen = []
-    sampler.create_noise_sampler = lambda _x, sigmas, _p: seen.append(sigmas) or "noise"
+    sampler.definition = {"name": "Multi: brownian", "samplers": samplers, "switch_ats": switch_ats}
+    sampler.last_latent = None
+    sampler.model_wrap_cfg = types.SimpleNamespace()
+    sampler.stop_at = None
+    sampler.eta = 1.0
+    sampler.create_noise_sampler = lambda _x, noise_sigmas, _p: created.append(noise_sigmas) or f"tree{len(created)}"
 
-    kwargs = sampler._build_stage_kwargs(
-        p=types.SimpleNamespace(),
-        func=lambda *args, **inner_kwargs: None,
-        funcname="sample_dpmpp_2m_sde",
-        config=types.SimpleNamespace(options={"brownian_noise": True}),
-        x=torch.zeros(1),
-        sigmas=stage_sigmas,
-        stage_steps=2,
-    )
+    def stage(name):
+        def run(_model, x, sigmas=None, noise_sampler=None, **_kwargs):
+            received.append((name, sigmas.tolist(), noise_sampler))
+            return x
+        return run
 
-    assert kwargs["noise_sampler"] == "noise"
-    assert seen[0] is stage_sigmas
+    for funcname in ("sample_euler", "sample_dpmpp_2m_sde", "sample_heun"):
+        monkeypatch.setattr(multi.k_diffusion.sampling, funcname, stage(funcname))
+    p = types.SimpleNamespace(extra_generation_params={})
+    sampler._run_chain(p, torch.zeros(1), "cond", "uncond", sigmas=torch.tensor(sigmas), steps=len(sigmas) - 1)
+    return created, received
+
+
+def _per_stage_interval(sigmas):
+    """The interval Sampler.create_noise_sampler derives from the sigmas it is given."""
+    sigmas = torch.as_tensor(sigmas)
+    return sigmas[sigmas > 0].min(), sigmas.max()
+
+
+def test_single_brownian_stage_gets_the_noise_sampler_of_its_own_schedule(multi, monkeypatch):
+    # "Multi: oi2"-shaped: one Brownian stage between two non-Brownian ones.
+    sigmas = [14.6, 9.1, 5.2, 3.0, 1.7, 0.9, 0.42, 0.2, 0.0]
+    created, received = _brownian_chain(multi, monkeypatch, ["Euler", "DPM++ 2M SDE", "Euler"], [3, 6], sigmas)
+
+    assert len(created) == 1
+    stage_sigmas = torch.tensor(sigmas[3:7])
+    # Bit-identical interval to the old per-stage construction from that stage's own sigmas.
+    for union_end, stage_end in zip(_per_stage_interval(created[0]), _per_stage_interval(stage_sigmas)):
+        assert union_end.dtype == stage_end.dtype and torch.equal(union_end, stage_end)
+    assert [(name, noise) for name, _sigmas, noise in received] == [("sample_euler", None), ("sample_dpmpp_2m_sde", "tree1"), ("sample_euler", None)]
+
+
+def test_brownian_stages_share_one_noise_sampler_over_their_union(multi, monkeypatch):
+    sigmas = [14.6, 9.1, 5.2, 3.0, 1.7, 0.9, 0.42, 0.2, 0.0]
+    created, received = _brownian_chain(multi, monkeypatch, ["DPM++ 2M SDE", "Euler", "DPM++ 2M SDE"], [2, 5], sigmas)
+
+    assert len(created) == 1
+    low, high = _per_stage_interval(created[0])
+    assert (float(low), float(high)) == (float(torch.tensor(0.2)), float(torch.tensor(14.6)))
+    brownian = [(stage_sigmas, noise) for name, stage_sigmas, noise in received if name == "sample_dpmpp_2m_sde"]
+    assert [noise for _sigmas, noise in brownian] == ["tree1", "tree1"]
+    # Every sigma a Brownian stage queries lies in the shared tree's interval (no torchsde out-of-range query).
+    queried = [sigma for stage_sigmas, _noise in brownian for sigma in stage_sigmas if sigma > 0]
+    assert all(float(low) <= sigma <= float(high) for sigma in queried)
+
+
+def test_brownian_stages_get_independent_noise_from_the_shared_tree(monkeypatch):
+    """With the real k-diffusion BrownianTreeNoiseSampler: per-stage trees with the same seed replay correlated noise
+    in the later stage; one tree over the union does not."""
+    from test.helpers import add_repositories_to_sys_path
+    add_repositories_to_sys_path("k-diffusion")
+    sampling = pytest.importorskip("k_diffusion.sampling")
+    if not hasattr(sampling, "BrownianTreeNoiseSampler"):  # the harness stub is installed by the `multi` fixture only
+        pytest.skip("k-diffusion not available")
+    x = torch.zeros(1, 4, 32, 32)
+    full = sampling.get_sigmas_exponential(15, 0.0292, 14.6146)
+    first, second = full[:8], full[7:]
+
+    def tree(sigmas):
+        return sampling.BrownianTreeNoiseSampler(x, *_per_stage_interval(sigmas), seed=[12345])
+
+    def noise(sampler, sigmas):
+        return [sampler(sigmas[i], sigmas[i + 1]).flatten() for i in range(len(sigmas) - 2)]
+
+    def max_correlation(a, b):
+        return max(abs(torch.corrcoef(torch.stack([u, v]))[0, 1].item()) for u in a for v in b)
+
+    per_stage = max_correlation(noise(tree(first), first), noise(tree(second), second))
+    shared = tree(torch.cat([first, second]))
+    union = max_correlation(noise(shared, first), noise(shared, second))
+
+    assert per_stage > 0.5
+    assert union < 0.1
 
 
 def test_multi_sampler_data_propagates_penultimate_sigma_discard(multi):
@@ -302,7 +368,7 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
         return x
 
     def sample_dpmpp_2m_sde(model, x, extra_args=None, disable=False, callback=None, sigmas=None, **kwargs):
-        calls.append(("DPM++ 2M SDE", list(sigmas), extra_args))
+        calls.append(("DPM++ 2M SDE", sigmas.tolist(), extra_args))
         return "denoised"
 
     monkeypatch.setattr(multi.k_diffusion.sampling, "sample_euler", sample_euler)
@@ -319,7 +385,8 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
     sampler.model_wrap_cfg = FakeModelWrapCfg()
     sampler.stop_at = None
 
-    result = sampler._run_chain(p, "latent", "cond", "uncond", sigmas=[2, 1, 0], steps=2, image_conditioning="image_cond")
+    sampler.create_noise_sampler = lambda _x, _sigmas, _p: None
+    result = sampler._run_chain(p, "latent", "cond", "uncond", sigmas=torch.tensor([2.0, 1.0, 0.0]), steps=2, image_conditioning="image_cond")
 
     assert result == "denoised"
     assert sampler.last_latent == "denoised"
@@ -459,7 +526,7 @@ def _stage_kwargs(multi, p, funcname, func):
     sampler = object.__new__(multi.MultiKDiffusionSampler)
     sampler.eta = 1.0
     return sampler._build_stage_kwargs(p=p, func=func, funcname=funcname, config=types.SimpleNamespace(options={}),
-                                       x=torch.zeros(1), sigmas=torch.tensor([2.0, 1.0, 0.0]), stage_steps=2)
+                                       sigmas=torch.tensor([2.0, 1.0, 0.0]), stage_steps=2)
 
 
 def test_stage_sigma_params_take_the_request_over_the_settings_and_are_recorded(multi, monkeypatch):

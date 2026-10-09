@@ -398,7 +398,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             stages.append((sampler_name, scheduler_name, stage_sigmas, start, end))
         return stages
 
-    def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, stage_steps: int) -> dict[str, Any]:
+    def _build_stage_kwargs(self, *, p, func, funcname: str, config, sigmas: torch.Tensor, stage_steps: int, noise_sampler=None) -> dict[str, Any]:
         params = _signature_param_names(func)
         # The request's s_* over the settings', passed and recorded like a single sampler's (Sampler.initialize).
         kwargs: dict[str, Any] = sd_samplers_common.sigma_params_kwargs(p, [name for name in _stage_extra_params(funcname) if name in params])
@@ -415,15 +415,25 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         if "sigmas" in params:
             kwargs["sigmas"] = sigmas
         if config.options.get("brownian_noise", False):
-            # Match upstream k-diffusion sampler semantics: the Brownian tree
-            # noise interval should be derived from the exact sigma schedule
-            # passed to this sampler call, not a broader multi-stage schedule.
-            # Mixed scheduler chains can otherwise seed/sample noise over the
-            # wrong sigma range for later stages.
-            kwargs["noise_sampler"] = self.create_noise_sampler(x, sigmas, p)
+            kwargs["noise_sampler"] = noise_sampler
         if config.options.get("solver_type", None) == "heun":
             kwargs["solver_type"] = "heun"
         return kwargs
+
+    def _chain_noise_sampler(self, x, stages, p):
+        """The Brownian noise sampler shared by every Brownian stage of the chain, over the union of their sigmas.
+
+        A Brownian tree's noise for (sigma, sigma_next) is fixed by its seeds and its interval: separate trees with the
+        same seeds over different stage intervals draw correlated noise, so a later Brownian stage partly replayed the
+        earlier one's. One tree over the union gives every stage step its own increment of the same Brownian path,
+        and the interval holds every sigma the stages query. With one Brownian stage the union is that stage's
+        schedule, so it gets the sampler it always got."""
+        brownian_sigmas = [
+            stage_sigmas
+            for sampler_name, _scheduler_name, stage_sigmas, start, end in stages
+            if end > start and _k_sampler_config(sampler_name).options.get("brownian_noise", False)
+        ]
+        return self.create_noise_sampler(x, torch.cat(brownian_sigmas), p)
 
     def _snapshot_config(self, p) -> dict[str, Any]:
         raw = getattr(p, "openclaw_multi_sampler_snapshots", None)
@@ -523,14 +533,20 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             scheduler = _sampler_data_for(self.definition).options.get("scheduler")
             if scheduler:
                 p.extra_generation_params["Sampler chain scheduler"] = scheduler
+        noise_sampler = None
+        noise_sampler_created = False
         try:
             for sampler_name, _scheduler_name, stage_sigmas, offset, end in stages:
                 stage_steps = max(0, end - offset)
                 if stage_steps <= 0:
                     continue
                 config = _k_sampler_config(sampler_name)
+                if config.options.get("brownian_noise", False) and not noise_sampler_created:
+                    # Created where the first Brownian stage starts, as the per-stage sampler was.
+                    noise_sampler = self._chain_noise_sampler(x, stages, p)
+                    noise_sampler_created = True
                 func, stage_funcname = _sampler_func_for(sampler_name)
-                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, stage_steps=stage_steps)
+                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, sigmas=stage_sigmas, stage_steps=stage_steps, noise_sampler=noise_sampler)
                 # A one-step final stage [sigma, 0] is valid for every sampler: modules/sd_samplers_extra.py makes the
                 # DPM++ 2M/3M SDE functions run it as their denoising step.
                 x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self._callback(p, offset=offset), **kwargs)
