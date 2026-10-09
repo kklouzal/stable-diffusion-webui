@@ -77,9 +77,11 @@ def prepare_mask(
     mask: Image.Image, p: processing.StableDiffusionProcessingImg2Img
 ) -> Image.Image:
     """
-    Prepare an img2img inpaint mask for ControlNet: convert it to grayscale (mode "L"), invert it when
-    `p.inpainting_mask_invert` is set, then apply the same separable Gaussian blur as the core's inpaint
-    mask (`p.mask_blur_x` horizontally, `p.mask_blur_y` vertically; 0 disables an axis).
+    Prepare an img2img inpaint mask for ControlNet the way StableDiffusionProcessingImg2Img.init prepares the
+    core's: create_binary_mask (an RGBA mask with transparency is its alpha channel, thresholded at 128 when
+    `p.mask_round` is set; any other mask becomes grayscale, mode "L"), invert it when `p.inpainting_mask_invert`
+    is set, then the separable Gaussian blur (`p.mask_blur_x` horizontally, `p.mask_blur_y` vertically; 0 disables
+    an axis).
 
     Args:
         mask (Image.Image): The input mask as a PIL Image object.
@@ -88,7 +90,7 @@ def prepare_mask(
     Returns:
         mask (Image.Image): The prepared mask as a PIL Image object.
     """
-    mask = mask.convert("L")
+    mask = processing.create_binary_mask(mask, round=p.mask_round)
     if getattr(p, "inpainting_mask_invert", False):
         mask = ImageOps.invert(mask)
 
@@ -505,7 +507,11 @@ class Script(scripts.Script, metaclass=(
                         all_edge_count = np.where(x > 127)[0].shape[0]
                         is_one_pixel_edge = one_pixel_edge_count * 2 > all_edge_count
 
-                if 2 < unique_color_count < 200:
+                # Few colors means a segmentation/color-coded map: keep the labels exact. A gray map (all channels
+                # equal) is an intensity map instead, e.g. a smooth low-contrast depth map with under 200 levels,
+                # which nearest-neighbour scaling would turn into visible steps.
+                is_gray = bool((x[:, :, 0] == x[:, :, 1]).all() and (x[:, :, 0] == x[:, :, 2]).all())
+                if 2 < unique_color_count < 200 and not is_gray:
                     interpolation = cv2.INTER_NEAREST
                 elif new_size_is_smaller:
                     interpolation = cv2.INTER_AREA
@@ -718,14 +724,16 @@ class Script(scripts.Script, metaclass=(
             and is_only_masked_inpaint
             and (is_upscale_script or unit.inpaint_crop_input_image)
         ):
+            mask = prepare_mask(a1111_mask_image, p)
+            crop_region = masking.get_crop_region_v2(mask, p.inpaint_full_res_padding)
+            if crop_region is None:
+                # Blank mask: the core does not crop either; it falls back to plain img2img.
+                return input_image
+            crop_region = masking.expand_crop_region(crop_region, p.width, p.height, mask.width, mask.height)
+
             logger.debug("Crop input image based on A1111 mask.")
             input_image = [input_image[:, :, i] for i in range(input_image.shape[2])]
             input_image = [Image.fromarray(x) for x in input_image]
-
-            mask = prepare_mask(a1111_mask_image, p)
-
-            crop_region = masking.get_crop_region(np.array(mask), p.inpaint_full_res_padding)
-            crop_region = masking.expand_crop_region(crop_region, p.width, p.height, mask.width, mask.height)
 
             input_image = [
                 images.resize_image(resize_mode.int_value(), i, mask.width, mask.height)
@@ -834,12 +842,6 @@ class Script(scripts.Script, metaclass=(
         forward_params: List[ControlParams] = []
         post_processors = []
 
-        # Unload unused preprocessors
-        Preprocessor.unload_unused(active_processors={
-            p
-            for unit in self.enabled_units
-            for p in unit.get_actual_preprocessors()
-        })
         high_res_fix = isinstance(p, StableDiffusionProcessingTxt2Img) and getattr(p, 'enable_hr', False)
 
         for unit in self.enabled_units:

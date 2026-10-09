@@ -1,8 +1,10 @@
 import unittest
 from types import SimpleNamespace
 from unittest import mock
-from PIL import Image
+from PIL import Image, ImageOps
+import cv2
 import numpy as np
+import torch
 
 import importlib
 
@@ -18,7 +20,7 @@ from modules import processing, shared
 
 class TestPrepareMask(unittest.TestCase):
     def test_prepare_mask(self):
-        p = processing.StableDiffusionProcessing()
+        p = processing.StableDiffusionProcessingImg2Img()
         p.inpainting_mask_invert = True
         p.mask_blur_x = p.mask_blur_y = 5
 
@@ -50,6 +52,104 @@ class TestPrepareMask(unittest.TestCase):
         self.assertEqual(
             processed_mask.getpixel((0, 0)), 0
         )  # black should remain black
+
+
+    def test_matches_the_core_inpaint_mask(self):
+        """StableDiffusionProcessingImg2Img.init: create_binary_mask(round=mask_round), invert, blur."""
+        alpha = np.zeros((40, 50, 4), np.uint8)
+        alpha[10:20, 5:30, 3] = 255
+        alpha[25, 30:40, 3] = 100  # soft alpha: dropped when rounding, kept as is otherwise
+        rgb = np.random.default_rng(0).integers(0, 256, (40, 50, 3), dtype=np.uint8)
+        for mask in (Image.fromarray(alpha, "RGBA"), Image.fromarray(rgb, "RGB"), Image.fromarray(rgb[..., 0], "L")):
+            for mask_round in (True, False):
+                for invert in (False, True):
+                    with self.subTest(mode=mask.mode, mask_round=mask_round, invert=invert):
+                        p = processing.StableDiffusionProcessingImg2Img(mask_round=mask_round, inpainting_mask_invert=invert)
+                        p.mask_blur_x = p.mask_blur_y = 0
+                        expected = processing.create_binary_mask(mask, round=mask_round)
+                        if invert:
+                            expected = ImageOps.invert(expected)
+                        processed = prepare_mask(mask, p)
+                        self.assertEqual(processed.mode, "L")
+                        np.testing.assert_array_equal(np.asarray(processed), np.asarray(expected))
+                        if mask.mode != "RGBA":  # L and RGB masks: unchanged grayscale conversion
+                            gray = np.asarray(mask.convert("L"))
+                            np.testing.assert_array_equal(np.asarray(processed), 255 - gray if invert else gray)
+        # The transparent mask is its alpha channel, not the (black) color channels.
+        p = processing.StableDiffusionProcessingImg2Img()
+        p.mask_blur_x = p.mask_blur_y = 0
+        self.assertEqual(prepare_mask(Image.fromarray(alpha, "RGBA"), p).getbbox(), (5, 10, 30, 20))
+
+
+class TestCropWithA1111Mask(unittest.TestCase):
+    """Inpaint "Only masked" crops the ControlNet input image to the core's crop region."""
+
+    def processing(self, mask):
+        p = processing.StableDiffusionProcessingImg2Img(
+            width=64, height=32, inpaint_full_res=True, inpaint_full_res_padding=4, mask=mask)
+        p.mask_blur_x = p.mask_blur_y = 0
+        p.extra_generation_params = {}
+        return p
+
+    def crop(self, p, image):
+        unit = ControlNetUnit(module="canny", inpaint_crop_input_image=True)
+        return Script.try_crop_image_with_a1111_mask(p, unit, image, ResizeMode.RESIZE)
+
+    def test_crop_region_is_the_cores(self):
+        from modules import images, masking
+
+        image = np.random.default_rng(2).integers(0, 256, (90, 120, 3), dtype=np.uint8)
+        alpha = np.zeros((90, 120, 4), np.uint8)
+        alpha[30:50, 40:70, 3] = 255
+        p = self.processing(Image.fromarray(alpha, "RGBA"))
+        core_mask = processing.create_binary_mask(p.image_mask, round=p.mask_round)
+        region = masking.expand_crop_region(
+            masking.get_crop_region_v2(core_mask, p.inpaint_full_res_padding), p.width, p.height, 120, 90)
+        expected = np.stack([
+            np.asarray(images.resize_image(ResizeMode.OUTER_FIT.int_value(), Image.fromarray(image[:, :, i]).crop(region), p.width, p.height))[:, :, 0]
+            for i in range(3)
+        ], axis=2)
+        np.testing.assert_array_equal(self.crop(p, image), expected)
+
+    def test_blank_mask_does_not_crop(self):
+        image = np.random.default_rng(3).integers(0, 256, (90, 120, 3), dtype=np.uint8)
+        for mask in (Image.new("L", (120, 90)), Image.new("RGBA", (120, 90))):
+            with self.subTest(mode=mask.mode):
+                self.assertIs(self.crop(self.processing(mask), image), image)
+
+
+class TestDetectmapResizeInterpolation(unittest.TestCase):
+    def test_gray_maps_with_few_levels_are_not_resized_nearest(self):
+        rng = np.random.default_rng(4)
+        gray = np.repeat(np.linspace(90, 140, 48)[:, None], 40, axis=1).astype(np.uint8)  # smooth, 51 levels
+        _, up = Script.detectmap_proc(gray, "depth_zoe", ResizeMode.RESIZE, 96, 80)
+        np.testing.assert_array_equal(up, cv2.resize(np.stack([gray] * 3, axis=2), (80, 96), interpolation=cv2.INTER_CUBIC))
+
+        palette = rng.integers(0, 256, (12, 3), dtype=np.uint8)
+        seg = palette[rng.integers(0, 12, (6, 5))].repeat(8, axis=0).repeat(8, axis=1)
+        _, up = Script.detectmap_proc(seg, "seg_anime_face", ResizeMode.RESIZE, 96, 80)
+        np.testing.assert_array_equal(up, cv2.resize(seg, (80, 96), interpolation=cv2.INTER_NEAREST))
+
+
+class TestPreprocessorsStayLoaded(unittest.TestCase):
+    def test_a_request_does_not_unload_the_preprocessors_it_does_not_use(self):
+        from scripts.supported_preprocessor import Preprocessor
+
+        class Stop(Exception):
+            pass
+
+        unit = ControlNetUnit(enabled=True, module="canny", model="None")
+        unused = Preprocessor.get_preprocessor("depth_zoe")
+        sd_model = SimpleNamespace(model=SimpleNamespace(diffusion_model=torch.nn.Module()), is_sdxl=False)
+        p = SimpleNamespace(sd_model=sd_model)
+        with mock.patch.object(Script, "get_enabled_units", return_value=[unit]), \
+                mock.patch.object(Script, "check_sd_version_compatible", side_effect=Stop), \
+                mock.patch.object(type(unused), "unload") as unload, \
+                mock.patch.object(type(unused), "clear_cache") as clear_cache:
+            with self.assertRaises(Stop):
+                Script().controlnet_main_entry(p)
+        unload.assert_not_called()
+        clear_cache.assert_not_called()
 
 
 class TestSetNumpySeed(unittest.TestCase):

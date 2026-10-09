@@ -84,7 +84,6 @@ class Preprocessor(ABC):
     requires_mask: bool = False
     model: Optional[torch.nn.Module] = None
     device = devices.get_device_for("controlnet")
-    preprocessor_deps: List[str] = field(default_factory=list)
     # Opt-in per class (or per instance) for results that are a pure function of
     # _cache_identity. A ClassVar, not a dataclass field: a field default would be
     # assigned per instance by __init__ and shadow a subclass's `cacheable = True`.
@@ -164,17 +163,6 @@ class Preprocessor(ABC):
         tag = tag.lower()
         union_tags = ["union"] if tag in ControlNetUnionControlType.all_tags() else []
         return set([tag] + filters_aliases.get(tag, []) + union_tags)
-
-    @classmethod
-    def unload_unused(cls, active_processors: Set["Preprocessor"]):
-        logger.debug(
-            f"Unload unused preprocessors. Active: {[p.name for p in active_processors]}"
-        )
-        for p in cls.all_processors.values():
-            if p not in active_processors:
-                success = p.unload()
-                if success:
-                    logger.debug(f"Unload unused preprocessor {p.name}")
 
     class Result(NamedTuple):
         value: Any

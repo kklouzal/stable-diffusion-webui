@@ -102,14 +102,15 @@ def test_zoedepth_sources_avoid_deprecated_torch_and_timm_apis():
 
 
 def _zoe_depth_image_two_percentile_calls(depth):
-    """The depth image as computed before the single-pass change."""
+    """The depth image with the two percentile calls used before the single-pass change (rounded to uint8 as the
+    detector does)."""
     depth = depth.copy()
     vmin = np.percentile(depth, 2)
     vmax = np.percentile(depth, 85)
     depth -= vmin
     depth /= vmax - vmin
     depth = 1.0 - depth
-    return (depth * 255.0).clip(0, 255).astype(np.uint8)
+    return np.rint((depth * 255.0).clip(0, 255)).astype(np.uint8)
 
 
 def test_zoedepth_single_percentile_pass_is_bitwise_identical_to_two_calls():

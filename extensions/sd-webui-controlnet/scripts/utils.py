@@ -85,7 +85,10 @@ def safer_memory(x):
     return np.ascontiguousarray(x.copy()).copy()
 
 
-def resize_image_with_pad(img: np.ndarray, resolution: int):
+def resize_image_short_side(img: np.ndarray, resolution: int) -> np.ndarray:
+    """Resize so that the short side is `resolution`, keeping the aspect ratio (greyscale becomes RGB). This is
+    resize_image_with_pad's image without its padding, for models that take any size and whose output
+    normalization must see only image content."""
     # Convert greyscale image to RGB.
     if img.ndim == 2:
         img = img[:, :, None]
@@ -96,7 +99,12 @@ def resize_image_with_pad(img: np.ndarray, resolution: int):
     interpolation = cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA
     H_target = int(np.round(float(H_raw) * k))
     W_target = int(np.round(float(W_raw) * k))
-    img = cv2.resize(img, (W_target, H_target), interpolation=interpolation)
+    return cv2.resize(img, (W_target, H_target), interpolation=interpolation)
+
+
+def resize_image_with_pad(img: np.ndarray, resolution: int):
+    img = resize_image_short_side(img, resolution)
+    H_target, W_target = img.shape[:2]
     H_pad, W_pad = pad64(H_target), pad64(W_target)
     img_padded = np.pad(img, [[0, H_pad], [0, W_pad], [0, 0]], mode="edge")
 
