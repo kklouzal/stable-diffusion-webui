@@ -303,6 +303,10 @@ ENV A1111_RUN_AS_USER=a1111
 ENV COMMANDLINE_ARGS=
 # stdout is a pipe in the container: unbuffered, log lines reach `docker logs` when written, in order with stderr.
 ENV PYTHONUNBUFFERED=1
+# torch.hub and Hugging Face downloads (ControlNet preprocessors such as Depth Anything) go under the app's cache/,
+# which gb10/run.sh mounts from the host (Caches/app), so they survive container replacement.
+ENV TORCH_HOME=/opt/stable-diffusion-webui/cache/torch
+ENV HF_HOME=/opt/stable-diffusion-webui/cache/huggingface
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/local/bin/gb10-a1111-entrypoint"]

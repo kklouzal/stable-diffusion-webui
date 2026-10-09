@@ -70,7 +70,7 @@ table. The host-owned surfaces are:
 - the model directories `BLIP`, `CLIP`, `Codeformer`, `GFPGAN`, `karlo`, `RealESGRAN`, `torch_deepdanbooru`, `VAE` and
   `VAE-approx`
 - `Extensions/`
-- `Caches/compile/`
+- `Caches/app/` (the app's `cache/`, with torch.hub and Hugging Face downloads) and `Caches/compile/`
 - `Embeddings/`, `Hypernetworks/`, `Lora/` and `Outputs/`, which are symlinks into `/mnt/nas-warehouse/StableDiffusion/`
 
 The host root also has directories that run.sh does not mount. They are leftovers from earlier layouts, and nothing in

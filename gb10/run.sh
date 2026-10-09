@@ -18,7 +18,9 @@ OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX:-4}"
 OPENCLAW_COMPILE_CACHE_ROOT="${OPENCLAW_COMPILE_CACHE_ROOT:-${HOST_ROOT}/Caches/compile}"
 
 # Host directory under HOST_ROOT -> path under the container's app directory. One table drives the host mkdir,
-# the ownership repair and the bind mounts, in this order.
+# the ownership repair and the bind mounts, in this order. Caches/app holds the app's cache/ (hash and metadata
+# caches, and TORCH_HOME/HF_HOME downloads, which the image places under cache/); the compile cache mount below nests
+# inside it at cache/compile.
 HOST_DIR_MOUNTS=(
   BLIP:models/BLIP
   CLIP:models/CLIP
@@ -34,6 +36,7 @@ HOST_DIR_MOUNTS=(
   Embeddings:embeddings
   Extensions:extensions
   Models:models/Stable-diffusion
+  Caches/app:cache
 )
 HOST_DIRS=("${HOST_DIR_MOUNTS[@]%%:*}" config)
 

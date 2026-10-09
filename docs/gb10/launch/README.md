@@ -139,7 +139,8 @@ it.
 | `Extensions` | `extensions` |
 | `Models` | `models/Stable-diffusion` |
 | `Outputs` | `outputs` |
-| `${OPENCLAW_COMPILE_CACHE_ROOT}` (`Caches/compile`) | `cache/compile` |
+| `Caches/app` | `cache` (app caches; the image sets `TORCH_HOME=cache/torch` and `HF_HOME=cache/huggingface`) |
+| `${OPENCLAW_COMPILE_CACHE_ROOT}` (`Caches/compile`) | `cache/compile` (nested inside the `cache` mount) |
 | `config/config.json` | `config.json` |
 | `config/styles.csv` | `styles.csv` |
 | `config/generation-last` | `generation-last` (`GENERATION_LAST_DIR`, see [generation-last-api.md](../generation-last-api.md)) |
@@ -147,4 +148,4 @@ it.
 On the host, `Outputs`, `Embeddings`, `Hypernetworks` and `Lora` are symlinks into `/mnt/nas-warehouse/StableDiffusion/`.
 
 Anything written outside these mounts is lost when the container is replaced. That includes `tmp/` and any weights
-downloaded into a model directory that has no mount.
+downloaded into a model directory that has no mount. torch.hub and Hugging Face downloads land under the `cache` mount.
