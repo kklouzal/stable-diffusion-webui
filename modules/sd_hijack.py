@@ -377,12 +377,12 @@ model_hijack = StableDiffusionModelHijack()
 
 def register_buffer(self, name, attr):
     """
-    Fix register buffer bug for Mac OS.
+    Puts ldm DDIM/PLMS sampler buffers on devices.device instead of the sampler's own device argument (cuda by default).
     """
 
     if type(attr) == torch.Tensor:
         if attr.device != devices.device:
-            attr = attr.to(device=devices.device, dtype=(torch.float32 if devices.device.type == 'mps' else None))
+            attr = attr.to(device=devices.device)
 
     setattr(self, name, attr)
 

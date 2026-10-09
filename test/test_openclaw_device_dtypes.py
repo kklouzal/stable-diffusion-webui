@@ -37,7 +37,7 @@ def load_timesteps_impl_module():
     k_diffusion_sampling = types.ModuleType("k_diffusion.sampling")
 
     shared_module.opts = types.SimpleNamespace()
-    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type in ("mps", "xpu") else torch.float64
+    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type == "xpu" else torch.float64
     k_diffusion_sampling.torch = torch
     k_diffusion_pkg.sampling = k_diffusion_sampling
     uni_pc_pkg.uni_pc = unipc_module

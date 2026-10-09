@@ -1,12 +1,8 @@
-import sys
 import contextlib
 from functools import lru_cache
 
 import torch
 from modules import errors, shared
-
-if sys.platform == "darwin":
-    from modules import mac_specific
 
 if shared.cmd_opts.use_ipex:
     from modules import xpu_specific
@@ -14,13 +10,6 @@ if shared.cmd_opts.use_ipex:
 
 def has_xpu() -> bool:
     return shared.cmd_opts.use_ipex and xpu_specific.has_xpu
-
-
-def has_mps() -> bool:
-    if sys.platform != "darwin":
-        return False
-    else:
-        return mac_specific.has_mps
 
 
 def cuda_no_autocast(device_id=None) -> bool:
@@ -51,9 +40,6 @@ def get_optimal_device_name():
     if torch.cuda.is_available():
         return get_cuda_device_string()
 
-    if has_mps():
-        return "mps"
-
     if has_xpu():
         return xpu_specific.get_xpu_device_string()
 
@@ -77,9 +63,6 @@ def torch_gc():
         with torch.cuda.device(get_cuda_device_string()):
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-
-    if has_mps():
-        mac_specific.torch_mps_gc()
 
     if has_xpu():
         xpu_specific.torch_xpu_gc()
@@ -216,7 +199,7 @@ def autocast(disable=False):
     if dtype == torch.float32 or dtype_inference == torch.float32:
         return contextlib.nullcontext()
 
-    if has_xpu() or has_mps() or cuda_no_autocast():
+    if has_xpu() or cuda_no_autocast():
         return manual_cast(dtype)
 
     return torch.autocast("cuda", dtype=dtype)

@@ -3,7 +3,6 @@ import functools
 import logging
 import math
 import psutil
-import platform
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -85,10 +84,7 @@ class SdOptimizationSdp(SdOptimizationSdpNoMem):
 class SdOptimizationSubQuad(SdOptimization):
     name = "sub-quadratic"
     cmd_opt = "opt_sub_quad_attention"
-
-    @property
-    def priority(self):
-        return 1000 if shared.device.type == 'mps' else 10
+    priority = 10
 
     def apply(self):
         ldm.modules.attention.CrossAttention.forward = sub_quad_attention_forward
@@ -114,7 +110,7 @@ class SdOptimizationInvokeAI(SdOptimization):
 
     @property
     def priority(self):
-        return 1000 if shared.device.type != 'mps' and not torch.cuda.is_available() else 10
+        return 1000 if not torch.cuda.is_available() else 10
 
     def apply(self):
         ldm.modules.attention.CrossAttention.forward = split_cross_attention_forward_invokeAI
@@ -235,7 +231,7 @@ def split_cross_attention_forward(self, x, context=None, mask=None, **kwargs):
 
     dtype = q_in.dtype
     if shared.opts.upcast_attn:
-        q_in, k_in, v_in = q_in.float(), k_in.float(), v_in if v_in.device.type == 'mps' else v_in.float()
+        q_in, k_in, v_in = q_in.float(), k_in.float(), v_in.float()
 
     with devices.without_autocast(disable=not shared.opts.upcast_attn):
         k_in = k_in * self.scale
@@ -287,9 +283,6 @@ def split_cross_attention_forward(self, x, context=None, mask=None, **kwargs):
 
 
 # -- Taken from https://github.com/invoke-ai/InvokeAI and modified --
-mem_total_gb = psutil.virtual_memory().total // (1 << 30)
-
-
 def einsum_op_compvis(q, k, v):
     s = einsum('b i d, b j d -> b i j', q, k)
     s = s.softmax(dim=-1, dtype=s.dtype)
@@ -310,23 +303,6 @@ def einsum_op_slice_1(q, k, v, slice_size):
         end = i + slice_size
         r[:, i:end] = einsum_op_compvis(q[:, i:end], k, v)
     return r
-
-
-def einsum_op_mps_v1(q, k, v):
-    if q.shape[0] * q.shape[1] <= 2**16: # (512x512) max q.shape[1]: 4096
-        return einsum_op_compvis(q, k, v)
-    else:
-        slice_size = math.floor(2**30 / (q.shape[0] * q.shape[1]))
-        if slice_size % 4096 == 0:
-            slice_size -= 1
-        return einsum_op_slice_1(q, k, v, slice_size)
-
-
-def einsum_op_mps_v2(q, k, v):
-    if mem_total_gb > 8 and q.shape[0] * q.shape[1] <= 2**16:
-        return einsum_op_compvis(q, k, v)
-    else:
-        return einsum_op_slice_0(q, k, v, 1)
 
 
 def einsum_op_tensor_mem(q, k, v, max_tensor_mb):
@@ -354,11 +330,6 @@ def einsum_op(q, k, v):
     if q.device.type == 'cuda':
         return einsum_op_cuda(q, k, v)
 
-    if q.device.type == 'mps':
-        if mem_total_gb >= 32 and q.shape[0] % 32 != 0 and q.shape[0] * q.shape[1] < 2**18:
-            return einsum_op_mps_v1(q, k, v)
-        return einsum_op_mps_v2(q, k, v)
-
     # Smaller slices are faster due to L2/L3/SLC caches.
     # Tested on i7 with 8MB L3 cache.
     return einsum_op_tensor_mem(q, k, v, 32)
@@ -377,7 +348,7 @@ def split_cross_attention_forward_invokeAI(self, x, context=None, mask=None, **k
 
     dtype = q.dtype
     if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v if v.device.type == 'mps' else v.float()
+        q, k, v = q.float(), k.float(), v.float()
 
     with devices.without_autocast(disable=not shared.opts.upcast_attn):
         k = k * self.scale
@@ -409,9 +380,6 @@ def sub_quad_attention_forward(self, x, context=None, mask=None, **kwargs):
     k = k.unflatten(-1, (h, -1)).transpose(1,2).flatten(end_dim=1)
     v = v.unflatten(-1, (h, -1)).transpose(1,2).flatten(end_dim=1)
 
-    if q.device.type == 'mps':
-        q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-
     dtype = q.dtype
     if shared.opts.upcast_attn:
         q, k = q.float(), k.float()
@@ -436,10 +404,7 @@ def sub_quad_attention(q, k, v, q_chunk_size=1024, kv_chunk_size=None, kv_chunk_
     qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
     if chunk_threshold is None:
-        if q.device.type == 'mps':
-            chunk_threshold_bytes = 268435456 * (2 if platform.processor() == 'i386' else bytes_per_token)
-        else:
-            chunk_threshold_bytes = int(get_available_vram() * 0.7)
+        chunk_threshold_bytes = int(get_available_vram() * 0.7)
     elif chunk_threshold == 0:
         chunk_threshold_bytes = None
     else:
