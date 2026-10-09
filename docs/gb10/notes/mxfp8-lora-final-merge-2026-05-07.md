@@ -1,5 +1,11 @@
 # MXFP8 final-merged LoRA preparation — 2026-05-07
 
+Update 2026-10-09:
+- `modules/mxfp8_diagnostics.py` and its routes were removed (1e7c369d). The prepare stats are in
+  `GET /sdapi/v1/openclaw/precision-map` under `quantization_stats.mxfp8_lora_prepare`.
+- The functions are now backend-generic: `prepare_quant_active_config(backend)` and
+  `network_apply_quant_merged_lora(backend, ...)` in `extensions-builtin/Lora/networks.py`.
+
 ## Problem
 
 MXFP8 `unet_other` generation stayed fast with no active LoRAs, but repeat generation time scaled almost linearly with active LoRA count after the MXFP8 LoRA merge/requantize work:

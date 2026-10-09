@@ -69,7 +69,10 @@ retrying:
 3. Then rerun the stress protocol (idle host, nothing else on the GPU, the operator able to reset it):
    `~/audit-artifacts/gb10-a1111-perf2-20261007/stress1.sh` (39 back-to-back n-w1/n-w2/plain requests with NHWC on; the
    script disables the restart policy for the test and restores it), then the same with hires-fix requests (n-w3).
-   NHWC is switched with `curl -X POST :7860/sdapi/v1/openclaw/nhwc-groupnorm -d '{"scopes":"all"}'` (and `"off"`);
-   NCHW is a deploy without `--opt-channelslast` in `COMMANDLINE_ARGS`.
+   NHWC is switched with `curl -X POST http://127.0.0.1:7860/sdapi/v1/openclaw/nhwc-groupnorm -H 'Content-Type: application/json' -d '{"scopes":"all"}'`
+   (and `"off"`); NCHW is a deploy without `--opt-channelslast` in `COMMANDLINE_ARGS`. (Update 2026-10-09: the JSON
+   content type is required, since the route takes a JSON body. A non-empty `COMMANDLINE_ARGS` replaces the launcher's
+   whole default list, so pass that list minus `--opt-channelslast` and keep `--nowebui --api`; see
+   docs/gb10/launch/README.md.)
 4. Open detail: with NHWC on, the ControlNet img2img request gave a different (repeatable) pixel hash in two server
    processes while txt2img matched; check cross-process determinism of the ControlNet layout conversion before adopting.

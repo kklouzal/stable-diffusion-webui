@@ -1,13 +1,22 @@
 # GB10 img2img path notes
 
+## Reference records
 
-## Current known-good MXFP8 baseline
+Read these before you change image-affecting math, quantization coverage, attention backend defaults, LoRA
+quantization behavior, or SEG/PAG semantics.
 
-The final GB10 img2img/MXFP8 baseline from 2026-05-06 is recorded in [`notes/mxfp8-img2img-final-baseline-2026-05-06.md`](notes/mxfp8-img2img-final-baseline-2026-05-06.md).
+Current records:
+- [`notes/correctness-audit-2026-10-07.md`](notes/correctness-audit-2026-10-07.md): the image-affecting fixes and their
+  live verification.
+- [`notes/performance-pass-2-2026-10-07.md`](notes/performance-pass-2-2026-10-07.md): the exact (bitwise) performance
+  changes and the parked layout work.
 
-Treat that note as the reference point before changing image-affecting math, quantization coverage, attention backend defaults, LoRA/MXFP8 behavior, or SEG/PAG semantics.
-
-Experimental runtime-selectable Linear coverage is documented in [`notes/mxfp8-dynamic-linear-coverage-2026-05-06.md`](notes/mxfp8-dynamic-linear-coverage-2026-05-06.md).
+Historical record, from 2026-05-06:
+- [`notes/mxfp8-img2img-final-baseline-2026-05-06.md`](notes/mxfp8-img2img-final-baseline-2026-05-06.md) is the MXFP8
+  img2img baseline. Production now runs with `mxfp8_storage` and `nvfp4_storage` set to `Disable`, which is also the
+  default.
+- Runtime-selectable Linear coverage is in
+  [`notes/mxfp8-dynamic-linear-coverage-2026-05-06.md`](notes/mxfp8-dynamic-linear-coverage-2026-05-06.md).
 
 ## Low-risk cleanup boundary
 

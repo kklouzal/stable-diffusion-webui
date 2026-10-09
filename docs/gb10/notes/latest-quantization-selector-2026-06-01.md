@@ -10,6 +10,10 @@ Base: `latest-mxfp8` at `4ba907111876ba222f8edd19dcc11a1698678b39`
 
 MXFP8 stays the default backend. NVFP4 is exposed as a sibling backend selected by runtime options rather than as a replacement for the MXFP8 implementation.
 
+Update 2026-10-09: `mxfp8_storage` and `nvfp4_storage` both default to `Disable`, and production runs with both
+disabled. The MXFP8 diagnostics routes were removed in the cleanup pass (1e7c369d). Quantization stats are in
+`GET /sdapi/v1/openclaw/precision-map`.
+
 ## Port audit
 
 The old `latest-nvfp4` branch has 17 commits not present as commits on `latest-mxfp8`, but most useful NVFP4 capability has already been reimplemented on top of the newer MXFP8 architecture:

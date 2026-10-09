@@ -2,6 +2,10 @@
 
 This note records the experimental runtime-selectable MXFP8 Linear coverage control added after the final conservative img2img baseline.
 
+Update 2026-10-09: the MXFP8 diagnostics probe and its routes (`/sdapi/v1/mxfp8-diagnostics`, `.../run`) were removed
+(1e7c369d). The coverage counts are in `GET /sdapi/v1/openclaw/precision-map` under `quantization_stats.mxfp8`.
+`mxfp8_storage` defaults to `Disable`, and production runs with it disabled.
+
 ## Runtime option
 
 `MXFP8 Linear coverage` is a checkbox-group optimization option with four supported Linear regions:

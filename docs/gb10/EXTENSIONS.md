@@ -1,176 +1,109 @@
-# GB10 mounted extension audit
+# GB10 extensions
 
-This document records the current external A1111 extension posture now that A1111-Controller is canonical for Schwi's workflow direction.
+The host directory `/opt/gb10/stable-diffusion/Extensions` is mounted as A1111's `extensions/` directory. The
+extensions in it are of two kinds:
 
-The goal is to keep the runtime lean: purge UI-only extensions that A1111-Controller supersedes, and adopt any remaining generation-critical behavior as first-class repo-owned source instead of depending on opaque mounted checkouts.
+- **Owned**: the source lives in this repo under `extensions/`. On every deploy, `gb10/run.sh` mirrors each one into
+  the host directory (see [launch/README.md](launch/README.md#deploy-gb10runsh)). The image does not contain them.
+- **Third-party**: installed only on the host. run.sh patches them in place at deploy time.
 
-## Current live extension inventory
+A1111-Controller is the frontend. UI-only extensions do not belong here. Any extension that affects generation quality,
+callback ordering or model loading should be owned source, not an opaque host checkout.
 
-Live host path:
+## Owned extensions
 
-- `/opt/gb10/stable-diffusion/Extensions`
+| Directory | Provenance | Provides |
+|---|---|---|
+| `openclaw-clear-cond-cache` | GB10-owned | Controller helper routes under `/sdapi/v1/openclaw/` (listed below) and the backend activity status fed by hooks on model, VAE and LoRA loading |
+| `openclaw-denoise-ramp` | GB10-owned | the `OpenClaw Denoise Ramp` script, which wraps the k-diffusion sigma schedule for img2img |
+| `openclaw-multi-sampler` | GB10-owned | the `OpenClaw Multi-Sampler` script and `/sdapi/v1/openclaw/multi-sampler` (GET), `.../custom` (POST), `.../custom/{name}` (DELETE) and `.../preview` (POST). Saved chains live in the extension's `data/`, which deploys preserve |
+| `sd-webui-controlnet` | `Mikubill/sd-webui-controlnet` v1.1.455 (`56cec5b`), GPL-3.0 | API-only ControlNet; see its [README](../../extensions/sd-webui-controlnet/README.md) |
+| `sd-webui-incantations` | Incantations (GPL-3.0) plus `mcmonkeyprojects/sd-dynamic-thresholding` (MIT) | PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix; see its [README](../../extensions/sd-webui-incantations/README.md) |
+| `sd-webui-model-converter` | `Akegarasu/sd-webui-model-converter` at `a8c04410` | checkpoint and LoRA conversion: `/sdapi/v1/openclaw/model-converter/options` (GET) and `.../convert` (POST) |
+| `sd-webui-teacache` | `feffy380/sd-webui-teacache` at `a8cecf28`, MIT | SDXL TeaCache acceleration, off by default |
 
-Live directories as of 2026-09-25:
+The routes of `openclaw-clear-cond-cache` (see its [README](../../extensions/openclaw-clear-cond-cache/README.md)):
 
-- `multidiffusion-upscaler-for-automatic1111`
-- `openclaw-clear-cond-cache`
-- `openclaw-denoise-ramp`
-- `openclaw-multi-sampler`
-- `sd-webui-controlnet`
-- `sd-webui-detail-daemon`
-- `sd-webui-incantations`
-- `sd-webui-model-converter`
-- `sd-webui-teacache`
-- `ultimate-upscale-for-automatic1111`
+| Method | Path |
+|---|---|
+| POST | `/sdapi/v1/openclaw/clear-cond-cache` |
+| GET | `/sdapi/v1/openclaw/cond-cache` |
+| POST | `/sdapi/v1/openclaw/token-count` |
+| POST | `/sdapi/v1/openclaw/token_counter` (alias of `token-count`) |
+| GET, POST | `/sdapi/v1/openclaw/torch-compile` |
+| GET | `/sdapi/v1/openclaw/backend-status` |
+| GET, POST | `/sdapi/v1/openclaw/cudnn-benchmark` |
+| POST | `/sdapi/v1/openclaw/model-merge` |
+| GET | `/sdapi/v1/openclaw/training-templates` |
 
-## Ownership policy
+ControlNet notes:
 
-### First-class extensions
+- **Models.** Model weights live in the checkout's `extensions/sd-webui-controlnet/models/`. Git ignores them; the
+  identity of each is pinned by a committed `.sha256` sidecar. See [gb10/controlnet-models.md](../../gb10/controlnet-models.md).
+- **Preprocessor weights** download on first use into `annotator/downloads/`. Deploys preserve both directories on
+  the host.
+- **Supported preprocessors.** The 2026-10-09 cleanup dropped the preprocessors that could not run in this image.
+  `module_list` went from 72 to 60.
+- **Depth Anything.** The Depth Anything v1/v2 packages are installed in images built from 6bbe3a96 on.
 
-First-class means:
+Incantations notes:
 
-- source lives in this repo under `extensions/`
-- provenance/license is documented
-- `gb10/run.sh` syncs the repo-owned source into the host `Extensions/` mount before launch
-- behavior changes are committed, reviewable, and validated with the image/runtime
+- PAG's CFG Scheduler ("CFG Interval") was removed on 2026-10-09.
+- Its four script inputs remain as placeholders, so positional `alwayson_scripts` arguments keep their indices.
+  `cfg_interval_enable=true` raises an error.
 
-Currently first-class:
+Rules for owned code:
 
-- `openclaw-clear-cond-cache`
-  - owns OpenClaw/A1111-Controller helper endpoints:
-    - `POST /sdapi/v1/openclaw/clear-cond-cache`
-    - `GET /sdapi/v1/openclaw/cond-cache`
-    - `POST /sdapi/v1/openclaw/token-count`
-    - `POST /sdapi/v1/openclaw/token_counter`
-  - replaces the former token-counter dependency on `sd-webui-prompt-all-in-one`
-- `sd-webui-incantations`
-  - owns PAG, SEG, CFG-combiner, and Dynamic Thresholding / CFG-Fix behavior
-  - replaces previous dependence on separate Incantations and Dynamic Thresholding checkouts
-- `sd-webui-teacache`
-  - owns SDXL TeaCache acceleration as a disabled-by-default experimental script
-  - adopted from `feffy380/sd-webui-teacache` under MIT license with attribution preserved
-- `sd-webui-controlnet`
-  - upstream `Mikubill/sd-webui-controlnet` v1.1.455 (`56cec5b`, GPL-3.0), committed byte-identical first, followed by a separate commit that holds the GB10 edits (legacy remote API field normalization used by A1111-Controller, headless submit-button guard, hook and ZoeDepth fixes)
-  - `gb10/run.sh` additionally applies the tracked `gb10/patch-controlnet-*.py` patchers on deploy
-  - model weights (`models/*.safetensors`, identity pinned by the committed `.sha256` sidecars) and `annotator/downloads/` stay out of git. Each deploy's resync removes `annotator/downloads/`, so annotators such as ZoeDepth re-download on first use.
-- `openclaw-denoise-ramp`, `openclaw-multi-sampler`, `sd-webui-model-converter`
-  - GB10-owned sampler, denoise-ramp, and model conversion extensions
+- Make changes here.
+- Keep each upstream's license and provenance notes.
+- Patch generation math and cache behavior conservatively: it changes images.
 
-Tiled upscaling stays external (`multidiffusion-upscaler-for-automatic1111`, `ultimate-upscale-for-automatic1111`). Their GB10 changes are tracked as `gb10/patch-*.py` patchers and `patches/mounted-extensions/`.
+**Retired.** `openclaw-conditioning-probe` (cache-coherency diagnostics routes) was removed on 2026-10-09. run.sh
+never deletes a retired owned extension, so remove the host copy
+`/opt/gb10/stable-diffusion/Extensions/openclaw-conditioning-probe` by hand.
 
-### External mounted extensions
+## Third-party extensions
 
-External mounted extensions are tolerated only if they provide behavior we still need and are not yet worth adopting. Any external extension that materially affects generation quality, callback ordering, model loading, or high-value workflow behavior should either become first-class or be removed.
+A1111-Controller uses these, so they stay installed on the host:
 
-## Removal decisions
+| Directory | Deploy-time patch (`gb10/`, on the `patchlib.py` contract) |
+|---|---|
+| `multidiffusion-upscaler-for-automatic1111` | `patch-multidiffusion-performance.py` |
+| `ultimate-upscale-for-automatic1111` | `patch-ultimate-upscale-state-lifecycle.py` and `patch-ultimate-upscale-subcanvas.py` |
+| `sd-webui-detail-daemon` | none |
 
-Schwi approved removing these UI-only / Controller-superseded extensions from the live A1111 runtime:
+What the patches do:
 
-- `Config-Presets`
-- `model-keyword`
-- `sd_delete_button`
-- `sd-webui-cardmaster`
-- `sd-webui-prompt-all-in-one`
-- `sd-webui-state-manager`
+- **`patch-multidiffusion-performance.py`.** Its original text is upstream `22798f6`, so a fresh install patches
+  cleanly. It covers:
+  - the MultiDiffusion terminal-tile fix (previously a separate patcher)
+  - the Tiled VAE attention fallbacks (previously `patches/mounted-extensions/`)
+  - the Tiled VAE and MultiDiffusion performance changes
+- **`patch-ultimate-upscale-state-lifecycle.py`** makes Ultimate Upscale end its job state on every path.
+- **`patch-ultimate-upscale-subcanvas.py`** gives each Ultimate Upscale tile a window of the canvas instead of the whole
+  canvas. The output is bitwise identical.
 
-`sd-webui-state-manager` was already disabled in `config.json`. The user referred to this as `sd-webui-statemaster`; the live directory name is `sd-webui-state-manager`.
+Each patcher accepts either the original or the already-patched text and fails the deploy on anything else. run.sh
+rehearses every patcher on a scratch copy before it stops production.
 
-`sd-webui-prompt-all-in-one` originally stayed because A1111-Controller used its `/physton_prompt/token_counter` endpoint. That dependency was replaced by the first-class `openclaw-clear-cond-cache` endpoint `/sdapi/v1/openclaw/token-count`, after which the controller fallback to `/physton_prompt/token_counter` was removed.
+Candidates for adoption as owned source:
 
-Removal result:
+- MultiDiffusion, which is in the generation and runtime hot path and already patched
+- detail-daemon, which changes sampling noise
+- Ultimate Upscale
 
-- earlier UI-only removals were quarantined under `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-160304`
-- the quarantine tree `/opt/gb10/stable-diffusion/Extensions.quarantine` was purged completely after Schwi validated the runtime
-- `sd-webui-prompt-all-in-one` was removed after owned token-count replacement and live validation
-- A1111 restarted successfully from `local/gb10-a1111:base-protected-app-latest`
-- smoke tests should include progress endpoint health, model listing, OpenClaw token-count endpoint, Controller token-count endpoint, and extension absence
+## History
 
-## Keep decisions
+- **2026-05.** These UI-only or Controller-superseded extensions were removed from the host:
+  - `Config-Presets`
+  - `model-keyword`
+  - `sd_delete_button`
+  - `sd-webui-cardmaster`
+  - `sd-webui-prompt-all-in-one`
+  - `sd-webui-state-manager`
 
-Schwi confirmed these external mounted extensions need to stay because A1111-Controller uses functionality from them:
-
-### `sd-webui-model-converter`
-
-Decision: **keep**.
-
-Reason:
-
-- A1111-Controller uses model-conversion functionality.
-- It should remain mounted for now.
-
-Future ownership:
-
-- consider adopting first-class or replacing with a Controller/offline utility only after identifying the exact conversion operations Controller depends on.
-
-### `sd-webui-detail-daemon`
-
-Decision: **keep**.
-
-Reason:
-
-- A1111-Controller uses this generation-control functionality.
-- It modifies generation behavior through sampling/noise scheduling, so if we patch it later, it should be treated as output-quality-affecting code.
-
-Future ownership:
-
-- likely first-class adoption candidate if it remains central to workflows.
-
-### `multidiffusion-upscaler-for-automatic1111`
-
-Decision: **keep**.
-
-Reason:
-
-- A1111-Controller uses tiled diffusion / tiled VAE / large-image functionality from it.
-- It already has GB10-specific xformers/SDPA compatibility handling.
-
-Future ownership:
-
-- strong first-class adoption candidate, because patched generation/runtime behavior should not remain opaque long-term.
-
-Current repo note:
-
-- `patches/mounted-extensions/multidiffusion-upscaler-for-automatic1111/0001-modern-attention-fallbacks.patch` records the local attention fallback patch.
-
-### `ultimate-upscale-for-automatic1111`
-
-Decision: **keep**.
-
-Reason:
-
-- A1111-Controller uses this upscaling functionality.
-
-Future ownership:
-
-- possible first-class adoption or replacement candidate after mapping exactly which upscale path Controller calls.
-
-## Current retained external mounted extensions
-
-After the approved removal/purge pass, the live external set is:
-
-- `multidiffusion-upscaler-for-automatic1111`
-- `sd-webui-detail-daemon`
-- `sd-webui-model-converter`
-- `ultimate-upscale-for-automatic1111`
-
-Already first-class / keep:
-
-- `openclaw-clear-cond-cache`
-- `sd-webui-incantations`
-- `sd-webui-teacache`
-
-## Proposed adoption order
-
-1. `multidiffusion-upscaler-for-automatic1111`
-   - already locally patched for GB10 attention behavior
-   - generation/runtime hot path
-2. `sd-webui-detail-daemon`
-   - generation-affecting sampling/noise behavior
-3. `ultimate-upscale-for-automatic1111`
-   - high-value upscale workflow if Controller relies on it
-4. `sd-webui-model-converter`
-   - possibly better as an offline/Controller utility than an always-mounted A1111 extension
-
-## Cleanup boundary
-
-Future extension removals should still be done as deliberate remove/restart/smoke passes. The current approved removal set has been purged and validated.
+  The Controller had used prompt-all-in-one's `/physton_prompt/token_counter`. It now calls
+  `/sdapi/v1/openclaw/token-count`. One quarantine copy is still on the host, waiting for an owner decision:
+  `/opt/gb10/stable-diffusion/Extensions.quarantine/20260503-194044/sd-webui-prompt-all-in-one`.
+- **Earlier adoptions.** Dynamic Thresholding was folded into `sd-webui-incantations`. TeaCache, ControlNet and the
+  model converter became owned source.

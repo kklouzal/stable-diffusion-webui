@@ -2,6 +2,15 @@
 
 Scope: running GB10 A1111 image source under `/opt/stable-diffusion-webui`, bundled repositories, builtin extensions, and mounted extensions.
 
+Update 2026-10-09: this records the April 2026 CUDA-nightly/Gradio image. The current base is NGC PyTorch, and the
+browser UI and Gradio are gone. Since this note was written:
+- The `initialize_util.py` Lightning alias no longer exists.
+- The cleanup pass removed `extensions-builtin/LDSR/sd_hijack_ddpm_v1.py` (LDSR, 9b18c895) and autocrop's version
+  check (db72df58).
+- The cleanup pass deleted the root `requirements.txt` that carried `send2trash`.
+- The MultiDiffusion `tile_utils/attn.py` patch is now applied on every deploy by
+  `gb10/patch-multidiffusion-performance.py` (59ddf59a).
+
 Runtime package baseline observed before this patch set:
 
 - Python 3.12.3

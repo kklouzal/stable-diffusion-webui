@@ -1,179 +1,106 @@
-# STATUS.md
+# STATUS
 
 ## Mission
 
-Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch base, keeping the repo reviewable, the NGC-tuned framework stack protected, and the host-mounted user-data layout intact.
+Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch base. That means:
 
-## Current status (2026-10-07)
+- keep the repo reviewable
+- keep the NGC-tuned framework stack protected
+- keep the host-mounted user-data layout intact
 
-- `latest` adds the 2026-10-07 correctness audit (`docs/gb10/notes/correctness-audit-2026-10-07.md`): image-changing fixes (rounded uint8 decode, deterministic SDXL VAE encode, fp32 LoRA merges, emphasis/tokenizer, schedulers, ControlNet/SEG row handling) and API contract changes (extension hook errors, LoRA tag errors and wrong-typed settings fail the request; mutating endpoints wait for `queue_lock`); CPU suites only, GPU verification list in the note
-- production `gb10-a1111-latest` runs `local/gb10-a1111:deploy9-75a94f59` (`sha256:2708c45d...`) = `latest` @75a94f59: the correctness audit plus performance pass 2 (`docs/gb10/notes/performance-pass-2-2026-10-07.md`: bitwise fused GEGLU, exact Dynamic Thresholding/SEG/TeaCache cuts, parallel PNG saves, decode-once inputs; NHWC GroupNorm switch present but off). Fixed-seed images are pixel-identical to deploy8; requests ~6% faster plus ~0.4 s faster disk saves. Rollback: `IMAGE_TAG=local/gb10-a1111:deploy8-2b5e4039 gb10/run.sh`
-- earlier deploys: `deploy8-2b5e4039` (correctness audit), `deploy5-293d3e2c` (2026-10-06 static performance pass, built from `latest` @293d3e2c)
-- contains the 2026-10-06 static performance pass and its fixes (`docs/gb10/notes/performance-static-pass-2026-10-06.md`), plus float32 SDXL size/aesthetic conditioning and UNet/ControlNet timesteps (intentional output change) and no ControlNet image echo in API responses
-- rollback image: `local/gb10-a1111:pre-perf-20261006` (`sha256:7f954f2f...`, the 2026-09-27 deploy4 build); roll back with `IMAGE_TAG=local/gb10-a1111:pre-perf-20261006 gb10/run.sh`
-- verification at deploy: CPU test suites without new failures, GPU unit tests for the UNet/attention/graph changes, API startup and read-only endpoint smoke; no end-to-end generation was run before deploy (left to the operator)
-- dependency drift from the one-time re-resolve (BuildKit cache was pruned 2026-10-04): transformers 5.17.0 -> 5.19.0, gitpython 3.1.62 -> 3.2.0, numba 0.67.0 -> 0.68.0, llvmlite 0.49.0 -> 0.50.0, mslk 2026.9.26 -> 2026.10.7 (same pinned commit, rebuilt), plus 10 patch-level indirect bumps; NGC base layers identical
-- app-only builds now reuse the dependency closure (the wheelbuilder no longer copies the app source)
-- parked: NHWC GroupNorm kernels (21-30% faster per request; switch present, default off) and the all-NCHW layout
-  (8.5-16% faster) both hard-locked the host under sustained load on 2026-10-07; keep `--opt-channelslast` and the switch
-  off until the host is stable under sustained GPU load (`docs/gb10/notes/performance-pass-2-2026-10-07.md`,
-  "Re-evaluating the layout work")
+## Production (checked 2026-10-09)
 
-## Status as of 2026-09-25
+- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy9-75a94f59`, which is also `latest` (image ID
+  `sha256:2708c45d4d9d...`). It was built from commit `75a94f59` and holds:
+  - the [2026-10-07 correctness audit](notes/correctness-audit-2026-10-07.md)
+  - [performance pass 2](notes/performance-pass-2-2026-10-07.md)
 
+  Fixed-seed images are pixel-identical to deploy8. Requests are about 6% faster, and disk saves about 0.4 s faster.
+- **Not deployed yet.** The [2026-10-09 cleanup pass](notes/cleanup-pass-2026-10-09.md) (branch `cleanup-integration`
+  and its docs/tests follow-ups) is not deployed. Deploying it needs:
+  - an image rebuild
+  - the GPU live checks listed in that note
+  - removal of the retired host extension `Extensions/openclaw-conditioning-probe`
+- **Builds.** `gb10/build.sh` and `gb10/run.sh` from this checkout (branch `latest`). System-Statistics' Rebuild button
+  runs the same two scripts.
 
-- production `gb10-a1111-latest` runs `local/gb10-a1111:latest` = `sha256:2240717e...`, built from commit `fca55394` on `latest`
-- rollback image: `local/gb10-a1111:pre-deps-20260925` (`sha256:87340a8f...`, the 2026-09-06 build plus hot-patch layers)
-- builds: `gb10/build.sh` from this checkout; System-Statistics' Rebuild button uses the same `gb10/build.sh` and `gb10/run.sh`
-- the NGC package set is protected, except 55 stock PyPI wheels released to the A1111 resolver (`docker/base-released-packages.txt`)
-- `/opt/stable-diffusion-webui/BUILD_MANIFEST.*` and `PROTECTED_PACKAGES.json` record the package classification, NGC floors, and protection checks
+### Images kept for rollback
 
-## Current chosen defaults
+Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`.
 
-- base image: `nvcr.io/nvidia/pytorch:26.08-py3` (newest NGC tag as of 2026-09-25; CUDA 13.4.1, cuDNN 9.25, NVIDIA PyTorch `2.14.0a0+4fdf77b` built for CUDA 13.4, Triton 3.8.0)
-- MSLK built from source at `88d06bc` against the inherited stack
-- torch-extension arch policy: `12.1a` (`12.1f` is not accepted by the PyTorch extension build path)
-- A1111 source: this fork checkout, branch `latest`
-- host storage root: `/opt/gb10/stable-diffusion`
-- default port: `7860` (API-only, `--nowebui`)
-- build CPU placement: `gb10build.slice` (performance cores 5-9,15-19) once those CPUs are not boot-isolated with `isolcpus=domain`; until then builds use the default efficiency-core placement
+| Tag | Image ID | Contents |
+|---|---|---|
+| `deploy9-75a94f59` (= `latest`) | `2708c45d4d9d` | production: correctness audit + performance pass 2 |
+| `deploy8-2b5e4039` | `e4501073fe84` | correctness audit plus its follow-ups (image-URL byte/pixel budgets, atomic patchers, sampler-registry publication) |
+| `deploy7-490eac83` | `db2612552043` | correctness audit, first deploy (live-verified in the audit note) |
+| `deploy5-293d3e2c` | `59626c7c24bc` | [2026-10-06 static performance pass](notes/performance-static-pass-2026-10-06.md) |
+| `pre-perf-20261006` | `7f954f2fc0fc` | the 2026-09-27 deploy4 build, before the performance passes |
+
+## Current defaults
+
+- **Base image.** `nvcr.io/nvidia/pytorch:26.08-py3`. MSLK is built from source at `88d06bc`, and torch extensions
+  target `12.1a` (details in [README.md](README.md)).
+- **Protected packages.** Every NGC package is protected except the 50 stock PyPI wheels in
+  `docker/base-released-packages.txt`.
+- **Launch flags.** The launcher's API-only defaults are used, including `--opt-channelslast`, `--dtype bfloat16` and
+  `--precision autocast` ([launch/README.md](launch/README.md#launch-flags)).
+- **run.sh runtime defaults.**
+  - SDPA backend order `cudnn,flash,efficient,math`
+  - UNet CUDA graphs on (cache 8)
+  - VAE decode CUDA graphs on (cache 4)
+  - compile caches under `/opt/gb10/stable-diffusion/Caches/compile`, namespaced by the image stack and the driver
+- **NHWC GroupNorm kernels** are off (`/sdapi/v1/openclaw/nhwc-groupnorm`). TeaCache is off by default.
+- **Production settings, read via `GET /sdapi/v1/options` on 2026-10-09:**
+  - checkpoint `MM_R2_FIX`, VAE `ftasticVAE_v10.safetensors`
+  - `mxfp8_storage` and `nvfp4_storage` both `Disable`
+  - cross-attention `sdp - scaled dot product`
+- **Build CPU placement.** Builds run in `gb10build.slice` (performance cores 5-9,15-19) once those CPUs are no longer
+  boot-isolated with `isolcpus=domain`. Until then they use the default efficiency-core placement.
 
 ## Persistent host surfaces
 
-Default host root:
+The host root is `/opt/gb10/stable-diffusion`. [launch/README.md](launch/README.md#host-mounts) has the full mount
+table. The host-owned surfaces are:
 
-- `/opt/gb10/stable-diffusion`
-
-Host-owned persistent surfaces:
-
-- `config/`
-- `Embeddings/`
+- `config/` (`config.json`, `styles.csv`, `generation-last/`)
+- `Models/` (checkpoints)
+- the model directories `BLIP`, `CLIP`, `Codeformer`, `GFPGAN`, `karlo`, `RealESGRAN`, `torch_deepdanbooru`, `VAE` and
+  `VAE-approx`
 - `Extensions/`
-- `Models/`
-- `Outputs/` (special host-side symlink to SERVER-002)
-- `Models/` (special mixed local+symlink model root)
+- `Caches/compile/`
+- `Embeddings/`, `Hypernetworks/`, `Lora/` and `Outputs/`, which are symlinks into `/mnt/nas-warehouse/StableDiffusion/`
 
-## Current owned extension posture
+The host root also has directories that run.sh does not mount. They are leftovers from earlier layouts, and nothing in
+the container reads them:
 
-- `extensions/sd-webui-incantations` is vendored in this repository under GPL-3.0
-- `extensions/sd-webui-teacache` is vendored in this repository under MIT as a disabled-by-default SDXL acceleration experiment
-- upstream provenance is preserved in extension README files and license copies
-- the image contains the owned extension source directly
-- the repo run script syncs owned extensions into the host-mounted `Extensions/` surface before launch
-- future PAG/SEG/CFG-combiner/CFG-Fix fixes should be made in this repo, not in an untracked external extension checkout
+- `BSRGAN`, `cache`, `Cache`, `ControlNet`, `deepbooru`, `ExtensionPatchBackups`, `Extensions.quarantine`, `LDSR`
+- `RealESRGAN`, `Repositories`, `runtime-notes`, `ScuNET`, `Stable-diffusion`, `SwinIR`
 
-## Current image/runtime doctrine
+## Owned extension posture
 
-- upstream `webui.sh` is not the container authority; the runtime Python environment is image-owned
-- the NGC PyTorch image owns CUDA, cuDNN, TensorRT, and the NVIDIA-built torch/torchvision/Triton/TransformerEngine stack
-- the base stage records the pristine NGC package set; the build fails if any build step changes an inherited package (MSLK is the one intentional rebuild)
-- every NGC package stays pinned except the released list, which the A1111 resolver may move forward (never below the NGC version, capped by every installed package's declared requirements)
-- the builder stage resolves and prebuilds the application closure; the runtime stage installs it with `--no-deps` and fails if the protected boundary changed
-- upstream companion repos required by A1111 are baked into the image
+- Seven extensions are owned source under `extensions/`: ControlNet, Incantations, TeaCache, the model converter and
+  three `openclaw-*` helpers. They carry upstream provenance and license copies.
+- `gb10/run.sh` mirrors them into the host `Extensions/` on every deploy. The image does not contain them.
+- Fixes to PAG/SEG/CFG-combiner/Dynamic Thresholding, ControlNet and TeaCache are made here. They are never made in an
+  untracked host checkout.
+- Three third-party extensions stay host-installed and deploy-patched: MultiDiffusion, Ultimate Upscale and
+  detail-daemon. See [EXTENSIONS.md](EXTENSIONS.md).
 
-## Deployment evidence — 2026-09-25 dependency refresh
+## Parked work
 
-- 42 package changes vs the previous image, including transformers 5.17.0, accelerate 1.15.0, openai 3.19.2, starlette 1.7.0, timm 1.0.30, pytorch-lightning 2.6.6, uvicorn 0.54.0, huggingface-hub 1.33.0, tokenizers 0.23.2, pydantic 2.13.5, scipy 1.18.1, numba 0.67.0
-- numpy is NGC's 2.1.0 again. Earlier builds' MSLK `--force-reinstall` had replaced it with PyPI 2.5.x, which broke NGC's numba 0.64.
-- `pip check`: only the stale `dctorch` `numpy<2` metadata and NGC `triton-kernels` `pytest` remain (pre-existing)
-- captured A1111-Controller img2img + ControlNet workload: output within the previous image's cross-process noise floor (PSNR 39.4-40.1 dB vs 38.1 dB old-vs-old); warm latency 29.06 / 29.14 s on production after deploy (previous baseline 29.5 s)
-- evidence: `~/audit-artifacts/gb10-a1111-deps-refresh-20260925/`
+- **NHWC GroupNorm Triton kernels** were 21-30% faster per request. The code and the runtime switch are kept, with the
+  switch off.
+- **All-NCHW layout** (no `--opt-channelslast`) was 8.5-16% faster.
+- Both hard-locked the host under sustained load on 2026-10-07. Keep `--opt-channelslast` on and the NHWC switch off
+  until the host is stable under sustained GPU load. The retry protocol is under "Re-evaluating the layout work" in
+  [performance pass 2](notes/performance-pass-2-2026-10-07.md).
 
-## Current baked upstream companion repos
+## Open items
 
-- `stable-diffusion-stability-ai`
-- `generative-models`
-- `k-diffusion`
-- `BLIP`
+1. Deploy the cleanup pass. The rebuild, the GPU live checks and the host action are listed in
+   [notes/cleanup-pass-2026-10-09.md](notes/cleanup-pass-2026-10-09.md), along with the owner items it deferred.
+2. Owner decisions on host leftovers: the directories listed above that run.sh does not mount, and the quarantine copy
+   `Extensions.quarantine/20260503-194044/sd-webui-prompt-all-in-one`.
+3. Adopt or replace the third-party extensions, starting with MultiDiffusion and detail-daemon (EXTENSIONS.md).
 
-## Current explicit compatibility handling
-
-- explicit `pytorch-lightning` / `torchmetrics` / `lightning-utilities` runtime cluster
-- explicit OpenAI CLIP wheel build/install path
-- config bootstrap repair for missing/zero-byte config files
-- tokenizers resolver guard: `transformers>=5.7.0`, `tokenizers>=0.22.2`, `huggingface-hub>=1.13.0`, and tokenizers must resolve from a wheel rather than an sdist/Rust build
-- explicit `libssl-dev` + `pkg-config` support in `wheelbuilder`
-
-## Historical CUDA-base build/runtime evidence
-
-This pre-MXFP8 CUDA-base runtime remains a useful dependency baseline, but it is no longer the current live/default runtime. Current MXFP8 state is below.
-
-- image tag: `local/gb10-a1111:base-protected-app-latest`
-- image ID: `sha256:85c902073586364c4406d36604050c6ab7ccc531b1e7fa4449d26089d923b3c8`
-- image created: `2026-05-03T15:47:10.304319823-07:00`
-- live container at validation time: `gb10-a1111-latest`
-- torch after runtime install: `2.13.0.dev20260502+cu132`
-- torchvision after runtime install: `0.27.0.dev20260502+cu132`
-- torchaudio after runtime install: `2.11.0.dev20260502+cu132`
-- Transformers/tokenizers/HF Hub runtime: `transformers==5.7.0`, `tokenizers==0.22.2`, `huggingface-hub==1.13.0`
-- tokenizers build guard: Docker build fails if Transformers, tokenizers, or Hugging Face Hub resolve below the validated floors, and tokenizers must resolve from a `.whl` artifact rather than an sdist/Rust source build
-- A1111 API health after extension quarantine: `GET /sdapi/v1/progress`, `GET /sdapi/v1/sd-models`, and `GET /sdapi/v1/options` return JSON on `127.0.0.1:7860`; latest smoke saw `10` models and checkpoint `test2.safetensors`
-- `BUILD_MANIFEST.json` summary: `base=31`, `direct=52`, `indirect=87`
-- `triton`, `gradio`, and `transformers` import in the live container
-- `xformers` is intentionally absent in the current CUDA 13 / GB10 aarch64 runtime; A1111 uses PyTorch SDPA instead
-- repo smoke coverage now includes `gb10/smoke-test.sh` for API health, model listing, CUDA/PyTorch visibility, and required runtime imports without starting a generation job
-- `gb10/run.sh` is the canonical relaunch path; it owns runtime mounts, first-class extension sync, container replacement, and `COMMANDLINE_ARGS`
-- external mounted extension posture is documented in `docs/gb10/EXTENSIONS.md`; approved removals were purged from `/opt/gb10/stable-diffusion/Extensions` and the quarantine tree was deleted after validation
-
-Older probe tags worth keeping as historical breadcrumbs:
-
-- `local/gb10-a1111:full-probe` / digest `sha256:205e443219a72e9e8792ca31046638fd0dc88c16f570d4314f0835a7c3157d99` proved the earlier full-image bring-up
-- `local/gb10-a1111:wheelbuilder-probe` proved the separate wheelbuilder path
-- `local/gb10-a1111:arch-priority-probe` proved the earlier `sm_121a` extension-build direction
-- `local/gb10-a1111:manifest-probe` proved the package-manifest path before the current `cu132` runtime refresh
-
-
-## Latest MXFP8 img2img baseline
-
-The current known-good MXFP8/img2img baseline is documented in `docs/gb10/notes/mxfp8-img2img-final-baseline-2026-05-06.md`.
-
-Key validated defaults:
-
-- image tag: `local/gb10-a1111:latest-mxfp8-dev`
-- live container: `gb10-a1111-latest-mxfp8`
-- checkpoint: `test2.safetensors`
-- VAE: `ftasticVAE_v10.safetensors`
-- attention backend: `sdpa`
-- MXFP8 storage: `Enable for SDXL`
-- MXFP8 LoRA behavior: active LoRA deltas are merged into BF16 master weights once, then quantized back to MXFP8
-- A1111 MXFP8 audit: `183/911` Linear modules quantized; attention and conditioner Linear modules intentionally skipped
-- 9-case txt2img/img2img SDPA/Sage/SEG/PAG generation matrix completed successfully
-
-## Latest MXFP8 LoRA final-merge fix
-
-The MXFP8+LoRA repeat-step slowdown was traced to LoRA-count-sensitive MXFP8 preparation work remaining in the generation path. The 2026-05-07 refactor makes MXFP8+LoRA preparation a model-level active-config transaction: BF16 master weights + active LoRA deltas are merged once, selected final effective weights are quantized once, and `Linear.forward()` stays a fast path while the active signature matches. Details and validation are in `docs/gb10/notes/mxfp8-lora-final-merge-2026-05-07.md`.
-
-Validated repeat timings after the fix at 832x832 / 4 Euler-a steps / `unet_other`: initial `0` LoRAs `0.516s/step`, `1` LoRA `0.516s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.519s/step`; post-cleanup `0` LoRAs `0.513s/step`, `1` LoRA `0.510s/step`, `4` LoRAs `0.506s/step`, `13` LoRAs `0.515s/step`; final image validation `0` LoRAs `0.511s/step`, `1` LoRA `0.523s/step`, `4` LoRAs `0.516s/step`, `13` LoRAs `0.527s/step`. The cleanup pass also added transactional rollback, live signature comparison, MXFP8-config identity in the active signature, better UI failure comments, coverage-aware MXFP8 cache sidecars, MXFP8-safe fully materialized model loading, and diagnostics coverage for prepared active-config stats. Fresh restart/smoke/benchmark log scans after the reload-path polish showed no `Cannot copy out of meta tensor; no data!`, `failed to prepare`, `Traceback`, `RuntimeError`, or checkpoint loading errors.
-
-## Final cleanup / polish pass — 2026-05-07
-
-A final repository cleanup pass removed the old selectable MXFP8 LoRA BF16 fallback and related dead bookkeeping after merge-then-quantize became the only validated path. Current helper defaults now consistently target `local/gb10-a1111:latest-mxfp8-dev` / `gb10-a1111-latest-mxfp8`, and the runtime image no longer carries duplicate baked copies of owned extensions that are always synced into the host-mounted `Extensions/` tree by `gb10/run.sh`.
-
-Validation from rebuilt image `sha256:3935811b3b43cb9348ada1da14821311fc278fc327988a312683eb2d77875c94`:
-
-- Docker build completed successfully.
-- `gb10/run.sh` relaunched `gb10-a1111-latest-mxfp8` from `local/gb10-a1111:latest-mxfp8-dev`.
-- `gb10/smoke-test.sh` passed API health, model listing, CUDA/PyTorch visibility, and required import checks.
-- MXFP8 diagnostics completed with no legacy `mxfp8_lora_mode` field.
-- A 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully and logged `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1`.
-- Fresh log scan after validation showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or other material exceptions.
-
-## Final end-to-end audit polish — 2026-05-07
-
-A follow-up repo-wide audit found only three more safe cleanups: removal of the unused deprecated Windows Blackwell early-access torch wheel helper from `modules/launch_utils.py`, removal of stale `/data/*` tmpfs mounts from `gb10/run.sh`, and ignore-rule tightening so first-class owned extensions remain trackable in Git but are excluded from the Docker build context. `docs/gb10/README.md` now also shows the accurate `COMMANDLINE_ARGS=... python launch.py --skip-*` launch shape.
-
-Validation from rebuilt image `sha256:11e9e2267eb0efe582632872b22cf153768983481a6f3f9ba3fd9b2cc8871857`:
-
-- full Docker build completed successfully
-- image-local owned extension copies are absent; owned extensions are supplied by the host-mounted `Extensions/` sync path
-- `gb10/run.sh` relaunched `gb10-a1111-latest-mxfp8` without `/data/*` tmpfs mounts
-- `gb10/smoke-test.sh` passed API health, model listing, CUDA/PyTorch visibility, and required import checks
-- 512x512 / 4-step txt2img LoRA smoke with `<lora:Detail-Enhancer-v1.0:0.4>` completed successfully
-- logs showed `Prepared active MXFP8 LoRA config: prepared 183 Linear, quantized 183, untouched 0, LoRAs 1` for the LoRA smoke
-- fresh log scan showed no `Cannot copy out`, `failed to prepare`, `Traceback`, `RuntimeError`, checkpoint loading errors, or material exceptions
-
-## Immediate next validation work
-
-1. plan first-class adoption/replacement for retained external extensions, starting with `multidiffusion-upscaler-for-automatic1111` and `sd-webui-detail-daemon`
-2. map exactly which A1111-Controller paths depend on `sd-webui-model-converter` and `ultimate-upscale-for-automatic1111`
-3. continue modern Python/PyTorch/runtime cleanup only when new warnings/errors appear under real generation, model swap, or LoRA-swap workloads
+History before 2026-10 lives in git and in [notes/](notes/README.md).

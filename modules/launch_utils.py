@@ -43,20 +43,14 @@ def commit_hash():
 
 @lru_cache()
 def git_tag():
+    # The image has no .git: gb10/run.sh passes the host checkout's `git describe --tags` as A1111_VERSION_TAG.
     env_tag = _webui_source_version_env("A1111_VERSION_TAG")
     if env_tag is not None:
         return env_tag
-    if _script_path_is_git_repo():
-        try:
-            return subprocess.check_output([git, "-C", script_path, "describe", "--tags"], shell=False, stderr=subprocess.DEVNULL, encoding='utf8').strip()
-        except Exception:
-            pass
+    if not _script_path_is_git_repo():
+        return "<none>"
     try:
-        changelog_md = os.path.join(script_path, "CHANGELOG.md")
-        with open(changelog_md, "r", encoding="utf-8") as file:
-            line = next((line.strip() for line in file if line.strip()), "<none>")
-            line = line.replace("## ", "")
-            return line
+        return subprocess.check_output([git, "-C", script_path, "describe", "--tags"], shell=False, stderr=subprocess.DEVNULL, encoding='utf8').strip()
     except Exception:
         return "<none>"
 
