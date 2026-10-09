@@ -22,12 +22,20 @@ FLOAT8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 DTYPES_TO_FP16 = {torch.float32, torch.float64, torch.bfloat16, *FLOAT8_DTYPES}
 DTYPES_TO_BF16 = {torch.float32, torch.float64, torch.float16, *FLOAT8_DTYPES}
 DTYPES_TO_FLOAT8 = {torch.float32, torch.float64, torch.bfloat16, torch.float16}
-PART_ACTIONS = {"copy", "convert", "delete"}
-PRECISIONS = {"full", "fp32", "fp16", "bf16", "float8_e4m3fn", "float8_e5m2"}
+# The choices converter_options() offers, in its order; the sets below validate requests.
+PRECISION_CHOICES = ("fp32", "fp16", "bf16", "float8_e4m3fn", "float8_e5m2")
+LORA_PRECISION_CHOICES = ("fp32", "fp16", "bf16")
+COMPONENT_PRECISION_CHOICES = ("inherit", *PRECISION_CHOICES)
+PRUNING_METHOD_CHOICES = ("disabled", "no-ema", "ema-only")
+FORMAT_CHOICES = ("safetensors", "ckpt")
+PART_ACTION_CHOICES = ("convert", "copy", "delete")
+PART_ACTIONS = set(PART_ACTION_CHOICES)
+# "full" is an fp32 alias that requests may still name; the options do not offer it.
+PRECISIONS = {"full", *PRECISION_CHOICES}
 COMPONENT_PRECISIONS = {"inherit", *PRECISIONS}
-PRUNING_METHODS = {"disabled", "no-ema", "ema-only"}
-FORMATS = {"ckpt", "safetensors"}
-LORA_PRECISIONS = {"fp32", "fp16", "bf16"}
+PRUNING_METHODS = set(PRUNING_METHOD_CHOICES)
+FORMATS = set(FORMAT_CHOICES)
+LORA_PRECISIONS = set(LORA_PRECISION_CHOICES)
 # Content hashes of the source file's tensor data. A converted LoRA has different bytes, and A1111 trusts
 # sshs_model_hash as the LoRA hash (extensions-builtin/Lora/network.py), so these are never copied over.
 STALE_LORA_HASH_KEYS = {"sshs_model_hash", "sshs_legacy_hash", "modelspec.hash_sha256"}
@@ -43,6 +51,8 @@ KNOWN_JUNK_PREFIXES = (
     "callbacks.",
     "loops.",
 )
+# In a LoRA file the lora_*/lycoris_* keys are the payload, not junk: only the training/runtime residue is.
+LORA_JUNK_PREFIXES = tuple(prefix for prefix in KNOWN_JUNK_PREFIXES if not prefix.startswith(("lora_", "lycoris_")))
 KNOWN_JUNK_EXACT = {"global_step", "pytorch-lightning_version"}
 
 
@@ -51,10 +61,6 @@ class MockModelInfo:
         self.filepath = model_path
         self.filename = os.path.basename(model_path)
         self.model_name = os.path.splitext(self.filename)[0]
-
-
-def conv_full(t: Tensor) -> Tensor:
-    return t.float() if torch.is_floating_point(t) and t.dtype != torch.float32 else t
 
 
 def conv_fp32(t: Tensor) -> Tensor:
@@ -78,7 +84,7 @@ def conv_float8_e5m2(t: Tensor) -> Tensor:
 
 
 PRECISION_FUNCS = {
-    "full": conv_full,
+    "full": conv_fp32,
     "fp32": conv_fp32,
     "fp16": conv_fp16,
     "bf16": conv_bf16,
@@ -107,13 +113,6 @@ def load_model(path: str) -> dict[str, Any]:
     else:
         try:
             loaded = torch.load(path, map_location="cpu", weights_only=True)
-        except TypeError as exc:
-            if "weights_only" not in str(exc):
-                raise
-            raise RuntimeError(
-                "This PyTorch version cannot safely load legacy pickle checkpoints; "
-                "use a safetensors source or a PyTorch build with weights_only support."
-            ) from exc
         except Exception as exc:
             raise RuntimeError(
                 f"Could not safely load legacy checkpoint {path!r}. "
@@ -270,26 +269,11 @@ def normalize_bool(value: Any, default: bool = False) -> bool:
 
 
 def is_known_junk_key(key: str) -> bool:
-    return key in KNOWN_JUNK_EXACT or any(
-        key.startswith(prefix) for prefix in KNOWN_JUNK_PREFIXES
-    )
+    return key in KNOWN_JUNK_EXACT or key.startswith(KNOWN_JUNK_PREFIXES)
 
 
 def is_known_lora_junk_key(key: str) -> bool:
-    # In a LoRA file, lora_unet/lora_te keys are the payload, not junk. Keep cleanup to
-    # obvious training/runtime residue.
-    lora_safe_prefixes = (
-        "optimizer.",
-        "optimizers.",
-        "lr_schedulers.",
-        "callbacks.",
-        "loops.",
-        "embedding_manager.embedder.",
-        "control_model.",
-    )
-    return key in KNOWN_JUNK_EXACT or any(
-        key.startswith(prefix) for prefix in lora_safe_prefixes
-    )
+    return key in KNOWN_JUNK_EXACT or key.startswith(LORA_JUNK_PREFIXES)
 
 
 def dtype_name(tensor: Tensor) -> str:
@@ -340,12 +324,10 @@ def checkpoint_doctor(
             )
     keys = set(map(str, model.keys()))
     junk_keys = [key for key in keys if is_known_junk_key(key)]
-    has_unet = any(key.startswith("model.diffusion_model") for key in keys)
-    has_vae = any(key.startswith("first_stage_model") for key in keys)
-    has_clip = any(
-        key.startswith("cond_stage_model") or key.startswith("conditioner.embedders")
-        for key in keys
-    )
+    families = {check_weight_type(key) for key in keys}
+    has_unet = "unet" in families
+    has_vae = "vae" in families
+    has_clip = "clip" in families
     position_ids = summarize_position_ids(model)
     warnings = []
     if not has_unet:
@@ -463,22 +445,17 @@ def lora_roots() -> list[str]:
 
 
 def list_loras() -> list[dict[str, str]]:
-    # Walked like A1111's walk_files (followlinks=True), so every path /sdapi/v1/loras reports -- which the
-    # controller sends back as the source -- is listed here, including files under symlinked subdirectories.
+    # Walked with A1111's own walk_files, as networks.list_available_networks walks these roots (symlinked
+    # subdirectories followed, hidden directories skipped unless list_hidden_files), so the paths
+    # /sdapi/v1/loras reports -- which the controller sends back as the source -- are the ones listed here.
     out = []
     for root in lora_roots():
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _, filenames in os.walk(root, followlinks=True):
-            for filename in filenames:
-                if not filename.lower().endswith((".safetensors", ".ckpt", ".pt")):
-                    continue
-                path = os.path.join(dirpath, filename)
-                rel = os.path.relpath(path, root)
-                name = os.path.splitext(rel)[0].replace(os.sep, "/")
-                out.append(
-                    {"name": name, "title": name, "filename": filename, "path": path}
-                )
+        for path in shared.walk_files(root, allowed_extensions=[".safetensors", ".ckpt", ".pt"]):
+            rel = os.path.relpath(path, root)
+            name = os.path.splitext(rel)[0].replace(os.sep, "/")
+            out.append(
+                {"name": name, "title": name, "filename": os.path.basename(path), "path": path}
+            )
     return sorted(out, key=lambda item: item["title"].lower())
 
 
@@ -710,10 +687,10 @@ def refresh_after_convert(kind: str = "checkpoint") -> None:
         )
     if kind == "lora":
         try:
-            import networks  # type: ignore  # noqa: PLC0415 - LoRA extension import is only available after WebUI extension setup.
+            # Imported late: the built-in Lora extension's module is importable only after WebUI extension setup.
+            import networks  # type: ignore
 
-            if hasattr(networks, "list_available_networks"):
-                networks.list_available_networks()
+            networks.list_available_networks()
         except Exception as exc:
             print(
                 f"[OpenClaw Model Converter] LoRA refresh after conversion failed: {exc}"
@@ -732,19 +709,12 @@ def converter_options() -> dict[str, Any]:
         ],
         "loras": list_loras(),
         "vaes": ["None", *sorted(sd_vae.vae_dict.keys(), key=str.lower)],
-        "precisions": ["fp32", "fp16", "bf16", "float8_e4m3fn", "float8_e5m2"],
-        "lora_precisions": ["fp32", "fp16", "bf16"],
-        "component_precisions": [
-            "inherit",
-            "fp32",
-            "fp16",
-            "bf16",
-            "float8_e4m3fn",
-            "float8_e5m2",
-        ],
-        "pruning_methods": ["disabled", "no-ema", "ema-only"],
-        "formats": ["safetensors", "ckpt"],
-        "part_actions": ["convert", "copy", "delete"],
+        "precisions": list(PRECISION_CHOICES),
+        "lora_precisions": list(LORA_PRECISION_CHOICES),
+        "component_precisions": list(COMPONENT_PRECISION_CHOICES),
+        "pruning_methods": list(PRUNING_METHOD_CHOICES),
+        "formats": list(FORMAT_CHOICES),
+        "part_actions": list(PART_ACTION_CHOICES),
     }
 
 

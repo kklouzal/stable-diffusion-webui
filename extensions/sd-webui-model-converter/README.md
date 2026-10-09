@@ -1,6 +1,6 @@
 # OpenClaw Model Converter
 
-Fork-local, OpenClaw-owned A1111 extension for single-checkpoint conversion.
+Fork-local, OpenClaw-owned A1111 extension for single-checkpoint and LoRA conversion.
 
 This extension was adopted from `Akegarasu/sd-webui-model-converter` at upstream commit `a8c04410aa505be61652dca1ba6361bd85113667` (`float8_e5m2 (#29)`, 2024-12-24), then trimmed and maintained as part of Schwi's GB10 A1111 fork.
 
@@ -14,9 +14,10 @@ This extension was adopted from `Akegarasu/sd-webui-model-converter` at upstream
 - Per-weight-family action: convert, copy, or delete for UNet, CLIP/text encoder, VAE, and other weights
 - CLIP `position_ids` int64 preservation/fix
 - Known junk-data prefix removal
+- LoRA conversion (`mode: "lora"`): a LoRA from A1111's LoRA listing re-saved as safetensors in `fp32`, `fp16` or `bf16`, with NaN/Inf repair, optional training-residue cleanup and a LoRA doctor report; the source's content-hash metadata (`sshs_model_hash`, `sshs_legacy_hash`, `modelspec.hash_sha256`) is not copied
 - OpenClaw API endpoints for A1111-Controller integration
 
-Converted checkpoints are written next to the source checkpoint, matching the original extension behavior.
+Converted checkpoints are written next to the source checkpoint, matching the original extension behavior; converted LoRAs are written next to the source LoRA.
 
 ## API
 
