@@ -87,6 +87,8 @@ The NGC PyTorch base owns the core framework layer, and later dependency resolut
   NGC version, except the released list below.
 - Resolve the A1111 dependency closure once in the builder stage, against resolver stubs of the protected packages.
   Then prebuild the wheels in that throwaway stage.
+- Drop every requirement on a protected package from the resolver input (`docker/prepare-resolver-input.py`). A
+  version specifier there would never be applied, so the build fails when the protected version does not satisfy it.
 - Install the resolved application set with `--no-deps`. Then fail the build if any protected package changed
   (`docker/check-protected-stack.py`).
 - The build also asserts that `gradio`, `gradio-client`, `opencv-python` and `mediapipe` are absent.

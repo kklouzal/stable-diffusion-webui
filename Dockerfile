@@ -196,7 +196,7 @@ COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     rustc --version \
     && cargo --version \
-    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-names-file /opt/build/base-python-protected-names.txt \
+    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-constraints-file /opt/build/base-python-protected-constraints.txt \
     && python /opt/build/patch-headless-opencv-wheels.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
     && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt --released-floors /opt/build/base-python-released-floors.txt --dependents-out /opt/build/protected-resolver-dependents.txt \
     && python -m venv /opt/build/resolver-venv \

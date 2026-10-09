@@ -4,7 +4,6 @@
 # CUDA, or NVIDIA packages here: the GB10 Docker image inherits and protects
 # the selected NGC CUDA/PyTorch lane explicitly. torchaudio is optional-absent
 # in that lane unless a real runtime import requirement is proven.
-setuptools==69.5.1
 GitPython
 Pillow
 pytz==2026.4

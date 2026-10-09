@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -10,13 +11,11 @@ import pytest
 from test.helpers import ROOT, load_source
 
 
-def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
+def _prepare_resolver_input(tmp_path: Path, requirements: str):
     source = tmp_path / "requirements.txt"
-    source.write_text("setuptools==69.5.1\nnumpy\nrequests\ntorch\n", encoding="utf-8")
-    target = tmp_path / "resolver.txt"
+    source.write_text(requirements, encoding="utf-8")
     protected = tmp_path / "protected.txt"
-    protected.write_text("setuptools\nnumpy\n", encoding="utf-8")
-
+    protected.write_text("setuptools==80.9.0\nnumpy==2.5.2\ntorch==2.14.0a0+4fdf77b\n", encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,
@@ -24,19 +23,46 @@ def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
             "--source",
             str(source),
             "--target",
-            str(target),
+            str(tmp_path / "resolver.txt"),
             "--wheel-dir",
             str(tmp_path / "wheels"),
-            "--protected-names-file",
+            "--protected-constraints-file",
             str(protected),
         ],
-        check=True,
         capture_output=True,
         text=True,
     )
+    return result, tmp_path / "resolver.txt"
 
+
+def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
+    result, target = _prepare_resolver_input(tmp_path, "setuptools>=70  # build backends\nnumpy\nrequests\ntorch==2.14.0a0+4fdf77b\nnvidia-cudnn-cu13\n")
+
+    assert result.returncode == 0, result.stderr
     assert target.read_text(encoding="utf-8") == "requests\n"
-    assert "removed protected resolver inputs: numpy, setuptools, torch\n" in result.stdout
+    assert "removed protected resolver inputs: numpy, nvidia-cudnn-cu13, setuptools, torch\n" in result.stdout
+
+
+@pytest.mark.parametrize("requirement", [
+    "setuptools==69.5.1",  # the dead pin requirements_versions.txt carried
+    "numpy<2",
+    "torchaudio>=2",  # protected but absent from the base
+    "torch @ https://example.invalid/torch.whl",
+])
+def test_prepare_resolver_rejects_a_protected_requirement_the_base_version_does_not_satisfy(tmp_path: Path, requirement):
+    result, target = _prepare_resolver_input(tmp_path, f"requests\n{requirement}\n")
+
+    assert result.returncode != 0
+    assert requirement in result.stderr
+    assert not target.exists()
+
+
+def test_app_requirements_pin_no_protected_package():
+    names = {"setuptools", "numpy", "pillow", "torch", "torchvision", "triton"}
+    for line in (ROOT / "requirements_versions.txt").read_text(encoding="utf-8").splitlines():
+        name = re.split(r"[<>=!~ ;\[]", line.strip(), maxsplit=1)[0].lower()
+        if name in names:
+            assert not re.search(r"[<>=!~]", line), line
 
 
 def test_protected_resolver_stubs_preserve_versions_without_base_dependencies(tmp_path: Path):
