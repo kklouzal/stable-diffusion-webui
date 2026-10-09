@@ -88,19 +88,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 upscale_by = max(upscale_to_width/image.width, upscale_to_height/image.height)
                 info["Max side length"] = max_side_length
 
-        cache_key = (images.pixel_fingerprint(image), _upscaler_identity(upscaler), upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop)
-        with upscale_cache_lock:
-            cached_image = upscale_cache.pop(cache_key, None)
-
-        if cached_image is not None:
-            image = cached_image.copy()
-        else:
-            image = upscaler.scaler.upscale(image, upscale_by, upscaler.data_path)
-
-        with upscale_cache_lock:
-            upscale_cache[cache_key] = image.copy()
-            while len(upscale_cache) > max(0, shared.opts.upscaling_max_images_in_cache):
-                upscale_cache.popitem(last=False)
+        image = self.cached_upscale(image, upscaler, (upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop), lambda: upscaler.scaler.upscale(image, upscale_by, upscaler.data_path))
 
         if upscale_mode == 1 and upscale_crop:
             if image.width < upscale_to_width or image.height < upscale_to_height:
@@ -115,6 +103,31 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             info["Postprocess crop to"] = f"{image.width}x{image.height}"
 
         return image
+
+    @staticmethod
+    def cached_upscale(image, upscaler, settings, run_upscaler):
+        """`run_upscaler()`, memoized over the last `upscaling_max_images_in_cache` (pixels of `image`, upscaler,
+        `settings`). Callers own and may change the image they get, so a hit returns a copy and an entry is a copy;
+        with the cache size 0 nothing is hashed or copied."""
+        cache_size = shared.opts.upscaling_max_images_in_cache
+        if cache_size <= 0:
+            with upscale_cache_lock:
+                upscale_cache.clear()  # the size was lowered to 0 at run time
+            return run_upscaler()
+
+        cache_key = (images.pixel_fingerprint(image), _upscaler_identity(upscaler), *settings)
+        with upscale_cache_lock:
+            cached_image = upscale_cache.get(cache_key)
+            if cached_image is not None:
+                upscale_cache.move_to_end(cache_key)
+                return cached_image.copy()
+
+        result = run_upscaler()
+        with upscale_cache_lock:
+            upscale_cache[cache_key] = result.copy()
+            while len(upscale_cache) > cache_size:
+                upscale_cache.popitem(last=False)
+        return result
 
     def process_firstpass(self, pp: scripts_postprocessing.PostprocessedImage, upscale_enabled=True, upscale_mode=1, upscale_by=2.0, max_side_length=0, upscale_to_width=None, upscale_to_height=None, upscale_crop=False, upscaler_1_name=None, upscaler_2_name=None, upscaler_2_visibility=0.0):
         if upscale_mode == 1:
