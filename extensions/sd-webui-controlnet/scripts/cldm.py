@@ -5,14 +5,8 @@ import torch.nn as nn
 from modules import devices, openclaw_nhwc_groupnorm, shared
 from scripts.controlnet_core.controlnet_union import ControlAddEmbedding, ResBlockUnionControlnet
 
-try:
-    from sgm.modules.diffusionmodules.openaimodel import conv_nd, linear, zero_module, timestep_embedding, \
-        TimestepEmbedSequential, ResBlock, Downsample, SpatialTransformer, exists
-    using_sgm = True
-except ImportError:
-    from ldm.modules.diffusionmodules.openaimodel import conv_nd, linear, zero_module, timestep_embedding, \
-        TimestepEmbedSequential, ResBlock, Downsample, SpatialTransformer, exists
-    using_sgm = False
+from sgm.modules.diffusionmodules.openaimodel import conv_nd, linear, zero_module, timestep_embedding, \
+    TimestepEmbedSequential, ResBlock, Downsample, SpatialTransformer, exists
 
 
 def _loaded_value(value, expected_dtype, dtype):
@@ -132,11 +126,8 @@ class ControlNet(nn.Module):
         num_heads_upsample=-1,
         use_scale_shift_norm=False,
         resblock_updown=False,
-        use_spatial_transformer=True,
         transformer_depth=1,
         context_dim=None,
-        n_embed=None,
-        legacy=False,
         disable_self_attentions=None,
         num_attention_blocks=None,
         disable_middle_self_attn=False,
@@ -176,7 +167,6 @@ class ControlNet(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
-        self.predict_codebook_ids = n_embed is not None
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -186,12 +176,7 @@ class ControlNet(nn.Module):
         )
 
         if self.num_classes is not None:
-            if isinstance(self.num_classes, int):
-                self.label_emb = nn.Embedding(num_classes, time_embed_dim)
-            elif self.num_classes == "continuous":
-                print("setting up linear c_adm embedding layer")
-                self.label_emb = nn.Linear(1, time_embed_dim)
-            elif self.num_classes == "sequential":
+            if self.num_classes == "sequential":
                 assert adm_in_channels is not None
                 self.label_emb = nn.Sequential(
                     nn.Sequential(
@@ -230,7 +215,6 @@ class ControlNet(nn.Module):
                     zero_module(conv_nd(dims, 256, model_channels, 3, padding=1))
         )
 
-        self._feature_size = model_channels
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
@@ -254,9 +238,6 @@ class ControlNet(nn.Module):
                     else:
                         num_heads = ch // num_head_channels
                         dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
                     if exists(disable_self_attentions):
                         disabled_sa = disable_self_attentions[level]
                     else:
@@ -272,7 +253,6 @@ class ControlNet(nn.Module):
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self.zero_convs.append(self.make_zero_conv(ch))
-                self._feature_size += ch
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
                 out_ch = ch
@@ -298,16 +278,12 @@ class ControlNet(nn.Module):
                 input_block_chans.append(ch)
                 self.zero_convs.append(self.make_zero_conv(ch))
                 ds *= 2
-                self._feature_size += ch
 
         if num_head_channels == -1:
             dim_head = ch // num_heads
         else:
             num_heads = ch // num_head_channels
             dim_head = num_head_channels
-        if legacy:
-            #num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -332,7 +308,6 @@ class ControlNet(nn.Module):
             ),
         )
         self.middle_block_out = self.make_zero_conv(ch)
-        self._feature_size += ch
 
         if union_controlnet_num_control_type is not None:
             self.num_control_type = union_controlnet_num_control_type

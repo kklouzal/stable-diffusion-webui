@@ -55,15 +55,13 @@ def test_request_state_release_drops_derived_tensors_but_not_model_weights():
             self.effective_region_mask = object()
             self.latent_width = 64
             self.latent_height = 64
-            self.pulid_attn_setting = object()
         def reset(self): self.cache = {}
         def release_request_state(self):
             self.reset(); self.image_emb = None; self.effective_region_mask = None
-            self.latent_width = self.latent_height = 0; self.pulid_attn_setting = None
+            self.latent_width = self.latent_height = 0
     adapter = Adapter(); weights = adapter.ipadapter
     adapter.release_request_state()
     assert adapter.ipadapter is weights
     assert adapter.cache == {} and adapter.image_emb is None
     assert adapter.effective_region_mask is None
     assert adapter.latent_width == adapter.latent_height == 0
-    assert adapter.pulid_attn_setting is None

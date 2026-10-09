@@ -11,8 +11,6 @@ from .image_proj_models import (
     ImageProjModel,
     MLPProjModel,
     MLPProjModelFaceId,
-    ProjModelFaceIdPlus,
-    PuLIDEncoder,
 )
 
 
@@ -21,23 +19,6 @@ class ImageEmbed(NamedTuple):
 
     cond_emb: torch.Tensor
     uncond_emb: torch.Tensor
-
-    def eval(self, cond_mark: torch.Tensor) -> torch.Tensor:
-        assert cond_mark.ndim == 4
-        assert self.cond_emb.ndim == self.uncond_emb.ndim == 3
-        assert (
-            self.uncond_emb.shape[0] == 1
-            or self.cond_emb.shape[0] == self.uncond_emb.shape[0]
-        )
-        assert (
-            self.cond_emb.shape[0] == 1 or self.cond_emb.shape[0] == cond_mark.shape[0]
-        )
-        cond_mark = cond_mark[:, :, :, 0].to(self.cond_emb)
-        device = cond_mark.device
-        dtype = cond_mark.dtype
-        return self.cond_emb.to(
-            device=device, dtype=dtype
-        ) * cond_mark + self.uncond_emb.to(device=device, dtype=dtype) * (1 - cond_mark)
 
     def average_of(*args: List[Tuple[torch.Tensor, torch.Tensor]]) -> "ImageEmbed":
         conds, unconds = zip(*args)
@@ -72,8 +53,6 @@ class IPAdapterModel(torch.nn.Module):
         is_faceid: bool,
         is_portrait: bool,
         is_instantid: bool,
-        is_pulid: bool,
-        is_v2: bool,
     ):
         super().__init__()
         self.device = "cpu"
@@ -84,15 +63,11 @@ class IPAdapterModel(torch.nn.Module):
         self.is_sdxl = is_sdxl
         self.sdxl_plus = sdxl_plus
         self.is_full = is_full
-        self.is_v2 = is_v2
         self.is_faceid = is_faceid
         self.is_instantid = is_instantid
-        self.is_pulid = is_pulid
         self.clip_extra_context_tokens = 16 if (self.is_plus or is_portrait) else 4
 
-        if self.is_pulid:
-            self.image_proj_model = PuLIDEncoder()
-        elif self.is_instantid:
+        if self.is_instantid:
             self.image_proj_model = self.init_proj_instantid()
         elif is_faceid:
             self.image_proj_model = self.init_proj_faceid()
@@ -129,20 +104,11 @@ class IPAdapterModel(torch.nn.Module):
         self.ip_layers = To_KV(state_dict["ip_adapter"])
 
     def init_proj_faceid(self):
-        if self.is_plus:
-            image_proj_model = ProjModelFaceIdPlus(
-                cross_attention_dim=self.cross_attention_dim,
-                id_embeddings_dim=512,
-                clip_embeddings_dim=self.clip_embeddings_dim,
-                num_tokens=4,
-            )
-        else:
-            image_proj_model = MLPProjModelFaceId(
-                cross_attention_dim=self.cross_attention_dim,
-                id_embeddings_dim=512,
-                num_tokens=self.clip_extra_context_tokens,
-            )
-        return image_proj_model
+        return MLPProjModelFaceId(
+            cross_attention_dim=self.cross_attention_dim,
+            id_embeddings_dim=512,
+            num_tokens=self.clip_extra_context_tokens,
+        )
 
     def init_proj_instantid(self, image_emb_dim=512, num_tokens=16):
         image_proj_model = Resampler(
@@ -188,28 +154,6 @@ class IPAdapterModel(torch.nn.Module):
         return ImageEmbed(image_prompt_embeds, uncond_image_prompt_embeds)
 
     @torch.inference_mode()
-    def _get_image_embeds_faceid_plus(
-        self,
-        face_embed: torch.Tensor,
-        clip_vision_output: CLIPVisionModelOutput,
-        is_v2: bool,
-    ) -> ImageEmbed:
-        face_embed = face_embed.to(self.device, dtype=torch.float32)
-        from annotator.clipvision import clip_vision_h_uc
-
-        clip_embed = clip_vision_output["hidden_states"][-2].to(
-            device=self.device, dtype=torch.float32
-        )
-        return ImageEmbed(
-            self.image_proj_model(face_embed, clip_embed, shortcut=is_v2),
-            self.image_proj_model(
-                torch.zeros_like(face_embed),
-                clip_vision_h_uc.to(clip_embed),
-                shortcut=is_v2,
-            ),
-        )
-
-    @torch.inference_mode()
     def _get_image_embeds_faceid(self, insightface_output: torch.Tensor) -> ImageEmbed:
         """Get image embeds for non-plus faceid. Multiple inputs are supported."""
         self.image_proj_model.to(self.device)
@@ -239,45 +183,19 @@ class IPAdapterModel(torch.nn.Module):
             self.image_proj_model(torch.zeros_like(prompt_image_emb)),
         )
 
-    def _get_image_embeds_pulid(self, pulid_proj_input) -> ImageEmbed:
-        """Get image embeds for pulid."""
-        id_cond = torch.cat(
-            [
-                pulid_proj_input.id_ante_embedding.to(
-                    device=self.device, dtype=torch.float32
-                ),
-                pulid_proj_input.id_cond_vit.to(
-                    device=self.device, dtype=torch.float32
-                ),
-            ],
-            dim=-1,
-        )
-        id_vit_hidden = [
-            t.to(device=self.device, dtype=torch.float32)
-            for t in pulid_proj_input.id_vit_hidden
-        ]
-        return ImageEmbed(
-            self.image_proj_model(
-                id_cond,
-                id_vit_hidden,
-            ),
-            self.image_proj_model(
-                torch.zeros_like(id_cond),
-                [torch.zeros_like(t) for t in id_vit_hidden],
-            ),
-        )
-
     @staticmethod
     def load(state_dict: dict, model_name: str) -> IPAdapterModel:
         """
         Arguments:
             - state_dict: model state_dict.
             - model_name: file name of the model.
+
+        PuLID and FaceID Plus models are rejected: their image embeds come only from the ip-adapter_pulid and
+        ip-adapter_face_id_plus preprocessors, which this build does not ship (and `ipadapter_input` decodes
+        plain tensors only).
         """
-        is_v2 = "v2" in model_name
         is_faceid = "faceid" in model_name
         is_instantid = "instant_id" in model_name
-        is_pulid = "pulid" in model_name.lower()
         is_portrait = "portrait" in model_name
         is_full = "proj.3.weight" in state_dict["image_proj"]
         is_plus = (
@@ -285,19 +203,21 @@ class IPAdapterModel(torch.nn.Module):
             or "latents" in state_dict["image_proj"]
             or "perceiver_resampler.proj_in.weight" in state_dict["image_proj"]
         )
+        if "pulid" in model_name.lower():
+            raise RuntimeError(
+                f"[ControlNet Error] {model_name}: PuLID IP-Adapter models need the removed ip-adapter_pulid "
+                "preprocessor and are not supported by this build.")
+        if is_faceid and is_plus:
+            raise RuntimeError(
+                f"[ControlNet Error] {model_name}: FaceID Plus IP-Adapter models need the removed "
+                "ip-adapter_face_id_plus preprocessor and are not supported by this build.")
         cross_attention_dim = state_dict["ip_adapter"]["1.to_k_ip.weight"].shape[1]
         sdxl = cross_attention_dim == 2048
         sdxl_plus = sdxl and is_plus
 
-        if is_instantid or is_pulid:
-            # InstantID/PuLID does not use clip embedding.
+        if is_instantid or is_faceid:
+            # InstantID and plain FaceID do not use clip embedding.
             clip_embeddings_dim = None
-        elif is_faceid:
-            if is_plus:
-                clip_embeddings_dim = 1280
-            else:
-                # Plain faceid does not use clip_embeddings_dim.
-                clip_embeddings_dim = None
         elif is_plus:
             if sdxl_plus:
                 clip_embeddings_dim = int(state_dict["image_proj"]["latents"].shape[2])
@@ -323,23 +243,11 @@ class IPAdapterModel(torch.nn.Module):
             is_faceid=is_faceid,
             is_portrait=is_portrait,
             is_instantid=is_instantid,
-            is_v2=is_v2,
-            is_pulid=is_pulid,
         )
 
     def get_image_emb(self, preprocessor_output) -> ImageEmbed:
-        if self.is_pulid:
-            return self._get_image_embeds_pulid(preprocessor_output)
-        elif self.is_instantid:
+        if self.is_instantid:
             return self._get_image_embeds_instantid(preprocessor_output)
-        elif self.is_faceid and self.is_plus:
-            # Note: FaceID plus uses both face_embed and clip_embed.
-            # This should be the return value from preprocessor.
-            return self._get_image_embeds_faceid_plus(
-                preprocessor_output.face_embed,
-                preprocessor_output.clip_embed,
-                is_v2=self.is_v2,
-            )
         elif self.is_faceid:
             return self._get_image_embeds_faceid(preprocessor_output)
         else:

@@ -1,6 +1,5 @@
-from typing import List, Tuple
+from typing import List
 from enum import Enum
-import gradio as gr
 
 from modules.processing import StableDiffusionProcessing
 
@@ -8,32 +7,13 @@ from internal_controlnet.external_code import ControlNetUnit
 from scripts.logging import logger
 
 
-class Infotext(object):
-    def __init__(self) -> None:
-        self.infotext_fields: List[Tuple[gr.components.IOComponent, str]] = []
-        self.paste_field_names: List[str] = []
+class Infotext:
+    """ControlNet's generation-infotext contract: one "ControlNet <i>" entry per enabled unit, and its parse for
+    /sdapi/v1/png-info (on_infotext_pasted)."""
 
     @staticmethod
     def unit_prefix(unit_index: int) -> str:
         return f"ControlNet {unit_index}"
-
-    def register_unit(self, unit_index: int, uigroup) -> None:
-        """Register the unit's UI group. By regsitering the unit, A1111 will be
-        able to paste values from infotext to IOComponents.
-
-        Args:
-            unit_index: The index of the ControlNet unit
-            uigroup: The ControlNetUiGroup instance that contains all gradio
-                     iocomponents.
-        """
-        unit_prefix = Infotext.unit_prefix(unit_index)
-        for field in ControlNetUnit.infotext_fields():
-            # Every field in ControlNetUnit should have a cooresponding
-            # IOComponent in ControlNetUiGroup.
-            io_component = getattr(uigroup, field)
-            component_locator = f"{unit_prefix} {field}"
-            self.infotext_fields.append((io_component, component_locator))
-            self.paste_field_names.append(component_locator)
 
     @staticmethod
     def write_infotext(units: List[ControlNetUnit], p: StableDiffusionProcessing):

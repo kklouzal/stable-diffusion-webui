@@ -16,24 +16,16 @@ from scripts.enums import (
     ControlNetUnionControlType,
 )
 from scripts.ipadapter.ipadapter_model import ImageEmbed
-from scripts.controlnet_sparsectrl import SparseCtrl
 from modules import devices, lowvram, shared, scripts, sd_unet_row_memo
+from modules.sd_hijack_unet import th
 
-from ldm.modules.diffusionmodules.util import make_beta_schedule
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
+from ldm.modules.diffusionmodules.upscaling import AbstractLowScaleModel as LdmAbstractLowScaleModel
 from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
+from sgm.modules.attention import BasicTransformerBlock as BasicTransformerBlockSGM
 
 from modules.prompt_parser import MulticondLearnedConditioning, ComposableScheduledPromptConditioning, ScheduledPromptConditioning
-
-
-try:
-    from sgm.modules.attention import BasicTransformerBlock as BasicTransformerBlockSGM
-except ImportError:
-    print('Warning: ControlNet failed to load SGM - will use LDM instead.')
-    BasicTransformerBlockSGM = BasicTransformerBlock
-
-cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
 
 POSITIVE_MARK_TOKEN = 1024
 NEGATIVE_MARK_TOKEN = - POSITIVE_MARK_TOKEN
@@ -50,7 +42,13 @@ def prompt_context_is_marked(x):
 def mark_prompt_context(x, positive):
     """Return a marked copy of `x`; `x` itself is never mutated. The conditioning
     objects are the persistent cond cache's entries, shared with later requests
-    that may not use ControlNet. Callers must use the return value."""
+    that may not use ControlNet. Callers must use the return value.
+
+    ControlNet tells cond (positive) from uncond (negative) rows by this mark. `x` is a
+    MulticondLearnedConditioning, a ComposableScheduledPromptConditioning, a
+    ScheduledPromptConditioning or a list of these; an extension that samples without
+    UnetHook's process_sample marks its prompts with this function, otherwise
+    unmark_prompt_context treats every row as cond."""
     if isinstance(x, list):
         return [mark_prompt_context(item, positive) for item in x]
     if isinstance(x, MulticondLearnedConditioning):
@@ -79,10 +77,6 @@ def mark_prompt_context(x, positive):
     return x
 
 
-disable_controlnet_prompt_warning = True
-# You can disable this warning using disable_controlnet_prompt_warning.
-
-
 def unmark_prompt_context(x):
     # Same values as prompt_context_is_marked(x) and the per-row marks below,
     # read back in one device->host copy (a single stream sync per UNet call).
@@ -91,19 +85,7 @@ def unmark_prompt_context(x):
     row_mark = (torch.mean(torch.abs(t - NEGATIVE_MARK_TOKEN), dim=-1) > MARK_EPS).float()
     host = torch.cat([is_marked.detach().float().reshape(1), row_mark.detach().reshape(-1)]).cpu().numpy()
     if not float(host[0]) < MARK_EPS:
-        # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
-        # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
-        # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
-        # if XXX is a positive prompt, you should call mark_prompt_context(XXX, positive=True)
-        # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
-        # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
-        # After you mark the prompts, the mismatch errors will disappear.
-        if not disable_controlnet_prompt_warning:
-            logger.warning('ControlNet Error: Failed to detect whether an instance is cond or uncond!')
-            logger.warning('ControlNet Error: This is mainly because other extension(s) blocked A1111\'s \"process.sample()\" and deleted ControlNet\'s sample function.')
-            logger.warning('ControlNet Error: ControlNet will shift to a backup backend but the results will be worse than expectation.')
-            logger.warning('Solution (For extension developers): Take a look at ControlNet\' hook.py '
-                  'UnetHook.hook.process_sample and manually call mark_prompt_context to mark cond/uncond prompts.')
+        # Unmarked context (see mark_prompt_context): every row is cond.
         mark_batch = torch.ones(size=(x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
         context = x
         return mark_batch, [], [], context
@@ -133,35 +115,6 @@ class HackedImageRNG:
         return result
 
 
-class TorchHijackForUnet:
-    """
-    This is torch, but with cat that resizes tensors to appropriate dimensions if they do not match;
-    this makes it possible to create pictures with dimensions that are multiples of 8 rather than 64
-    """
-
-    def __getattr__(self, item):
-        if item == 'cat':
-            return self.cat
-
-        if hasattr(torch, item):
-            return getattr(torch, item)
-
-        raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, item))
-
-    def cat(self, tensors, *args, **kwargs):
-        if len(tensors) == 2:
-            a, b = tensors
-            if a.shape[-2:] != b.shape[-2:]:
-                a = torch.nn.functional.interpolate(a, b.shape[-2:], mode="nearest")
-
-            tensors = (a, b)
-
-        return torch.cat(tensors, *args, **kwargs)
-
-
-th = TorchHijackForUnet()
-
-
 class ControlParams:
     def __init__(
             self,
@@ -182,7 +135,6 @@ class ControlParams:
             control_context_override: Optional[Any] = None,
             effective_region_mask: Optional[torch.Tensor] = None,
             union_control_types: List[ControlNetUnionControlType] = None,
-            **kwargs  # To avoid errors
     ):
         self.control_model = control_model
         self.preprocessor = preprocessor
@@ -262,7 +214,6 @@ def aligned_adding(base, x, require_channel_alignment):
 
     if xh > 1 or xw > 1:
         if base_h != xh or base_w != xw:
-            # logger.info('[Warning] ControlNet finds unexpected mis-alignment in tensor shape.')
             x = th.nn.functional.interpolate(x, size=(base_h, base_w), mode="nearest")
 
     return base + x
@@ -277,7 +228,7 @@ def torch_dfs(model: torch.nn.Module):
 
 
 def restore_secondary_hijacks(model):
-    """Undo the attention/GroupNorm hijacks (reference-only, StyleAlign) that
+    """Undo the attention/GroupNorm hijacks (reference-only/AdaIN) that
     UnetHook.hook installed on `model`'s submodules. They are registered on the
     model, so this needs no walk over all UNet modules."""
     for module in getattr(model, '_controlnet_secondary_hijacks', ()):
@@ -290,37 +241,12 @@ def restore_secondary_hijacks(model):
     model._controlnet_secondary_hijacks = []
 
 
-class AbstractLowScaleModel(nn.Module):
+class AbstractLowScaleModel(LdmAbstractLowScaleModel):
+    """ldm's noise schedule holder with its default linear schedule. q_sample moves the schedule to x_start:
+    this module stays on the CPU while the revision embeds it noises are on the device."""
+
     def __init__(self):
-        super(AbstractLowScaleModel, self).__init__()
-        self.register_schedule()
-
-    def register_schedule(self, beta_schedule="linear", timesteps=1000,
-                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
-        betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end,
-                                   cosine_s=cosine_s)
-        alphas = 1. - betas
-        alphas_cumprod = np.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
-
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.linear_start = linear_start
-        self.linear_end = linear_end
-        assert alphas_cumprod.shape[0] == self.num_timesteps, 'alphas have to be defined for each timestep'
-
-        to_torch = partial(torch.tensor, dtype=torch.float32)
-
-        self.register_buffer('betas', to_torch(betas))
-        self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
-        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
-        self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod)))
-        self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
+        super().__init__(noise_schedule_config={})
 
     def q_sample(self, x_start, t, noise=None):
         if noise is None:
@@ -345,7 +271,7 @@ def register_schedule(self):
     to_torch = partial(torch.tensor, dtype=torch.float32, device=devices.device)
 
     setattr(self, 'betas', to_torch(betas))
-    # setattr(self, 'alphas_cumprod', to_torch(alphas_cumprod))  # a1111 already has this
+    # alphas_cumprod: the loaded model already has it.
     setattr(self, 'alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
     setattr(self, 'sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
     setattr(self, 'sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
@@ -482,7 +408,7 @@ class UnetHook(nn.Module):
             if self.model is not None:
                 self.model.current_sampling_percent = current_sampling_percent
 
-    def hook(self, model, sd_ldm, control_params: List[ControlParams], process, batch_option_uint_separate=False, batch_option_style_align=False):
+    def hook(self, model, sd_ldm, control_params: List[ControlParams], process):
         self.model = model
         self.sd_ldm = sd_ldm
         self.control_params = control_params
@@ -492,14 +418,7 @@ class UnetHook(nn.Module):
         outer = self
 
         def process_sample(*args, **kwargs):
-            # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
-            # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
-            # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
-            # if XXX is a positive prompt, you should call mark_prompt_context(XXX, positive=True)
-            # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
-            # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
-            # After you mark the prompts, the mismatch errors will disappear.
-            # Marked copies only: the originals are persistent cond cache entries.
+            # Mark cond/uncond (see mark_prompt_context). Marked copies only: the originals are persistent cond cache entries.
             for key, positive in (('conditioning', True), ('unconditional_conditioning', False)):
                 if key in kwargs:
                     kwargs[key] = mark_prompt_context(kwargs[key], positive=positive)
@@ -551,13 +470,10 @@ class UnetHook(nn.Module):
             """Whether a call can be evaluated on a subset of its rows with identical per-row results.
 
             PAG replays only the cond rows of main-pass calls. Units that couple rows must see the
-            whole call: StyleAlign shares attention across the batch, multi-image hints are row-aligned,
-            and reference units draw fresh noise over all rows of every call. IP-Adapter now picks its
-            image k/v per row by cond_mark, but its calls stay whole until a cond-row replay with it is
-            verified against the full call.
+            whole call: multi-image hints are row-aligned, and reference units draw fresh noise over
+            all rows of every call. IP-Adapter now picks its image k/v per row by cond_mark, but its
+            calls stay whole until a cond-row replay with it is verified against the full call.
             """
-            if batch_option_style_align:
-                return False
             for param in outer.control_params:
                 if param.control_model_type == ControlModelType.IPAdapter:
                     return False
@@ -572,12 +488,10 @@ class UnetHook(nn.Module):
         def control_is_replayable():
             """Whether a replay of a recorded call's rows may reuse its control state.
 
-            Reference/AdaIN units run a nested UNet pass and fill attention banks per call, StyleAlign
-            hacks attention across rows, and colorfix/inpaint_only post-process the output with per-call
-            tensors; such calls are always recomputed.
+            Reference/AdaIN units run a nested UNet pass and fill attention banks per call, and
+            colorfix/inpaint_only post-process the output with per-call tensors; such calls are always
+            recomputed.
             """
-            if batch_option_style_align:
-                return False
             for param in outer.control_params:
                 if param.control_model_type == ControlModelType.AttentionInjection:
                     return False
@@ -602,7 +516,6 @@ class UnetHook(nn.Module):
             # Stripping the mark token leaves a strided view; copy once instead of in every k/v projection.
             context = context.contiguous()
             outer.model.cond_mark = cond_mark
-            # logger.info(str(cond_mark[:, 0, 0, 0].detach().cpu().numpy().tolist()) + ' - ' + str(outer.current_uc_indices))
 
             # Revision
             if is_sdxl:
@@ -705,7 +618,7 @@ class UnetHook(nn.Module):
                 context = torch.cat([context, control.clone()], dim=1)
 
             # handle ControlNet / T2I_Adapter
-            for param_index, param in enumerate(outer.control_params):
+            for param in outer.control_params:
                 if param.guidance_stopped or param.disabled_by_hr_option(self.is_in_high_res_fix):
                     continue
 
@@ -743,9 +656,9 @@ class UnetHook(nn.Module):
                 if param.control_model_type == ControlModelType.InstantID:
                     embed = param.control_context_override
                     assert isinstance(embed, ImageEmbed)
-                    # ImageEmbed.eval(cond_mark) per row, without its round trip through the embeds' (CPU)
-                    # device on every call: the embeds are cast once per request and rows picked on the device.
-                    # cond_mark is exactly 0/1, so the selection equals eval's blend, then the same cast.
+                    # Per row cond_emb * cond_mark + uncond_emb * (1 - cond_mark), cast to the call's dtype. The
+                    # embeds are cast once per request and rows picked on the device; cond_mark is exactly 0/1,
+                    # so the selection equals that blend.
                     cached = getattr(param, 'control_context_device', None)
                     if cached is None or cached[0] is not embed or cached[1] != (x.device, x.dtype):
                         cached = (embed, (x.device, x.dtype),
@@ -777,7 +690,7 @@ class UnetHook(nn.Module):
                     guided_hint = cached_guided_hint[3]
 
                 # ControlNet inpaint protocol
-                if guided_hint is None and hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
+                if guided_hint is None and hint.shape[1] == 4:
                     c = hint[:, 0:3, :, :]
                     m = hint[:, 3:4, :, :]
                     m = (m > 0.5).float()
@@ -862,13 +775,6 @@ class UnetHook(nn.Module):
                     if param.control_model_type == ControlModelType.T2I_Adapter:
                         target = total_t2i_adapter_embedding
                     if target is not None:
-                        if batch_option_uint_separate:
-                            for pi, ci in enumerate(outer.current_c_indices):
-                                if pi % len(outer.control_params) != param_index:
-                                    item[ci] = 0
-                            for pi, ci in enumerate(outer.current_uc_indices):
-                                if pi % len(outer.control_params) != param_index:
-                                    item[ci] = 0
                         # The first unit's residual is a fresh tensor: take it instead of adding it to 0.0.
                         target[idx] = item if isinstance(target[idx], float) and target[idx] == 0.0 else item + target[idx]
 
@@ -899,7 +805,7 @@ class UnetHook(nn.Module):
                         param.control_model.to('cpu')
 
             # A1111 fix for medvram.
-            if shared.cmd_opts.medvram or (getattr(shared.cmd_opts, 'medvram_sdxl', False) and is_sdxl):
+            if shared.cmd_opts.medvram or (shared.cmd_opts.medvram_sdxl and is_sdxl):
                 try:
                     # Trigger the register_forward_pre_hook
                     outer.sd_ldm.model()
@@ -1039,7 +945,7 @@ class UnetHook(nn.Module):
                     total_t2i_adapter_embedding = [rows(t) for t in encoder['t2i']]
                     h = hs[-1]
                 else:
-                    t_emb = cond_cast_unet(unet_timestep_embedding(timesteps, self.model_channels))
+                    t_emb = devices.cond_cast_unet(unet_timestep_embedding(timesteps, self.model_channels))
                     emb = self.time_embed(t_emb)
 
                     if is_sdxl:
@@ -1200,19 +1106,6 @@ class UnetHook(nn.Module):
                         self_attn1 = style_cfg * self_attn1_c + (1.0 - style_cfg) * self_attn1_uc
                     self.bank = []
                     self.style_cfgs = []
-                if outer.attention_auto_machine == AutoMachine.StyleAlign and not outer.is_in_high_res_fix:
-                    # very VRAM hungry - disable at high_res_fix
-
-                    def shared_attn1(inner_x):
-                        BB, FF, CC = inner_x.shape
-                        return self.attn1(inner_x.reshape(1, BB * FF, CC)).reshape(BB, FF, CC)
-
-                    uc_layer = shared_attn1(x_norm1[outer.current_uc_indices])
-                    c_layer = shared_attn1(x_norm1[outer.current_c_indices])
-                    self_attn1 = torch.zeros_like(x_norm1).to(uc_layer)
-                    self_attn1[outer.current_uc_indices] = uc_layer
-                    self_attn1[outer.current_c_indices] = c_layer
-                    del uc_layer, c_layer
                 if self_attn1 is None:
                     self_attn1 = self.attn1(x_norm1, context=self_attention_context)
 
@@ -1283,16 +1176,8 @@ class UnetHook(nn.Module):
             register_schedule(sd_ldm)
             outer.revision_q_sampler = AbstractLowScaleModel()
 
-        need_attention_hijack = False
-
-        for param in outer.control_params:
-            if param.control_model_type in [ControlModelType.AttentionInjection]:
-                need_attention_hijack = True
-
-        if batch_option_style_align:
-            need_attention_hijack = True
-            outer.attention_auto_machine = AutoMachine.StyleAlign
-            outer.gn_auto_machine = AutoMachine.StyleAlign
+        need_attention_hijack = any(
+            param.control_model_type == ControlModelType.AttentionInjection for param in outer.control_params)
 
         if need_attention_hijack:
             attn_modules = [module for module in torch_dfs(model) if isinstance(module, BasicTransformerBlock) or isinstance(module, BasicTransformerBlockSGM)]

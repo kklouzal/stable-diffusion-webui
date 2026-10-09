@@ -11,7 +11,8 @@ utils = importlib.import_module("extensions.sd-webui-controlnet.tests.utils", "u
 
 from scripts import controlnet, hook  # noqa: E402
 from scripts.controlnet import clear_all_secondary_control_models, get_pytorch_control  # noqa: E402
-from scripts.hook import BasicTransformerBlockSGM, UnetHook  # noqa: E402
+from scripts.enums import ControlModelType  # noqa: E402
+from scripts.hook import BasicTransformerBlockSGM, ControlParams, UnetHook  # noqa: E402
 
 
 def former_get_pytorch_control(x):
@@ -59,8 +60,17 @@ class FakeSDXLUNet(torch.nn.Module):
         return x
 
 
+def reference_only_param():
+    return ControlParams(
+        control_model=None, preprocessor={"name": "reference_only", "threshold_a": 0.5, "threshold_b": 0.5},
+        hint_cond=torch.zeros(1, 3, 8, 8), weight=1.0, guidance_stopped=False, start_guidance_percent=0.0,
+        stop_guidance_percent=1.0, advanced_weighting=None, control_model_type=ControlModelType.AttentionInjection,
+        hr_hint_cond=None, global_average_pooling=False, soft_injection=False, cfg_injection=False,
+    )
+
+
 class TestSecondaryHijackRegistry(unittest.TestCase):
-    def test_style_align_hijacks_are_registered_and_restored_without_module_walks(self):
+    def test_reference_hijacks_are_registered_and_restored_without_module_walks(self):
         unet = FakeSDXLUNet()
         attn = [m for m in unet.modules() if isinstance(m, BasicTransformerBlockSGM)]
         gn = [unet.middle_block] + [unet.input_blocks[i] for i in (4, 5, 7, 8)] + list(unet.output_blocks)
@@ -69,7 +79,7 @@ class TestSecondaryHijackRegistry(unittest.TestCase):
         sd_ldm = types.SimpleNamespace(is_sdxl=True)
 
         owner = UnetHook()
-        owner.hook(unet, sd_ldm, [], process, batch_option_style_align=True)
+        owner.hook(unet, sd_ldm, [reference_only_param()], process)
         self.assertEqual(set(unet._controlnet_secondary_hijacks), set(attn + gn))
         for m in attn:
             self.assertNotEqual(m._forward, originals[m][0])
@@ -81,7 +91,7 @@ class TestSecondaryHijackRegistry(unittest.TestCase):
         with mock.patch.object(hook, "torch_dfs", walk):
             clear_all_secondary_control_models(unet)  # controlnet_main_entry / postprocess
             plain = UnetHook()
-            plain.hook(unet, sd_ldm, [], process)  # a request without reference/StyleAlign
+            plain.hook(unet, sd_ldm, [], process)  # a request without reference units
             plain.restore()
         walk.assert_not_called()
         self.assertEqual(unet._controlnet_secondary_hijacks, [])

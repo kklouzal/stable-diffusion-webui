@@ -4,7 +4,6 @@ import math
 from threading import RLock
 from typing import Union, Dict, Optional
 
-from .pulid_attn import PuLIDAttnSetting
 from .ipadapter_model import ImageEmbed, IPAdapterModel
 from ..enums import StableDiffusionVersion, TransformerID
 
@@ -43,8 +42,8 @@ def attn_forward_hacked(self, x, context=None, **kwargs):
 
     del k, v, x
 
-    # Each hack sees the attention output so far (PuLID projects its id attention against it) and returns
-    # the term to add, or None when inactive at this layer/step.
+    # Each hack sees the attention output so far and returns the term to add, or None when inactive at
+    # this layer/step.
     for f in self.ipadapter_hacks:
         ip_out = f(self, out, q)
         if ip_out is not None:
@@ -116,7 +115,6 @@ class PlugableIPAdapter(torch.nn.Module):
         self.latent_width: int = 0
         self.latent_height: int = 0
         self.effective_region_mask = None
-        self.pulid_attn_setting: Optional[PuLIDAttnSetting] = None
         self.region_masks = {}
         self.cond_rows_memo = None
 
@@ -130,7 +128,6 @@ class PlugableIPAdapter(torch.nn.Module):
         self.image_emb = None
         self.effective_region_mask = None
         self.latent_width = self.latent_height = 0
-        self.pulid_attn_setting = None
 
     @torch.no_grad()
     def hook(
@@ -143,7 +140,6 @@ class PlugableIPAdapter(torch.nn.Module):
         latent_width: int,
         latent_height: int,
         effective_region_mask: Optional[torch.Tensor],
-        pulid_attn_setting: Optional[PuLIDAttnSetting] = None,
         dtype=torch.float32,
     ):
         global current_model
@@ -154,7 +150,6 @@ class PlugableIPAdapter(torch.nn.Module):
         self.latent_width = latent_width
         self.latent_height = latent_height
         self.effective_region_mask = effective_region_mask
-        self.pulid_attn_setting = pulid_attn_setting
 
         self.reset()
 
@@ -163,9 +158,7 @@ class PlugableIPAdapter(torch.nn.Module):
         self.dtype = dtype
 
         self.ipadapter.to(device, dtype=self.dtype)
-        if isinstance(preprocessor_outputs, (list, tuple)):
-            preprocessor_outputs = preprocessor_outputs
-        else:
+        if not isinstance(preprocessor_outputs, (list, tuple)):
             preprocessor_outputs = [preprocessor_outputs]
         self.image_emb = ImageEmbed.average_of(
             *[self.ipadapter.get_image_emb(o) for o in preprocessor_outputs]
@@ -210,8 +203,7 @@ class PlugableIPAdapter(torch.nn.Module):
     def call_ip(self, key: str, cond_mark: torch.Tensor, device, dtype) -> torch.Tensor:
         """`key`'s projection (to_k_ip/to_v_ip) of the image embeds for the rows of this call, (B, T, C) in `dtype`.
 
-        The projection is row-wise and bias-free, so the cond and uncond embeds (with PuLID's zero tokens) are
-        projected once per request, in the IP-Adapter's dtype on its device, and each call selects its rows by
+        The projection is row-wise and bias-free, so the cond and uncond embeds are projected once per request, in the IP-Adapter's dtype on its device, and each call selects its rows by
         cond_mark. The row layout must not be frozen at the first call: A1111 runs cond and uncond rows as
         separate UNet calls (prompt and negative prompt of different token lengths without padding,
         batch_cond_uncond off) and drops the uncond rows on skipped-uncond steps.
@@ -221,8 +213,6 @@ class PlugableIPAdapter(torch.nn.Module):
         if projected is None:
             cond_emb, uncond_emb = self.image_emb
             emb = torch.cat([cond_emb, uncond_emb])
-            if self.ipadapter.is_pulid:
-                emb = self.pulid_attn_setting.append_zero_tokens(emb)
             both = self.ipadapter.ip_layers.to_kvs[key](emb).to(device=device, dtype=dtype)
             projected = self.cache[cache_key] = (both[: cond_emb.shape[0]], both[cond_emb.shape[0]:])
         cond, uncond = projected
@@ -265,35 +255,6 @@ class PlugableIPAdapter(torch.nn.Module):
     ):
         """hidden_states: the attention output (B, L, heads * head_dim); query: (B, heads, L, head_dim);
         ip_k/ip_v: the call's image k/v rows (B, T, heads * head_dim) in the query's dtype."""
-        if self.ipadapter.is_pulid:
-            assert self.pulid_attn_setting is not None
-            return self.pulid_attn_setting.eval(
-                hidden_states,
-                query,
-                ip_k,
-                ip_v,
-                attn_heads,
-                head_dim,
-            )
-        else:
-            return self._attn_eval_ipadapter(
-                hidden_states,
-                query,
-                ip_k,
-                ip_v,
-                attn_heads,
-                head_dim,
-            )
-
-    def _attn_eval_ipadapter(
-        self,
-        hidden_states: torch.Tensor,
-        query: torch.Tensor,
-        ip_k: torch.Tensor,
-        ip_v: torch.Tensor,
-        attn_heads: int,
-        head_dim: int,
-    ):
         assert hidden_states.ndim == 3
         batch_size, sequence_length, inner_dim = hidden_states.shape
 
@@ -331,7 +292,7 @@ class PlugableIPAdapter(torch.nn.Module):
             h = attn_blk.heads
             head_dim = inner_dim // h
             cond_mark = current_model.cond_mark
-            # In the query's dtype (the dtype of the attention's own k/v, and what PuLID projects in).
+            # In the query's dtype (the dtype of the attention's own k/v).
             ip_out = self.attn_eval(
                 hidden_states=out,
                 query=q,

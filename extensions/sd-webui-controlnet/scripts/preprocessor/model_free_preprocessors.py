@@ -47,7 +47,6 @@ class PreprocessorCanny(Preprocessor):
             label="High Threshold",
         )
         self.sorting_priority = 100
-        self.use_soft_projection_in_hr_fix = True
 
     def __call__(
         self,
@@ -142,21 +141,19 @@ class PreprocessorScribbleXdog(Preprocessor):
         g2 = cv2.GaussianBlur(img.astype(np.float32), (0, 0), 5.0)
         dog = (255 - np.min(g2 - g1, axis=2)).clip(0, 255).astype(np.uint8)
         result = np.zeros_like(img, dtype=np.uint8)
-        result[2 * (255 - dog) > slider_1] = 255
+        # Widen before doubling: 2 * (255 - dog) in uint8 wraps for edge strengths above 127.
+        result[2 * (255 - dog.astype(np.int32)) > slider_1] = 255
         return remove_pad(result)
 
 
 class PreprocessorShuffle(Preprocessor):
+    # Not cacheable (the Preprocessor default): each call depends on the numpy seed.
     def __init__(self):
         super().__init__(name="shuffle")
         self.tags = ["Shuffle"]
         self.model_shuffle = None
         # Fix res to 512.
         self.slider_resolution = PreprocessorParameter(value=512, visible=False)
-
-    def _cached_call(self, *args, **kwargs):
-        """No cache for shuffle, as each call depends on different numpy seed."""
-        return self(*args, **kwargs)
 
     def __call__(
         self,

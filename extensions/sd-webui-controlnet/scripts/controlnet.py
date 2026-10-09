@@ -1,12 +1,11 @@
-import gc
 import math
 import tracemalloc
 import os
 import logging
-from copy import copy, deepcopy
+from copy import copy
 from typing import Any, List, NamedTuple, Optional, Tuple
 import modules.scripts as scripts
-from internal_controlnet.cache_contract import AtomicLRU, callable_identity, freeze, runtime_identity
+from internal_controlnet.cache_contract import AtomicLRU, callable_identity, controlnet_option_snapshot, runtime_identity
 from modules import shared, devices, script_callbacks, processing, masking, images
 import gradio as gr
 import time
@@ -17,11 +16,10 @@ from einops import rearrange
 import scripts.preprocessor as preprocessor_init  # noqa
 from annotator.util import HWC3
 from internal_controlnet.external_code import ControlNetUnit
-from scripts import global_state, hook, external_code, batch_hijack, controlnet_version, utils
+from scripts import global_state, hook, external_code, controlnet_version, utils
 from scripts.controlnet_lora import bind_control_lora, unbind_control_lora
 from scripts.controlnet_lllite import clear_all_lllite
-from scripts.ipadapter.plugable_ipadapter import ImageEmbed, clear_all_ip_adapter
-from scripts.ipadapter.pulid_attn import PULID_SETTING_FIDELITY, PULID_SETTING_STYLE
+from scripts.ipadapter.plugable_ipadapter import clear_all_ip_adapter
 from scripts.utils import load_state_dict, get_unique_axis0, align_dim_latent
 from scripts.hook import ControlParams, UnetHook, HackedImageRNG
 from scripts.enums import (
@@ -29,16 +27,11 @@ from scripts.enums import (
     InputMode,
     StableDiffusionVersion,
     HiResFixOption,
-    PuLIDMode,
     ControlMode,
-    BatchOption,
     ResizeMode,
 )
-from scripts.controlnet_ui.controlnet_ui_group import ControlNetUiGroup
-from scripts.controlnet_ui.photopea import Photopea
 from scripts.logging import logger
 from scripts.supported_preprocessor import Preprocessor
-from scripts.animate_diff.batch import add_animate_diff_batch_input
 from modules.processing import StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img, StableDiffusionProcessing
 from modules.images import save_image
 from scripts.infotext import Infotext
@@ -47,16 +40,10 @@ import cv2
 import numpy as np
 import torch
 
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 from scripts.lvminthin import lvmin_thin, nake_nms
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
 from scripts.hook import restore_secondary_hijacks
-
-
-# Gradio 3.32 bug fix
-import tempfile
-gradio_tempfile_path = os.path.join(tempfile.gettempdir(), 'gradio')
-os.makedirs(gradio_tempfile_path, exist_ok=True)
 
 
 def clear_all_secondary_control_models(m):
@@ -81,38 +68,21 @@ def find_closest_lora_model_name(search: str):
     return global_state.cn_models_names[applicable[0]]
 
 
-def swap_img2img_pipeline(p: processing.StableDiffusionProcessingImg2Img):
-    p.__class__ = processing.StableDiffusionProcessingTxt2Img
-    dummy = processing.StableDiffusionProcessingTxt2Img()
-    for k,v in dummy.__dict__.items():
-        if hasattr(p, k):
-            continue
-        setattr(p, k, v)
-
-
 global_state.update_cn_models()
 logger.info(f"ControlNet {controlnet_version.version_flag}")
 
 
 def prepare_mask(
-    mask: Image.Image, p: processing.StableDiffusionProcessing
+    mask: Image.Image, p: processing.StableDiffusionProcessingImg2Img
 ) -> Image.Image:
     """
-    Prepare an image mask for the inpainting process.
-
-    This function takes as input a PIL Image object and an instance of the 
-    StableDiffusionProcessing class, and performs the following steps to prepare the mask:
-
-    1. Convert the mask to grayscale (mode "L").
-    2. If the 'inpainting_mask_invert' attribute of the processing instance is True,
-       invert the mask colors.
-    3. If the 'mask_blur' attribute of the processing instance is greater than 0,
-       apply a Gaussian blur to the mask with a radius equal to 'mask_blur'.
+    Prepare an img2img inpaint mask for ControlNet: convert it to grayscale (mode "L"), invert it when
+    `p.inpainting_mask_invert` is set, then apply the same separable Gaussian blur as the core's inpaint
+    mask (`p.mask_blur_x` horizontally, `p.mask_blur_y` vertically; 0 disables an axis).
 
     Args:
         mask (Image.Image): The input mask as a PIL Image object.
-        p (processing.StableDiffusionProcessing): An instance of the StableDiffusionProcessing class 
-                                                   containing the processing parameters.
+        p: The img2img processing object (the only kind that carries an inpaint mask).
 
     Returns:
         mask (Image.Image): The prepared mask as a PIL Image object.
@@ -121,20 +91,16 @@ def prepare_mask(
     if getattr(p, "inpainting_mask_invert", False):
         mask = ImageOps.invert(mask)
 
-    if hasattr(p, 'mask_blur_x'):
-        if getattr(p, "mask_blur_x", 0) > 0:
-            np_mask = np.array(mask)
-            kernel_size = 2 * int(2.5 * p.mask_blur_x + 0.5) + 1
-            np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), p.mask_blur_x)
-            mask = Image.fromarray(np_mask)
-        if getattr(p, "mask_blur_y", 0) > 0:
-            np_mask = np.array(mask)
-            kernel_size = 2 * int(2.5 * p.mask_blur_y + 0.5) + 1
-            np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), p.mask_blur_y)
-            mask = Image.fromarray(np_mask)
-    else:
-        if getattr(p, "mask_blur", 0) > 0:
-            mask = mask.filter(ImageFilter.GaussianBlur(p.mask_blur))
+    if getattr(p, "mask_blur_x", 0) > 0:
+        np_mask = np.array(mask)
+        kernel_size = 2 * int(2.5 * p.mask_blur_x + 0.5) + 1
+        np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), p.mask_blur_x)
+        mask = Image.fromarray(np_mask)
+    if getattr(p, "mask_blur_y", 0) > 0:
+        np_mask = np.array(mask)
+        kernel_size = 2 * int(2.5 * p.mask_blur_y + 0.5) + 1
+        np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), p.mask_blur_y)
+        mask = Image.fromarray(np_mask)
 
     return mask
 
@@ -190,23 +156,19 @@ def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
 def get_control(
     p: StableDiffusionProcessing,
     unit: ControlNetUnit,
-    idx: int,
     control_model_type: ControlModelType,
     preprocessor: Preprocessor,
 ):
     """Get input for a ControlNet unit."""
-    if unit.is_animate_diff_batch:
-        unit = add_animate_diff_batch_input(p, unit)
-
     high_res_fix = isinstance(p, StableDiffusionProcessingTxt2Img) and getattr(p, 'enable_hr', False)
     h, w, hr_y, hr_x = Script.get_target_dimensions(p)
-    input_image, resize_mode = Script.choose_input_image(p, unit, idx)
+    input_image, resize_mode = Script.choose_input_image(p, unit)
     if isinstance(input_image, list):
-        assert unit.accepts_multiple_inputs or unit.is_animate_diff_batch
+        assert unit.accepts_multiple_inputs
         input_images = input_image
     else: # Following operations are only for single input image.
         input_image = Script.try_crop_image_with_a1111_mask(p, unit, input_image, resize_mode)
-        input_image = np.ascontiguousarray(input_image.copy()).copy() # safe numpy
+        input_image = input_image.copy()  # C-contiguous copy
         if unit.module == 'inpaint_only+lama' and resize_mode == ResizeMode.OUTER_FIT:
             # inpaint_only+lama is special and required outpaint fix
             _, input_image = Script.detectmap_proc(input_image, unit.module, resize_mode, hr_y, hr_x)
@@ -242,7 +204,7 @@ def get_control(
             slider_1=unit.threshold_a,
             slider_2=unit.threshold_b,
             low_vram=(
-                ("clip" in unit.module or unit.module == "ip-adapter_face_id_plus") and
+                "clip" in unit.module and
                 shared.opts.data.get("controlnet_clip_detector_on_cpu", False)
             ),
             model=unit.model,
@@ -273,18 +235,9 @@ def get_control(
         if control_model_type == ControlModelType.ReVision:
             control = control['image_embeds']
 
-        if is_image and unit.is_animate_diff_batch: # AnimateDiff save VRAM
-            control = control.cpu()
-            if hr_control is not None:
-                hr_control = hr_control.cpu()
-
         return control, hr_control
 
-    def optional_tqdm(iterable, use_tqdm=unit.is_animate_diff_batch):
-        from tqdm import tqdm
-        return tqdm(iterable) if use_tqdm else iterable
-
-    controls, hr_controls = list(zip(*[preprocess_input_image(img) for img in optional_tqdm(input_images)]))
+    controls, hr_controls = list(zip(*[preprocess_input_image(img) for img in input_images]))
     assert len(controls) == len(hr_controls)
     return controls, hr_controls, detected_maps
 
@@ -304,21 +257,10 @@ class Script(scripts.Script, metaclass=(
     def __init__(self) -> None:
         super().__init__()
         self.latest_network = None
-        self.input_image = None
-        self.latest_model_hash = ""
         self.enabled_units: List[ControlNetUnit] = []
         self.detected_map = []
         self.post_processors = []
         self.noise_modifier = None
-        self.ui_batch_option_state = [BatchOption.DEFAULT.value, False]
-        # `Script` instance is created twice, once for img2img and once for txt2img.
-        # However, A1111 does not pass is_img2img to script constructor, so this field
-        # is initialized in `ui` method.
-        self.is_img2img = False
-        batch_hijack.instance.process_batch_callbacks.append(self.batch_tab_process)
-        batch_hijack.instance.process_batch_each_callbacks.append(self.batch_tab_process_each)
-        batch_hijack.instance.postprocess_batch_each_callbacks.insert(0, self.batch_tab_postprocess_each)
-        batch_hijack.instance.postprocess_batch_callbacks.insert(0, self.batch_tab_postprocess)
 
     def title(self):
         return "ControlNet"
@@ -326,93 +268,10 @@ class Script(scripts.Script, metaclass=(
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
-    def uigroup(self, tabname: str, is_img2img: bool, elem_id_tabname: str, photopea: Optional[Photopea]) -> Tuple[ControlNetUiGroup, gr.State]:
-        group = ControlNetUiGroup(is_img2img, photopea)
-        return group, group.render(tabname, elem_id_tabname)
-
-    def ui_batch_options(self, is_img2img: bool, elem_id_tabname: str):
-        batch_option = gr.Radio(
-            choices=[e.value for e in BatchOption],
-            value=BatchOption.DEFAULT.value,
-            label="Batch Option",
-            elem_id=f"{elem_id_tabname}_controlnet_batch_option_radio",
-            elem_classes="controlnet_batch_option_radio",
-        )
-        use_batch_style_align = gr.Checkbox(
-            label='[StyleAlign] Align image style in the batch.'
-        )
-
-        unit_args = [batch_option, use_batch_style_align]
-
-        def update_ui_batch_options(*args):
-            self.ui_batch_option_state = args
-            return
-
-        for comp in unit_args:
-            event_subscribers = []
-            if hasattr(comp, "edit"):
-                event_subscribers.append(comp.edit)
-            elif hasattr(comp, "click"):
-                event_subscribers.append(comp.click)
-            elif isinstance(comp, gr.Slider) and hasattr(comp, "release"):
-                event_subscribers.append(comp.release)
-            elif hasattr(comp, "change"):
-                event_subscribers.append(comp.change)
-
-            if hasattr(comp, "clear"):
-                event_subscribers.append(comp.clear)
-
-            for event_subscriber in event_subscribers:
-                event_subscriber(
-                    fn=update_ui_batch_options, inputs=unit_args
-                )
-
-        return
-
     def ui(self, is_img2img):
-        """this function should create gradio UI elements. See https://gradio.app/docs/#components
-        The return value should be an array of all components that are used in processing.
-        Values of those returned components will be passed to run() and process() functions.
-        """
-        self.is_img2img = is_img2img
-
-        infotext = Infotext()
-        ui_groups = []
-        controls = []
-        max_models = shared.opts.data.get("control_net_unit_count", 3)
-        elem_id_tabname = ("img2img" if is_img2img else "txt2img") + "_controlnet"
-        with gr.Group(elem_id=elem_id_tabname):
-            with gr.Accordion(f"ControlNet {controlnet_version.version_flag}", open = False, elem_id="controlnet"):
-                photopea = Photopea() if not shared.opts.data.get("controlnet_disable_photopea_edit", False) else None
-                if max_models > 1:
-                    with gr.Tabs(elem_id=f"{elem_id_tabname}_tabs"):
-                        for i in range(max_models):
-                            with gr.Tab(f"ControlNet Unit {i}",
-                                        elem_classes=['cnet-unit-tab']):
-                                group, state = self.uigroup(f"ControlNet-{i}", is_img2img, elem_id_tabname, photopea)
-                                ui_groups.append(group)
-                                controls.append(state)
-                else:
-                    with gr.Column():
-                        group, state = self.uigroup("ControlNet", is_img2img, elem_id_tabname, photopea)
-                        ui_groups.append(group)
-                        controls.append(state)
-                with gr.Accordion("Batch Options", open=False, elem_id="controlnet_batch_options"):
-                    self.ui_batch_options(is_img2img, elem_id_tabname)
-
-        for i, ui_group in enumerate(ui_groups):
-            infotext.register_unit(i, ui_group)
-        if shared.opts.data.get("control_net_sync_field_args", True):
-            self.infotext_fields = infotext.infotext_fields
-            self.paste_field_names = infotext.paste_field_names
-
-        return tuple(controls)
-
-    @staticmethod
-    def clear_control_model_cache(reason="explicit"):
-        Script.model_load_cache.clear(reason)
-        gc.collect()
-        devices.torch_gc()
+        """API-only: one inert State per unit (`control_net_unit_count`). Each value is the default ControlNetUnit
+        that the API's default script args and /sdapi/v1/script-info report; no browser UI is built."""
+        return tuple(gr.State(ControlNetUnit()) for _ in range(shared.opts.data.get("control_net_unit_count", 3)))
 
     @staticmethod
     def _resolve_model_path(model):
@@ -440,15 +299,11 @@ class Script(scripts.Script, metaclass=(
         # The loaded checkpoint is not part of the key: only 'difference' models depend on it, and
         # load_control_model rebuilds those when it changes (see _checkpoint_revision).
         base_revision = (type(unet).__module__, type(unet).__qualname__, id(unet))
-        loader_options = {
-            key: value for key, value in shared.opts.data.items()
-            if key.startswith("control_net") or key.startswith("controlnet")
-        }
         return (
             "controlnet-model", 1, resolved_model, source_revision, base_revision,
             str(sd_model.dtype), str(getattr(devices, "dtype_unet", None)),
             str(getattr(devices, "device", None)), runtime_identity(torch),
-            callable_identity(build_model_by_guess), freeze(loader_options),
+            callable_identity(build_model_by_guess), controlnet_option_snapshot(shared.opts.data),
         )
 
     @staticmethod
@@ -573,8 +428,8 @@ class Script(scripts.Script, metaclass=(
         return start, end
 
     @staticmethod
-    def get_remote_call(p, attribute, default=None, idx=0, strict=False, force=False):
-        if not force and not shared.opts.data.get("control_net_allow_script_control", False):
+    def get_remote_call(p, attribute, default=None, idx=0, strict=False):
+        if not shared.opts.data.get("control_net_allow_script_control", False):
             return default
 
         def get_element(obj, strict=False):
@@ -609,9 +464,7 @@ class Script(scripts.Script, metaclass=(
         unit.threshold_b = selector(p, "control_net_pthr_b", unit.threshold_b, idx)
         guidance_start = selector(p, "control_net_guidance_start", unit.guidance_start, idx)
         guidance_end = selector(p, "control_net_guidance_end", unit.guidance_end, idx)
-        # Backward compatibility. See https://github.com/Mikubill/sd-webui-controlnet/issues/1740
-        # for more details.
-        guidance_end = selector(p, "control_net_guidance_strength", guidance_end, idx)
+        # The API maps the legacy alias control_net_guidance_strength to control_net_guidance_end.
         unit.guidance_start, unit.guidance_end = Script.normalize_guidance_interval(guidance_start, guidance_end)
         unit.control_mode = Script.normalize_remote_control_mode(selector(p, "control_net_control_mode", unit.control_mode, idx), unit.control_mode)
         unit.pixel_perfect = selector(p, "control_net_pixel_perfect", unit.pixel_perfect, idx)
@@ -625,16 +478,6 @@ class Script(scripts.Script, metaclass=(
             detected_map = detected_map.astype(np.float32)
         else:
             detected_map = HWC3(detected_map)
-
-        def safe_numpy(x):
-            # A very safe method to make sure that Apple/Mac works
-            y = x
-
-            # below is very boring but do not change these. If you change these Apple or Mac may fail.
-            y = y.copy()
-            y = np.ascontiguousarray(y)
-            y = y.copy()
-            return y
 
         def high_quality_resize(x, size):
             # Written by lvmin
@@ -693,7 +536,7 @@ class Script(scripts.Script, metaclass=(
 
         if resize_mode == ResizeMode.RESIZE:
             detected_map = high_quality_resize(detected_map, (w, h))
-            detected_map = safe_numpy(detected_map)
+            detected_map = detected_map.copy()  # C-contiguous; never aliases the preprocessor result
             return get_pytorch_control(detected_map), detected_map
 
         old_h, old_w, _ = detected_map.shape
@@ -718,7 +561,7 @@ class Script(scripts.Script, metaclass=(
             pad_w = max(0, (w - new_w) // 2)
             high_quality_background[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = detected_map
             detected_map = high_quality_background
-            detected_map = safe_numpy(detected_map)
+            detected_map = detected_map.copy()
             return get_pytorch_control(detected_map), detected_map
         else:
             k = max(k0, k1)
@@ -727,7 +570,7 @@ class Script(scripts.Script, metaclass=(
             pad_h = max(0, (new_h - h) // 2)
             pad_w = max(0, (new_w - w) // 2)
             detected_map = detected_map[pad_h:pad_h+h, pad_w:pad_w+w]
-            detected_map = safe_numpy(detected_map)
+            detected_map = detected_map.copy()
             return get_pytorch_control(detected_map), detected_map
 
     @staticmethod
@@ -753,7 +596,9 @@ class Script(scripts.Script, metaclass=(
                 result.append(u)
             return result
 
-        units = external_code.get_all_units_in_processing(p)
+        # Copies: the script args may be the API's shared default units (the same objects for every request), and
+        # parse_remote_call / unfold_merged / pixel-perfect / the inpaint fallback assign onto the units.
+        units = [unit.model_copy() for unit in external_code.get_all_units_in_processing(p)]
         if len(units) == 0:
             # fill null groups from legacy remote-call fields, including indexed
             # control_net_*2/control_net_*3 aliases accepted by the API model.
@@ -776,11 +621,8 @@ class Script(scripts.Script, metaclass=(
     def choose_input_image(
             p: processing.StableDiffusionProcessing,
             unit: ControlNetUnit,
-            idx: int
         ) -> Tuple[np.ndarray, ResizeMode]:
         """ Choose input image from following sources with descending priority:
-         - p.image_control: [Deprecated] Lagacy way to pass image to controlnet.
-         - p.control_net_input_image: [Deprecated] Lagacy way to pass image to controlnet.
          - unit.image: ControlNet unit input image.
          - p.init_images: A1111 img2img input image.
 
@@ -802,26 +644,12 @@ class Script(scripts.Script, metaclass=(
             logger.info("Canvas scribble mode. Using mask scribble as input.")
             return HWC3(img[:, :, 3])
 
-        # 4 input image sources.
-        p_image_control = getattr(p, "image_control", None)
-        p_input_image = Script.get_remote_call(p, "control_net_input_image", None, idx)
         image = unit.get_input_images_rgba()
         a1111_image = getattr(p, "init_images", [None])[0]
 
         resize_mode = unit.resize_mode
 
-        if batch_hijack.instance.is_batch and p_image_control is not None:
-            logger.warning("Warn: Using legacy field 'p.image_control'.")
-            input_image = HWC3(np.asarray(p_image_control))
-        elif p_input_image is not None:
-            logger.warning("Warn: Using legacy field 'p.controlnet_input_image'")
-            if isinstance(p_input_image, dict) and "mask" in p_input_image and "image" in p_input_image:
-                color = HWC3(np.asarray(p_input_image['image']))
-                alpha = np.asarray(p_input_image['mask'])[..., None]
-                input_image = np.concatenate([color, alpha], axis=2)
-            else:
-                input_image = HWC3(np.asarray(p_input_image))
-        elif image is not None:
+        if image is not None:
             assert isinstance(image, list)
             # Inpaint mask or CLIP mask.
             if unit.is_inpaint or unit.uses_clip:
@@ -853,9 +681,6 @@ class Script(scripts.Script, metaclass=(
                         np.zeros_like(input_image, dtype=np.uint8)[:, :, 0:1],
                     ], axis=2)
         else:
-            # No input image detected.
-            if batch_hijack.instance.is_batch:
-                shared.state.interrupted = True
             raise ValueError("controlnet is enabled but no input image is given")
 
         assert isinstance(input_image, (np.ndarray, list))
@@ -998,27 +823,15 @@ class Script(scripts.Script, metaclass=(
         # always clear (~0.05s)
         clear_all_secondary_control_models(unet)
 
-        if not batch_hijack.instance.is_batch:
-            self.enabled_units = Script.get_enabled_units(p)
+        self.enabled_units = Script.get_enabled_units(p)
 
-        batch_option_uint_separate = self.ui_batch_option_state[0] == BatchOption.SEPARATE.value
-        batch_option_style_align = self.ui_batch_option_state[1]
-
-        if len(self.enabled_units) == 0 and not batch_option_style_align:
-           self.latest_network = None
-           return
-
-        logger.info(f"unit_separate = {batch_option_uint_separate}, style_align = {batch_option_style_align}")
+        if len(self.enabled_units) == 0:
+            self.latest_network = None
+            return
 
         detected_maps = []
         forward_params: List[ControlParams] = []
         post_processors = []
-
-        # cache stuff
-        if self.latest_model_hash != p.sd_model.sd_model_hash:
-            Script.clear_control_model_cache()
-
-        self.latest_model_hash = p.sd_model.sd_model_hash
 
         # Unload unused preprocessors
         Preprocessor.unload_unused(active_processors={
@@ -1028,7 +841,7 @@ class Script(scripts.Script, metaclass=(
         })
         high_res_fix = isinstance(p, StableDiffusionProcessingTxt2Img) and getattr(p, 'enable_hr', False)
 
-        for idx, unit in enumerate(self.enabled_units):
+        for unit in self.enabled_units:
             Script.check_sd_version_compatible(unit)
             if (
                 'inpaint_only' == unit.module and
@@ -1053,7 +866,7 @@ class Script(scripts.Script, metaclass=(
                 model_net, control_model_type = Script.load_control_model(p, unet, unit.model)
                 model_net.reset()
 
-                if model_net is not None and getattr(devices, "fp8", False) and control_model_type == ControlModelType.ControlNet:
+                if model_net is not None and devices.fp8 and control_model_type == ControlModelType.ControlNet:
                     for _module in model_net.modules(): # FIXME: let's only apply fp8 to ControlNet for now
                         if isinstance(_module, (torch.nn.Conv2d, torch.nn.Linear)):
                             _module.to(torch.float8_e4m3fn)
@@ -1073,79 +886,12 @@ class Script(scripts.Script, metaclass=(
                 hr_controls = unit.ipadapter_input
             else:
                 controls, hr_controls, additional_maps = get_control(
-                    p, unit, idx, control_model_type, preprocessor)
+                    p, unit, control_model_type, preprocessor)
                 detected_maps.extend(additional_maps)
 
-            if len(controls) == len(hr_controls) == 1 and control_model_type not in [ControlModelType.SparseCtrl]:
+            if len(controls) == len(hr_controls) == 1:
                 control = controls[0]
                 hr_control = hr_controls[0]
-            elif unit.is_animate_diff_batch or control_model_type in [ControlModelType.SparseCtrl]:
-                cn_ad_keyframe_idx = getattr(unit, "batch_keyframe_idx", None)
-                def ad_process_control(cc: List[torch.Tensor], cn_ad_keyframe_idx=cn_ad_keyframe_idx):
-                    if unit.is_ipadapter:
-                        ip_adapter_image_emb_cond = []
-                        model_net.ipadapter.image_proj_model.to(torch.float32) # noqa
-                        for c in cc:
-                            c = model_net.ipadapter.get_image_emb(c) # noqa
-                            ip_adapter_image_emb_cond.append(c.cond_emb)
-                        c_cond = torch.cat(ip_adapter_image_emb_cond, dim=0)
-                        c = ImageEmbed(c_cond, c.uncond_emb, True)
-                    else:
-                        c = torch.cat(cc, dim=0)
-                    # SparseCtrl keyframe need to encode control image with VAE
-                    if control_model_type == ControlModelType.SparseCtrl and \
-                        model_net.control_model.use_simplified_condition_embedding: # noqa
-                        c = UnetHook.call_vae_using_process(p, c)
-                    # handle key frame control for different control methods
-                    if cn_ad_keyframe_idx is not None or control_model_type in [ControlModelType.SparseCtrl]:
-                        if control_model_type == ControlModelType.SparseCtrl:
-                            # sparsectrl has its own embed generator
-                            from scripts.controlnet_sparsectrl import SparseCtrl
-                            if cn_ad_keyframe_idx is None:
-                                cn_ad_keyframe_idx = [0]
-                                logger.info(f"SparseCtrl: control images will be applied to frames: {cn_ad_keyframe_idx}")
-                            else:
-                                logger.info(f"SparseCtrl: control images will be applied to frames: {cn_ad_keyframe_idx}")
-                                for frame_idx, frame_path in zip(unit.batch_keyframe_idx, unit.batch_image_files):
-                                    logger.info(f"\t{frame_idx}: {frame_path}")
-                            c = SparseCtrl.create_cond_mask(cn_ad_keyframe_idx, c, p.batch_size).cpu()
-                        elif unit.is_ipadapter:
-                            # ip-adapter should do prompt travel
-                            logger.info("IP-Adapter: control prompts will be traveled in the following way:")
-                            for frame_idx, frame_path in zip(unit.batch_keyframe_idx, unit.batch_image_files):
-                                logger.info(f"\t{frame_idx}: {frame_path}")
-                            from scripts.animatediff_utils import get_animatediff_arg
-                            ip_adapter_emb = c
-                            c = c.cond_emb
-                            c_full = torch.zeros((p.batch_size, *c.shape[1:]), dtype=c.dtype, device=c.device)
-                            for i, idx in enumerate(cn_ad_keyframe_idx[:-1]):
-                                c_full[idx:cn_ad_keyframe_idx[i + 1]] = c[i]
-                            c_full[cn_ad_keyframe_idx[-1]:] = c[-1]
-                            ad_params = get_animatediff_arg(p)
-                            prompt_scheduler = deepcopy(ad_params.prompt_scheduler)
-                            prompt_scheduler.prompt_map = {i: "" for i in cn_ad_keyframe_idx}
-                            prompt_closed_loop = (ad_params.video_length > ad_params.batch_size) and (ad_params.closed_loop in ['R+P', 'A'])
-                            c_full = prompt_scheduler.multi_cond(c_full, prompt_closed_loop)
-                            if shared.opts.batch_cond_uncond:
-                                c_full = torch.cat([c_full, c_full], dim=0)
-                            c = ImageEmbed(c_full, ip_adapter_emb.uncond_emb, True)
-                        else:
-                            # normal CN should insert empty frames
-                            logger.info(f"ControlNet: control images will be applied to frames: {cn_ad_keyframe_idx} where")
-                            for frame_idx, frame_path in zip(unit.batch_keyframe_idx, unit.batch_image_files):
-                                logger.info(f"\t{frame_idx}: {frame_path}")
-                            c_full = torch.zeros((p.batch_size, *c.shape[1:]), dtype=c.dtype, device=c.device)
-                            c_full[cn_ad_keyframe_idx] = c
-                            c = c_full
-                    # handle batch condition and unconditional
-                    if shared.opts.batch_cond_uncond and not unit.accepts_multiple_inputs:
-                        c = torch.cat([c, c], dim=0)
-                    return c
-
-                control = ad_process_control(controls)
-                hr_control = ad_process_control(hr_controls) if hr_controls[0] is not None else None
-                if control_model_type == ControlModelType.SparseCtrl:
-                    control_model_type = ControlModelType.ControlNet
             else:
                 control = controls
                 hr_control = hr_controls
@@ -1192,8 +938,7 @@ class Script(scripts.Script, metaclass=(
 
             if 'inpaint_only' in unit.module:
                 final_inpaint_feed = hr_control if hr_control is not None else control
-                final_inpaint_feed = final_inpaint_feed.detach().cpu().numpy()
-                final_inpaint_feed = np.ascontiguousarray(final_inpaint_feed).copy()
+                final_inpaint_feed = final_inpaint_feed.detach().cpu().numpy().copy()
                 final_inpaint_mask = final_inpaint_feed[:, 3, :, :].astype(np.float32)
                 final_inpaint_raw = final_inpaint_feed[:, :3].astype(np.float32)
                 sigma = shared.opts.data.get("control_net_inpaint_blur_sigma", 7)
@@ -1204,8 +949,8 @@ class Script(scripts.Script, metaclass=(
                     final_inpaint_mask_post_cv.append(m)
                 final_inpaint_mask = np.concatenate(final_inpaint_mask_post_cv, axis=0)
                 _, _, Hmask, Wmask = final_inpaint_mask.shape
-                final_inpaint_raw = torch.from_numpy(np.ascontiguousarray(final_inpaint_raw).copy())
-                final_inpaint_mask = torch.from_numpy(np.ascontiguousarray(final_inpaint_mask).copy())
+                final_inpaint_raw = torch.from_numpy(final_inpaint_raw.copy())
+                final_inpaint_mask = torch.from_numpy(final_inpaint_mask.copy())
 
                 def inpaint_only_post_processing(x, i):
                     if i >= final_inpaint_raw.shape[0]:
@@ -1224,8 +969,7 @@ class Script(scripts.Script, metaclass=(
 
             if 'recolor' in unit.module:
                 final_feed = hr_control if hr_control is not None else control
-                final_feed = final_feed.detach().cpu().numpy()
-                final_feed = np.ascontiguousarray(final_feed).copy()
+                final_feed = final_feed.detach().cpu().numpy().copy()
                 final_feed = final_feed[:, 0, :, :].astype(np.float32)
                 final_feed = (final_feed * 255).clip(0, 255).astype(np.uint8)
                 _, Hfeed, Wfeed = final_feed.shape
@@ -1233,40 +977,14 @@ class Script(scripts.Script, metaclass=(
                 if 'luminance' in unit.module:
 
                     def recolor_luminance_post_processing(x, i):
-                        if i >= final_feed.shape[0]:
-                            i = 0
-                        C, H, W = x.shape
-                        if Hfeed != H or Wfeed != W or C != 3:
-                            logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
-                            return x
-                        h = x.detach().cpu().numpy().transpose((1, 2, 0))
-                        h = (h * 255).clip(0, 255).astype(np.uint8)
-                        h = cv2.cvtColor(h, cv2.COLOR_RGB2LAB)
-                        h[:, :, 0] = final_feed[i]
-                        h = cv2.cvtColor(h, cv2.COLOR_LAB2RGB)
-                        h = (h.astype(np.float32) / 255.0).transpose((2, 0, 1))
-                        y = torch.from_numpy(h).clip(0, 1).to(x)
-                        return y
+                        return recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, cv2.COLOR_RGB2LAB, cv2.COLOR_LAB2RGB, 0)
 
                     post_processors.append(recolor_luminance_post_processing)
 
                 if 'intensity' in unit.module:
 
                     def recolor_intensity_post_processing(x, i):
-                        if i >= final_feed.shape[0]:
-                            i = 0
-                        C, H, W = x.shape
-                        if Hfeed != H or Wfeed != W or C != 3:
-                            logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
-                            return x
-                        h = x.detach().cpu().numpy().transpose((1, 2, 0))
-                        h = (h * 255).clip(0, 255).astype(np.uint8)
-                        h = cv2.cvtColor(h, cv2.COLOR_RGB2HSV)
-                        h[:, :, 2] = final_feed[i]
-                        h = cv2.cvtColor(h, cv2.COLOR_HSV2RGB)
-                        h = (h.astype(np.float32) / 255.0).transpose((2, 0, 1))
-                        y = torch.from_numpy(h).clip(0, 1).to(x)
-                        return y
+                        return recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, cv2.COLOR_RGB2HSV, cv2.COLOR_HSV2RGB, 2)
 
                     post_processors.append(recolor_intensity_post_processing)
 
@@ -1293,12 +1011,6 @@ class Script(scripts.Script, metaclass=(
                     weight = param.weight
 
                 h, w, hr_y, hr_x = Script.get_target_dimensions(p)
-                if unit.pulid_mode == PuLIDMode.STYLE:
-                    pulid_attn_setting = PULID_SETTING_STYLE
-                else:
-                    assert unit.pulid_mode == PuLIDMode.FIDELITY
-                    pulid_attn_setting = PULID_SETTING_FIDELITY
-
                 param.control_model.hook(
                     model=unet,
                     preprocessor_outputs=param.hint_cond,
@@ -1309,7 +1021,6 @@ class Script(scripts.Script, metaclass=(
                     latent_width=w // 8,
                     latent_height=h // 8,
                     effective_region_mask=param.effective_region_mask,
-                    pulid_attn_setting=pulid_attn_setting,
                 )
             if param.control_model_type == ControlModelType.Controlllite:
                 param.control_model.hook(
@@ -1331,9 +1042,7 @@ class Script(scripts.Script, metaclass=(
                 param.control_context_override = control_model.image_emb
 
         self.latest_network = UnetHook(lowvram=is_low_vram)
-        self.latest_network.hook(model=unet, sd_ldm=sd_ldm, control_params=forward_params, process=p,
-                                 batch_option_uint_separate=batch_option_uint_separate,
-                                 batch_option_style_align=batch_option_style_align)
+        self.latest_network.hook(model=unet, sd_ldm=sd_ldm, control_params=forward_params, process=p)
 
         self.detected_map = detected_maps
         self.post_processors = post_processors
@@ -1404,10 +1113,8 @@ class Script(scripts.Script, metaclass=(
         setattr(p, 'controlnet_vae_cache', None)
 
         processor_params_flag = (', '.join(getattr(processed, 'extra_generation_params', []))).lower()
-        self.post_processors = []
 
-        if not batch_hijack.instance.is_batch:
-            self.enabled_units.clear()
+        self.enabled_units.clear()
 
         if shared.opts.data.get("control_net_detectmap_autosaving", False) and self.latest_network is not None:
             for detect_map, module in self.detected_map:
@@ -1416,28 +1123,26 @@ class Script(scripts.Script, metaclass=(
                     detectmap_dir = os.path.join(p.outpath_samples, detectmap_dir)
                 if module != "none":
                     os.makedirs(detectmap_dir, exist_ok=True)
-                    img = Image.fromarray(np.ascontiguousarray(detect_map.clip(0, 255).astype(np.uint8)).copy())
+                    img = Image.fromarray(detect_map.clip(0, 255).astype(np.uint8))
                     save_image(img, detectmap_dir, module)
 
         if self.latest_network is None:
             return
 
-        if not batch_hijack.instance.is_batch:
-            if not shared.opts.data.get("control_net_no_detectmap", False):
-                if 'sd upscale' not in processor_params_flag:
-                    if self.detected_map is not None:
-                        for detect_map, module in self.detected_map:
-                            if detect_map is None:
-                                continue
-                            detect_map = np.ascontiguousarray(detect_map.copy()).copy()
-                            detect_map = external_code.visualize_inpaint_mask(detect_map)
-                            processed.images.extend([
-                                Image.fromarray(
-                                    detect_map.clip(0, 255).astype(np.uint8)
-                                )
-                            ])
+        if not shared.opts.data.get("control_net_no_detectmap", False):
+            if 'sd upscale' not in processor_params_flag:
+                if self.detected_map is not None:
+                    for detect_map, module in self.detected_map:
+                        if detect_map is None:
+                            continue
+                        detect_map = detect_map.copy()
+                        detect_map = external_code.visualize_inpaint_mask(detect_map)
+                        processed.images.extend([
+                            Image.fromarray(
+                                detect_map.clip(0, 255).astype(np.uint8)
+                            )
+                        ])
 
-        self.input_image = None
         self.latest_network.restore()
         self.latest_network = None
         self.detected_map.clear()
@@ -1450,52 +1155,24 @@ class Script(scripts.Script, metaclass=(
                 logger.info(stat)
             tracemalloc.stop()
 
-    def batch_tab_process(self, p, batches, *args, **kwargs):
-        is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
-        if is_img2img != self.is_img2img:
-            return
 
-        self.enabled_units = Script.get_enabled_units(p)
-        for unit_i, unit in enumerate(self.enabled_units):
-            unit.batch_images = iter([batch[unit_i] for batch in batches])
-
-    def batch_tab_process_each(self, p, *args, **kwargs):
-        is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
-        if is_img2img != self.is_img2img:
-            return
-
-        for unit in self.enabled_units:
-            if getattr(unit, 'loopback', False) and batch_hijack.instance.batch_index > 0:
-                continue
-
-            unit.image = next(unit.batch_images)
-
-    def batch_tab_postprocess_each(self, p, processed, *args, **kwargs):
-        is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
-        if is_img2img != self.is_img2img:
-            return
-
-        for unit_i, unit in enumerate(self.enabled_units):
-            if getattr(unit, 'loopback', False):
-                output_images = getattr(processed, 'images', [])[processed.index_of_first_image:]
-                if output_images:
-                    unit.image = np.array(output_images[0])
-                else:
-                    logger.warning(f'Warning: No loopback image found for controlnet unit {unit_i}. Using control map from last batch iteration instead')
-
-    def batch_tab_postprocess(self, p, *args, **kwargs):
-        is_img2img = isinstance(p, StableDiffusionProcessingImg2Img)
-        if is_img2img != self.is_img2img:
-            return
-
-        self.enabled_units.clear()
-        self.input_image = None
-        if self.latest_network is None:
-            return
-
-        self.latest_network.restore()
-        self.latest_network = None
-        self.detected_map.clear()
+def recolor_post_processing(x, i, final_feed, Hfeed, Wfeed, to_code, from_code, channel):
+    """Replace `channel` of output image `x` (CHW, [0, 1]) in the `to_code` colour space with the recolor
+    preprocessor's map `final_feed[i]` (uint8, NHW), then convert back with `from_code`."""
+    if i >= final_feed.shape[0]:
+        i = 0
+    C, H, W = x.shape
+    if Hfeed != H or Wfeed != W or C != 3:
+        logger.error('Error: ControlNet find post-processing resolution mismatch. This could be related to other extensions hacked processing.')
+        return x
+    h = x.detach().cpu().numpy().transpose((1, 2, 0))
+    h = (h * 255).clip(0, 255).astype(np.uint8)
+    h = cv2.cvtColor(h, to_code)
+    h[:, :, channel] = final_feed[i]
+    h = cv2.cvtColor(h, from_code)
+    h = (h.astype(np.float32) / 255.0).transpose((2, 0, 1))
+    y = torch.from_numpy(h).clip(0, 1).to(x)
+    return y
 
 
 def on_ui_settings():
@@ -1543,13 +1220,5 @@ def on_ui_settings():
         gr.Checkbox, {"interactive": True}, section=section).needs_reload_ui())
 
 
-def clear_controlnet_caches_for_reload():
-    Script.clear_control_model_cache("extension-reload")
-    Preprocessor.clear_all_caches("extension-reload")
-
-
-batch_hijack.instance.do_hijack()
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_infotext_pasted(Infotext.on_infotext_pasted)
-script_callbacks.on_after_component(ControlNetUiGroup.on_after_component)
-script_callbacks.on_before_reload(ControlNetUiGroup.reset)

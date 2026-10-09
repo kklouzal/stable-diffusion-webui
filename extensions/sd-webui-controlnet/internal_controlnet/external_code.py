@@ -1,21 +1,20 @@
-from copy import copy
-from typing import List, Any, Optional, Union, Tuple, Dict
+from typing import List, Any, Optional, Union, Dict
 import numpy as np
 
 from modules import scripts, processing, shared
 from modules.api import api
-from .args import ControlNetUnit
+from .args import ControlNetUnit, RESIZE_MODE_ALIASES
 from scripts import global_state
 from scripts.logging import logger
 from scripts.enums import (
     ResizeMode,
-    BatchOption,  # noqa: F401
     ControlMode,  # noqa: F401
 )
 from scripts.supported_preprocessor import (
     Preprocessor,
     PreprocessorParameter,  # noqa: F401
 )
+from scripts.utils import visualize_inpaint_mask  # noqa: F401 (public re-export)
 
 import torch
 import base64
@@ -27,17 +26,9 @@ def get_api_version() -> int:
     return 3
 
 
-resize_mode_aliases = {
-    "Inner Fit (Scale to Fit)": "Crop and Resize",
-    "Outer Fit (Shrink to Fit)": "Resize and Fill",
-    "Scale to Fit (Inner Fit)": "Crop and Resize",
-    "Envelope (Outer Fit)": "Resize and Fill",
-}
-
-
 def resize_mode_from_value(value: Union[str, int, ResizeMode]) -> ResizeMode:
     if isinstance(value, str):
-        return ResizeMode(resize_mode_aliases.get(value, value))
+        return ResizeMode(RESIZE_MODE_ALIASES.get(value, value))
     elif isinstance(value, int):
         assert value >= 0
         if value == 3:  # 'Just Resize (Latent upscale)'
@@ -52,16 +43,6 @@ def resize_mode_from_value(value: Union[str, int, ResizeMode]) -> ResizeMode:
         return [e for e in ResizeMode][value]
     else:
         return value
-
-
-def visualize_inpaint_mask(img):
-    if img.ndim == 3 and img.shape[2] == 4:
-        result = img.copy()
-        mask = result[:, :, 3]
-        mask = 255 - mask // 2
-        result[:, :, 3] = mask
-        return np.ascontiguousarray(result.copy())
-    return img
 
 
 def pixel_perfect_resolution(
@@ -128,87 +109,41 @@ def get_all_units_in_processing(
 ) -> List[ControlNetUnit]:
     """
     Fetch ControlNet processing units from a StableDiffusionProcessing.
+
+    The units come from ControlNet's slice of `p.script_args`: the range the API recorded in
+    `p.openclaw_script_arg_ranges` when a request passed more units than ControlNet has slots
+    (modules/api/api.py _assign_script_args), else the script's fixed `args_from:args_to` slots.
+    ControlNetUnit args are returned as the script-arg objects themselves (callers that mutate
+    them must copy); dict args are parsed into new units.
     """
 
-    return get_all_units(p.scripts, p.script_args)
-
-
-def get_all_units(
-    script_runner: scripts.ScriptRunner, script_args: List[Any]
-) -> List[ControlNetUnit]:
-    """
-    Fetch ControlNet processing units from an existing script runner.
-    Use this function to fetch units from the list of all scripts arguments.
-    """
-
-    cn_script = find_cn_script(script_runner)
-    if cn_script:
-        return get_all_units_from(script_args[cn_script.args_from : cn_script.args_to])
-
-    return []
+    cn_script = find_cn_script(p.scripts)
+    if cn_script is None:
+        return []
+    start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(
+        id(cn_script), (cn_script.args_from, cn_script.args_to)
+    )
+    return get_all_units_from(p.script_args[start:end])
 
 
 def get_all_units_from(script_args: List[Any]) -> List[ControlNetUnit]:
     """
     Fetch ControlNet processing units from ControlNet script arguments.
-    Use `external_code.get_all_units` to fetch units from the list of all scripts arguments.
+    Use `get_all_units_in_processing` to fetch the units of a processing object.
     """
-
-    def is_stale_unit(script_arg: Any) -> bool:
-        """Returns whether the script_arg is potentially an stale version of
-        ControlNetUnit created before module reload."""
-        return "ControlNetUnit" in type(script_arg).__name__ and not isinstance(
-            script_arg, ControlNetUnit
-        )
-
-    def is_controlnet_unit(script_arg: Any) -> bool:
-        """Returns whether the script_arg is ControlNetUnit or anything that
-        can be treated like ControlNetUnit."""
-        return isinstance(script_arg, (ControlNetUnit, dict)) or (
-            hasattr(script_arg, "__dict__")
-            and set(vars(ControlNetUnit()).keys()).issubset(
-                set(vars(script_arg).keys())
-            )
-        )
 
     all_units = [
         to_processing_unit(script_arg)
         for script_arg in script_args
-        if is_controlnet_unit(script_arg)
+        if isinstance(script_arg, (ControlNetUnit, dict))
     ]
     if not all_units:
         logger.warning(
             "No ControlNetUnit detected in args. It is very likely that you are having an extension conflict."
             f"Here are args received by ControlNet: {script_args}."
         )
-    if any(is_stale_unit(script_arg) for script_arg in script_args):
-        logger.debug(
-            "Stale version of ControlNetUnit detected. The ControlNetUnit received"
-            "by ControlNet is created before the newest load of ControlNet extension."
-            "They will still be used by ControlNet as long as they provide same fields"
-            "defined in the newest version of ControlNetUnit."
-        )
 
     return all_units
-
-
-def get_single_unit_from(
-    script_args: List[Any], index: int = 0
-) -> Optional[ControlNetUnit]:
-    """
-    Fetch a single ControlNet processing unit from ControlNet script arguments.
-    The list must not contain script positional arguments. It must only contain processing units.
-    """
-
-    i = 0
-    while i < len(script_args) and index >= 0:
-        if index == 0 and script_args[i] is not None:
-            return to_processing_unit(script_args[i])
-        i += 1
-
-        index -= 1
-
-    return None
 
 
 def get_max_models_num():
@@ -229,107 +164,6 @@ def to_processing_unit(unit: Union[Dict, ControlNetUnit]) -> ControlNetUnit:
 
     assert isinstance(unit, ControlNetUnit)
     return unit
-
-
-def update_cn_script_in_processing(
-    p: processing.StableDiffusionProcessing,
-    cn_units: List[ControlNetUnit],
-    **_kwargs,  # for backwards compatibility
-):
-    """
-    Update the arguments of the ControlNet script in `p.script_args` in place, reading from `cn_units`.
-    `cn_units` and its elements are not modified. You can call this function repeatedly, as many times as you want.
-
-    Does not update `p.script_args` if any of the folling is true:
-    - ControlNet is not present in `p.scripts`
-    - `p.script_args` is not filled with script arguments for scripts that are processed before ControlNet
-    """
-    p.script_args = update_cn_script(p.scripts, p.script_args_value, cn_units)
-
-
-def update_cn_script(
-    script_runner: scripts.ScriptRunner,
-    script_args: Union[Tuple[Any], List[Any]],
-    cn_units: List[ControlNetUnit],
-) -> Union[Tuple[Any], List[Any]]:
-    """
-    Returns: The updated `script_args` with given `cn_units` used as ControlNet
-    script args.
-
-    Does not update `script_args` if any of the folling is true:
-    - ControlNet is not present in `script_runner`
-    - `script_args` is not filled with script arguments for scripts that are
-    processed before ControlNet
-    """
-    script_args_type = type(script_args)
-    assert script_args_type in (tuple, list), script_args_type
-    updated_script_args = list(copy(script_args))
-
-    cn_script = find_cn_script(script_runner)
-
-    if cn_script is None or len(script_args) < cn_script.args_from:
-        return script_args
-
-    # fill in remaining parameters to satisfy max models, just in case script needs it.
-    max_models = shared.opts.data.get("control_net_unit_count", 3)
-    cn_units = cn_units + [ControlNetUnit(enabled=False)] * max(
-        max_models - len(cn_units), 0
-    )
-
-    cn_script_args_diff = 0
-    for script in script_runner.alwayson_scripts:
-        if script is cn_script:
-            cn_script_args_diff = len(cn_units) - (
-                cn_script.args_to - cn_script.args_from
-            )
-            updated_script_args[script.args_from : script.args_to] = cn_units
-            script.args_to = script.args_from + len(cn_units)
-        else:
-            script.args_from += cn_script_args_diff
-            script.args_to += cn_script_args_diff
-
-    return script_args_type(updated_script_args)
-
-
-def update_cn_script_in_place(
-    script_runner: scripts.ScriptRunner,
-    script_args: List[Any],
-    cn_units: List[ControlNetUnit],
-    **_kwargs,  # for backwards compatibility
-):
-    """
-    @Deprecated(Raises assertion error if script_args passed in is Tuple)
-
-    Update the arguments of the ControlNet script in `script_args` in place, reading from `cn_units`.
-    `cn_units` and its elements are not modified. You can call this function repeatedly, as many times as you want.
-
-    Does not update `script_args` if any of the folling is true:
-    - ControlNet is not present in `script_runner`
-    - `script_args` is not filled with script arguments for scripts that are processed before ControlNet
-    """
-    assert isinstance(script_args, list), type(script_args)
-
-    cn_script = find_cn_script(script_runner)
-    if cn_script is None or len(script_args) < cn_script.args_from:
-        return
-
-    # fill in remaining parameters to satisfy max models, just in case script needs it.
-    max_models = shared.opts.data.get("control_net_unit_count", 3)
-    cn_units = cn_units + [ControlNetUnit(enabled=False)] * max(
-        max_models - len(cn_units), 0
-    )
-
-    cn_script_args_diff = 0
-    for script in script_runner.alwayson_scripts:
-        if script is cn_script:
-            cn_script_args_diff = len(cn_units) - (
-                cn_script.args_to - cn_script.args_from
-            )
-            script_args[script.args_from : script.args_to] = cn_units
-            script.args_to = script.args_from + len(cn_units)
-        else:
-            script.args_from += cn_script_args_diff
-            script.args_to += cn_script_args_diff
 
 
 def get_models(update: bool = False) -> List[str]:

@@ -9,7 +9,6 @@ class PreprocessorIPAdapterAuto(Preprocessor):
         self.tags = ["IP-Adapter"]
         self.sorting_priority = 1000
         self.returns_image = False
-        self.show_control_mode = False
 
     @staticmethod
     def get_preprocessor_by_model(model):
@@ -20,8 +19,8 @@ class PreprocessorIPAdapterAuto(Preprocessor):
         assert "model" in kwargs
         model: str = kwargs["model"]
         p = PreprocessorIPAdapterAuto.get_preprocessor_by_model(model)
+        assert p is not None, f"ip-adapter-auto: no registered preprocessor for model {model}"
         logger.info(f"ip-adapter-auto => {p.label}")
-        assert p is not None
         return p(*args, **kwargs)
 
 

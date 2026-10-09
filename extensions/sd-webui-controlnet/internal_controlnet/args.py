@@ -1,11 +1,9 @@
 from __future__ import annotations
-import os
 import cv2
 import torch
 import numpy as np
 from typing import Optional, List, Annotated, ClassVar, Callable, Any, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from PIL import Image
 from logging import Logger
 from copy import copy
 from enum import Enum
@@ -39,6 +37,15 @@ def serialize_value(value) -> str:
     return str(value)
 
 
+# Legacy resize-mode names accepted wherever a ResizeMode is parsed from a string.
+RESIZE_MODE_ALIASES = {
+    "Inner Fit (Scale to Fit)": "Crop and Resize",
+    "Outer Fit (Shrink to Fit)": "Resize and Fill",
+    "Scale to Fit (Inner Fit)": "Crop and Resize",
+    "Envelope (Outer Fit)": "Resize and Fill",
+}
+
+
 def parse_value(value: str) -> Union[str, float, int, bool]:
     if value in ("True", "False"):
         return value == "True"
@@ -67,6 +74,8 @@ class ControlNetUnit(BaseModel):
 
     # UI only fields.
     is_ui: bool = False
+    # SIMPLE or MERGE. BATCH (server-directory batch input) was removed and fails validation
+    # (reject_removed_modes); batch_images/output_dir/loopback are inert and kept for the API schema.
     input_mode: InputMode = InputMode.SIMPLE
     batch_images: Optional[Any] = None
     output_dir: str = ""
@@ -102,14 +111,8 @@ class ControlNetUnit(BaseModel):
     @field_validator("resize_mode", mode="before")
     @classmethod
     def check_resize_mode(cls, value) -> ResizeMode:
-        resize_mode_aliases = {
-            "Inner Fit (Scale to Fit)": "Crop and Resize",
-            "Outer Fit (Shrink to Fit)": "Resize and Fill",
-            "Scale to Fit (Inner Fit)": "Crop and Resize",
-            "Envelope (Outer Fit)": "Resize and Fill",
-        }
         if isinstance(value, str):
-            return ResizeMode(resize_mode_aliases.get(value, value))
+            return ResizeMode(RESIZE_MODE_ALIASES.get(value, value))
         assert isinstance(value, ResizeMode)
         return value
 
@@ -201,8 +204,8 @@ class ControlNetUnit(BaseModel):
         assert isinstance(value, np.ndarray) or value is None
         return value
 
-    # The weight mode for PuLID.
-    # https://github.com/ToTheBeginning/PuLID
+    # The weight mode for PuLID (https://github.com/ToTheBeginning/PuLID). Inert: PuLID models and the
+    # ip-adapter_pulid preprocessor were removed; the field stays for the API schema.
     pulid_mode: PuLIDMode = PuLIDMode.FIDELITY
 
     # ControlNet control type for ControlNet union model.
@@ -231,13 +234,22 @@ class ControlNetUnit(BaseModel):
     # The mask to be used on top of the image.
     mask: Optional[Any] = None
 
-    # AnimateDiff compatibility fields.
-    # TODO: Find a better way in AnimateDiff to deal with these extra fields.
+    # AnimateDiff compatibility fields. AnimateDiff is not part of this build: animatediff_batch=True fails
+    # validation (reject_removed_modes); the other fields are inert and kept for the API schema.
     batch_mask_dir: Optional[str] = None
     animatediff_batch: bool = False
     batch_modifiers: list = Field(default_factory=list)
     batch_image_files: list = Field(default_factory=list)
     batch_keyframe_idx: Optional[str | list] = None
+
+    @model_validator(mode="after")
+    def reject_removed_modes(self) -> "ControlNetUnit":
+        """Fail closed on input modes whose machinery was removed (both read or wrote server directories)."""
+        if self.input_mode == InputMode.BATCH:
+            raise ValueError("input_mode 'batch' (server-directory batch input) is not supported.")
+        if self.animatediff_batch:
+            raise ValueError("animatediff_batch is not supported: AnimateDiff is not part of this build.")
+        return self
 
     @property
     def accepts_multiple_inputs(self) -> bool:
@@ -245,18 +257,10 @@ class ControlNetUnit(BaseModel):
         return self.is_ipadapter
 
     @property
-    def is_animate_diff_batch(self) -> bool:
-        return getattr(self, "animatediff_batch", False)
-
-    @property
     def uses_clip(self) -> bool:
         """Whether this unit uses clip preprocessor."""
-        return any(
-            (
-                ("ip-adapter" in self.module and "face_id" not in self.module),
-                self.module
-                in ("clip_vision", "revision_clipvision", "revision_ignore_prompt"),
-            )
+        return "ip-adapter" in self.module or self.module in (
+            "clip_vision", "revision_clipvision", "revision_ignore_prompt",
         )
 
     @property
@@ -283,14 +287,11 @@ class ControlNetUnit(BaseModel):
 
     @classmethod
     def parse_image(cls, image) -> np.ndarray:
+        """An ndarray, or a base64 string (decoded by cls_decode_base64; never read as a server file path)."""
         if isinstance(image, np.ndarray):
             np_image = image
         elif isinstance(image, str):
-            # Necessary for batch.
-            if os.path.exists(image):
-                np_image = np.array(Image.open(image)).astype("uint8")
-            else:
-                np_image = cls.cls_decode_base64(image)
+            np_image = cls.cls_decode_base64(image)
         else:
             raise ValueError(f"Unrecognized image format {image}.")
 
@@ -433,13 +434,6 @@ class ControlNetUnit(BaseModel):
         values = cls.legacy_field_alias(values)
         values = cls.mask_alias(values)
         return ControlNetUnit(**values)
-
-    @classmethod
-    def from_infotext_args(cls, *args) -> ControlNetUnit:
-        assert len(args) == len(ControlNetUnit.infotext_fields())
-        return cls.from_dict(
-            {k: v for k, v in zip(ControlNetUnit.infotext_fields(), args)}
-        )
 
     @staticmethod
     def infotext_fields() -> Tuple[str]:

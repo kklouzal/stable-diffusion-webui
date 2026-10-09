@@ -1,15 +1,12 @@
-from einops import rearrange
 import torch
 import os
 import functools
 import time
-import base64
 import numpy as np
 import safetensors.torch
 import cv2
 import logging
 
-from typing import Callable, Dict, List
 from modules.safe import unsafe_torch_load
 from modules.modelloader import load_file_from_url  # noqa: F401
 from scripts.logging import logger
@@ -62,35 +59,6 @@ class TimeMeta(type):
         return super().__new__(cls, name, bases, attrs)
 
 
-# svgsupports
-svgsupport = False
-try:
-    import io
-    from svglib.svglib import svg2rlg
-    from reportlab.graphics import renderPM
-
-    svgsupport = True
-except ImportError:
-    pass
-
-
-def svg_preprocess(inputs: Dict, preprocess: Callable):
-    if not inputs:
-        return None
-
-    if inputs["image"].startswith("data:image/svg+xml;base64,") and svgsupport:
-        svg_data = base64.b64decode(
-            inputs["image"].replace("data:image/svg+xml;base64,", "")
-        )
-        drawing = svg2rlg(io.BytesIO(svg_data))
-        png_data = renderPM.drawToString(drawing, fmt="PNG")
-        encoded_string = base64.b64encode(png_data)
-        base64_str = str(encoded_string, "utf-8")
-        base64_str = "data:image/png;base64," + base64_str
-        inputs["image"] = base64_str
-    return preprocess(inputs)
-
-
 def get_unique_axis0(data):
     arr = np.asanyarray(data)
     idxs = np.lexsort(arr.T)
@@ -99,29 +67,6 @@ def get_unique_axis0(data):
     unique_idxs[:1] = True
     unique_idxs[1:] = np.any(arr[:-1, :] != arr[1:, :], axis=-1)
     return arr[unique_idxs]
-
-
-def read_image(img_path: str) -> str:
-    """Read image from specified path and return a base64 string."""
-    img = cv2.imread(img_path)
-    _, bytes = cv2.imencode(".png", img)
-    encoded_image = base64.b64encode(bytes).decode("utf-8")
-    return encoded_image
-
-
-def read_image_dir(
-    img_dir: str, suffixes=(".png", ".jpg", ".jpeg", ".webp")
-) -> List[str]:
-    """Try read all images in given img_dir."""
-    images = []
-    for filename in os.listdir(img_dir):
-        if filename.endswith(suffixes):
-            img_path = os.path.join(img_dir, filename)
-            try:
-                images.append(read_image(img_path))
-            except IOError:
-                logger.error(f"Error opening {img_path}")
-    return images
 
 
 def align_dim_latent(x: int) -> int:
@@ -159,21 +104,6 @@ def resize_image_with_pad(img: np.ndarray, resolution: int):
         return safer_memory(x[:H_target, :W_target])
 
     return safer_memory(img_padded), remove_pad
-
-
-def npimg2tensor(img: np.ndarray) -> torch.Tensor:
-    """Convert numpy img ([H, W, C]) to tensor ([1, C, H, W])"""
-    return rearrange(torch.from_numpy(img).float() / 255.0, "h w c -> 1 c h w")
-
-
-def tensor2npimg(t: torch.Tensor) -> np.ndarray:
-    """Convert tensor ([1, C, H, W]) to numpy RGB img ([H, W, C])"""
-    return (
-        (rearrange(t, "1 c h w -> h w c") * 255.0)
-        .to(dtype=torch.uint8)
-        .cpu()
-        .numpy()
-    )
 
 
 def visualize_inpaint_mask(img):

@@ -203,3 +203,16 @@ def test_deploy_time_cache_patch_is_retired_and_settings_survive():
     controlnet = (CONTROLNET / "scripts/controlnet.py").read_text(encoding="utf-8")
     assert controlnet.count('add_option("control_net_modules_path"') == 1
     assert controlnet.count('add_option("control_net_preprocessor_models_path"') == 1
+
+
+def test_option_snapshot_covers_exactly_the_controlnet_options():
+    # One snapshot for both cache keys (Script._model_cache_key, Preprocessor result keys): every
+    # "control_net*"/"controlnet*" option and nothing else, independent of insertion order.
+    data = {"control_net_unit_count": 3, "sd_model_checkpoint": "x", "controlnet_clip_detector_on_cpu": False,
+            "CN_other": 1}
+    snapshot = cache_contract.controlnet_option_snapshot(data)
+    assert snapshot == freeze({"control_net_unit_count": 3, "controlnet_clip_detector_on_cpu": False})
+    assert snapshot == cache_contract.controlnet_option_snapshot(dict(reversed(list(data.items()))))
+    assert snapshot != cache_contract.controlnet_option_snapshot({**data, "control_net_unit_count": 4})
+    for rel in ("scripts/controlnet.py", "scripts/supported_preprocessor.py"):
+        assert "controlnet_option_snapshot(shared.opts.data)" in (CONTROLNET / rel).read_text(encoding="utf-8")

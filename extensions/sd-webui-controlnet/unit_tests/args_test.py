@@ -258,3 +258,32 @@ def test_copy():
     unit2.enabled = False
     assert unit1.enabled
     assert not unit2.enabled
+
+
+def test_removed_batch_input_mode_is_rejected(set_cls_funcs):
+    # Server-directory batch input (input_mode "batch") was removed; the field stays in the schema.
+    with pytest.raises(ValueError, match="input_mode 'batch'"):
+        ControlNetUnit(input_mode="batch")
+    ControlNetUnit(input_mode="simple")
+    ControlNetUnit(input_mode="merge")
+
+
+def test_animatediff_batch_is_rejected(set_cls_funcs):
+    with pytest.raises(ValueError, match="animatediff_batch"):
+        ControlNetUnit(animatediff_batch=True)
+    ControlNetUnit(animatediff_batch=False)
+
+
+def test_image_string_is_decoded_never_opened_as_a_path(set_cls_funcs, tmp_path, monkeypatch):
+    path = tmp_path / "server-file.png"
+    path.write_bytes(b"not read")
+    decoded = []
+
+    def decode(s):
+        decoded.append(s)
+        return img1
+
+    monkeypatch.setattr(ControlNetUnit, "cls_decode_base64", decode)
+    unit = ControlNetUnit(image=str(path))
+    unit.get_input_images_rgba()
+    assert decoded == [str(path)]

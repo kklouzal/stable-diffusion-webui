@@ -9,7 +9,6 @@ utils = importlib.import_module("extensions.sd-webui-controlnet.tests.utils", "u
 
 from scripts.ipadapter import plugable_ipadapter  # noqa: E402
 from scripts.ipadapter.ipadapter_model import ImageEmbed, IPAdapterModel, To_KV  # noqa: E402
-from scripts.ipadapter.pulid_attn import PULID_SETTING_FIDELITY, PULID_SETTING_STYLE  # noqa: E402
 
 HEADS, HEAD_DIM, CONTEXT_DIM, TOKENS = 2, 8, 12, 4
 INNER = HEADS * HEAD_DIM
@@ -37,24 +36,15 @@ def merge_heads(t):
     return t.transpose(1, 2).reshape(t.shape[0], -1, INNER)
 
 
-def oracle(attn, x, context, w_k, w_v, row_embeds, weight, pulid=None, region=None):
-    """One row at a time: IPAttnProcessor2_0 of tencent-ailab/IP-Adapter, or IDAttnProcessor2_0 of
-    ToTheBeginning/PuLID (whose orthogonal modes project against the main attention output)."""
+def oracle(attn, x, context, w_k, w_v, row_embeds, weight, region=None):
+    """One row at a time: IPAttnProcessor2_0 of tencent-ailab/IP-Adapter."""
     rows = []
     for i, emb in enumerate(row_embeds):
         q = split_heads(attn.to_q(x[i:i + 1]))
         hidden = merge_heads(F.scaled_dot_product_attention(
             q, split_heads(attn.to_k(context[i:i + 1])), split_heads(attn.to_v(context[i:i + 1]))))
-        if pulid is not None and pulid.num_zero:
-            emb = torch.cat([emb, torch.zeros(1, pulid.num_zero, emb.shape[-1])], dim=1)
         key, value = split_heads(F.linear(emb, w_k)), split_heads(F.linear(emb, w_v))
         ip = merge_heads(F.scaled_dot_product_attention(q, key, value))
-        projection = (hidden * ip).sum(-2, keepdim=True) / (hidden * hidden).sum(-2, keepdim=True) * hidden
-        if pulid is not None and pulid.ortho_v2:
-            attn_mean = (q @ key.transpose(-2, -1)).softmax(dim=-1).mean(dim=1)[:, :, :5].sum(dim=-1, keepdim=True)
-            ip = ip + (attn_mean - 1) * projection
-        elif pulid is not None and pulid.ortho:
-            ip = ip - projection
         ip = ip * weight
         if region is not None:
             ip = ip * F.interpolate(region, size=(LATENT_H, LATENT_W), mode="bilinear").view(1, -1, 1)
@@ -75,13 +65,11 @@ class TestIPAdapterAttention(unittest.TestCase):
     def tearDown(self):
         plugable_ipadapter.clear_all_ip_adapter()
 
-    def adapter(self, weight=0.7, pulid=None, region=None, transformer_index=0):
-        ip = plugable_ipadapter.PlugableIPAdapter(
-            types.SimpleNamespace(ip_layers=self.to_kv, is_pulid=pulid is not None))
+    def adapter(self, weight=0.7, region=None, transformer_index=0):
+        ip = plugable_ipadapter.PlugableIPAdapter(types.SimpleNamespace(ip_layers=self.to_kv))
         ip.reset()
         ip.image_emb = ImageEmbed(self.cond, self.uncond)
         ip.weight, ip.p_start, ip.p_end = weight, 0.0, 1.0
-        ip.pulid_attn_setting = pulid
         ip.effective_region_mask = region
         ip.latent_width, ip.latent_height = LATENT_W, LATENT_H
         plugable_ipadapter.hack_blk(self.attn, ip.patch_forward(0, transformer_index), Attn)
@@ -107,14 +95,6 @@ class TestIPAdapterAttention(unittest.TestCase):
                 self.adapter(region=region)
                 for rows in ([True, False], [True], [False], [True, True, False, False], [False, True]):
                     self.call(rows, weight=0.7, region=region)
-                plugable_ipadapter.clear_all_ip_adapter()
-
-    def test_pulid_projects_against_attention_output(self):
-        for setting in (PULID_SETTING_FIDELITY, PULID_SETTING_STYLE):
-            with self.subTest(setting=setting):
-                self.adapter(weight=0.8, pulid=setting)
-                for rows in ([True, False], [False]):
-                    self.call(rows, weight=0.8, pulid=setting)
                 plugable_ipadapter.clear_all_ip_adapter()
 
     def test_image_embeds_projected_once_per_request(self):

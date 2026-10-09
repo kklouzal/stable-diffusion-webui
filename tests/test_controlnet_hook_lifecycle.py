@@ -411,7 +411,7 @@ def _install_hook_import_stubs():
 
     enums_mod = types.ModuleType("scripts.enums")
     enums_mod.ControlModelType = types.SimpleNamespace(AttentionInjection="AttentionInjection")
-    enums_mod.AutoMachine = types.SimpleNamespace(Read="Read", Write="Write", StyleAlign="StyleAlign")
+    enums_mod.AutoMachine = types.SimpleNamespace(Read="Read", Write="Write")
     enums_mod.HiResFixOption = types.SimpleNamespace(BOTH="BOTH")
     enums_mod.ControlNetUnionControlType = types.SimpleNamespace()
     sys.modules["scripts.enums"] = enums_mod
@@ -428,10 +428,6 @@ def _install_hook_import_stubs():
     lllite_mod = types.ModuleType("scripts.controlnet_lllite")
     lllite_mod.clear_all_lllite = lambda: None
     sys.modules["scripts.controlnet_lllite"] = lllite_mod
-
-    sparsectrl_mod = types.ModuleType("scripts.controlnet_sparsectrl")
-    sparsectrl_mod.SparseCtrl = object
-    sys.modules["scripts.controlnet_sparsectrl"] = sparsectrl_mod
 
     modules_pkg = types.ModuleType("modules")
     modules_pkg.__path__ = []
@@ -453,6 +449,11 @@ def _install_hook_import_stubs():
     devices_mod.get_device_for = lambda _name: "cpu"
     devices_mod.cond_cast_unet = lambda x: x
     sys.modules["modules.devices"] = devices_mod
+
+    # The core's torch with a resizing cat; equal to torch for these tests' aligned shapes.
+    hijack_unet_mod = types.ModuleType("modules.sd_hijack_unet")
+    hijack_unet_mod.th = torch
+    sys.modules["modules.sd_hijack_unet"] = hijack_unet_mod
 
     lowvram_mod = types.ModuleType("modules.lowvram")
     lowvram_mod.send_everything_to_cpu = lambda: None
@@ -484,9 +485,9 @@ def _install_hook_import_stubs():
     ldm_modules_pkg.__path__ = []
     ldm_diff_pkg = types.ModuleType("ldm.modules.diffusionmodules")
     ldm_diff_pkg.__path__ = []
-    util_mod = types.ModuleType("ldm.modules.diffusionmodules.util")
-    util_mod.timestep_embedding = lambda *args, **kwargs: None
-    util_mod.make_beta_schedule = lambda *args, **kwargs: []
+    upscaling_mod = types.ModuleType("ldm.modules.diffusionmodules.upscaling")
+    upscaling_mod.AbstractLowScaleModel = type("AbstractLowScaleModel", (torch.nn.Module,), {
+        "__init__": lambda self, noise_schedule_config=None: torch.nn.Module.__init__(self)})
     openaimodel_mod = types.ModuleType("ldm.modules.diffusionmodules.openaimodel")
     openaimodel_mod.UNetModel = type("UNetModel", (), {})
     attention_mod = types.ModuleType("ldm.modules.attention")
@@ -501,7 +502,7 @@ def _install_hook_import_stubs():
         "ldm": ldm_pkg,
         "ldm.modules": ldm_modules_pkg,
         "ldm.modules.diffusionmodules": ldm_diff_pkg,
-        "ldm.modules.diffusionmodules.util": util_mod,
+        "ldm.modules.diffusionmodules.upscaling": upscaling_mod,
         "ldm.modules.diffusionmodules.openaimodel": openaimodel_mod,
         "ldm.modules.attention": attention_mod,
         "ldm.models": ldm_models_pkg,
