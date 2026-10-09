@@ -263,10 +263,7 @@ def test_img2imgalt_reuses_noise_inversion_only_within_a_request_for_the_same_la
     assert len(inversions) == 3
 
 
-def test_hypertile_geometry_caches_are_bounded(monkeypatch):
-    spec = importlib.util.spec_from_file_location("hypertile_cache_bounds", ROOT / "extensions-builtin/hypertile/hypertile.py")
-    hypertile = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, hypertile)  # @dataclass resolves the defining module through sys.modules
-    spec.loader.exec_module(hypertile)
+def test_hypertile_geometry_caches_are_bounded():
+    hypertile = load_source("hypertile_cache_bounds", "extensions-builtin/hypertile/hypertile.py")
     for function in (hypertile.get_divisors, hypertile.largest_tile_size_available, hypertile.find_hw_candidates):
         assert function.cache_info().maxsize == 256, function.__name__
