@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import types
+from collections import Counter
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -464,6 +465,63 @@ class ConversionCorrectnessTests(unittest.TestCase):
                 self.convert.save_atomically(str(final), lambda path: Path(path).write_bytes(b"new"))
             self.assertEqual((os.listdir(tmpdir), final.read_bytes()), (["out.safetensors"], b"new"))
             self.assertEqual(synced[-1], os.path.realpath(tmpdir))
+
+    def test_narrowing_casts_reject_overflow_exactly_where_torch_does_not_round_to_a_finite_value(self):
+        # Oracle: torch's own cast. For the formats with Inf a finite value overflows exactly when the cast gives
+        # Inf; float8_e4m3fn saturates instead, so its oracle is round-to-nearest-even past 448 (above 464).
+        def edge_values(points, dtype):
+            values = []
+            for point in points:
+                x = torch.tensor(point, dtype=dtype)
+                below, above = x, x
+                for _ in range(3):
+                    below = torch.nextafter(below, torch.tensor(0.0, dtype=dtype))
+                    above = torch.nextafter(above, torch.tensor(float("inf"), dtype=dtype))
+                    values += [below, above]
+                values.append(x)
+            return torch.stack(values)
+
+        cases = (
+            (torch.float32, self.convert.conv_fp16, torch.float16, (65504.0, 65520.0)),
+            (torch.bfloat16, self.convert.conv_fp16, torch.float16, (65504.0, 65536.0)),
+            (torch.float32, self.convert.conv_bf16, torch.bfloat16, (3.3895313892515355e38, 3.39617752923046e38)),
+            (torch.float64, self.convert.conv_fp32, torch.float32, (3.4028234663852886e38, 3.4028235677973366e38)),
+            (torch.float32, self.convert.conv_float8_e5m2, torch.float8_e5m2, (57344.0, 61440.0)),
+            (torch.float16, self.convert.conv_float8_e5m2, torch.float8_e5m2, (57344.0, 61440.0)),
+            (torch.float32, self.convert.conv_float8_e4m3fn, torch.float8_e4m3fn, (448.0, 464.0)),
+        )
+        checked = Counter()
+        for source_dtype, conv, target, points in cases:
+            for value in edge_values(points, source_dtype).tolist():
+                for sign in (1.0, -1.0):
+                    tensor = torch.tensor([0.25, sign * value, float("nan")], dtype=source_dtype)
+                    cast = tensor.to(target)
+                    if target == torch.float8_e4m3fn:
+                        overflows = value > 464.0
+                    else:
+                        overflows = bool(torch.isinf(cast[1].float()))
+                    checked[(target, overflows)] += 1
+                    with self.subTest(source=source_dtype, target=target, value=sign * value):
+                        if overflows:
+                            with self.assertRaisesRegex(OverflowError, "choose a wider precision"):
+                                conv(tensor)
+                        else:
+                            out = conv(tensor)
+                            self.assertEqual(out.dtype, target)
+                            torch.testing.assert_close(out.float(), cast.float(), rtol=0, atol=0, equal_nan=True)
+        # Every target was exercised on both sides of its boundary.
+        self.assertEqual({target for target, overflows in checked if overflows}, {case[2] for case in cases})
+        self.assertEqual({target for target, overflows in checked if not overflows}, {case[2] for case in cases})
+
+    def test_overflowing_weight_fails_the_conversion_naming_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "model.safetensors")
+            save_file({"model.diffusion_model.big": torch.tensor([1.0, 1e5]), "model.diffusion_model.w": torch.ones(2)}, source)
+            with self.assertRaisesRegex(OverflowError, r"model\.diffusion_model\.big: float16 cannot hold a weight of magnitude 100000"):
+                self._convert(source)
+            self.assertEqual(os.listdir(tmpdir), ["model.safetensors"])
+            self._convert(source, precision="bf16")
+            self.assertEqual(load_file(os.path.join(tmpdir, "out.safetensors"))["model.diffusion_model.big"].tolist(), [1.0, 99840.0])
 
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

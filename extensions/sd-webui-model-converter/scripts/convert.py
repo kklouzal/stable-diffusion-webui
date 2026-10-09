@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import time
 import traceback
@@ -68,24 +69,63 @@ class MockModelInfo:
         self.model_name = os.path.splitext(self.filename)[0]
 
 
+def overflow_limit(dtype: torch.dtype) -> tuple[float, bool]:
+    """(threshold, tie_overflows) for round-to-nearest-even into ``dtype``: a finite value whose magnitude is above
+    the threshold, or equal to it when tie_overflows, does not round to a finite ``dtype`` value. The threshold is
+    the midpoint between the largest finite value and the next step; a tie rounds away from the largest value when
+    its significand is odd (all-ones in the IEEE-style formats; float8_e4m3fn's 448 = 1.110b x 2^8 is even)."""
+    finfo = torch.finfo(dtype)
+    ulp = 2.0 ** math.floor(math.log2(finfo.max)) * finfo.eps
+    return finfo.max + ulp / 2, int(finfo.max / ulp) % 2 == 1
+
+
+def cast_checked(t: Tensor, dtype: torch.dtype) -> Tensor:
+    """``t.to(dtype)``, raising OverflowError when a finite value of ``t`` is outside ``dtype``'s range.
+
+    torch turns such values into Inf for fp16, bf16, fp32 and float8_e5m2 (and the output NaN/Inf repair would then
+    zero them) and saturates them to 448 for float8_e4m3fn, which has no Inf. The upstream converter cast without a
+    check; here a weight the target format cannot hold is rejected so the caller can pick a wider precision. Casts
+    into a dtype whose range covers the source's need no check.
+    """
+    if torch.finfo(dtype).max >= torch.finfo(t.dtype).max or t.numel() == 0:
+        return t.to(dtype)
+    low, high = torch.aminmax(t)
+    peak = max(-float(low), float(high))
+    if not math.isfinite(peak):
+        # NaN/Inf in the source are not overflow; they are repaired by the NaN/Inf scan.
+        finite = torch.isfinite(t)
+        if not bool(finite.any()):
+            return t.to(dtype)
+        low, high = torch.aminmax(t[finite])
+        peak = max(-float(low), float(high))
+    threshold, tie_overflows = overflow_limit(dtype)
+    if peak > threshold or (tie_overflows and peak == threshold):
+        target = str(dtype).removeprefix("torch.")
+        raise OverflowError(
+            f"{target} cannot hold a weight of magnitude {peak:g} (largest finite {target} value "
+            f"{torch.finfo(dtype).max:g}); choose a wider precision"
+        )
+    return t.to(dtype)
+
+
 def conv_fp32(t: Tensor) -> Tensor:
-    return t.float() if torch.is_floating_point(t) and t.dtype != torch.float32 else t
+    return cast_checked(t, torch.float32) if torch.is_floating_point(t) and t.dtype != torch.float32 else t
 
 
 def conv_fp16(t: Tensor) -> Tensor:
-    return t.half() if t.dtype in DTYPES_TO_FP16 else t
+    return cast_checked(t, torch.float16) if t.dtype in DTYPES_TO_FP16 else t
 
 
 def conv_bf16(t: Tensor) -> Tensor:
-    return t.bfloat16() if t.dtype in DTYPES_TO_BF16 else t
+    return cast_checked(t, torch.bfloat16) if t.dtype in DTYPES_TO_BF16 else t
 
 
 def conv_float8_e4m3fn(t: Tensor) -> Tensor:
-    return t.to(torch.float8_e4m3fn) if t.dtype in DTYPES_TO_FLOAT8 else t
+    return cast_checked(t, torch.float8_e4m3fn) if t.dtype in DTYPES_TO_FLOAT8 else t
 
 
 def conv_float8_e5m2(t: Tensor) -> Tensor:
-    return t.to(torch.float8_e5m2) if t.dtype in DTYPES_TO_FLOAT8 else t
+    return cast_checked(t, torch.float8_e5m2) if t.dtype in DTYPES_TO_FLOAT8 else t
 
 
 PRECISION_FUNCS = {
@@ -650,7 +690,10 @@ def convert_lora(payload: dict[str, Any]) -> str:
             if cleanup and is_known_lora_junk_key(str(key)):
                 continue
             if torch.is_floating_point(tensor):
-                ok[key] = PRECISION_FUNCS[precision](tensor)
+                try:
+                    ok[key] = PRECISION_FUNCS[precision](tensor)
+                except OverflowError as exc:
+                    raise OverflowError(f"{key}: {exc}") from exc
             else:
                 ok[key] = tensor
         output_nonfinite = scan_and_repair_nonfinite(ok, repair=True)
@@ -888,7 +931,10 @@ def do_convert(
                 return tensor.to(torch.int64) if force_position_id else tensor
             if not torch.is_floating_point(tensor):
                 return tensor
-            return PRECISION_FUNCS[precision_for(weight_key)](tensor)
+            try:
+                return PRECISION_FUNCS[precision_for(weight_key)](tensor)
+            except OverflowError as exc:
+                raise OverflowError(f"{weight_key}: {exc}") from exc
 
         def handle_weight(weight_key: str, tensor: Tensor) -> None:
             if not isinstance(tensor, Tensor):
