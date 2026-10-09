@@ -159,24 +159,30 @@ def save_atomically(save_path: str, write: Callable[[str], None]) -> None:
     """Publish ``save_path`` only after ``write`` has fully written and flushed it.
 
     ``write`` serializes to a uniquely named hidden ``.partial`` sibling (ignored by the checkpoint and LoRA
-    listings), which is fsynced and renamed onto ``save_path``; a failed or interrupted save never leaves a
-    truncated checkpoint under the final name, and the temporary file is removed on failure. The no-overwrite
-    contract of safe_output_path is re-checked just before the rename (conversions run under queue_lock).
+    listings), which is fsynced and then hard-linked to ``save_path``. The link fails atomically when
+    ``save_path`` exists, so a file another process created after safe_output_path checked is never replaced; a
+    failed or interrupted save never leaves a truncated checkpoint under the final name. The temporary name is
+    always removed, and the directory is fsynced so the published name is durable. On a filesystem without
+    hard links the save fails.
     """
-    tmp_path = os.path.join(
-        os.path.dirname(save_path), f".openclaw-convert-{uuid.uuid4().hex}.partial"
-    )
+    directory = os.path.dirname(save_path)
+    tmp_path = os.path.join(directory, f".openclaw-convert-{uuid.uuid4().hex}.partial")
     try:
         write(tmp_path)
         with open(tmp_path, "rb") as f:
             os.fsync(f.fileno())
-        if os.path.exists(save_path):
-            raise FileExistsError(f"refusing to overwrite existing file: {save_path}")
-        os.replace(tmp_path, save_path)
-    except BaseException:
+        try:
+            os.link(tmp_path, save_path)
+        except FileExistsError:
+            raise FileExistsError(f"refusing to overwrite existing file: {save_path}") from None
+    finally:
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp_path)
-        raise
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def require_choice(kind: str, value: Any, allowed: set[str]) -> str:

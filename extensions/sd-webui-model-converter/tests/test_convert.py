@@ -434,6 +434,37 @@ class ConversionCorrectnessTests(unittest.TestCase):
         self.assertNotIn("skipped", doctor["content_scan"])
         self.assertEqual(out["model.diffusion_model.w"].tolist(), [1.0, 0.0])
 
+    def test_atomic_save_link_refuses_a_file_created_after_every_check(self):
+        # The final name appears after safe_output_path checked and with no exists() check in between: the
+        # hard link, not a check, refuses to replace it, and the temporary file is removed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            final = Path(tmpdir) / "out.safetensors"
+            real_link = os.link
+
+            def link(src, dst):
+                final.write_bytes(b"other")
+                return real_link(src, dst)
+
+            with mock.patch.object(self.convert.os, "link", side_effect=link), \
+                    self.assertRaisesRegex(FileExistsError, "overwrite"):
+                self.convert.save_atomically(str(final), lambda path: Path(path).write_bytes(b"new"))
+            self.assertEqual((os.listdir(tmpdir), final.read_bytes()), (["out.safetensors"], b"other"))
+
+    def test_atomic_save_publishes_and_fsyncs_the_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            final = Path(tmpdir) / "out.safetensors"
+            synced = []
+            real_fsync = os.fsync
+
+            def fsync(fd):
+                synced.append(os.path.realpath(f"/proc/self/fd/{fd}"))
+                return real_fsync(fd)
+
+            with mock.patch.object(self.convert.os, "fsync", side_effect=fsync):
+                self.convert.save_atomically(str(final), lambda path: Path(path).write_bytes(b"new"))
+            self.assertEqual((os.listdir(tmpdir), final.read_bytes()), (["out.safetensors"], b"new"))
+            self.assertEqual(synced[-1], os.path.realpath(tmpdir))
+
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outside = Path(tmpdir) / "outside.safetensors"
