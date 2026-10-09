@@ -46,7 +46,7 @@ def test_vae_api_clear_without_enabled_is_reset_not_disable():
 
 def test_cuda_graph_first_request_returns_captured_output_contract():
     source = Path("modules/openclaw_cuda_graphs.py").read_text()
-    assert 'graph.replay()\n                return _clone_static(static_out)' in source
+    assert 'graph.replay()\n            return _clone_static(static_out)' in source
     assert 'return capture_return' not in source
     assert '_record_bypass("cache_warmup")' not in source
 

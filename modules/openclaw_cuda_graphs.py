@@ -12,28 +12,16 @@ from typing import Any
 import torch
 
 from modules import openclaw_cache_epochs, openclaw_env
+from modules.sd_unet_row_memo import tensor_version
 
-_ENABLED = False
+# Read once at import (T2): an invalid value fails startup instead of being logged and ignored.
+_ENABLED = openclaw_env.env_bool("OPENCLAW_CUDA_GRAPHS", False)
 # Insertion order is recency order: hits move_to_end, eviction pops the least recently used entry.
 _CACHE: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
-_KEY_LOCKS: dict[tuple[Any, ...], threading.RLock] = {}
 _LOCK = threading.RLock()
+# Serializes every replay/capture and every cache teardown (see run() and _graph_pool()); taken before _LOCK.
 _RUNTIME_LOCK = threading.RLock()
-_STATS = {
-    "captures": 0,
-    "replays": 0,
-    "fallbacks": 0,
-    "bypasses": 0,
-    "bypass_reasons": {},
-    "last_bypass_reason": None,
-    "invalidations": 0,
-    "invalidation_reasons": {},
-    "last_invalidation_reason": None,
-    "last_invalidation_details": None,
-    "failures": 0,
-    "last_error": None,
-    "last_key": None,
-}
+_STATS: dict[str, Any] = {}  # filled by _reset_stats() below
 _FAILED_KEYS: set[tuple[Any, ...]] = set()
 _LIFECYCLE_STATE: dict[str, Any] = {}
 _MISSING = object()
@@ -69,20 +57,41 @@ def _reset_stats() -> None:
     })
 
 
+_reset_stats()
+
+
+def publish_graph_cache_size() -> None:
+    """Publish E11's size and capacity: one telemetry family fed by the UNet graphs here and the VAE decode graphs.
+
+    Both caches call this after their size changes, so the family reports the sum of both instead of whichever
+    cache wrote last. The VAE module imports this one, so it is in sys.modules whenever it holds entries.
+    """
+    current_size, capacity = len(_CACHE), _MAX_CACHE_SIZE
+    vae_graphs = sys.modules.get("modules.openclaw_vae_decode_graphs")
+    if vae_graphs is not None:
+        current_size += len(vae_graphs._CACHE)
+        capacity += vae_graphs._CACHE_MAX
+    openclaw_cache_epochs.set_size("E11", current_size=current_size, capacity=capacity)
+
+
 def status() -> dict[str, Any]:
+    """A snapshot: the nested reason dicts are copied, so serializing it never races a later mutation."""
     with _LOCK:
         return {
             "enabled": _ENABLED,
             "cache_size": len(_CACHE),
             "max_cache_size": _MAX_CACHE_SIZE,
             **_STATS,
+            "bypass_reasons": dict(_STATS["bypass_reasons"]),
+            "invalidation_reasons": dict(_STATS["invalidation_reasons"]),
             "lifecycle_state_keys": sorted(_LIFECYCLE_STATE),
         }
 
 
 def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
     global _ENABLED
-    with _LOCK:
+    # As in invalidate(): a capture in flight must not publish into a cache that was just disabled or cleared.
+    with _RUNTIME_LOCK, _LOCK:
         _ENABLED = bool(enabled)
         if clear or not _ENABLED:
             cleared = len(_CACHE)
@@ -91,15 +100,14 @@ def set_enabled(enabled: bool, clear: bool = False) -> dict[str, Any]:
             _reset_stats()
             if cleared:
                 openclaw_cache_epochs.observe("E11", "invalidate", reason="cache_disabled" if not _ENABLED else "cache_cleared", count=cleared)
-            openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
+            publish_graph_cache_size()
         return status()
 
 
 def _clear_cache_locked() -> bool:
     global _GRAPH_POOL
-    had_state = bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS)
+    had_state = bool(_CACHE or _FAILED_KEYS)
     _CACHE.clear()
-    _KEY_LOCKS.clear()
     _FAILED_KEYS.clear()
     _SCHEDULE_TOKENS.clear()
     # Every graph that captured into the shared pool is gone; the next capture starts a fresh pool.
@@ -107,25 +115,27 @@ def _clear_cache_locked() -> bool:
     return had_state
 
 
+def _record_invalidation_locked(reason: str, details: Any | None) -> None:
+    openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
+    publish_graph_cache_size()
+    _STATS["invalidations"] += 1
+    _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
+    _STATS["last_invalidation_reason"] = reason
+    _STATS["last_invalidation_details"] = repr(details)[:1000] if details is not None else None
+
+
 def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
     """Clear captured CUDA graphs after a mutable runtime boundary changes."""
     reason = str(reason or "unknown")
     # Invalidation can run from model CPU/device/trash movement while API workers
     # are concurrently copying static graph inputs or capturing a new graph. Hold
-    # the runtime lock so invalidation cannot clear per-key ownership underneath
-    # an in-flight replay/capture, and so a capture cannot publish a stale entry
+    # the runtime lock so invalidation cannot clear entries underneath an
+    # in-flight replay/capture, and so a capture cannot publish a stale entry
     # after the boundary has changed.
-    with _RUNTIME_LOCK:
-        with _LOCK:
-            had_state = _clear_cache_locked()
-            if had_state:
-                openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
-                openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
-                _STATS["invalidations"] += 1
-                _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
-                _STATS["last_invalidation_reason"] = reason
-                _STATS["last_invalidation_details"] = repr(details)[:1000] if details is not None else None
-            return status()
+    with _RUNTIME_LOCK, _LOCK:
+        if _clear_cache_locked():
+            _record_invalidation_locked(reason, details)
+        return status()
 
 
 @contextlib.contextmanager
@@ -150,30 +160,24 @@ def invalidate_if_changed(boundary: str, state: Any, reason: str | None = None) 
     Repeated identical observations are no-ops.
     """
     reason = reason or boundary
-    with _RUNTIME_LOCK:
-        with _LOCK:
-            previous = _LIFECYCLE_STATE.get(boundary, _MISSING)
-            if previous == state:
-                return status()
-            _LIFECYCLE_STATE[boundary] = state
-            had_state = _clear_cache_locked()
-            if had_state:
-                openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
-                openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
-                _STATS["invalidations"] += 1
-                _STATS["invalidation_reasons"][reason] = _STATS["invalidation_reasons"].get(reason, 0) + 1
-                _STATS["last_invalidation_reason"] = reason
-                _STATS["last_invalidation_details"] = repr({"boundary": boundary, "previous": previous, "current": state})[:1000]
+    with _RUNTIME_LOCK, _LOCK:
+        previous = _LIFECYCLE_STATE.get(boundary, _MISSING)
+        if previous == state:
             return status()
+        _LIFECYCLE_STATE[boundary] = state
+        if _clear_cache_locked():
+            _record_invalidation_locked(reason, {"boundary": boundary, "previous": previous, "current": state})
+        return status()
+
 
 def clear() -> dict[str, Any]:
-    with _LOCK:
+    with _RUNTIME_LOCK, _LOCK:
         had_state = _clear_cache_locked()
         _LIFECYCLE_STATE.clear()
         _reset_stats()
         if had_state:
             openclaw_cache_epochs.observe("E11", "invalidate", reason="cache_cleared")
-        openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_MAX_CACHE_SIZE)
+        publish_graph_cache_size()
         return status()
 
 
@@ -250,36 +254,24 @@ def _lora_signature() -> tuple[Any, ...] | None:
     )
 
 
-def note_model_loaded(model: Any | None = None, reason: str = "model_changed") -> dict[str, Any]:
-    state = (
-        id(model) if model is not None else None,
-        *_checkpoint_signature(model),
-        repr(getattr(model, "used_config", None)),
-    )
-    return invalidate_if_changed("model", state, reason)
+def note_model_loaded(model: Any) -> dict[str, Any]:
+    state = (id(model), *_checkpoint_signature(model), repr(getattr(model, "used_config", None)))
+    return invalidate_if_changed("model", state, "model_changed")
 
 
-def note_vae_loaded(model: Any | None = None, reason: str = "vae_changed") -> dict[str, Any]:
-    state = (
-        id(model) if model is not None else None,
-        getattr(model, "loaded_vae_file", None),
-        id(getattr(model, "first_stage_model", None)) if model is not None else None,
-    )
-    return invalidate_if_changed("vae", state, reason)
+def note_vae_loaded(model: Any) -> dict[str, Any]:
+    state = (id(model), getattr(model, "loaded_vae_file", None), id(getattr(model, "first_stage_model", None)))
+    return invalidate_if_changed("vae", state, "vae_changed")
 
 
-def note_lora_loaded(reason: str = "lora_changed") -> dict[str, Any]:
-    return invalidate_if_changed("lora", _lora_signature(), reason)
+def note_lora_loaded() -> dict[str, Any]:
+    return invalidate_if_changed("lora", _lora_signature(), "lora_changed")
 
 
 def _evict_if_needed_locked() -> None:
-    if _MAX_CACHE_SIZE <= 0:
-        _CACHE.clear()
-        _KEY_LOCKS.clear()
-        return
+    # run() never captures while _MAX_CACHE_SIZE <= 0 (an import-time constant), so this loop always terminates.
     while len(_CACHE) >= _MAX_CACHE_SIZE:
         evicted_key, _ = _CACHE.popitem(last=False)
-        _KEY_LOCKS.pop(evicted_key, None)
         openclaw_cache_epochs.observe("E11", "eviction", reason="capacity", semantic_key=evicted_key)
 
 
@@ -332,7 +324,7 @@ def _schedule_signature(fn: Any) -> tuple[str, int]:
     call with the floats inline (CPU-measured on the GB10 host).
     """
     tensors = _schedule_tensors(fn)
-    versions = tuple(None if tensor.is_inference() else tensor._version for _name, tensor in tensors)
+    versions = tuple(tensor_version(tensor) for _name, tensor in tensors)
     try:
         cached = _SCHEDULE_SIGNATURES.get(fn)
     except TypeError:  # not weak-referenceable (plain callables in tests); nothing to memoize per run
@@ -370,17 +362,12 @@ def _wrapper_scalars(fn: Any) -> tuple[Any, ...]:
 
 
 def _model_signature(fn: Any) -> tuple[Any, ...]:
-    try:
-        from modules import shared
-
-        checkpoint_key = _checkpoint_signature(getattr(shared, "sd_model", None))
-    except ImportError:
-        checkpoint_key = None
+    from modules import shared
 
     return (
         type(fn).__module__,
         type(fn).__qualname__,
-        checkpoint_key,
+        _checkpoint_signature(getattr(shared, "sd_model", None)),
         _lora_signature(),
         _wrapper_scalars(fn),
         _schedule_signature(fn),
@@ -417,43 +404,24 @@ def _runtime_branch_key() -> tuple[Any, ...]:
 
 
 def _cache_key(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, denoiser: Any | None = None) -> tuple[Any, ...]:
-    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), _attention_key(), _runtime_branch_key(), _denoiser_graph_key(denoiser))
+    # Active TeaCache (a per-request Python UNet.forward patch) needs no key part: run() bypasses it before keying.
+    return (_model_signature(fn), _tensor_signature(x), _tensor_signature(sigma), _structure_signature(cond), _attention_key(), _runtime_branch_key(), _img2img_graph_state_key(denoiser))
 
 
 def _seg_params(denoiser: Any | None) -> Any | None:
-    p = getattr(denoiser, "p", None) if denoiser is not None else None
-    incant_cfg = getattr(p, "incant_cfg_params", None)
+    incant_cfg = getattr(getattr(denoiser, "p", None), "incant_cfg_params", None)
     return incant_cfg.get("seg_params") if isinstance(incant_cfg, dict) else None
 
 
-def _img2img_graph_state_key(denoiser: Any | None) -> Any:
-    if denoiser is None:
-        return None
-
+def _img2img_graph_state_key(denoiser: Any | None) -> tuple[Any, ...]:
     p = getattr(denoiser, "p", None)
     return (
         "img2img",
         getattr(denoiser, "init_latent", None) is not None,
         bool(getattr(denoiser, "mask_before_denoising", False)),
-        getattr(p, "init_latent", None) is not None if p is not None else False,
-        getattr(p, "image_conditioning", None) is not None if p is not None else False,
-        bool(getattr(p, "init_images", None)) if p is not None else False,
-    )
-
-
-def _denoiser_graph_key(denoiser: Any | None) -> Any:
-    p = getattr(denoiser, "p", None) if denoiser is not None else None
-    sd_model = getattr(p, "sd_model", None) if p is not None else None
-    unet = getattr(getattr(sd_model, "model", None), "diffusion_model", None)
-    return (
-        _img2img_graph_state_key(denoiser),
-        # TeaCache is implemented as a per-request Python UNet.forward patch. The
-        # CUDA graph cache key must include this active hook state; otherwise a graph
-        # captured by a disabled request can replay for a later TeaCache-enabled
-        # request and bypass TeaCache entirely while infotext still records accepted
-        # TeaCache args.
-        bool(getattr(unet, "_teacache_patched", False)),
-        getattr(unet, "_openclaw_teacache_original_forward", None) is not None,
+        getattr(p, "init_latent", None) is not None,
+        getattr(p, "image_conditioning", None) is not None,
+        bool(getattr(p, "init_images", None)),
     )
 
 
@@ -480,16 +448,13 @@ def _denoiser_models(fn: Any | None, p: Any | None) -> tuple[Any, ...]:
 
 
 def _graph_denoiser_bypass_reason(denoiser: Any | None, fn: Any | None = None) -> str | None:
-    if denoiser is None and fn is None:
-        return None
-
     # Masked/inpaint blending mutates the latent around the wrapped UNet call and
     # can invoke arbitrary mask-blend scripts. Keep every mask-bearing path eager
     # until mask tensors/script effects are modeled as explicit graph inputs.
     if getattr(denoiser, "mask", None) is not None or getattr(denoiser, "nmask", None) is not None:
         return "denoiser_mask"
 
-    p = getattr(denoiser, "p", None) if denoiser is not None else None
+    p = getattr(denoiser, "p", None)
     if p is not None:
         if getattr(p, "mask", None) is not None or getattr(p, "nmask", None) is not None:
             return "processing_mask"
@@ -564,15 +529,18 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None, fn: Any | None = None) -
 def _record_bypass(reason: str) -> None:
     with _LOCK:
         _STATS["bypasses"] += 1
-        reasons = dict(_STATS.get("bypass_reasons") or {})
-        reasons[reason] = reasons.get(reason, 0) + 1
-        _STATS["bypass_reasons"] = reasons
+        _STATS["bypass_reasons"][reason] = _STATS["bypass_reasons"].get(reason, 0) + 1
         _STATS["last_bypass_reason"] = reason
     openclaw_cache_epochs.observe("E11", "bypass", reason="cache_disabled" if reason == "cache_disabled" else "unsafe_input")
 
 
 def on_default_stream(device: torch.device) -> bool:
     return torch.cuda.current_stream(device) == torch.cuda.default_stream(device)
+
+
+def _record_fallback_locked(key: tuple[Any, ...]) -> None:
+    _STATS["fallbacks"] += 1
+    _STATS["last_key"] = repr(key)
 
 
 def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: Any | None = None):
@@ -596,13 +564,9 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
 
     key = _cache_key(fn, x, sigma, cond, denoiser)
     with _LOCK:
-        failed_before = key in _FAILED_KEYS
-        key_lock = _KEY_LOCKS.setdefault(key, threading.RLock())
-    if failed_before:
-        with _LOCK:
-            _STATS["fallbacks"] += 1
-            _STATS["last_key"] = repr(key)
-        return fn(x, sigma, cond=cond)
+        if key in _FAILED_KEYS:
+            _record_fallback_locked(key)
+            return fn(x, sigma, cond=cond)
 
     # A CUDA graph entry owns mutable static input/output tensors and a graph
     # replay object, and all entries share one memory pool (see _graph_pool).
@@ -610,75 +574,72 @@ def run(fn: Any, x: torch.Tensor, sigma: torch.Tensor, cond: Any, *, denoiser: A
     # keys; otherwise concurrent API workers could interleave static input copies
     # or overwrite another graph's pool memory before its output is cloned.
     with _RUNTIME_LOCK:
-        with key_lock:
+        with _LOCK:
+            entry = _CACHE.get(key)
+            if key in _FAILED_KEYS:  # latched by a capture that finished while this call waited for the lock
+                _record_fallback_locked(key)
+                return fn(x, sigma, cond=cond)
+        if entry is not None:
+            openclaw_cache_epochs.observe("E11", "hit", reason="cache_hit", semantic_key=key)
+            _copy_into_static(entry["x"], x)
+            _copy_into_static(entry["sigma"], sigma)
+            _copy_into_static(entry["cond"], cond)
+            entry["graph"].replay()
             with _LOCK:
-                entry = _CACHE.get(key)
-                failed_before = key in _FAILED_KEYS
-            if failed_before:
-                with _LOCK:
-                    _STATS["fallbacks"] += 1
-                    _STATS["last_key"] = repr(key)
-                return fn(x, sigma, cond=cond)
-            if entry is not None:
-                openclaw_cache_epochs.observe("E11", "hit", reason="cache_hit", semantic_key=key)
-                _copy_into_static(entry["x"], x)
-                _copy_into_static(entry["sigma"], sigma)
-                _copy_into_static(entry["cond"], cond)
-                entry["graph"].replay()
-                with _LOCK:
-                    if key in _CACHE:
-                        _CACHE.move_to_end(key)
-                    _STATS["replays"] += 1
-                    _STATS["last_key"] = repr(key)
-                return entry["out"].clone()
+                if key in _CACHE:
+                    _CACHE.move_to_end(key)
+                _STATS["replays"] += 1
+                _STATS["last_key"] = repr(key)
+            return entry["out"].clone()
 
-            openclaw_cache_epochs.observe("E11", "miss", reason="cache_miss", semantic_key=key)
-            try:
-                static_x = _clone_static(x)
-                static_sigma = _clone_static(sigma)
-                static_cond = _clone_static(cond)
-                # The one warm-up a capture needs: run on a side stream so lazy CUDA state (library handles and
-                # workspaces, kernel loading, allocator growth) is initialized outside the capture. A first-sighting
-                # key used to get an extra eager run on the caller's stream as well; its result was discarded (the
-                # caller receives the replay below), so it only added a UNet forward per new key.
-                stream = torch.cuda.Stream()
-                stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(stream):
-                    fn(static_x, static_sigma, cond=static_cond)
-                torch.cuda.current_stream().wait_stream(stream)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, pool=_graph_pool()):
-                    static_out = fn(static_x, static_sigma, cond=static_cond)
-                entry = {
-                    "graph": graph,
-                    # The replay reads the wrapper's schedule tensors at their captured addresses; keep the wrapper
-                    # and those tensors alive for the entry's lifetime (the request that created them may end).
-                    "fn": fn,
-                    "schedule": tuple(tensor for _name, tensor in _schedule_tensors(fn)),
-                    "x": static_x,
-                    "sigma": static_sigma,
-                    "cond": static_cond,
-                    "out": static_out,
-                }
-                with _LOCK:
-                    _evict_if_needed_locked()
-                    _CACHE[key] = entry
-                    _STATS["captures"] += 1
-                    openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
-                    openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_MAX_CACHE_SIZE)
-                    _STATS["last_error"] = None
-                    _STATS["last_key"] = repr(key)
-                # The capture execution can include one-time backend/autotune
-                # transitions. Replay once with the same static inputs and return that
-                # output so the first request has the same graph-replay semantics as
-                # every cache hit.
-                graph.replay()
-                return _clone_static(static_out)
-            except Exception as exc:
-                with _LOCK:
-                    _STATS["failures"] += 1
-                    _FAILED_KEYS.add(key)
-                    openclaw_cache_epochs.observe("E11", "reject", reason="capture_failed", semantic_key=key)
-                    _STATS["last_error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:]
-                    _STATS["last_key"] = repr(key)
-                return fn(x, sigma, cond=cond)
+        openclaw_cache_epochs.observe("E11", "miss", reason="cache_miss", semantic_key=key)
+        try:
+            static_x = _clone_static(x)
+            static_sigma = _clone_static(sigma)
+            static_cond = _clone_static(cond)
+            # The one warm-up a capture needs: run on a side stream so lazy CUDA state (library handles and
+            # workspaces, kernel loading, allocator growth) is initialized outside the capture.
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                fn(static_x, static_sigma, cond=static_cond)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=_graph_pool()):
+                static_out = fn(static_x, static_sigma, cond=static_cond)
+            entry = {
+                "graph": graph,
+                # The replay reads the wrapper's schedule tensors at their captured addresses; keep the wrapper
+                # and those tensors alive for the entry's lifetime (the request that created them may end).
+                "fn": fn,
+                "schedule": tuple(tensor for _name, tensor in _schedule_tensors(fn)),
+                "x": static_x,
+                "sigma": static_sigma,
+                "cond": static_cond,
+                "out": static_out,
+            }
+            with _LOCK:
+                _evict_if_needed_locked()
+                _CACHE[key] = entry
+                _STATS["captures"] += 1
+                openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
+                publish_graph_cache_size()
+                _STATS["last_error"] = None
+                _STATS["last_key"] = repr(key)
+            # The capture execution can include one-time backend/autotune
+            # transitions. Replay once with the same static inputs and return that
+            # output so the first request has the same graph-replay semantics as
+            # every cache hit.
+            graph.replay()
+            return _clone_static(static_out)
+        except Exception as exc:
+            with _LOCK:
+                _STATS["failures"] += 1
+                _FAILED_KEYS.add(key)
+                openclaw_cache_epochs.observe("E11", "reject", reason="capture_failed", semantic_key=key)
+                _STATS["last_error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:]
+                _STATS["last_key"] = repr(key)
+            return fn(x, sigma, cond=cond)
+
+
+publish_graph_cache_size()

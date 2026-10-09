@@ -412,7 +412,7 @@ def _publish_applied_state(new_networks, emb_db=None):
                         openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="other")
                         openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="other")
                     openclaw_cache_epochs.observe("E12", "reject", reason="other", semantic_key=wanted_key)
-                    openclaw_cuda_graphs.note_lora_loaded("lora_changed")
+                    openclaw_cuda_graphs.note_lora_loaded()
                     raise RuntimeError("LoRA application rollback failed closed") from rollback_error
                 _applied_state_key = previous_key
                 loaded_bundle_embeddings = previous_bundles
@@ -428,7 +428,7 @@ def _publish_applied_state(new_networks, emb_db=None):
                 openclaw_cache_epochs.bump_epoch("textual_inversion_epoch", reason="published")
                 openclaw_cache_epochs.bump_epoch("tokenizer_epoch", reason="published")
             openclaw_cache_epochs.observe("E12", "publish", reason="published", semantic_key=wanted_key)
-            openclaw_cuda_graphs.note_lora_loaded("lora_changed")
+            openclaw_cuda_graphs.note_lora_loaded()
             return True
 
 
@@ -606,7 +606,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         if all(source_key in cached_by_key for source_key in source_keys) and wanted_key == _applied_state_key and _published_bundles_current(emb_db):
             elapsed = (time.perf_counter() - started) * 1000.0
             _record_lora_steady_state(hit=True, reason="semantic_signature_equal", identity_ms=(identity_done-started)*1000.0, total_ms=elapsed)
-            openclaw_cache_epochs.observe("E12", "hit", reason="exact", semantic_key=wanted_key)
+            openclaw_cache_epochs.observe("E12", "hit", reason="cache_hit", semantic_key=wanted_key)
             return False
     active_by_key = {getattr(net, "source_key", network_source_key(net.network_on_disk, getattr(net, "source_signature", None))): net for net in loaded_networks}
     staged_cache = {}
@@ -663,7 +663,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     purge_networks_from_memory()
     finished = time.perf_counter()
     _record_lora_steady_state(hit=False, reason="semantic_signature_changed", identity_ms=(identity_done-started)*1000.0, load_parse_ms=(parse_done-identity_done)*1000.0, publication_ms=(finished-publication_started)*1000.0, total_ms=(finished-started)*1000.0)
-    openclaw_cache_epochs.observe("E12", "miss", reason="dependency_dirty", semantic_key=wanted_key)
+    openclaw_cache_epochs.observe("E12", "miss", reason="dependency_changed", semantic_key=wanted_key)
     return True
 
 def allowed_layer_without_weight(layer):

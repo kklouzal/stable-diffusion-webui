@@ -1455,12 +1455,12 @@ def _reload_model_weights(sd_model, info, forced_reload):
             devices.torch_gc()
 
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
-        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model, "model_changed")
+        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model)
         return model_data.sd_model
 
     sd_model = reuse_model_from_already_loaded(sd_model, checkpoint_info, timer)
     if not forced_reload and sd_model is not None and sd_model.sd_checkpoint_info.filename == checkpoint_info.filename:
-        openclaw_cuda_graphs.note_model_loaded(sd_model, "model_changed")
+        openclaw_cuda_graphs.note_model_loaded(sd_model)
         return sd_model
 
     if sd_model is not None:
@@ -1483,7 +1483,7 @@ def _reload_model_weights(sd_model, info, forced_reload):
             send_model_to_trash(sd_model)
 
         load_model(checkpoint_info, already_loaded_state_dict=state_dict, checkpoint_config=checkpoint_config)
-        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model, "model_changed")
+        openclaw_cuda_graphs.note_model_loaded(model_data.sd_model)
         return model_data.sd_model
 
     reload_exc_info = None
@@ -1523,7 +1523,7 @@ def _reload_model_weights(sd_model, info, forced_reload):
 
     model_data.set_sd_model(sd_model)
     sd_unet.apply_unet()
-    openclaw_cuda_graphs.note_model_loaded(sd_model, "model_changed")
+    openclaw_cuda_graphs.note_model_loaded(sd_model)
     vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
     openclaw_lifecycle_epochs.publish_checkpoint_commit(changed=True, vae_bytes_changed=vae_bytes_changed, vae_object_changed=vae_object_changed)
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 import threading
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import torch
@@ -124,11 +126,11 @@ class CudaGraphBypassTests(unittest.TestCase):
         img2img = make_denoiser(active=False)
         img2img.init_latent = object()
         img2img.p.init_images = [object()]
-        first = openclaw_cuda_graphs._denoiser_graph_key(img2img)
+        first = openclaw_cuda_graphs._img2img_graph_state_key(img2img)
         img2img.p.init_images = [object(), object()]
-        second = openclaw_cuda_graphs._denoiser_graph_key(img2img)
+        second = openclaw_cuda_graphs._img2img_graph_state_key(img2img)
 
-        self.assertNotEqual(openclaw_cuda_graphs._denoiser_graph_key(txt2img), first)
+        self.assertNotEqual(openclaw_cuda_graphs._img2img_graph_state_key(txt2img), first)
         self.assertEqual(first, second)
 
 
@@ -146,7 +148,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
 
     def seed_graph_state(self):
         openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
-        openclaw_cuda_graphs._KEY_LOCKS[("stale",)] = object()
         openclaw_cuda_graphs._FAILED_KEYS.add(("failed",))
 
     def test_invalidate_records_reason_only_when_state_is_cleared(self):
@@ -157,7 +158,6 @@ class CudaGraphInvalidationTests(unittest.TestCase):
         status = openclaw_cuda_graphs.invalidate("model_changed", {"checkpoint": "next"})
 
         self.assertEqual(status["cache_size"], 0)
-        self.assertEqual(openclaw_cuda_graphs._KEY_LOCKS, {})
         self.assertEqual(openclaw_cuda_graphs._FAILED_KEYS, set())
         self.assertEqual(status["invalidations"], 1)
         self.assertEqual(status["invalidation_reasons"], {"model_changed": 1})
@@ -214,14 +214,6 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         openclaw_cuda_graphs._MAX_CACHE_SIZE = self.previous_max_cache_size
         openclaw_cuda_graphs.set_enabled(False, clear=True)
 
-    def test_zero_max_cache_size_clears_existing_cache_entries(self):
-        openclaw_cuda_graphs._MAX_CACHE_SIZE = 0
-        openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
-
-        openclaw_cuda_graphs._evict_if_needed_locked()
-
-        self.assertEqual(openclaw_cuda_graphs.status()["cache_size"], 0)
-
     def test_zero_max_cache_size_bypasses_capture(self):
         openclaw_cuda_graphs._MAX_CACHE_SIZE = 0
         openclaw_cuda_graphs.set_enabled(True, clear=True)
@@ -241,48 +233,13 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         self.assertEqual(status["bypass_reasons"].get("cache_disabled"), 1)
 
 
-    def test_clear_removes_per_key_locks(self):
-        openclaw_cuda_graphs._KEY_LOCKS[("stale",)] = object()
-
-        openclaw_cuda_graphs.clear()
-
-        self.assertEqual(openclaw_cuda_graphs._KEY_LOCKS, {})
-
-    def test_evict_removes_per_key_lock_with_cache_entry(self):
+    def test_evict_removes_least_recent_entry_at_capacity(self):
         openclaw_cuda_graphs._MAX_CACHE_SIZE = 1
         openclaw_cuda_graphs._CACHE[("old",)] = {"dummy": True}
-        openclaw_cuda_graphs._KEY_LOCKS[("old",)] = object()
 
         openclaw_cuda_graphs._evict_if_needed_locked()
 
         self.assertEqual(openclaw_cuda_graphs._CACHE, {})
-        self.assertEqual(openclaw_cuda_graphs._KEY_LOCKS, {})
-
-    def test_run_reuses_per_key_lock_on_warmup_bypass(self):
-        class FakeTensor:
-            shape = (1,)
-            dtype = "float32"
-            device = types.SimpleNamespace(type="cuda")
-            requires_grad = False
-
-            def stride(self):
-                return (1,)
-
-        openclaw_cuda_graphs._MAX_CACHE_SIZE = 1
-        openclaw_cuda_graphs.set_enabled(True, clear=True)
-        x = FakeTensor()
-
-        def fn(x_arg, sigma_arg, cond=None):
-            return x_arg
-
-        with mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
-             mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, FakeTensor)):
-            openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
-            openclaw_cuda_graphs.run(fn, x, x, cond={"x": x})
-
-        self.assertEqual(len(openclaw_cuda_graphs._KEY_LOCKS), 1)
 
 
     def test_first_capture_returns_graph_replay_after_single_side_stream_warmup(self):
@@ -467,15 +424,16 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         transposed = x.transpose(2, 3)
 
         with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 1),)):
-            base = self.graphs._key(model_a, x, 0)
-            self.assertNotEqual(base, self.graphs._key(model_b, x, 0))
-            self.assertNotEqual(base, self.graphs._key(model_a, transposed, 0))
+            base = self.graphs._key(model_a, x)
+            self.assertNotEqual(base, self.graphs._key(model_b, x))
+            # The capture reads a contiguous clone and a replay copies into it: the input layout never splits keys.
+            self.assertEqual(base, self.graphs._key(model_a, transposed))
             with mock.patch.object(self.graphs, "_mutation_epochs", return_value=(("vae_object_epoch", 2),)):
-                self.assertNotEqual(base, self.graphs._key(model_a, x, 0))
+                self.assertNotEqual(base, self.graphs._key(model_a, x))
 
         clone = x.clone()
         if torch.cuda.is_available():
-            self.assertNotEqual(base, self.graphs._key(model_a, clone.cuda(), 0))
+            self.assertNotEqual(base, self.graphs._key(model_a, clone.cuda()))
         self.assertNotEqual(self.graphs._tensor_key(x), self.graphs._tensor_key(x.to(torch.float64)))
 
     def test_parameter_mutation_and_callable_replacement_change_identity(self):
@@ -647,17 +605,15 @@ class OpenClawVaeDecodeGraphTests(unittest.TestCase):
         finally:
             self.graphs._CACHE_MAX = old_max
 
-    def test_capacity_eviction_bounds_retained_entries_and_locks(self):
+    def test_capacity_eviction_bounds_retained_entries(self):
         old_max = self.graphs._CACHE_MAX
         self.graphs._CACHE_MAX = 2
         try:
             for index in range(3):
                 key = (index,)
                 self.graphs._CACHE[key] = {"graph": object(), "input": object(), "output": object()}
-                self.graphs._key_lock(key)
                 self.graphs._evict_locked()
             self.assertEqual(list(self.graphs._CACHE), [(1,), (2,)])
-            self.assertNotIn((0,), self.graphs._KEY_LOCKS)
             self.assertEqual(self.graphs.status()["evictions"], 1)
         finally:
             self.graphs._CACHE_MAX = old_max
@@ -1225,7 +1181,7 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
         def key(backend="cudnn"):
             optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: backend)
             with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
-                return self.graphs._key(self.model, x, 0)
+                return self.graphs._key(self.model, x)
 
         base = key()
         self.assertEqual(key(), base)
@@ -1239,9 +1195,9 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
         x = torch.zeros(1, 4, 8, 8)
         switch = types.SimpleNamespace(state_key=lambda: ())
         with mock.patch.dict(sys.modules, {"modules.openclaw_nhwc_groupnorm": switch}):
-            off = self.graphs._key(self.model, x, 0)
+            off = self.graphs._key(self.model, x)
             switch.state_key = lambda: ("silu", "vae")  # the VAE GroupNorm kernel and fused swish a capture freezes
-            self.assertNotEqual(self.graphs._key(self.model, x, 0), off)
+            self.assertNotEqual(self.graphs._key(self.model, x), off)
 
     def test_vae_captures_share_one_pool(self):
         pools = []
@@ -1286,6 +1242,126 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
                     self.assertEqual(self.graphs.run(self.model, source(float(index))).value, float(index))
         self.assertEqual(len(pools), 1)
         self.assertEqual(graph_pools, [pools[0]] * 3)
+
+    def test_key_probe_failure_fails_closed_without_capture(self):
+        # An identity probe that raises must not collapse to a key shared by every model/VAE (a replay would then run
+        # another VAE's captured graph); the decode runs eagerly and the error stays visible.
+        before = self.graphs.status()["bypass_reasons"].get("key_probe_failed", 0)
+        with mock.patch.object(self.graphs, "_module_revision", side_effect=RuntimeError("probe exploded")), \
+             mock.patch.object(self.graphs, "_execute", side_effect=AssertionError("must not capture")):
+            self.assertIsNone(self.graphs.run(self.model, self.x))
+        status = self.graphs.status()
+        self.assertEqual(status["bypass_reasons"].get("key_probe_failed", 0), before + 1)
+        self.assertEqual(status["cache_size"], 0)
+        self.assertIn("probe exploded", status["last_error"])
+
+    def test_inference_mode_vae_parameters_key_by_identity(self):
+        # A checkpoint constructed under torch.inference_mode() (processing reloads models inside it) owns inference
+        # tensors, whose ._version raises; the revision keys them by identity/address instead of failing.
+        with torch.inference_mode():
+            vae = torch.nn.Module()
+            vae.decoder = torch.nn.Linear(1, 1)
+            other = torch.nn.Module()
+            other.decoder = torch.nn.Linear(1, 1)
+        first = self.graphs._module_revision(vae)
+        self.assertEqual(first, self.graphs._module_revision(vae))
+        self.assertNotEqual(first, self.graphs._module_revision(other))
+        self.assertTrue(first[4] and all(entry[2] is None for entry in first[4]))
+
+    def test_manual_reset_is_reported_under_the_graph_family(self):
+        from modules import openclaw_cache_epochs
+
+        def family(family_id):
+            return next(item for item in openclaw_cache_epochs.snapshot()["families"] if item["id"] == family_id)
+
+        e10_before = family("E10")["events"]["invalidate"]
+        e11_before = family("E11")["reason_counts"].get("manual", 0)
+        self.graphs.set_enabled(None, clear_cache=True)
+        self.assertEqual(family("E10")["events"]["invalidate"], e10_before)
+        self.assertEqual(family("E11")["reason_counts"].get("manual", 0), e11_before + 1)
+
+
+def _load_module_copy(module, name, environ):
+    """Execute a fresh copy of `module`'s source under `name` (sys.modules is untouched) with `environ` applied."""
+    spec = importlib.util.spec_from_file_location(name, Path(module.__file__))
+    copy = importlib.util.module_from_spec(spec)
+    with mock.patch.dict(os.environ, environ):
+        spec.loader.exec_module(copy)
+    return copy
+
+
+class GraphCacheStateContractTests(unittest.TestCase):
+    def setUp(self):
+        from modules import openclaw_vae_decode_graphs
+
+        self.vae_graphs = openclaw_vae_decode_graphs
+        openclaw_cuda_graphs.clear()
+
+    def tearDown(self):
+        openclaw_cuda_graphs.clear()
+        self.vae_graphs.invalidate("test_cleanup")
+        openclaw_cuda_graphs.publish_graph_cache_size()
+
+    def test_cuda_graph_knob_is_read_once_at_import(self):
+        self.assertTrue(_load_module_copy(openclaw_cuda_graphs, "openclaw_cuda_graphs_env_on", {"OPENCLAW_CUDA_GRAPHS": "1"})._ENABLED)
+        self.assertFalse(_load_module_copy(openclaw_cuda_graphs, "openclaw_cuda_graphs_env_off", {"OPENCLAW_CUDA_GRAPHS": "0"})._ENABLED)
+        with self.assertRaises(ValueError):  # fail-fast at startup, not a logged-and-ignored setting
+            _load_module_copy(openclaw_cuda_graphs, "openclaw_cuda_graphs_env_bad", {"OPENCLAW_CUDA_GRAPHS": "maybe"})
+
+    def test_vae_import_records_no_invalidation(self):
+        fresh = _load_module_copy(self.vae_graphs, "openclaw_vae_decode_graphs_env_on", {"OPENCLAW_VAE_DECODE_GRAPHS": "1"})
+        status = fresh.status()
+        self.assertTrue(status["enabled"])
+        self.assertEqual((status["invalidations"], status["invalidation_reasons"]), (0, {}))
+
+    def test_status_is_a_snapshot(self):
+        openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
+        openclaw_cuda_graphs.invalidate("model_changed")
+        snapshot = openclaw_cuda_graphs.status()
+        openclaw_cuda_graphs._CACHE[("stale",)] = {"dummy": True}
+        openclaw_cuda_graphs.invalidate("vae_changed")
+        openclaw_cuda_graphs._record_bypass("hypernetworks")
+        self.assertEqual(snapshot["invalidation_reasons"], {"model_changed": 1})
+        self.assertEqual(snapshot["bypass_reasons"], {})
+
+    def assert_waits_for_runtime_lock(self, action):
+        held, release, done = threading.Event(), threading.Event(), threading.Event()
+
+        def hold_runtime_lock():  # stands in for a replay/capture in flight
+            with openclaw_cuda_graphs._RUNTIME_LOCK:
+                held.set()
+                release.wait(1)
+
+        holder = threading.Thread(target=hold_runtime_lock)
+        holder.start()
+        self.assertTrue(held.wait(1))
+        worker = threading.Thread(target=lambda: (action(), done.set()))
+        worker.start()
+        self.assertFalse(done.wait(0.05))
+        release.set()
+        holder.join(1)
+        worker.join(1)
+        self.assertTrue(done.is_set())
+
+    def test_clear_waits_for_inflight_replay_or_capture(self):
+        self.assert_waits_for_runtime_lock(openclaw_cuda_graphs.clear)
+
+    def test_disable_waits_for_inflight_replay_or_capture(self):
+        self.assert_waits_for_runtime_lock(lambda: openclaw_cuda_graphs.set_enabled(False))
+
+    def test_e11_size_is_the_sum_of_both_graph_caches(self):
+        from modules import openclaw_cache_epochs
+
+        def e11():
+            return next(item for item in openclaw_cache_epochs.snapshot()["families"] if item["id"] == "E11")
+
+        openclaw_cuda_graphs.publish_graph_cache_size()
+        self.assertEqual(e11()["capacity"], openclaw_cuda_graphs._MAX_CACHE_SIZE + self.vae_graphs._CACHE_MAX)
+        self.assertEqual(e11()["current_size"], 0)
+        openclaw_cuda_graphs._CACHE[("unet",)] = {"dummy": True}
+        self.vae_graphs._CACHE[("vae",)] = {"dummy": True}
+        openclaw_cuda_graphs.publish_graph_cache_size()
+        self.assertEqual(e11()["current_size"], 2)
 
 
 if __name__ == "__main__":
