@@ -122,7 +122,8 @@ def get_sampler_and_scheduler(sampler_name, scheduler_name, *, convert_automatic
     return _resolve_sampler_and_scheduler(sampler_name, scheduler_name, convert_automatic, strict, _registry_generation)
 
 
-@functools.cache
+# Bounded: the key includes request strings, and API callers can send any number of distinct names.
+@functools.lru_cache(maxsize=256)
 def _resolve_sampler_and_scheduler(sampler_name, scheduler_name, convert_automatic, strict, _generation):
     default_sampler = samplers[0]
     found_scheduler = sd_schedulers.schedulers_map.get(scheduler_name, sd_schedulers.schedulers[0])
