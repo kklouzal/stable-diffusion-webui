@@ -58,13 +58,27 @@ def test_thread_safety_and_counter_accuracy():
     assert len(item["semantic_key_digests"]) <= openclaw_cache_epochs.MAX_KEY_SUMMARIES
 
 
+def test_unknown_reason_is_rejected_not_coerced():
+    # A reason outside the fixed vocabulary is caller drift (or private text): fail like bump_epoch(), never count it.
+    for reason in ("not-allowed", "exact", "manual_reset", None):
+        try:
+            openclaw_cache_epochs.observe("E12", "reject", reason=reason, semantic_key=("key", 1))
+        except ValueError as error:
+            assert "unknown cache telemetry reason" in str(error)
+        else:
+            raise AssertionError(f"reason {reason!r} was accepted")
+    item = family(openclaw_cache_epochs.snapshot(), "E12")
+    assert item["events"]["reject"] == 0
+    assert item["reason_counts"] == {}
+
+
 def test_bounded_reason_key_and_dependency_retention():
     for index in range(100):
-        openclaw_cache_epochs.observe("E12", "reject", reason=f"not-allowed-{index}", semantic_key=("key", index))
+        openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=("key", index))
         openclaw_cache_epochs.observe_dependency("E12", {"lora_source_epoch": index, "unknown_secret": f"secret-{index}"})
 
     item = family(openclaw_cache_epochs.snapshot(), "E12")
-    assert item["reason_counts"] == {"other": 100, "dependency_snapshot": 100}
+    assert item["reason_counts"] == {"rejected": 100, "dependency_snapshot": 100}
     assert len(item["semantic_key_digests"]) == openclaw_cache_epochs.MAX_KEY_SUMMARIES
     assert len(item["dependency_observation_digests"]) == openclaw_cache_epochs.MAX_KEY_SUMMARIES
     assert item["semantic_key_observations"] == 100

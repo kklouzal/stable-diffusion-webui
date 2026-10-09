@@ -48,20 +48,20 @@ def test_epoch_bumps_are_monotonic_and_reasons_are_validated():
     with pytest.raises(ValueError, match="invalid epoch bump reason"):
         openclaw_cache_epochs.bump_epoch(dimension, reason="private/raw/reason")
 
-    assert openclaw_cache_epochs.epoch_snapshot()["epochs"][dimension] == 2
+    assert openclaw_cache_epochs.epoch_subset((dimension,)) == ((dimension, 2),)
 
 
-def test_epoch_snapshot_is_atomic_with_stable_opaque_digest():
+def test_public_summary_digest_is_stable_and_opaque():
     openclaw_cache_epochs.bump_epoch("vae_object_epoch", reason="vae_loaded")
-    first = openclaw_cache_epochs.epoch_snapshot()
-    second = openclaw_cache_epochs.epoch_snapshot()
+    first = openclaw_cache_epochs.epoch_public_summary()
+    second = openclaw_cache_epochs.epoch_public_summary()
 
     assert first == second
     assert HEX_DIGEST.fullmatch(first["digest"])
     assert first["digest"] == digest(first["epochs"])
 
     openclaw_cache_epochs.bump_epoch("vae_object_epoch", reason="vae_unloaded")
-    third = openclaw_cache_epochs.epoch_snapshot()
+    third = openclaw_cache_epochs.epoch_public_summary()
     assert third["digest"] == digest(third["epochs"])
     assert third["digest"] != first["digest"]
 
@@ -75,7 +75,7 @@ def test_concurrent_epoch_bumps_are_not_lost_and_snapshots_are_consistent():
 
     def sample_snapshots():
         while not stop.is_set():
-            observed.append(openclaw_cache_epochs.epoch_snapshot())
+            observed.append(openclaw_cache_epochs.epoch_public_summary())
 
     sampler = threading.Thread(target=sample_snapshots)
     sampler.start()
@@ -94,7 +94,7 @@ def test_concurrent_epoch_bumps_are_not_lost_and_snapshots_are_consistent():
         stop.set()
         sampler.join()
 
-    final = openclaw_cache_epochs.epoch_snapshot()
+    final = openclaw_cache_epochs.epoch_public_summary()
     assert final["epochs"][dimension] == workers * bumps_per_worker
     assert observed
     assert all(item["digest"] == digest(item["epochs"]) for item in observed)

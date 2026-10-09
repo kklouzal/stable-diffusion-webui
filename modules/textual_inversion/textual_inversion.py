@@ -156,7 +156,7 @@ class EmbeddingDatabase:
     def read_embedding_from_image(self, path, name):
         try:
             ondisk_mtime = os.path.getmtime(path)
-            semantic_key = openclaw_cache_epochs.registry.digest((os.path.realpath(path), ondisk_mtime))
+            semantic_key = (os.path.realpath(path), ondisk_mtime)
 
             if (cache_embedding := self.image_embedding_cache.get(path)) and ondisk_mtime == cache_embedding.get('mtime', 0):
                 openclaw_cache_epochs.observe("E07", "hit", reason="cache_hit", semantic_key=semantic_key)

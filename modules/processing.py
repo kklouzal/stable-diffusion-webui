@@ -569,7 +569,7 @@ class StableDiffusionProcessing:
         """Return the complete semantic conditioning key and atomic dependency snapshot."""
         relevant_epochs = openclaw_cache_epochs.epoch_subset((
             "checkpoint_object_epoch", "conditioner_epoch", "textual_inversion_epoch",
-            "tokenizer_epoch", "conditioning_hook_epoch", "precision_epoch", "device_epoch",
+            "tokenizer_epoch", "conditioning_hook_epoch", "device_epoch",
         ))
         effective_network_state = self.active_lora_cond_signature()
         openclaw_cache_epochs.observe_dependency("E05", dict(relevant_epochs))
@@ -637,7 +637,7 @@ class StableDiffusionProcessing:
             stats = getattr(self, "openclaw_cond_cache_stats", None)
             if stats is None:
                 stats = self.openclaw_cond_cache_stats = _cache_stats()
-            semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
+            semantic_key = cached_params  # observe() digests it (opaquely) itself
 
             with StableDiffusionProcessing.conditioning_cache_lock:
                 if cache[0] is not None and cached_params == cache[0]:
@@ -647,7 +647,7 @@ class StableDiffusionProcessing:
                     return cache[1]
 
                 reason = self._conditioning_cache_miss_reason(cache[0], cached_params)
-                openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
+                openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss" if reason == "cold" else "dependency_changed", semantic_key=semantic_key)
                 started = time.perf_counter()
                 infotext = model_hijack.extra_generation_params
                 model_hijack.extra_generation_params = {}

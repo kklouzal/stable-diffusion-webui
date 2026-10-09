@@ -6,7 +6,7 @@ def text(path): return (ROOT / path).read_text()
 
 def test_conditioning_key_contract_and_isolation():
     src=text('modules/processing.py')
-    for epoch in ('checkpoint_object_epoch','conditioner_epoch','textual_inversion_epoch','tokenizer_epoch','conditioning_hook_epoch','precision_epoch','device_epoch'):
+    for epoch in ('checkpoint_object_epoch','conditioner_epoch','textual_inversion_epoch','tokenizer_epoch','conditioning_hook_epoch','device_epoch'):
         assert f'"{epoch}"' in src
     assert 'effective_network_state = self.active_lora_cond_signature()' in src
     assert 'effective_network_state,' in src
@@ -61,7 +61,7 @@ def test_each_conditioning_epoch_changes_atomic_subset(monkeypatch):
     relevant = (
         'checkpoint_object_epoch', 'conditioner_epoch', 'textual_inversion_epoch',
         'tokenizer_epoch', 'conditioning_hook_epoch', 'lora_applied_epoch',
-        'precision_epoch', 'device_epoch',
+        'device_epoch',
     )
     epochs.epoch_registry.reset()
     baseline = epochs.epoch_subset(relevant)

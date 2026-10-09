@@ -196,12 +196,14 @@ class CacheTelemetryRegistry:
             state.current_size = _safe_nonnegative_int(current_size)
             state.capacity = _safe_nonnegative_int(capacity)
 
-    def observe(self, family_id: str, event: str, *, reason: str | None = None, semantic_key: Any = None, count: int = 1) -> None:
+    def observe(self, family_id: str, event: str, *, reason: str, semantic_key: Any = None, count: int = 1) -> None:
+        """Count one event. `semantic_key` is digested here (opaque, never repr'd); pass the raw key, not a digest."""
         if event not in EVENTS:
             raise ValueError(f"unknown cache telemetry event: {event}")
+        if reason not in REASON_CODES:
+            raise ValueError(f"unknown cache telemetry reason: {reason}")
         if count < 0:
             raise ValueError("count must be non-negative")
-        reason = reason if reason in REASON_CODES else "other"
         with self._lock:
             state = self._state(family_id)
             state.events[event] += count
@@ -355,10 +357,9 @@ class EpochRegistry:
             self._reason_counts[reason] += 1
             return self._epochs[dimension]
 
-    def atomic_snapshot(self) -> dict[str, Any]:
+    def atomic_snapshot(self) -> dict[str, int]:
         with self._lock:
-            epochs = dict(self._epochs)
-        return {"epochs": epochs, "digest": self._digest(epochs)}
+            return dict(self._epochs)
 
     def public_summary(self) -> dict[str, Any]:
         with self._lock:
@@ -496,7 +497,7 @@ generation_owner_registry = GenerationOwnerRegistry()
 registry = CacheTelemetryRegistry()
 
 
-def observe(family_id: str, event: str, *, reason: str | None = None, semantic_key: Any = None, count: int = 1) -> None:
+def observe(family_id: str, event: str, *, reason: str, semantic_key: Any = None, count: int = 1) -> None:
     registry.observe(family_id, event, reason=reason, semantic_key=semantic_key, count=count)
 
 
@@ -519,13 +520,9 @@ def bump_epoch(dimension: str, *, reason: str) -> int:
     return epoch_registry.bump(dimension, reason=reason)
 
 
-def epoch_snapshot() -> dict[str, Any]:
-    return epoch_registry.atomic_snapshot()
-
-
 def epoch_subset(dimensions: tuple[str, ...]) -> tuple[tuple[str, int], ...]:
     """Capture an ordered subset from one atomic registry snapshot."""
-    snapshot = epoch_registry.atomic_snapshot()["epochs"]
+    snapshot = epoch_registry.atomic_snapshot()
     unknown = set(dimensions) - set(snapshot)
     if unknown:
         raise ValueError("unknown epoch dimension")
