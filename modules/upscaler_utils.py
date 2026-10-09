@@ -138,7 +138,11 @@ def tiled_upscale_2(
     # Alternative implementation of `upscale_with_model` originally used by
     # SwinIR and ScuNET.  It differs from `upscale_with_model` in that tiling and
     # weighting is done in PyTorch space, as opposed to `images.Grid` doing it in
-    # Pillow space without weighting.
+    # Pillow space.  Each tile's weight ramps up linearly over the `tile_overlap`
+    # (times `scale`) output pixels along every edge it shares with another tile
+    # and is 1 elsewhere, so overlapping tiles are cross-faded instead of
+    # averaged evenly, which kept both tiles' border errors in the seam; with
+    # `tile_overlap` 0 every weight is 1, the former plain average.
     # Returns None when interrupted or skipped before every tile ran.
 
     b, c, h, w = img.size()
@@ -160,8 +164,22 @@ def tiled_upscale_2(
         device=device,
         dtype=img.dtype,
     )
-    # Per-pixel tile count; the same for every channel, so one channel broadcast over `result` suffices.
+    # Per-pixel weight sum; the same for every channel, so one channel broadcast over `result` suffices.
     weights = torch.zeros((1, 1, h * scale, w * scale), device=device, dtype=img.dtype)
+
+    def edge_ramp(starts_inside: bool, ends_inside: bool) -> torch.Tensor:
+        # min(1, distance in pixels from each shared edge / (ramp + 1)), in float64: never 0, so every output pixel
+        # gets a positive weight sum.
+        ramp = tile_overlap * scale
+        distance = torch.arange(1, tile_size * scale + 1, dtype=torch.float64)
+        weight = torch.ones_like(distance)
+        if starts_inside:
+            weight = torch.minimum(weight, distance / (ramp + 1))
+        if ends_inside:
+            weight = torch.minimum(weight, distance.flip(0) / (ramp + 1))
+        return weight
+
+    tile_weights = {}  # by which of the tile's edges are shared: at most 9 distinct tiles
     logger.debug("Upscaling %s to %s with tiles", img.shape, result.shape)
     with tqdm.tqdm(total=len(h_idx_list) * len(w_idx_list), desc=desc, disable=not shared.opts.enable_upscale_progressbar) as pbar:
         for h_idx in h_idx_list:
@@ -179,17 +197,23 @@ def tiled_upscale_2(
 
                 out_patch = model(in_patch)
 
+                edges = (h_idx > 0, h_idx + tile_size < h, w_idx > 0, w_idx + tile_size < w)
+                tile_weight = tile_weights.get(edges)
+                if tile_weight is None:
+                    tile_weight = torch.outer(edge_ramp(*edges[:2]), edge_ramp(*edges[2:])).to(device=device, dtype=img.dtype)
+                    tile_weights[edges] = tile_weight
+
                 result[
                     ...,
                     h_idx * scale : (h_idx + tile_size) * scale,
                     w_idx * scale : (w_idx + tile_size) * scale,
-                ].add_(out_patch)
+                ].addcmul_(out_patch, tile_weight)
 
                 weights[
                     ...,
                     h_idx * scale : (h_idx + tile_size) * scale,
                     w_idx * scale : (w_idx + tile_size) * scale,
-                ].add_(1)
+                ].add_(tile_weight)
 
                 pbar.update(1)
 

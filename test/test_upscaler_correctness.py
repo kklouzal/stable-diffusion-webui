@@ -214,8 +214,19 @@ def test_tile_taller_than_image_has_no_black_padding_in_rows(env):
 
 # --- upscale_2 (SwinIR / ScuNET) --------------------------------------------------------------------------------
 
-def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale):
-    """The former implementation: CPU float64 -> dtype tensor, per-tile copy, ones-tensor weights, no autocast."""
+def _feather(length, ramp, starts_inside, ends_inside):
+    """Per-axis tile weight: rises linearly over `ramp` pixels from each edge shared with another tile."""
+    position = np.arange(length, dtype=np.float64)
+    weight = np.ones(length)
+    if starts_inside:
+        weight = np.minimum(weight, (position + 1) / (ramp + 1))
+    if ends_inside:
+        weight = np.minimum(weight, (length - position) / (ramp + 1))
+    return weight
+
+
+def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale, feather=True):
+    """CPU float64 -> dtype tensor, per-tile copy, no autocast; `feather=False` is the former plain average."""
     param = next(model.parameters())
     arr = np.ascontiguousarray(np.transpose(np.array(img.convert("RGB"))[:, :, ::-1], (2, 0, 1))) / 255
     tensor = torch.from_numpy(arr).to(dtype=param.dtype).unsqueeze(0)
@@ -232,15 +243,23 @@ def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale):
             for w_idx in w_idx_list:
                 out_patch = model(tensor[..., h_idx:h_idx + tile_size, w_idx:w_idx + tile_size])
                 region = (..., slice(h_idx * scale, (h_idx + tile_size) * scale), slice(w_idx * scale, (w_idx + tile_size) * scale))
-                result[region].add_(out_patch)
-                weights[region].add_(torch.ones_like(out_patch))
+                if feather:
+                    n, ramp = tile_size * scale, tile_overlap * scale
+                    weight = torch.from_numpy(np.outer(
+                        _feather(n, ramp, h_idx > 0, h_idx + tile_size < h), _feather(n, ramp, w_idx > 0, w_idx + tile_size < w),
+                    )).to(tensor.dtype)
+                    result[region].addcmul_(out_patch, weight)  # one rounding of out * weight + sum in bf16
+                    weights[region].add_(weight.expand_as(out_patch))
+                else:
+                    result[region].add_(out_patch)
+                    weights[region].add_(torch.ones_like(out_patch))
         output = result.div_(weights)
     arr = output.squeeze(0).float().clamp(0, 1).mul(255.0).round().to(torch.uint8).flip(0).permute(1, 2, 0).numpy()
     return Image.fromarray(np.ascontiguousarray(arr), "RGB")
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_upscale_2_matches_former_cpu_path(env, dtype):
+def test_upscale_2_matches_the_feathered_cpu_oracle(env, dtype):
     model = _ReplicatePadUpscaler().to(dtype).eval()
     img = _random_image(53, 41, seed=5)
 
@@ -248,6 +267,59 @@ def test_upscale_2_matches_former_cpu_path(env, dtype):
 
     expected = _oracle_upscale_2(img, model, tile_size=16, tile_overlap=5, scale=2)
     assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_upscale_2_without_overlap_is_the_former_plain_average(env, dtype):
+    # 53x41 in 16 px tiles: the last tile of each row and column still overlaps its neighbour.
+    model = _ReplicatePadUpscaler().to(dtype).eval()
+    img = _random_image(53, 41, seed=5)
+
+    result = env.upscaler_utils.upscale_2(img, model, tile_size=16, tile_overlap=0, scale=2, desc="t")
+
+    expected = _oracle_upscale_2(img, model, tile_size=16, tile_overlap=0, scale=2, feather=False)
+    assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+class _BlurNet(torch.nn.Module):
+    """Four zero-padded 5x5 box blurs: like a conv net, its output near a tile edge depends on the missing context."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("kernel", torch.ones(3, 1, 5, 5) / 25)
+
+    def forward(self, x):
+        for _ in range(4):
+            x = torch.nn.functional.conv2d(x, self.kernel, padding=2, groups=3)
+        return x
+
+
+def test_feathered_tiles_approach_the_untiled_result_as_overlap_grows(env):
+    model = _BlurNet()
+    img = torch.rand(1, 3, 256, 256, generator=torch.Generator().manual_seed(0))
+    untiled = model(img)
+
+    def error(tile_overlap, plain=False):
+        if plain:  # the former plain average: what every tile_overlap gave before feathering
+            out = _oracle_tensor_plain_average(model, img, tile_size=96, tile_overlap=tile_overlap)
+        else:
+            out = env.upscaler_utils.tiled_upscale_2(img, model, tile_size=96, tile_overlap=tile_overlap, scale=1, device=torch.device("cpu"))
+        return (out - untiled).abs().max().item()
+
+    feathered = [error(overlap) for overlap in (8, 16, 32)]
+    assert feathered[0] > feathered[1] > feathered[2]
+    assert all(f < error(overlap, plain=True) / 2 for f, overlap in zip(feathered, (8, 16, 32)))
+
+
+def _oracle_tensor_plain_average(model, img, *, tile_size, tile_overlap):
+    _, _, h, w = img.shape
+    stride = tile_size - tile_overlap
+    result, count = torch.zeros_like(img), torch.zeros_like(img)
+    for y in list(range(0, h - tile_size, stride)) + [h - tile_size]:
+        for x in list(range(0, w - tile_size, stride)) + [w - tile_size]:
+            result[..., y:y + tile_size, x:x + tile_size] += model(img[..., y:y + tile_size, x:x + tile_size])
+            count[..., y:y + tile_size, x:x + tile_size] += 1
+    return result / count
 
 
 def test_upscale_2_runs_model_outside_sampler_autocast(env):
