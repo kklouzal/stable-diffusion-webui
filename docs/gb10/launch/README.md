@@ -39,7 +39,7 @@ The build records its provenance as OCI labels on the image, which `gb10/run.sh`
 
 | Label | Value |
 |---|---|
-| `org.opencontainers.image.revision` | `git rev-parse HEAD` of the checkout, with `-dirty` when `git status --porcelain` is not empty |
+| `org.opencontainers.image.revision` | `git rev-parse HEAD` of the checkout, with `-dirty` when what the build reads has uncommitted or untracked (not ignored) changes: the paths `.dockerignore` allows (read as literal paths), `.dockerignore` and the Dockerfile. A Dockerfile outside the checkout always counts as dirty |
 | `org.opencontainers.image.version` | `git describe --tags` of the checkout: the infotext `Version` |
 | `org.opencontainers.image.base.name` / `.base.digest` | the base image and its registry digest (`docker buildx imagetools inspect`) |
 
