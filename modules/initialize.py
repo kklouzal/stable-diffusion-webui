@@ -148,7 +148,6 @@ def initialize_rest():
         by that time, so we apply optimization again.
         """
         from modules import devices
-        devices.torch_npu_set_device()
 
         shared.sd_model  # noqa: B018
 
