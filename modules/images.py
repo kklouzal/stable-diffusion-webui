@@ -925,9 +925,15 @@ def pixel_fingerprint(image):
     )
 
 
+class UnsupportedImageError(ValueError):
+    """Decoded image data that has no defined mapping to 8 bits: a pixel mode whose value range the format does not
+    define (32-bit integer "I", float "F")."""
+
+
 def read(fp, *, max_pixels=None, **kwargs):
     """Opens and decodes an image. An image of more than max_pixels pixels raises Image.DecompressionBombError once
-    its header is read, before its pixel data is decoded."""
+    its header is read, before its pixel data is decoded. See fix_image for the conversions; an image it cannot
+    convert raises UnsupportedImageError."""
     image = Image.open(fp, **kwargs)
     if max_pixels is not None and image.width * image.height > max_pixels:
         image.close()
@@ -939,8 +945,12 @@ def read(fp, *, max_pixels=None, **kwargs):
 
 
 def fix_image(image: Image.Image):
+    """Maps 16-bit grayscale to 8 bits and applies EXIF orientation and palette transparency. Orientation/transparency
+    errors are ignored (as before); unsupported modes raise UnsupportedImageError."""
     if image is None:
         return None
+
+    image = _sixteen_bit_gray_to_8_bit(image)
 
     try:
         image = ImageOps.exif_transpose(image)
@@ -949,6 +959,29 @@ def fix_image(image: Image.Image):
         pass
 
     return image
+
+
+_SIXTEEN_BIT_GRAY_MODES = frozenset(("I;16", "I;16B", "I;16L", "I;16N"))
+
+
+def _sixteen_bit_gray_to_8_bit(image):
+    """16-bit grayscale (a 16-bit PNG decodes as I;16) to L with v -> round(v / 257), so 65535 -> 255; everything
+    downstream converts with convert("L"/"RGB"), which clips every value above 255 to white. A 16-bit transparent
+    colour key (PNG tRNS) becomes an alpha channel (LA): no 8-bit key can single out the same pixels. 32-bit integer
+    ("I") and float ("F") images have no defined value range and are rejected."""
+    if image.mode in ("I", "F"):
+        raise UnsupportedImageError(f"Unsupported image mode {image.mode}: the range of its values is undefined")
+    if image.mode not in _SIXTEEN_BIT_GRAY_MODES:
+        return image
+
+    values = np.asarray(image).astype(np.uint32)
+    gray = Image.fromarray(((values + 128) // 257).astype(np.uint8))  # 257 is odd: v / 257 never ties
+    info = dict(image.info)
+    key = info.pop("transparency", None)
+    if isinstance(key, int):
+        gray = Image.merge("LA", (gray, Image.fromarray(np.where(values == key, 0, 255).astype(np.uint8))))
+    gray.info = info
+    return gray
 
 
 def fix_png_transparency(image: Image.Image):

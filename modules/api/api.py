@@ -627,7 +627,8 @@ def decode_base64_to_image(encoding):
     """Decodes an API input image: an http(s) URL (if api_enable_requests), an RFC 2397 data URL or plain base64.
     An image of more than img_max_size_mp megapixels answers 413 once its header is read, before its pixels are
     decoded. A URL download may be as long as an image of that many pixels stored uncompressed as 8-bit RGBA (4 bytes
-    per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit.
+    per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit. A decoded image
+    images.read cannot map to 8 bits (images.UnsupportedImageError) answers 422.
     Inside decode_inline_images_once, inline data decoded earlier in the request returns a new copy of that decode
     (URLs are always fetched: the resource may change)."""
     max_pixels = int(opts.img_max_size_mp * 1_000_000)
@@ -643,6 +644,8 @@ def decode_base64_to_image(encoding):
             return image
         except Image.DecompressionBombError as e:
             raise HTTPException(status_code=413, detail=str(e)) from e
+        except images.UnsupportedImageError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(status_code=500, detail="Invalid image url") from e
 
@@ -660,6 +663,8 @@ def decode_base64_to_image(encoding):
         image = images.read(BytesIO(base64.b64decode(encoding)), max_pixels=max_pixels)
     except Image.DecompressionBombError as e:
         raise HTTPException(status_code=413, detail=str(e)) from e
+    except images.UnsupportedImageError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail="Invalid encoded image") from e
 

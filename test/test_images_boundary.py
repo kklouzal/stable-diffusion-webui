@@ -374,3 +374,41 @@ def test_read_refuses_more_than_max_pixels_from_the_header(images):
         images.read(io.BytesIO(raw[: len(raw) // 2]), max_pixels=40 * 26)
 
     assert images.read(io.BytesIO(raw), max_pixels=40 * 26).size == (40, 26)
+
+
+def _png(image, **params):
+    data = io.BytesIO()
+    image.save(data, format="PNG", **params)
+    return io.BytesIO(data.getvalue())
+
+
+def test_read_maps_sixteen_bit_gray_to_eight_bits(images):
+    """A 16-bit grayscale PNG (I;16) becomes L with v -> round(v / 257); convert("L") clipped every value above 255."""
+    values = np.arange(65536, dtype=np.uint16).reshape(256, 256)
+
+    image = images.read(_png(Image.fromarray(values)))
+
+    assert image.mode == "L"
+    assert np.array_equal(np.asarray(image), ((values.astype(np.int64) + 128) // 257).astype(np.uint8))  # 257 is odd: no ties
+    big_endian = Image.frombytes("I;16B", (256, 256), values.astype(">u2").tobytes())
+    assert np.array_equal(np.asarray(images.fix_image(big_endian)), np.asarray(image))
+
+
+def test_read_turns_a_sixteen_bit_colour_key_into_alpha(images):
+    values = np.array([[0, 300, 301, 65535]], dtype=np.uint16)  # 300 and 301 both map to 1
+
+    image = images.read(_png(Image.fromarray(values), transparency=300))
+
+    assert image.mode == "LA" and "transparency" not in image.info
+    assert np.asarray(image.getchannel("L")).tolist() == [[0, 1, 1, 255]]
+    assert np.asarray(image.getchannel("A")).tolist() == [[255, 0, 255, 255]]
+
+
+@pytest.mark.parametrize("array", [np.full((2, 3), 40000, dtype=np.int32), np.full((2, 3), 0.5, dtype=np.float32)])
+def test_read_rejects_images_without_a_defined_value_range(images, array):
+    data = io.BytesIO()
+    Image.fromarray(array).save(data, format="TIFF")
+
+    with pytest.raises(images.UnsupportedImageError):
+        images.read(io.BytesIO(data.getvalue()))
+
