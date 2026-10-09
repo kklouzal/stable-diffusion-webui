@@ -2,6 +2,8 @@ import torch
 from packaging import version
 from einops import repeat
 import math
+import sgm.modules.diffusionmodules.model as _SGM_VAE
+import sgm.modules.diffusionmodules.util as _sgm_util
 
 from modules import devices, openclaw_fused_geglu, shared, openclaw_nhwc_groupnorm as nhwc_group_norm
 from modules.sd_hijack_utils import CondFunc
@@ -206,11 +208,7 @@ class UnetGroupNorm(torch.nn.GroupNorm):
 
     def forward(self, x):
         if bf16_native_norm_eligible(self, x):
-            y = unet_nhwc_group_norm(self, x)
-            if y is not None:
-                return y
-            with torch.autocast("cuda", enabled=False):
-                return torch.nn.GroupNorm.forward(self, x)
+            return group_norm32_bf16_forward(None, self, x)
         return torch.nn.GroupNorm.forward(self, x)
 
 
@@ -236,7 +234,7 @@ _TORCH_SILU_FORWARD = torch.nn.SiLU.forward
 
 def _fusable_norm_silu(norm, silu, norm_forward):
     """norm runs norm_forward (no subclass or later patch) and silu is a plain torch SiLU."""
-    return norm_forward is not None and type(norm).forward is norm_forward and type(silu) is torch.nn.SiLU and torch.nn.SiLU.forward is _TORCH_SILU_FORWARD
+    return type(norm).forward is norm_forward and type(silu) is torch.nn.SiLU and torch.nn.SiLU.forward is _TORCH_SILU_FORWARD
 
 
 def sgm_resblock_forward(orig_func, self, x, emb):
@@ -299,7 +297,7 @@ def sgm_vae_resnet_block_forward(orig_func, self, x, temb, **kwargs):
     the fp32 normalized value before its single rounding. Any other nonlinearity, norms that are not plain VaeGroupNorm
     instances without hooks or overrides, or NCHW input run the upstream forward."""
     norm1, norm2 = self.norm1, self.norm2
-    nonlinearity = getattr(_SGM_VAE, "nonlinearity", None)
+    nonlinearity = _SGM_VAE.nonlinearity  # read per call: sd_hijack.apply_optimizations swaps it
     if (
         kwargs or type(norm1) is not VaeGroupNorm or type(norm2) is not VaeGroupNorm
         or nonlinearity not in _VAE_SWISH_FUNCTIONS
@@ -377,14 +375,10 @@ CondFunc('sgm.modules.attention.SpatialTransformer.__init__', spatial_transforme
 # upstream forwards run unchanged. VAE norms are always VaeGroupNorm, which is the plain GroupNorm path while off.
 # sgm is what SDXL (and ControlNet, whose cldm builds from sgm when it imports) runs; the ldm GroupNorm32 and
 # SpatialTransformer.norm share the unet-scope GroupNorm dispatch above.
-try:
-    import sgm.modules.diffusionmodules.util as _sgm_util
-    import sgm.modules.diffusionmodules.model as _SGM_VAE
-except ImportError:
-    _sgm_util = _SGM_VAE = None
-_SGM_GROUPNORM32_FORWARD = getattr(getattr(_sgm_util, "GroupNorm32", None), "forward", None)
+# The GroupNorm32.forward hijack installed above (read after the CondFunc so _fusable_norm_silu compares against it).
+_SGM_GROUPNORM32_FORWARD = _sgm_util.GroupNorm32.forward
 # Swish as sgm defines it, and torch's silu that sd_hijack.apply_optimizations installs in its place.
-_VAE_SWISH_FUNCTIONS = tuple(f for f in (getattr(_SGM_VAE, "nonlinearity", None), torch.nn.functional.silu) if f is not None)
+_VAE_SWISH_FUNCTIONS = (_SGM_VAE.nonlinearity, torch.nn.functional.silu)
 _UNET_SILU_SCOPES = frozenset((nhwc_group_norm.UNET, nhwc_group_norm.SILU))
 _VAE_SILU_SCOPES = frozenset((nhwc_group_norm.VAE, nhwc_group_norm.SILU))
 CondFunc('sgm.modules.diffusionmodules.openaimodel.ResBlock._forward', sgm_resblock_forward, lambda *args, **kwargs: _UNET_SILU_SCOPES <= nhwc_group_norm.scopes())
