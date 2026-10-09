@@ -316,6 +316,7 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
     assert new["run_args"][-1] == NEW_ID
     assert "A1111_COMMIT_HASH=c0ffee" in new["env"]
     assert f"A1111_VERSION_TAG={NEW_LABELS['org.opencontainers.image.version']}" in new["env"]
+    assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in new["env"]
     # The old container was stopped gracefully and set aside, then removed once the new one passed.
     assert ["stop", "-t", "120", "gb10-a1111-latest"] in state["calls"]
     assert ["rename", "gb10-a1111-latest", "gb10-a1111-latest-previous"] in state["calls"]

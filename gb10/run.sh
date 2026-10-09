@@ -16,6 +16,9 @@ OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX:-8}"
 OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS:-1}"
 OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX:-4}"
 OPENCLAW_COMPILE_CACHE_ROOT="${OPENCLAW_COMPILE_CACHE_ROOT:-${HOST_ROOT}/Caches/compile}"
+# Expandable segments: same speed and pixel-identical output, 3.3 GB lower reserved peak on the img2img workload
+# (docs/gb10/notes/correctness-quality-speed-pass-2026-10-09.md); reserved memory is host RAM on unified memory.
+PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 # Seconds docker stop waits after SIGTERM before it kills the container.
 STOP_TIMEOUT="${STOP_TIMEOUT:-120}"
 # Seconds a started container gets to answer /sdapi/v1/progress (the API serves only once the startup model loaded).
@@ -345,6 +348,7 @@ DOCKER_ARGS=(
   -e OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
   -e OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS}"
   -e OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX}"
+  -e PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF}"
   -e TORCHINDUCTOR_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/torchinductor/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e TRITON_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e CUDA_CACHE_PATH="/opt/stable-diffusion-webui/cache/compile/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
@@ -392,6 +396,7 @@ echo "Outputs symlink target: ${OUTPUTS_TARGET}"
 echo "OpenClaw SDPA backend: ${OPENCLAW_SDPA_BACKEND}"
 echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
 echo "OpenClaw VAE decode graphs: ${OPENCLAW_VAE_DECODE_GRAPHS} cache=${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX}"
+echo "CUDA allocator: PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "Compile/kernel cache namespace: ${OPENCLAW_COMPILE_CACHE_NAMESPACE} root=${OPENCLAW_COMPILE_CACHE_ROOT}"
 echo "API: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
 echo "Browser UI has been removed; this image is API/headless only."

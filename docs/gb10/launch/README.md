@@ -74,6 +74,7 @@ Environment overrides:
 | `OPENCLAW_CUDA_GRAPH_CACHE_MAX` | `8` | UNet graph cache size |
 | `OPENCLAW_VAE_DECODE_GRAPHS` | `1` | VAE decode CUDA graphs |
 | `OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX` | `4` | VAE decode graph cache size |
+| `PYTORCH_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config: same speed and output, lower reserved peak |
 | `OPENCLAW_COMPILE_CACHE_ROOT` | `${HOST_ROOT}/Caches/compile` | host root of the Inductor, Triton and CUDA kernel caches |
 | `OPENCLAW_COMPILE_CACHE_NAMESPACE` | image torch/Triton/CUDA versions + host driver version | cache namespace. App-only deploys reuse warm caches |
 | `A1111_COMMIT_HASH` | the image's `org.opencontainers.image.revision` label | reported commit. Required for an image without labels |
