@@ -1699,9 +1699,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 save_intermediate(image, i)
 
                 image = images.resize_image(0, image, target_width, target_height, upscaler_name=self.hr_upscaler)
-                image = np.array(image).astype(np.float32) / 255.0
-                image = np.moveaxis(image, 2, 0)
-                batch_images.append(image)
+                batch_images.append(_image_to_chw_float32_array(image))
 
             decoded_samples = torch.from_numpy(np.array(batch_images))
             decoded_samples = decoded_samples.to(shared.device, dtype=devices.dtype_vae)
