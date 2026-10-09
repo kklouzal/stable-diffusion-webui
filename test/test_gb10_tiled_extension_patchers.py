@@ -100,7 +100,7 @@ def test_patchers_turn_upstream_and_the_installed_release_into_the_same_bytes(ul
         for block in blocks:
             text = text.replace(block.original, block.patched)
         deploy10.write_text(text, encoding="utf-8")
-    assert installed in (deploy10.read_bytes(), both)  # the host runs the deploy10 release or this one
+    assert installed in (upstream, deploy10.read_bytes(), both)  # a fresh install, the deploy10 release or this one
     for patcher in (UU_PATCHER, SUBCANVAS_PATCHER):
         outdated = run_patcher(patcher, deploy10, "--check", check=False)
         assert outdated.returncode != 0 and "patch outdated" in outdated.stderr
