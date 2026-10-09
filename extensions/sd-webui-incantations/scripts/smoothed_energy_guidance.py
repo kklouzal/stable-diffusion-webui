@@ -6,6 +6,7 @@ import math
 from modules import headless_ui as gr
 
 from modules import script_callbacks, shared
+from modules.openclaw_cuda_graphs import instance_overrides
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 
@@ -46,8 +47,12 @@ class SEGStateParams:
                 self.seg_end_step: int = 150
                 self.crossattn_modules = [] # the hooked middle-block self-attention modules
                 self.openclaw_extension_timings = {}
-                # (cond rows, uncond rows) of the current step's CFG batch, set by the cfg_denoiser callback.
-                self.cfg_rows = None
+                # Set by the cfg_denoiser callback of a step that blurs: the step's CFGDenoiserParams (its .x is
+                # the CFG batch [cond rows, uncond rows] the UNet calls slice) and its cond row count.
+                self.denoiser_params = None
+                self.n_cond = 0
+                # (cond rows, rows) of the UNet call in progress, set around each call of the denoiser's inner model.
+                self.call_rows = None
 
 
 def cfg_row_counts(text_cond, text_uncond):
@@ -55,24 +60,37 @@ def cfg_row_counts(text_cond, text_uncond):
         return int(cond_crossattn(text_cond).shape[0]), int(cond_crossattn(text_uncond).shape[0])
 
 
-def seg_attention_grid(seq_len, height, width):
+def seg_attention_grid(seq_len, latent_height, latent_width):
         """(rows, cols) of the token grid of a UNet attention layer with seq_len tokens (seq index row * cols + col).
 
-        The UNet sees the (height // 8, width // 8) latent and every downsample is a stride-2 conv with padding 1,
-        i.e. ceil(n / 2) per side, so the layer's grid is the level of that chain with seq_len tokens. Sizes that are
-        not multiples of 64 make that grid's aspect differ from height / width (1080x1920: 34x60, not 30x68). A latent
-        of another size (e.g. a hires pass) falls back to the divisor pair of seq_len closest to height / width.
+        latent_height and latent_width are the size of the latent the UNet call denoises (the CFG batch's own
+        shape, so a hires pass, cropped or not, uses its real latent). Every downsample is a stride-2 conv with
+        padding 1, i.e. ceil(n / 2) per side, so the layer's grid is the level of that chain with seq_len tokens.
+        Sizes that are not multiples of 64 make that grid's aspect differ from the image's (1080x1920: 34x60, not
+        30x68). Returns None when no level has seq_len tokens: the layer's tokens were split (hypertile tiles).
         """
-        rows, cols = max(1, height // 8), max(1, width // 8)
-        while rows * cols > seq_len:
+        rows, cols = latent_height, latent_width
+        while rows * cols > seq_len and rows * cols > 1:
                 rows, cols = (rows + 1) // 2, (cols + 1) // 2
-                if rows * cols == 1:
-                        break
-        if rows * cols == seq_len:
-                return rows, cols
-        aspect = math.log(height / width)
-        rows = min((r for r in range(1, seq_len + 1) if seq_len % r == 0), key=lambda r: abs(math.log(r * r / seq_len) - aspect))
-        return rows, seq_len // rows
+        return (rows, cols) if rows * cols == seq_len else None
+
+
+def cfg_call_rows(x_in, x, n_cond):
+        """(cond rows, rows) of a UNet call on x = rows [start, start + rows) of the step's CFG batch x_in.
+
+        A1111 calls the UNet on row slices of x_in: the whole batch, or (batch_cond_uncond off, prompts and
+        negative prompts of different token lengths) chunks of it, cond rows first. Returns None when x is not
+        such a slice (an extension calling the inner model on tensors of its own).
+        """
+        if x_in is None or not isinstance(x, torch.Tensor) or x.ndim != x_in.ndim or x.shape[1:] != x_in.shape[1:]:
+                return None
+        if x.untyped_storage().data_ptr() != x_in.untyped_storage().data_ptr() or x.stride() != x_in.stride():
+                return None
+        start, remainder = divmod(x.storage_offset() - x_in.storage_offset(), x_in.stride(0))
+        rows = x.shape[0]
+        if remainder or start < 0 or start + rows > x_in.shape[0]:
+                return None
+        return max(0, min(rows, n_cond - start)), rows
 
 
 def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, downscale_w, kernel_size, sigma, is_inf_blur):
@@ -80,7 +98,7 @@ def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, do
 
         A1111 orders the CFG batch [cond rows, uncond rows]; legacy SEG blurs the uncond rows, so CFG pushes
         away from the smoothed-attention uncond prediction. With one cond row per uncond row (no AND prompts)
-        this is exactly the tail half of the batch. n_cond counts to_q rows (cond rows x hypertile tiles).
+        this is exactly the tail half of the batch. n_cond is the cond row count of the UNet call.
         output is the to_q result (batch, H*W, heads*head_dim) with seq index h*W + w. It is a fresh
         tensor owned by the hook, so the blurred rows are written into it in place (one rounding copy,
         no concatenated copy of the batch) and it is returned.
@@ -107,6 +125,7 @@ class SEGExtensionScript(UIWrapper):
         def __init__(self):
                 super().__init__()
                 self._seg_hooked_modules = []
+                self._hooked_inner_model = None
 
         # Setup menu ui detail
         def setup_ui(self, is_img2img) -> list:
@@ -175,7 +194,7 @@ class SEGExtensionScript(UIWrapper):
                         return self.on_cfg_denoiser_callback(callback_params, seg_params)
 
                 if seg_params.seg_active:
-                        self.ready_hijack_forward(seg_params, seg_blur_sigma, p.height, p.width)
+                        self.ready_hijack_forward(seg_params, seg_blur_sigma)
 
                 logger.debug('Hooked callbacks')
                 script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
@@ -191,12 +210,30 @@ class SEGExtensionScript(UIWrapper):
 
         def remove_all_hooks(self):
                 self.remove_hook_handles()
+                self._hooked_inner_model = None
                 for module in self._seg_hooked_modules:
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
                 self._seg_hooked_modules = []
 
-        def ready_hijack_forward(self, seg_params: SEGStateParams, seg_blur_sigma, height, width):
+        def hook_inner_model(self, inner_model, seg_params: SEGStateParams):
+                """Track the CFG batch rows each call of the denoiser's inner model (the UNet call) evaluates, until remove_all_hooks."""
+                if self._hooked_inner_model is inner_model:
+                        return
+
+                def enter_call(module, args, kwargs):
+                        denoiser_params = seg_params.denoiser_params
+                        x_in = denoiser_params.x if denoiser_params is not None else None
+                        seg_params.call_rows = cfg_call_rows(x_in, args[0] if args else None, seg_params.n_cond)
+
+                def leave_call(module, args, kwargs, output):
+                        seg_params.call_rows = None
+
+                self.add_forward_pre_hook(inner_model, enter_call)
+                self.add_forward_hook(inner_model, leave_call)
+                self._hooked_inner_model = inner_model
+
+        def ready_hijack_forward(self, seg_params: SEGStateParams, seg_blur_sigma):
                 selfattn_modules = seg_params.crossattn_modules
                 self._seg_hooked_modules = list(selfattn_modules)
                 is_inf_blur = seg_blur_sigma > seg_params.seg_blur_threshold
@@ -214,46 +251,37 @@ class SEGExtensionScript(UIWrapper):
                         h = module.seg_parent_module[0].heads
                         head_dim = inner_dim // h
 
-                        cache_key = (seq_len, height, width)
+                        # SEG blurs the uncond rows of A1111's CFG batch [cond rows, uncond rows] (AND prompts give
+                        # more cond rows than uncond rows). A1111 evaluates that batch in one UNet call or in row
+                        # chunks (batch_cond_uncond off; prompt and negative prompt of different token lengths
+                        # without padding), so the rows to blur are the uncond rows of this call. A cond-only call
+                        # (skip-uncond: NGMS, skip early CFG) has none.
+                        call_rows = seg_params.call_rows
+                        if call_rows is None:
+                                raise RuntimeError("SEG: a UNet call that is not a row slice of the step's CFG batch reached the middle-block attention; SEG cannot tell its uncond rows")
+                        n_cond, rows = call_rows
+                        if n_cond == rows:
+                                return
+                        latent_h, latent_w = seg_params.denoiser_params.x.shape[-2:]
+                        if batch_size != rows:
+                                raise RuntimeError(
+                                        f"SEG: the middle-block attention got {batch_size} rows for a {rows}-row UNet call; its tokens were "
+                                        "split into tiles (hypertile tiling the middle block), which SEG cannot place on the image grid"
+                                )
+                        cache_key = (seq_len, latent_h, latent_w)
                         geometry = geometry_cache.get(cache_key)
                         if geometry is None:
-                                downscale_h, downscale_w = seg_attention_grid(seq_len, height, width)
+                                grid = seg_attention_grid(seq_len, latent_h, latent_w)
+                                if grid is None:
+                                        raise RuntimeError(f"SEG: {seq_len} middle-block tokens are no UNet level of the {latent_h}x{latent_w} latent")
                                 kernel_size = math.ceil(6 * blur_sigma_exp) + 1 - math.ceil(6 * blur_sigma_exp) % 2
-                                geometry = (downscale_h, downscale_w, kernel_size)
+                                geometry = (*grid, kernel_size)
                                 geometry_cache[cache_key] = geometry
                         downscale_h, downscale_w, kernel_size = geometry
 
-                        # SEG blurs the uncond rows of A1111's full CFG batch [cond rows, uncond rows].
-                        # A1111 does not always evaluate that batch in one call: token-length mismatches
-                        # without padding, disabled batch-cond-uncond, skip-uncond (NGMS / skip early CFG)
-                        # and hidden extension passes call the UNet on cond-only, uncond-only or partial
-                        # batches, and AND prompts give more cond rows than uncond rows. Splitting such a
-                        # batch in half would blur cond rows, i.e. guide toward the smoothed prediction, so
-                        # blur only a call that is this step's full CFG batch. Hypertile, when it tiles this
-                        # layer, makes every row `tiles` consecutive rows ("(b nh nw)"), so the batch is a
-                        # whole multiple of the CFG rows and the uncond rows start at n_cond * tiles.
-                        output_batch = output.shape[0]
-                        cfg_rows = seg_params.cfg_rows
-                        cfg_batch = cfg_rows[0] + cfg_rows[1] if cfg_rows is not None else 0
-                        if (
-                                cfg_rows is None
-                                or cfg_rows[0] < 1
-                                or cfg_rows[1] < 1
-                                or output_batch % cfg_batch != 0
-                                or batch_size != output_batch
-                        ):
-                                logger.debug(
-                                        "SEG skipping to_q batch that is not the full CFG batch: input_batch=%s output_batch=%s cfg_rows=%s seq_len=%s",
-                                        batch_size,
-                                        output_batch,
-                                        cfg_rows,
-                                        seq_len,
-                                )
-                                return
-
                         return _blur_seg_uncond_queries(
                                 output,
-                                cfg_rows[0] * (output_batch // cfg_batch),
+                                n_cond,
                                 heads=h,
                                 head_dim=head_dim,
                                 downscale_h=downscale_h,
@@ -285,17 +313,22 @@ class SEGExtensionScript(UIWrapper):
                 if not seg_params.seg_active:
                         return
 
-                in_interval = seg_params.seg_start_step <= sampler_step(params.denoiser) <= seg_params.seg_end_step
-                should_enable = in_interval and getattr(shared.opts, 'batch_cond_uncond', False)
-                seg_params.cfg_rows = cfg_row_counts(params.text_cond, params.text_uncond) if should_enable else None
-                if not should_enable:
-                        logger.debug(
-                                "SEG disabled for this step: in_interval=%s batch_cond_uncond=%s",
-                                in_interval,
-                                getattr(shared.opts, 'batch_cond_uncond', False),
-                        )
+                denoiser = params.denoiser
+                in_interval = seg_params.seg_start_step <= sampler_step(denoiser) <= seg_params.seg_end_step
+                seg_params.denoiser_params = None
+                if in_interval:
+                        check_untiled_denoiser(denoiser)
+                        n_cond, n_uncond = cfg_row_counts(params.text_cond, params.text_uncond)
+                        if n_cond < 1 or n_uncond < 1 or params.x.shape[0] != n_cond + n_uncond:
+                                raise RuntimeError(
+                                        f"SEG: the CFG batch has {params.x.shape[0]} rows for {n_cond} cond and {n_uncond} uncond rows; "
+                                        "SEG supports the [cond, uncond] batch only (not InstructPix2Pix image CFG)"
+                                )
+                        seg_params.denoiser_params = params
+                        seg_params.n_cond = n_cond
+                        self.hook_inner_model(denoiser.inner_model, seg_params)
                 for module in seg_params.crossattn_modules:
-                        module.to_q.seg_enable = should_enable
+                        module.to_q.seg_enable = in_interval
 
         def get_xyz_axis_options(self, xyz_grid) -> list:
                 return [
@@ -304,6 +337,29 @@ class SEGExtensionScript(UIWrapper):
                         xyz_grid.AxisOption("[SEG] SEG Start Step", int, xyz_field_setter("seg_start_step", 'seg_active')),
                         xyz_grid.AxisOption("[SEG] SEG End Step", int, xyz_field_setter("seg_end_step", 'seg_active')),
                 ]
+
+
+def check_untiled_denoiser(denoiser):
+        """Fail when a per-request override replaces how the denoiser calls the UNet.
+
+        Tiled Diffusion (MultiDiffusion, DemoFusion, Mixture of Diffusers) replaces the inner model's or the CFG
+        denoiser's forward or sd_model.apply_model and calls the UNet on latent tiles stacked along the batch: the
+        rows of a call are no longer the CFG batch's and its tokens are a tile's, so SEG would blur the wrong rows
+        on the wrong grid. Same test as the CUDA-graph bypass (modules/openclaw_cuda_graphs.py).
+        """
+        overridden = [
+                name for name, obj, attr in (
+                        ("CFG denoiser forward", denoiser, "forward"),
+                        ("inner model forward", denoiser.inner_model, "forward"),
+                        ("sd_model.apply_model", shared.sd_model, "apply_model"),
+                )
+                if instance_overrides(obj, attr)
+        ]
+        if overridden:
+                raise RuntimeError(
+                        f"SEG cannot run with an extension that replaces the {', '.join(overridden)} (Tiled Diffusion): "
+                        "its UNet calls are latent tiles whose rows and token grid SEG cannot locate"
+                )
 
 
 # Gaussian blur

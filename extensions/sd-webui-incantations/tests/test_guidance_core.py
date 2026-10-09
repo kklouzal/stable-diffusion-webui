@@ -137,6 +137,14 @@ def install_a1111_stubs():
             "modules.sd_unet_row_memo": row_memo_mod,
         }
     )
+    # The CUDA-graph module's instance_overrides is the shared monkeypatch test; it and its imports are real core
+    # code with no WebUI dependencies.
+    for name in ("openclaw_env", "openclaw_cache_epochs", "openclaw_cuda_graphs"):
+        spec = importlib.util.spec_from_file_location(f"modules.{name}", REPO_ROOT / "modules" / f"{name}.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[f"modules.{name}"] = mod
+        setattr(modules_pkg, name, mod)
+        spec.loader.exec_module(mod)
 
 
 class DynamicThresholdingTests(unittest.TestCase):
@@ -1172,26 +1180,76 @@ class SEGBlurTests(unittest.TestCase):
 
     def test_attention_grid_follows_the_unet_downsample_chain(self):
         # The old sqrt(seq * H / W) floor + divisor walk gave 30x68 for 1080x1920 (true 34x60) and 25x76
-        # for 1200x1600 (true 38x50), blurring along a wrapped grid.
+        # for 1200x1600 (true 38x50), blurring along a wrapped grid. Arguments are the latent's size.
         cases = {
-            (2040, 1080, 1920): (34, 60),
-            (1900, 1200, 1600): (38, 50),
-            (1600, 1280, 1280): (40, 40),
-            (988, 832, 1216): (26, 38),
-            (135 * 240, 1080, 1920): (135, 240),
-            (48 * 48, 1024, 1024): (48, 48),  # hires pass: latent is not height x width; aspect fallback
-            (57 * 39, 1216, 832): (57, 39),
+            (2040, 135, 240): (34, 60),
+            (1900, 150, 200): (38, 50),
+            (1600, 160, 160): (40, 40),
+            (988, 104, 152): (26, 38),
+            (135 * 240, 135, 240): (135, 240),
+            (19 * 13, 152, 104): (19, 13),
+            (48 * 32, 192, 128): (48, 32),  # 1024x1024 hires-cropped to a 1536x1024 latent
         }
         for (seq_len, height, width), expected in cases.items():
             with self.subTest(seq_len=seq_len, height=height, width=width):
                 self.assertEqual(self.seg.seg_attention_grid(seq_len, height, width), expected)
-        for height in range(512, 1601, 40):
-            for width in range(512, 1601, 56):
-                rows, cols = height // 8, width // 8
-                for _level in range(3):
+        for height in range(1, 260, 3):
+            for width in range(1, 260, 5):
+                rows, cols = height, width
+                for _level in range(4):
                     with self.subTest(height=height, width=width, grid=(rows, cols)):
                         self.assertEqual(self.seg.seg_attention_grid(rows * cols, height, width), (rows, cols))
                     rows, cols = math.ceil(rows / 2), math.ceil(cols / 2)
+
+    def test_attention_grid_matches_the_pixel_size_grid_wherever_that_was_right(self):
+        # The grid used to come from p.height x p.width; from the latent's own size it is bit-identical wherever
+        # that pixel size was the latent's (first passes), and right where it was not (a cropped hires pass).
+        def legacy_grid(seq_len, height, width):
+            rows, cols = max(1, height // 8), max(1, width // 8)
+            while rows * cols > seq_len:
+                rows, cols = (rows + 1) // 2, (cols + 1) // 2
+                if rows * cols == 1:
+                    break
+            if rows * cols == seq_len:
+                return rows, cols
+            aspect = math.log(height / width)
+            rows = min((r for r in range(1, seq_len + 1) if seq_len % r == 0), key=lambda r: abs(math.log(r * r / seq_len) - aspect))
+            return rows, seq_len // rows
+
+        for height in range(64, 2049, 8):
+            for width in range(64, 2049, 24):
+                rows, cols = height // 8, width // 8
+                for _level in range(3):
+                    with self.subTest(height=height, width=width, grid=(rows, cols)):
+                        self.assertEqual(self.seg.seg_attention_grid(rows * cols, height // 8, width // 8), legacy_grid(rows * cols, height, width))
+                    rows, cols = (rows + 1) // 2, (cols + 1) // 2
+        # 1024x1024 hires-fixed to 1536x1024 with cropping (p.width/p.height stay 1024): the middle level of the
+        # 128x192 latent is 32x48; the pixel size gave its transpose.
+        self.assertEqual(legacy_grid(32 * 48, 1024, 1024), (48, 32))
+        self.assertEqual(self.seg.seg_attention_grid(32 * 48, 128, 192), (32, 48))
+
+    def test_attention_grid_rejects_split_tokens(self):
+        # Hypertile tiles of a 32x32 level: 512 tokens are no level of the 128x128 latent.
+        self.assertIsNone(self.seg.seg_attention_grid(512, 128, 128))
+
+    def test_cfg_call_rows_locates_row_slices_of_the_cfg_batch(self):
+        x_in = torch.randn(5, 4, 3, 2)
+        n_cond = 3
+        cases = {
+            (0, 5): (3, 5),  # one call, the whole batch
+            (0, 2): (2, 2),  # chunks [c0 c1] [c2 u0] [u1]
+            (2, 4): (1, 2),
+            (4, 5): (0, 1),
+            (3, 5): (0, 2),  # the uncond call of a split batch
+            (0, 3): (3, 3),  # skip-uncond: cond rows only
+        }
+        for (start, end), expected in cases.items():
+            with self.subTest(rows=(start, end)):
+                self.assertEqual(self.seg.cfg_call_rows(x_in, x_in[start:end], n_cond), expected)
+        for x in (x_in.clone(), x_in[:, :2], x_in[1:3].clone(), torch.randn(2, 4, 3, 2), None):
+            with self.subTest(shape=None if x is None else tuple(x.shape)):
+                self.assertIsNone(self.seg.cfg_call_rows(x_in, x, n_cond))
+        self.assertIsNone(self.seg.cfg_call_rows(None, x_in, n_cond))
 
     def test_blur_operator_built_under_cpu_autocast_stays_fp32(self):
         # The operator is first built inside the UNet forward; an active CPU autocast must not
@@ -1220,12 +1278,28 @@ class SEGBlurTests(unittest.TestCase):
                 self.assertTrue(torch.equal(out[3], paired[1]))
                 self.assertFalse(torch.equal(out[3], output[3]))
 
-    def _hooked_seg(self, height=48, width=40):
+    # The SEG harness: a latent of LATENT_H x LATENT_W whose middle level (two ceil-halvings) is 6x5.
+    LATENT_H, LATENT_W = 24, 20
+    SEQ = 6 * 5
+
+    def _hooked_seg(self):
         class CrossAttention(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.heads = 2
                 self.to_q = torch.nn.Linear(6, 6, bias=False)
+
+        class InnerModel(torch.nn.Module):
+            """The denoiser's inner model: the UNet call. Row r of x carries index r in x[r, 0, 0, 0]; the
+            middle-block attention sees that row's tokens."""
+
+            def __init__(self, attn, tokens):
+                super().__init__()
+                self.attn = attn
+                self.tokens = tokens
+
+            def forward(self, x, sigma, cond=None):
+                return self.attn.to_q(self.tokens[x[:, 0, 0, 0].long()])
 
         attn = CrossAttention()
         script = self.seg.SEGExtensionScript()
@@ -1233,43 +1307,144 @@ class SEGBlurTests(unittest.TestCase):
         params.seg_active = True
         params.seg_blur_threshold = 10.5
         params.crossattn_modules = [attn]
-        script.ready_hijack_forward(params, 3.0, height, width)
+        script.ready_hijack_forward(params, 3.0)
         self.addCleanup(script.remove_all_hooks)
-        return script, params, attn
+        shared = sys.modules["modules.shared"]
+        saved_model = shared.__dict__.get("sd_model")
+        shared.sd_model = types.SimpleNamespace()
+        self.addCleanup(setattr, shared, "sd_model", saved_model)
+        tokens = torch.randn(8, self.SEQ, 6, generator=torch.Generator().manual_seed(7))
+        denoiser = types.SimpleNamespace(step=0, steps=20, total_steps=20, inner_model=InnerModel(attn, tokens))
+        return script, params, attn, denoiser
 
-    def _step(self, script, params, n_cond, n_uncond):
+    def _step(self, script, params, denoiser, n_cond, n_uncond, rows=None):
+        """Run the cfg_denoiser callback for a CFG batch of n_cond + n_uncond rows; returns x_in."""
+        rows = n_cond + n_uncond if rows is None else rows
+        x_in = torch.zeros(rows, 4, self.LATENT_H, self.LATENT_W)
+        x_in[:, 0, 0, 0] = torch.arange(rows, dtype=x_in.dtype)
+        step = types.SimpleNamespace(
+            x=x_in,
+            denoiser=denoiser,
+            text_cond={"crossattn": torch.zeros(n_cond, 77, 8), "vector": torch.zeros(n_cond, 4)},
+            text_uncond={"crossattn": torch.zeros(n_uncond, 77, 8), "vector": torch.zeros(n_uncond, 4)},
+        )
+        script.on_cfg_denoiser_callback(step, params)
+        return x_in
+
+    def _blur_oracle(self, denoiser, n_cond, rows):
+        """The to_q output of a CFG batch with its uncond rows [n_cond:rows) blurred, via the blur helper."""
+        attn = denoiser.inner_model.attn
+        plain = torch.nn.functional.linear(denoiser.inner_model.tokens[:rows], attn.to_q.weight)
+        return self.seg._blur_seg_uncond_queries(plain.clone(), n_cond, heads=2, head_dim=3, downscale_h=6, downscale_w=5, kernel_size=49, sigma=8.0, is_inf_blur=False), plain
+
+    def test_seg_blurs_exactly_the_uncond_rows_in_every_cfg_call_layout(self):
+        script, params, attn, denoiser = self._hooked_seg()
+        # (n_cond, n_uncond, the UNet calls as row ranges): one call; batch 2; AND prompts (3 cond rows for 1 uncond);
+        # batch_cond_uncond off ([c0 c1] [u0 u1], and AND prompts straddling a chunk); prompt and negative prompt
+        # of different token lengths without padding (cond chunks, then one uncond call); skip-uncond (cond only).
+        layouts = (
+            (1, 1, ((0, 2),)),
+            (2, 2, ((0, 4),)),
+            (3, 1, ((0, 4),)),
+            (2, 2, ((0, 2), (2, 4))),
+            (3, 2, ((0, 2), (2, 4), (4, 5))),
+            (3, 2, ((0, 2), (2, 3), (3, 5))),
+            (2, 2, ((0, 2),)),
+        )
+        with torch.no_grad():
+            for n_cond, n_uncond, calls in layouts:
+                with self.subTest(n_cond=n_cond, n_uncond=n_uncond, calls=calls):
+                    x_in = self._step(script, params, denoiser, n_cond, n_uncond)
+                    out = torch.cat([denoiser.inner_model(x_in[a:b], torch.ones(b - a)) for a, b in calls])
+                    expected, plain = self._blur_oracle(denoiser, n_cond, calls[-1][1])
+                    self.assertTrue(torch.equal(out, expected))
+                    self.assertTrue(torch.equal(out[:n_cond], plain[:n_cond]))
+                    for row in range(n_cond, out.shape[0]):
+                        self.assertFalse(torch.equal(out[row], plain[row]))
+                    self.assertIsNone(params.call_rows)
+
+    def test_seg_blurs_with_batch_cond_uncond_off(self):
+        # It used to switch itself off for the whole request when batch_cond_uncond was off.
         shared = sys.modules["modules.shared"]
         saved = shared.opts.batch_cond_uncond
-        shared.opts.batch_cond_uncond = True
+        shared.opts.batch_cond_uncond = False
         try:
-            step = types.SimpleNamespace(
-                denoiser=types.SimpleNamespace(step=0, steps=20, total_steps=20),
-                text_cond={"crossattn": torch.zeros(n_cond, 77, 8), "vector": torch.zeros(n_cond, 4)},
-                text_uncond={"crossattn": torch.zeros(n_uncond, 77, 8), "vector": torch.zeros(n_uncond, 4)},
-            )
-            script.on_cfg_denoiser_callback(step, params)
+            script, params, attn, denoiser = self._hooked_seg()
+            with torch.no_grad():
+                x_in = self._step(script, params, denoiser, 1, 1)
+                self.assertTrue(attn.to_q.seg_enable)
+                out = torch.cat([denoiser.inner_model(x_in[:1], torch.ones(1)), denoiser.inner_model(x_in[1:], torch.ones(1))])
+            self.assertTrue(torch.equal(out, self._blur_oracle(denoiser, 1, 2)[0]))
         finally:
             shared.opts.batch_cond_uncond = saved
 
-    def test_seg_hook_blurs_exactly_the_uncond_rows_of_the_full_cfg_batch(self):
-        script, params, attn = self._hooked_seg()
-        x = torch.randn(4, 6 * 5, 6)
+    def test_seg_fails_on_a_unet_call_it_cannot_place(self):
+        script, params, attn, denoiser = self._hooked_seg()
         with torch.no_grad():
-            plain = torch.nn.functional.linear(x, attn.to_q.weight)
-            # (2, 2) batch 2; (3, 1) AND prompts; (1, 1) with hypertile's 2 tiles per row: "(b nh nw)".
-            for n_cond, n_uncond, n_pass in ((2, 2, 2), (3, 1, 3), (1, 1, 2)):
-                self._step(script, params, n_cond, n_uncond)
-                out = attn.to_q(x)
-                with self.subTest(n_cond=n_cond, n_uncond=n_uncond):
-                    self.assertTrue(torch.equal(out[:n_pass], plain[:n_pass]))
-                    for row in range(n_pass, 4):
-                        self.assertFalse(torch.equal(out[row], plain[row]))
+            x_in = self._step(script, params, denoiser, 1, 1)
+            # An extension calling the UNet on rows of its own: SEG cannot tell which of them are uncond.
+            with self.assertRaisesRegex(RuntimeError, "not a row slice of the step's CFG batch"):
+                denoiser.inner_model(x_in.clone(), torch.ones(2))
+            # Hypertile tiling the middle block: the attention sees (rows x tiles) rows of a tile's tokens.
+            tiled = attn.to_q.register_forward_pre_hook(lambda module, args: (args[0].reshape(4, self.SEQ // 2, 6),))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "split into tiles"):
+                    denoiser.inner_model(x_in, torch.ones(2))
+            finally:
+                tiled.remove()
+            # Outside the SEG interval nothing is placed and any call runs.
+            params.seg_end_step = -1
+            self._step(script, params, denoiser, 1, 1)
+            out = denoiser.inner_model(x_in.clone(), torch.ones(2))
+        self.assertTrue(torch.equal(out, self._blur_oracle(denoiser, 1, 2)[1]))
+
+    def test_seg_rejects_a_cfg_batch_that_is_not_cond_then_uncond(self):
+        # InstructPix2Pix image CFG: [cond, uncond (image), uncond] rows.
+        script, params, attn, denoiser = self._hooked_seg()
+        with self.assertRaisesRegex(RuntimeError, r"SEG supports the \[cond, uncond\] batch only"):
+            self._step(script, params, denoiser, 1, 1, rows=3)
+
+    def test_seg_fails_under_tiled_diffusion_overrides(self):
+        shared = sys.modules["modules.shared"]
+
+        class Model:
+            def apply_model(self, x, t, cond):
+                return x
+
+        class Wrapper(torch.nn.Module):
+            def forward(self, x, sigma, cond=None):
+                return x
+
+        class Denoiser:
+            def forward(self, x):
+                return x
+
+        cases = {
+            # MultiDiffusion and DemoFusion replace the inner model's forward, DemoFusion the CFG denoiser's,
+            # Mixture of Diffusers and DemoFusion sd_model.apply_model.
+            "inner model forward": lambda den, model: setattr(den.inner_model, "forward", lambda x, sigma, cond=None: x),
+            "CFG denoiser forward": lambda den, model: setattr(den, "forward", lambda x: x),
+            "sd_model.apply_model": lambda den, model: setattr(model, "apply_model", lambda x, t, cond: x),
+        }
+        for label, override in cases.items():
+            script, params, attn, _ = self._hooked_seg()
+            denoiser = Denoiser()
+            denoiser.step, denoiser.steps, denoiser.total_steps, denoiser.inner_model = 0, 20, 20, Wrapper()
+            shared.sd_model = Model()
+            # Restores that assign the bound class method back are not overrides.
+            denoiser.forward = denoiser.forward
+            shared.sd_model.apply_model = shared.sd_model.apply_model
+            self._step(script, params, denoiser, 1, 1)
+            override(denoiser, shared.sd_model)
+            with self.subTest(override=label), self.assertRaisesRegex(RuntimeError, f"replaces the {label} \\(Tiled Diffusion\\)"):
+                self._step(script, params, denoiser, 1, 1)
 
     def test_inactive_seg_batch_clears_callback_left_by_failed_batch(self):
         # A failed generation skips postprocess_batch; the next (SEG-off) batch must not keep its callback.
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
-        script, params, attn = self._hooked_seg()
+        script, params, attn, denoiser = self._hooked_seg()
+        self._step(script, params, denoiser, 1, 1)
         callbacks.append(script.track_callback(lambda step: script.on_cfg_denoiser_callback(step, params)))
         p = types.SimpleNamespace(extra_generation_params={}, incant_cfg_params={})
         script.seg_process_batch(p, False, 3.0, 0, 150)
@@ -1277,6 +1452,8 @@ class SEGBlurTests(unittest.TestCase):
         self.assertEqual(script._callbacks, [])
         self.assertFalse(hasattr(attn.to_q, "seg_enable"))
         self.assertEqual(len(attn.to_q._forward_hooks), 0)
+        self.assertEqual(len(denoiser.inner_model._forward_pre_hooks), 0)
+        self.assertEqual(len(denoiser.inner_model._forward_hooks), 0)
 
     def test_active_seg_fails_when_model_has_no_middle_attention(self):
         # Requested SEG must not silently render without SEG (its infotext already says "SEG Active").
@@ -1289,16 +1466,17 @@ class SEGBlurTests(unittest.TestCase):
                 script.seg_process_batch(p, True, 3.0, 0, 150)
         self.assertEqual(callbacks, [])
 
-    def test_seg_hook_skips_calls_that_are_not_the_full_cfg_batch(self):
-        # Batch 2 with cond and uncond evaluated in separate calls (token-length mismatch without
-        # padding, skip-uncond): each call has an even row count, but none of them may be split.
-        script, params, attn = self._hooked_seg()
-        self._step(script, params, 2, 2)
+    def test_seg_steps_outside_the_interval_run_plain_attention(self):
+        script, params, attn, denoiser = self._hooked_seg()
+        params.seg_start_step, params.seg_end_step = 2, 3
         with torch.no_grad():
-            for rows in (2, 1, 3):
-                x = torch.randn(rows, 6 * 5, 6)
-                with self.subTest(rows=rows):
-                    self.assertTrue(torch.equal(attn.to_q(x), torch.nn.functional.linear(x, attn.to_q.weight)))
+            for call, blurred in ((1, False), (2, True), (3, True), (4, False)):
+                denoiser.step = call
+                x_in = self._step(script, params, denoiser, 1, 1)
+                out = denoiser.inner_model(x_in, torch.ones(2))
+                expected, plain = self._blur_oracle(denoiser, 1, 2)
+                with self.subTest(step=call):
+                    self.assertTrue(torch.equal(out, expected if blurred else plain))
 
 
 class SamplerStepTests(unittest.TestCase):

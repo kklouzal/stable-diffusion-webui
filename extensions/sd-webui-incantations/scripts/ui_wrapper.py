@@ -57,6 +57,10 @@ class UIWrapper:
         """Install ``fn(module, args, kwargs, output)`` as a forward hook of ``module`` until remove_hook_handles()."""
         self._hook_handles.append(module.register_forward_hook(fn, with_kwargs=True))
 
+    def add_forward_pre_hook(self, module, fn):
+        """Install ``fn(module, args, kwargs)`` as a forward pre-hook of ``module`` until remove_hook_handles()."""
+        self._hook_handles.append(module.register_forward_pre_hook(fn, with_kwargs=True))
+
     def remove_hook_handles(self):
         for handle in self._hook_handles:
             handle.remove()
