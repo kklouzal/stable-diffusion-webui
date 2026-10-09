@@ -66,6 +66,6 @@ class ZoeDetector:
             depth -= vmin
             depth /= vmax - vmin
             depth = 1.0 - depth
-            depth_image = (depth * 255.0).clip(0, 255).astype(np.uint8)
+            depth_image = np.rint((depth * 255.0).clip(0, 255)).astype(np.uint8)
 
             return depth_image

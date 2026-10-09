@@ -69,7 +69,9 @@ class DepthAnythingDetector:
         self.model.to(self.device)
         h, w = image.shape[:2]
 
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) / 255.0
+        # The input is RGB (PIL order), which is what the network expects: the reference run scripts convert
+        # cv2.imread's BGR to RGB before this step.
+        image = image / 255.0
         image = transform({"image": image})["image"]
         image = torch.from_numpy(image).unsqueeze(0).to(self.device)
         @torch.no_grad()
@@ -80,7 +82,7 @@ class DepthAnythingDetector:
             depth[None], (h, w), mode="bilinear", align_corners=False
         )[0, 0]
         depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
-        depth = depth.cpu().numpy().astype(np.uint8)
+        depth = np.rint(depth.cpu().numpy()).astype(np.uint8)
         if colored:
             return cv2.applyColorMap(depth, cv2.COLORMAP_INFERNO)[:, :, ::-1]
         else:
