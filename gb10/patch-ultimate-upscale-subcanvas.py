@@ -27,12 +27,11 @@ Each pass copies its input canvas once and then pastes tiles in place, so earlie
 """
 from __future__ import annotations
 
-import argparse
-import ast
-import os
-import tempfile
 from pathlib import Path
 
+from patchlib import Block, apply_blocks, parse_cli
+
+LABEL = "Ultimate Upscale sub-canvas"
 TARGET_RELATIVE = Path("scripts") / "ultimate-upscale.py"
 MARKER = "OPENCLAW_USDU_SUBCANVAS_V1"
 
@@ -192,107 +191,48 @@ def tile_block(indent: str, image: str) -> str:
     )
 
 
-# (original, patched, occurrences) in the post-lifecycle-patch source. Every block starts a line and is matched
-# with its preceding newline, so a 12-space block never matches inside a 16-space one.
+# Blocks of the post-lifecycle-patch source. Every block starts a line and is matched with its preceding newline, so a
+# 12-space block never matches inside a 16-space one.
 BLOCKS = [
-    (
-        '\nfrom enum import Enum\n\nelem_id_prefix = "ultimateupscale"\n',
-        '\nfrom enum import Enum\n' + IMPORTS + '\nelem_id_prefix = "ultimateupscale"\n',
-        1,
-    ),
-    (
+    Block("imports", '\nfrom enum import Enum\n\nelem_id_prefix = "ultimateupscale"\n', '\nfrom enum import Enum\n' + IMPORTS + '\nelem_id_prefix = "ultimateupscale"\n'),
+    Block(
+        "helpers",
         "\n    HALF_TILE_PLUS_INTERSECTIONS = 3\n\nclass USDUpscaler():\n",
         "\n    HALF_TILE_PLUS_INTERSECTIONS = 3\n\n" + HELPERS + "class USDUpscaler():\n",
-        1,
+        sentinel=MARKER,
     ),
-    (
+    Block(
+        "redraw canvas owner",
         "\n    def init_draw(self, p, width, height):\n        p.inpaint_full_res = True\n",
         "\n    def init_draw(self, p, width, height):\n        self._gb10_owned = None\n        p.inpaint_full_res = True\n",
-        1,
     ),
-    (
+    Block(
+        "seams-fix canvas owner",
         "\n    def init_draw(self, p):\n        self.initial_info = None\n",
         "\n    def init_draw(self, p):\n        self._gb10_owned = None\n        self.initial_info = None\n",
-        1,
     ),
-    ("\n" + tile_block(" " * 16, "image"), "\n" + " " * 16 + TILE_CALL.format(image="image"), 5),
-    ("\n" + tile_block(" " * 12, "image"), "\n" + " " * 12 + TILE_CALL.format(image="image"), 2),
-    ("\n" + tile_block(" " * 16, "fixed_image"), "\n" + " " * 16 + TILE_CALL.format(image="fixed_image"), 1),
+    Block("redraw tiles", "\n" + tile_block(" " * 16, "image"), "\n" + " " * 16 + TILE_CALL.format(image="image"), 5),
+    Block("seams-fix tiles", "\n" + tile_block(" " * 12, "image"), "\n" + " " * 12 + TILE_CALL.format(image="image"), 2),
+    Block("seams-fix fixed tile", "\n" + tile_block(" " * 16, "fixed_image"), "\n" + " " * 16 + TILE_CALL.format(image="fixed_image"), 1),
 ]
 TILE_SITES = 8  # every process_images call in USDURedraw and USDUSeamsFix
 
 
-def target_for(path: Path) -> Path:
-    return path / TARGET_RELATIVE if path.is_dir() else path
-
-
-def verify(source: str, target: Path) -> None:
-    if source.count(MARKER) != 1:
-        raise SystemExit(f"Ultimate Upscale sub-canvas verification failed (marker count {source.count(MARKER)}): {target}")
-    for original, patched, count in BLOCKS:
-        if source.count(patched) != count or original in source:
-            raise SystemExit(f"Ultimate Upscale sub-canvas verification failed (partial patch): {target}")
+def verify_routing(path: Path, source: str) -> None:
+    """Every process_images call outside the helpers goes through _gb10_process_tile."""
     if source.count("_gb10_process_tile(self, p, ") != TILE_SITES:
-        raise SystemExit(f"Ultimate Upscale sub-canvas verification failed (partial patch): {target}")
+        raise SystemExit(f"{LABEL} patch verification failed (partial patch): {path}")
     if "processing.process_images(p)" in source.replace(HELPERS, ""):
-        raise SystemExit(f"Ultimate Upscale sub-canvas verification failed (unrouted process_images call): {target}")
-    try:
-        ast.parse(source)
-    except SyntaxError as exc:
-        raise SystemExit(f"Ultimate Upscale sub-canvas verification failed (invalid Python): {target}: {exc}") from exc
-
-
-def patch(source: str, target: Path) -> str:
-    if "\r" in source:
-        raise SystemExit(f"unsupported Ultimate Upscale line endings (expected LF): {target}")
-    for original, _patched, count in BLOCKS:
-        if source.count(original) != count:
-            raise SystemExit(f"unsupported Ultimate Upscale sub-canvas source (block found {source.count(original)}x, expected {count}x): {target}")
-    for original, patched, _count in BLOCKS:
-        source = source.replace(original, patched)
-    return source
-
-
-def replace_atomically(path: Path, text: str) -> None:
-    """Write text (UTF-8, newlines untranslated) to a temporary file next to path, fsync it, give it path's mode
-    (and owner when run as root, as run.sh does) and os.replace() path with it: a failure at any point leaves path
-    untouched and removes the temporary file. A symlinked path is written through, as an in-place write would."""
-    path = Path(os.path.realpath(path))
-    stat = path.stat()
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".gb10-tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp:
-            tmp.write(text)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.chmod(tmp_name, stat.st_mode & 0o7777)
-        if os.geteuid() == 0:
-            os.chown(tmp_name, stat.st_uid, stat.st_gid)
-        os.replace(tmp_name, path)
-    except BaseException as exc:
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup:
-            exc.add_note(f"could not remove the temporary file {tmp_name}: {cleanup}")
-        raise
+        raise SystemExit(f"{LABEL} patch verification failed (unrouted process_images call): {path}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path", type=Path)
-    parser.add_argument("--check", action="store_true")
-    args = parser.parse_args()
-    target = target_for(args.path)
-    if not target.is_file():
-        raise SystemExit(f"Ultimate Upscale source not found: {target}")
-    source = target.read_bytes().decode("utf-8")  # no newline translation: CRLF must fail closed
-    if not args.check and MARKER not in source:
-        source = patch(source, target)
-        verify(source, target)
-        replace_atomically(target, source)  # verified above; atomic, keeps mode and owner
+    args = parse_cli(__doc__.splitlines()[0])
+    target = args.path / TARGET_RELATIVE if args.path.is_dir() else args.path
+    if apply_blocks({target: BLOCKS}, label=LABEL, check=args.check, verify=verify_routing):
         print(f"Patched Ultimate Upscale sub-canvas tiles: {target}")
-    verify(source, target)
-    print(f"Ultimate Upscale sub-canvas tiles verified: {target}")
+    else:
+        print(f"Ultimate Upscale sub-canvas tiles verified: {target}")
     return 0
 
 

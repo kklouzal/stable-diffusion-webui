@@ -3,25 +3,20 @@
 
 USDUpscaler.process() calls state.begin() first and state.end() last; an exception in between left the shared job
 state open. The patch wraps everything between them in try/finally so one begin always owns one end.
-- The source must be UTF-8 with LF line endings (no newline translation; CRLF fails closed).
-- The rewrapped body must parse to exactly the original statements, and the result must pass the --check
-  verification, before anything is written; the file is then replaced atomically, keeping its mode and owner.
-- --check writes nothing and fails unless the lifecycle is patched.
+The rewrite is an AST-checked re-indent rather than exact text blocks, but it follows gb10/patchlib.py's contract:
+UTF-8 with LF only, the rewrapped body must parse to exactly the original statements and the result must verify
+before anything is written, the file is replaced atomically, and --check writes nothing.
 """
 from __future__ import annotations
 
-import argparse
 import ast
-import os
-import tempfile
 from pathlib import Path
 
+from patchlib import parse_cli, read_lf, replace_atomically
+
+LABEL = "Ultimate Upscale lifecycle"
 TARGET_RELATIVE = Path("scripts") / "ultimate-upscale.py"
 MARKER = "OPENCLAW_ULTIMATE_UPSCALE_STATE_FINALLY_V2"
-
-
-def target_for(path: Path) -> Path:
-    return path / TARGET_RELATIVE if path.is_dir() else path
 
 
 def process_node(source: str, target: Path) -> ast.FunctionDef:
@@ -89,48 +84,18 @@ def patch(source: str, target: Path) -> str:
     return patched
 
 
-def replace_atomically(path: Path, text: str) -> None:
-    """Write text (UTF-8, newlines untranslated) to a temporary file next to path, fsync it, give it path's mode
-    (and owner when run as root, as run.sh does) and os.replace() path with it: a failure at any point leaves path
-    untouched and removes the temporary file. A symlinked path is written through, as an in-place write would."""
-    path = Path(os.path.realpath(path))
-    stat = path.stat()
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".gb10-tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp:
-            tmp.write(text)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.chmod(tmp_name, stat.st_mode & 0o7777)
-        if os.geteuid() == 0:
-            os.chown(tmp_name, stat.st_uid, stat.st_gid)
-        os.replace(tmp_name, path)
-    except BaseException as exc:
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup:
-            exc.add_note(f"could not remove the temporary file {tmp_name}: {cleanup}")
-        raise
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path", type=Path)
-    parser.add_argument("--check", action="store_true")
-    args = parser.parse_args()
-    target = target_for(args.path)
-    if not target.is_file():
-        raise SystemExit(f"Ultimate Upscale source not found: {target}")
-    source = target.read_bytes().decode("utf-8")  # no newline translation: CRLF must fail closed
-    if "\r" in source:
-        raise SystemExit(f"unsupported Ultimate Upscale line endings (expected LF): {target}")
-    if not args.check and MARKER not in source:
+    args = parse_cli(__doc__.splitlines()[0])
+    target = args.path / TARGET_RELATIVE if args.path.is_dir() else args.path
+    source = read_lf(target, LABEL)
+    if args.check or MARKER in source:
+        verify(source, target)
+        print(f"Ultimate Upscale lifecycle verified: {target}")
+    else:
         source = patch(source, target)
         verify(source, target)
         replace_atomically(target, source)
         print(f"Patched Ultimate Upscale state lifecycle: {target}")
-    verify(source, target)
-    print(f"Ultimate Upscale lifecycle verified: {target}")
     return 0
 
 

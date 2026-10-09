@@ -14,8 +14,5 @@ Build-applied patch targets:
 
 These are applied in lexical order within each target directory by `docker/apply-local-patches.py`.
 
-Manual / host-mounted patch archive:
-
-- `patches/mounted-extensions/*/*.patch`
-
-Mounted-extension patches document changes for host-mounted extension checkouts. They are intentionally not applied during the Docker image build.
+Host-mounted third-party extensions (MultiDiffusion, Ultimate Upscale) are not patched here: `gb10/run.sh` patches
+them in place at deploy time with the `gb10/patch-*.py` patchers, which accept pristine upstream checkouts.

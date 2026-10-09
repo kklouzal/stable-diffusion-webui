@@ -99,23 +99,16 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
     "${owned_extension_source}/" "${owned_extension_target}/"
 done
 
-# The owned extensions mirrored above carry their fixes in the tracked source; the host-installed third-party
-# extensions below are patched in place.
+# The owned extensions mirrored above carry their fixes in the tracked source. The host-installed third-party
+# extensions below are patched in place: each patcher (gb10/patchlib.py contract) patches upstream text or verifies
+# already-patched text, and fails the deploy on anything else, including a missing file.
 MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
 if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-terminal-tiles.py" "${MULTIDIFFUSION_ROOT}"
   sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${MULTIDIFFUSION_ROOT}"
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" --check "${MULTIDIFFUSION_ROOT}"
 fi
 ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
-if [[ ! -f "${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" ]]; then
-  echo "ERROR: required Ultimate Upscale script missing: ${ULTIMATE_UPSCALE_ROOT}/scripts/ultimate-upscale.py" >&2
-  exit 1
-fi
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" --check "${ULTIMATE_UPSCALE_ROOT}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${ULTIMATE_UPSCALE_ROOT}"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" --check "${ULTIMATE_UPSCALE_ROOT}"
 # Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
 # Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
 sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"

@@ -4,7 +4,6 @@ from pathlib import Path
 
 BUILD_ROOT = Path('/opt/build')
 PATCH_ROOT = Path('/opt/build/patches')
-MOUNTED_EXTENSION_PATCH_ROOT = PATCH_ROOT / 'mounted-extensions'
 # Patch sets that exist under patches/ (see patches/README.md); a missing directory is a build error.
 TARGETS = {
     'stable-diffusion-stability-ai': BUILD_ROOT / 'stable-diffusion-webui' / 'repositories' / 'stable-diffusion-stability-ai',
@@ -31,9 +30,6 @@ def main():
             run(['git', '-C', str(repo), 'apply', '--ignore-whitespace', str(patch)])
             applied += 1
             print(f'applied {patch.name} to {patch_set}', flush=True)
-
-    if MOUNTED_EXTENSION_PATCH_ROOT.exists():
-        print('mounted extension patches are present but not applied during image build; apply them to the corresponding host-mounted extension checkout when that extension is installed', flush=True)
 
     print(f'patch application complete; applied={applied}', flush=True)
 
