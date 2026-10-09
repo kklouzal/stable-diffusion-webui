@@ -1,13 +1,10 @@
 import ast
-import importlib.util
 import os
-import sys
 import threading
 import time
 import types
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from test.helpers import ROOT, load_source, module
 
 
 class MemoryCache(dict):
@@ -15,28 +12,17 @@ class MemoryCache(dict):
         super().__init__()
 
 
-def load_cache(monkeypatch, tmp_path):
-    diskcache = types.ModuleType("diskcache")
-    diskcache.Cache = MemoryCache
-    monkeypatch.setitem(sys.modules, "diskcache", diskcache)
-    tqdm = types.ModuleType("tqdm"); tqdm.tqdm = lambda *a, **k: None
-    monkeypatch.setitem(sys.modules, "tqdm", tqdm)
-    paths = types.ModuleType("modules.paths")
-    paths.data_path = str(tmp_path)
-    paths.script_path = str(tmp_path)
-    modules = types.ModuleType("modules")
-    modules.__path__ = []
-    monkeypatch.setitem(sys.modules, "modules", modules)
-    monkeypatch.setitem(sys.modules, "modules.paths", paths)
-    spec = importlib.util.spec_from_file_location("modules.cache", ROOT / "modules/cache.py")
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "modules.cache", module)
-    spec.loader.exec_module(module)
-    return module
+def load_cache(tmp_path):
+    return load_source("modules.cache", "modules/cache.py", {
+        "diskcache": module("diskcache", Cache=MemoryCache),
+        "tqdm": module("tqdm", tqdm=lambda *a, **k: None),
+        "modules": module("modules", package=True),
+        "modules.paths": module("modules.paths", data_path=str(tmp_path), script_path=str(tmp_path)),
+    })
 
 
-def test_file_cache_detects_same_size_same_mtime_replacement_and_schema(monkeypatch, tmp_path):
-    cache = load_cache(monkeypatch, tmp_path)
+def test_file_cache_detects_same_size_same_mtime_replacement_and_schema(tmp_path):
+    cache = load_cache(tmp_path)
     source = tmp_path / "source"
     source.write_text("one")
     original_mtime = source.stat().st_mtime_ns
@@ -58,8 +44,8 @@ def test_file_cache_detects_same_size_same_mtime_replacement_and_schema(monkeypa
     assert len(calls) == 3
 
 
-def test_file_cache_single_publication_under_concurrency(monkeypatch, tmp_path):
-    cache = load_cache(monkeypatch, tmp_path)
+def test_file_cache_single_publication_under_concurrency(tmp_path):
+    cache = load_cache(tmp_path)
     source = tmp_path / "source"
     source.write_text("data")
     calls = 0
@@ -84,19 +70,14 @@ def test_file_cache_single_publication_under_concurrency(monkeypatch, tmp_path):
     assert calls == 1
 
 
-def test_git_revision_tracks_head_ref_content(monkeypatch, tmp_path):
-    modules = types.ModuleType("modules")
-    modules.__path__ = []
+def test_git_revision_tracks_head_ref_content(tmp_path):
     shared = types.SimpleNamespace(cmd_opts=types.SimpleNamespace(), opts=types.SimpleNamespace())
-    for name, value in {"shared": shared, "errors": types.SimpleNamespace(report=lambda *a, **k: None), "cache": object(), "scripts": types.SimpleNamespace(ScriptFile=object)}.items():
-        setattr(modules, name, value)
-        monkeypatch.setitem(sys.modules, f"modules.{name}", value if isinstance(value, types.ModuleType) else types.ModuleType(f"modules.{name}"))
-    monkeypatch.setitem(sys.modules, "modules", modules)
-    git = types.ModuleType("modules.gitpython_hack"); git.Repo = object
-    paths = types.ModuleType("modules.paths_internal"); paths.extensions_dir=str(tmp_path/"exts"); paths.extensions_builtin_dir=str(tmp_path/"builtin")
-    monkeypatch.setitem(sys.modules, "modules.gitpython_hack", git); monkeypatch.setitem(sys.modules, "modules.paths_internal", paths)
-    spec = importlib.util.spec_from_file_location("derived_extensions", ROOT / "modules/extensions.py")
-    extension = importlib.util.module_from_spec(spec); monkeypatch.setitem(sys.modules, "derived_extensions", extension); spec.loader.exec_module(extension)
+    extension = load_source("derived_extensions", "modules/extensions.py", {
+        # `from modules import shared, errors, cache, scripts` reads these package attributes.
+        "modules": module("modules", package=True, shared=shared, errors=types.SimpleNamespace(report=lambda *a, **k: None), cache=object(), scripts=types.SimpleNamespace(ScriptFile=object)),
+        "modules.gitpython_hack": module("modules.gitpython_hack", Repo=object),
+        "modules.paths_internal": module("modules.paths_internal", extensions_dir=str(tmp_path / "exts"), extensions_builtin_dir=str(tmp_path / "builtin")),
+    })
     repo = tmp_path / "repo"; gitdir = repo / ".git"; (gitdir / "refs/heads").mkdir(parents=True)
     (gitdir / "HEAD").write_text("ref: refs/heads/main\n"); (gitdir / "refs/heads/main").write_text("a" * 40 + "\n")
     first = extension.git_repository_revision(repo)

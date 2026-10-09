@@ -1,36 +1,45 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
+import ast
 import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import torch
 
+from test.helpers import ROOT, load_source, module
 
-def _module(name: str, **attrs):
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    return module
+
+def _script_callbacks_params():
+    """The CFG callback parameter classes from modules/script_callbacks.py, executed without the rest of that module
+    (which imports fastapi, the UI and the extension registry)."""
+    path = ROOT / "modules" / "script_callbacks.py"
+    names = {"CFGDenoiserParams", "CFGDenoisedParams", "AfterCFGCallbackParams"}
+    body = [node for node in ast.parse(path.read_text(encoding="utf8")).body if isinstance(node, ast.ClassDef) and node.name in names]
+    assert {node.name for node in body} == names
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
+    return {name: namespace[name] for name in names}
+
+
+CFG_PARAMS = _script_callbacks_params()
 
 
 def load_cfg_denoiser(cfg_denoised_callback):
-    modules_pkg = _module("modules")
-    prompt_parser = _module("modules.prompt_parser")
-    prompt_parser.reconstruct_multicond_batch = lambda cond, step: ([[(0, 1.0)]], cond)
-    prompt_parser.reconstruct_cond_batch = lambda uncond, step: uncond
+    prompt_parser = module(
+        "modules.prompt_parser",
+        reconstruct_multicond_batch=lambda cond, step: ([[(0, 1.0)]], cond),
+        reconstruct_cond_batch=lambda uncond, step: uncond,
+    )
 
-    sd_samplers_common = _module(
+    sd_samplers_common = module(
         "modules.sd_samplers_common",
         InterruptedException=Exception,
         apply_refiner=lambda denoiser, sigma: False,
         store_latent=lambda latent: None,
     )
 
-    shared = _module(
+    shared = module(
         "modules.shared",
         state=types.SimpleNamespace(
             interrupted=False,
@@ -52,54 +61,21 @@ def load_cfg_denoiser(cfg_denoised_callback):
         ),
     )
 
-    class CFGDenoiserParams:
-        def __init__(self, x, image_cond, sigma, sampling_step, total_sampling_steps, text_cond, text_uncond, denoiser=None):
-            self.x = x
-            self.image_cond = image_cond
-            self.sigma = sigma
-            self.sampling_step = sampling_step
-            self.total_sampling_steps = total_sampling_steps
-            self.text_cond = text_cond
-            self.text_uncond = text_uncond
-            self.denoiser = denoiser
-
-    class CFGDenoisedParams:
-        def __init__(self, x, sampling_step, total_sampling_steps, inner_model):
-            self.x = x
-            self.sampling_step = sampling_step
-            self.total_sampling_steps = total_sampling_steps
-            self.inner_model = inner_model
-
-    class AfterCFGCallbackParams:
-        def __init__(self, x, sampling_step, total_sampling_steps):
-            self.x = x
-            self.sampling_step = sampling_step
-            self.total_sampling_steps = total_sampling_steps
-
-    script_callbacks = _module(
+    script_callbacks = module(
         "modules.script_callbacks",
-        CFGDenoiserParams=CFGDenoiserParams,
-        CFGDenoisedParams=CFGDenoisedParams,
-        AfterCFGCallbackParams=AfterCFGCallbackParams,
+        **CFG_PARAMS,
         cfg_denoiser_callback=lambda params: None,
         cfg_denoised_callback=cfg_denoised_callback,
         cfg_after_cfg_callback=lambda params: None,
     )
 
-    replacements = {
-        "modules": modules_pkg,
+    return load_source("cfg_denoiser_under_test", "modules/sd_samplers_cfg_denoiser.py", {
+        "modules": module("modules"),
         "modules.prompt_parser": prompt_parser,
         "modules.sd_samplers_common": sd_samplers_common,
         "modules.shared": shared,
         "modules.script_callbacks": script_callbacks,
-    }
-    module_path = Path(__file__).resolve().parents[1] / "modules" / "sd_samplers_cfg_denoiser.py"
-    spec = importlib.util.spec_from_file_location("cfg_denoiser_under_test", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    with mock.patch.dict(sys.modules, replacements):
-        spec.loader.exec_module(module)
-    return module
+    })
 
 
 class CFGDenoiserCallbackTests(unittest.TestCase):

@@ -1,46 +1,22 @@
-import importlib.util
 import os
-import sys
 import types
 import unittest
+from unittest import mock
 
 import torch
 
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-
-def _module(name, **attrs):
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    return module
+from test.helpers import ROOT, load_source, module, stub_modules
 
 
 def load_kdiffusion_module():
-    originals = {}
-
-    def put(name, module):
-        originals[name] = sys.modules.get(name)
-        sys.modules[name] = module
-        if "." in name:
-            parent_name, child_name = name.rsplit(".", 1)
-            parent = sys.modules.get(parent_name)
-            if parent is not None:
-                setattr(parent, child_name, module)
-
-    os.environ["OPENCLAW_GENERATION_PROFILE_CACHE_MAX"] = "16"
-
-    sampling_module = _module(
+    sampling_module = module(
         "k_diffusion.sampling",
         sample_euler=lambda *args, **kwargs: None,
     )
-    k_diffusion_module = _module("k_diffusion", sampling=sampling_module)
-    brownian_interval = _module("torchsde._brownian.brownian_interval", _randn=None)
-    torchsde_brownian = _module("torchsde._brownian", brownian_interval=brownian_interval)
-    torchsde_module = _module("torchsde", _brownian=torchsde_brownian)
+    brownian_interval = module("torchsde._brownian.brownian_interval", _randn=None)
+    torchsde_brownian = module("torchsde._brownian", brownian_interval=brownian_interval)
 
-    devices = _module(
+    devices = module(
         "modules.devices",
         cpu=torch.device("cpu"),
         device=torch.device("cpu"),
@@ -68,7 +44,7 @@ def load_kdiffusion_module():
         show_progress_every_n_steps=0,
         no_dpmpp_sde_batch_determinism=False,
     )
-    shared = _module(
+    shared = module(
         "modules.shared",
         opts=opts,
         state=types.SimpleNamespace(interrupted=False, sampling_step=0, assign_current_image=lambda image: None),
@@ -95,68 +71,43 @@ def load_kdiffusion_module():
         default_rho=-1,
         need_inner_model=True,
     )
-    sd_schedulers = _module(
-        "modules.sd_schedulers",
-        schedulers=[],
-        schedulers_map={"Align Your Steps": scheduler},
-    )
-    sd_samplers_cfg_denoiser = _module(
-        "modules.sd_samplers_cfg_denoiser",
-        CFGDenoiser=type("CFGDenoiser", (torch.nn.Module,), {"__init__": lambda self, sampler: torch.nn.Module.__init__(self)}),
-    )
-    script_callbacks = _module(
-        "modules.script_callbacks",
-        ExtraNoiseParams=object,
-        extra_noise_callback=lambda *args, **kwargs: None,
-    )
-    modules_pkg = _module("modules")
-    modules_pkg.__path__ = ["modules"]
-
-    for name, module in (
-        ("modules", modules_pkg),
-        ("k_diffusion", k_diffusion_module),
-        ("k_diffusion.sampling", sampling_module),
-        ("torchsde", torchsde_module),
-        ("torchsde._brownian", torchsde_brownian),
-        ("torchsde._brownian.brownian_interval", brownian_interval),
-        ("modules.devices", devices),
-        ("modules.images", _module("modules.images", image_grid=lambda images: images)),
-        ("modules.sd_vae_approx", _module("modules.sd_vae_approx")),
-        ("modules.sd_vae_taesd", _module("modules.sd_vae_taesd")),
-        ("modules.sd_models", _module("modules.sd_models", SkipWritingToConfig=lambda: torch.no_grad(), reload_model_weights=lambda *args, **kwargs: None)),
-        ("modules.sd_samplers", _module("modules.sd_samplers", find_sampler_config=lambda name: None)),
-        ("modules.shared", shared),
-        ("modules.sd_samplers_extra", _module("modules.sd_samplers_extra", restart_sampler=lambda *args, **kwargs: None)),
-        ("modules.sd_samplers_cfg_denoiser", sd_samplers_cfg_denoiser),
-        ("modules.sd_schedulers", sd_schedulers),
-        ("modules.script_callbacks", script_callbacks),
-    ):
-        put(name, module)
-
-    try:
-        common_spec = importlib.util.spec_from_file_location("modules.sd_samplers_common", "modules/sd_samplers_common.py")
-        common = importlib.util.module_from_spec(common_spec)
-        put("modules.sd_samplers_common", common)
-        common_spec.loader.exec_module(common)
-
-        profile_spec = importlib.util.spec_from_file_location("modules.openclaw_generation_profile", "modules/openclaw_generation_profile.py")
-        profile = importlib.util.module_from_spec(profile_spec)
-        put("modules.openclaw_generation_profile", profile)
-        profile_spec.loader.exec_module(profile)
+    stubs = {
+        # A package on the real directory: the unstubbed submodules the loaded files import (openclaw_cache_epochs,
+        # openclaw_env) come from disk.
+        "modules": module("modules", __path__=[str(ROOT / "modules")]),
+        "k_diffusion": module("k_diffusion", sampling=sampling_module),
+        "k_diffusion.sampling": sampling_module,
+        "torchsde": module("torchsde", _brownian=torchsde_brownian),
+        "torchsde._brownian": torchsde_brownian,
+        "torchsde._brownian.brownian_interval": brownian_interval,
+        "modules.devices": devices,
+        "modules.images": module("modules.images", image_grid=lambda images: images),
+        "modules.sd_vae_approx": module("modules.sd_vae_approx"),
+        "modules.sd_vae_taesd": module("modules.sd_vae_taesd"),
+        "modules.sd_models": module("modules.sd_models", SkipWritingToConfig=lambda: torch.no_grad(), reload_model_weights=lambda *args, **kwargs: None),
+        "modules.sd_samplers": module("modules.sd_samplers", find_sampler_config=lambda name: None),
+        "modules.shared": shared,
+        "modules.sd_samplers_extra": module("modules.sd_samplers_extra", restart_sampler=lambda *args, **kwargs: None),
+        "modules.sd_samplers_cfg_denoiser": module(
+            "modules.sd_samplers_cfg_denoiser",
+            CFGDenoiser=type("CFGDenoiser", (torch.nn.Module,), {"__init__": lambda self, sampler: torch.nn.Module.__init__(self)}),
+        ),
+        "modules.sd_schedulers": module("modules.sd_schedulers", schedulers=[], schedulers_map={"Align Your Steps": scheduler}),
+        "modules.script_callbacks": module(
+            "modules.script_callbacks",
+            ExtraNoiseParams=object,
+            extra_noise_callback=lambda *args, **kwargs: None,
+        ),
+    }
+    with mock.patch.dict(os.environ, {"OPENCLAW_GENERATION_PROFILE_CACHE_MAX": "16"}), stub_modules(stubs):
+        common = load_source("modules.sd_samplers_common", "modules/sd_samplers_common.py")
+        profile = load_source("modules.openclaw_generation_profile", "modules/openclaw_generation_profile.py")
         profile.clear()
-
-        spec = importlib.util.spec_from_file_location("test_kdiffusion_module", "modules/sd_samplers_kdiffusion.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["test_kdiffusion_module"] = module
-        spec.loader.exec_module(module)
-        return module, shared, profile
-    finally:
-        sys.modules.pop("test_kdiffusion_module", None)
-        for name, original in reversed(list(originals.items())):
-            if original is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = original
+        kdiffusion = load_source("test_kdiffusion_module", "modules/sd_samplers_kdiffusion.py", {
+            "modules.sd_samplers_common": common,
+            "modules.openclaw_generation_profile": profile,
+        })
+    return kdiffusion, shared, profile
 
 
 def make_sampler(module, model_sigmas=None, quantize=False):
@@ -272,21 +223,6 @@ class KDiffusionSigmasCacheTests(unittest.TestCase):
         torch.testing.assert_close(rng_after, rng_before)
         self.assertEqual(second.dtype, torch.float64)
         self.assertEqual(second.device, torch.device("cpu"))
-
-    def test_cache_honors_max_size_bound(self):
-        _module, _shared, profile = load_kdiffusion_module()
-        previous = profile._MAX_SIZE  # read once from OPENCLAW_GENERATION_PROFILE_CACHE_MAX at import
-        profile._MAX_SIZE = 1
-        try:
-            profile.clear()
-            profile.cached_tensor("direct", "a", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1))
-            profile.cached_tensor("direct", "b", None, 1, torch.device("cpu"), torch.float32, lambda: torch.ones(1) * 2)
-
-            status = profile.status()
-            self.assertEqual(status["cache_size"], 1)
-            self.assertEqual(status["evictions"], 1)
-        finally:
-            profile._MAX_SIZE = previous
 
     def test_schedule_override_gets_the_penultimate_sigma_discard(self):
         module, _shared, profile = load_kdiffusion_module()

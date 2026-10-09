@@ -1,35 +1,22 @@
 import importlib
-import importlib.util
 import inspect
-import os
-import sys
 
 import pytest
 import torch
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from test.helpers import add_repositories_to_sys_path, load_source
+
 SDE_SAMPLERS = ("sample_dpmpp_2m_sde", "sample_dpmpp_3m_sde")
 
 
 @pytest.fixture(scope="module")
 def sampling():
-    k_diffusion_path = os.path.join(ROOT, "repositories", "k-diffusion")
-    if k_diffusion_path not in sys.path:
-        sys.path.insert(0, k_diffusion_path)
-    # Other test files leave file-less k_diffusion stubs in sys.modules; this test needs the real sampler code.
-    stubs = {}
-    if getattr(sys.modules.get("k_diffusion.sampling"), "__file__", None) is None:
-        stubs = {name: sys.modules.pop(name) for name in list(sys.modules) if name == "k_diffusion" or name.startswith("k_diffusion.")}
-    try:
-        sampling = pytest.importorskip("k_diffusion.sampling")
-        spec = importlib.util.spec_from_file_location("sd_samplers_extra_under_test", os.path.join(ROOT, "modules", "sd_samplers_extra.py"))
-        spec.loader.exec_module(importlib.util.module_from_spec(spec))
-        yield sampling
-    finally:
-        if stubs:
-            for name in [name for name in sys.modules if name == "k_diffusion" or name.startswith("k_diffusion.")]:
-                del sys.modules[name]
-            sys.modules.update(stubs)
+    """The real k_diffusion.sampling with modules/sd_samplers_extra.py's terminal-step patch applied (it patches the
+    module in place, as it does at webui startup)."""
+    add_repositories_to_sys_path("k-diffusion")
+    sampling = importlib.import_module("k_diffusion.sampling")
+    load_source("sd_samplers_extra_under_test", "modules/sd_samplers_extra.py")
+    return sampling
 
 
 def toy_model(x, sigma, **kwargs):
@@ -85,6 +72,5 @@ def test_patch_keeps_the_signature_and_is_applied_once(sampling, name):
     # KDiffusionSampler routes eta/s_noise/noise_sampler/solver_type by inspecting the signature.
     assert inspect.signature(patched) == inspect.signature(patched.__wrapped__)
 
-    spec = importlib.util.spec_from_file_location("sd_samplers_extra_reloaded", os.path.join(ROOT, "modules", "sd_samplers_extra.py"))
-    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+    load_source("sd_samplers_extra_reloaded", "modules/sd_samplers_extra.py")
     assert getattr(sampling, name) is patched
