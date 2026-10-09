@@ -329,6 +329,27 @@ def test_scunet_uses_the_shared_model_cache(env):
     assert env.loader_calls[-1][1]["expected_architecture"] == "SCUNet"
 
 
+def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
+    # modules.util.load_file_from_url contract: saved as `file_name` if given, else as the URL's basename.
+    downloads = []
+
+    def load_file_from_url(url, *, model_dir, file_name=None, **kwargs):
+        downloads.append((url, model_dir, file_name))
+        return str(Path(model_dir) / (file_name or Path(url).name))
+
+    env.modelloader.load_file_from_url = load_file_from_url
+    env.modelloader.load_cached_spandrel_model = lambda path, **kwargs: (env.loader_calls.append((path, kwargs)), object())[1]
+    module = _load_script(env, "extensions-builtin/ScuNET/scripts/scunet_model.py")
+    upscaler = module.UpscalerScuNET(str(env.tmp_path))
+    upscaler.model_download_path = str(env.tmp_path)
+
+    upscaler.load_model(upscaler.model_url)
+
+    assert downloads == [(upscaler.model_url, str(env.tmp_path), None)]
+    # spandrel dispatches on the extension: a name without .pth raises "Unsupported model file extension".
+    assert env.loader_calls[-1][0] == str(env.tmp_path / "scunet_color_real_gan.pth")
+
+
 def test_unloadable_ldsr_fails_instead_of_lanczos(env):
     ldsr_arch = types.ModuleType("ldsr_model_arch")
     ldsr_arch.LDSR = lambda model, yaml: pytest.fail("LDSR must not be constructed without a model")

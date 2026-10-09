@@ -55,7 +55,8 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
     def load_model(self, path: str):
         device = devices.get_device_for('scunet')
         if path.startswith("http"):
-            filename = modelloader.load_file_from_url(path, model_dir=self.model_download_path, file_name=modelloader.friendly_name(path))
+            # Saved under the URL's basename: spandrel picks its reader from the .pth extension.
+            filename = modelloader.load_file_from_url(path, model_dir=self.model_download_path)
         else:
             filename = path
         return modelloader.load_cached_spandrel_model(filename, device=device, expected_architecture='SCUNet')
