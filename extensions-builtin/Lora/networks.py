@@ -432,20 +432,6 @@ def _publish_applied_state(new_networks, emb_db=None):
             return True
 
 
-def unload_networks():
-    """Restore/unhook weights and bundled TIs as one coherent empty state."""
-    changed = _publish_applied_state([])
-    model = getattr(shared, "sd_model", None)
-    restored = 0
-    if model is not None:
-        for backend in torchao_weight_quant.BACKENDS.values():
-            if getattr(devices, backend.name, False):
-                network_quant_capture_managed_base(backend, model)
-                restored += network_quant_restore_managed_base(backend, model)
-                network_quant_mark_model_unprepared(backend, model)
-    return changed or restored > 0
-
-
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
@@ -1080,35 +1066,6 @@ def network_quant_capture_managed_base(backend, model, force=False):
             setattr(module, base_bias_attr, bias.detach().to(devices.cpu, copy=True) if bias is not None else None)
             captured += 1
     return captured
-
-
-def network_quant_restore_managed_base(backend, model):
-    """Restore quant-managed LoRA modules to their immutable BF16 canonical base.
-
-    Normal LoRA unload goes through network_apply_weights(), but TorchAO-managed
-    Linear layers bypass that mutating path and are prepared model-wide from
-    immutable base tensors. Clearing LoRA state must therefore also clear the
-    physical quantized active config; otherwise a later same-signature activation
-    can incorrectly reuse stale prepared weights, and no-LoRA generations after
-    unload can still see the previous LoRA config.
-    """
-    base_weight_attr, base_bias_attr = f"network_{backend.name}_base_weight", f"network_{backend.name}_base_bias"
-    restored = 0
-    with torch.no_grad():
-        for _fqn, module in network_quant_managed_modules(backend, model):
-            base_weight = getattr(module, base_weight_attr, None)
-            if base_weight is None:
-                continue
-            module._parameters["weight"] = torch.nn.Parameter(base_weight.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
-            base_bias = getattr(module, base_bias_attr, None)
-            if base_bias is not None:
-                module._parameters["bias"] = torch.nn.Parameter(base_bias.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
-            elif "bias" in module._parameters:
-                module._parameters["bias"] = None
-            module.network_current_names = ()
-            setattr(module, f"network_{backend.name}_merged_lora_applied", False)
-            restored += 1
-    return restored
 
 
 def prepare_quant_active_config(backend):

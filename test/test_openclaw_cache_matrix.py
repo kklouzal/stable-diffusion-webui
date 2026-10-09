@@ -17,6 +17,6 @@ def test_core_08(lora_networks, monkeypatch):
     before = dict(networks.openclaw_cache_epochs.epoch_subset(("lora_applied_epoch",)))["lora_applied_epoch"]
     networks.load_networks(["alpha"], [0.5], [0.5], [None])
     networks.load_networks(["alpha"], [0.8], [0.8], [None])
-    networks.unload_networks()
+    networks.load_networks([])
     after = dict(networks.openclaw_cache_epochs.epoch_subset(("lora_applied_epoch",)))["lora_applied_epoch"]
     assert after == before + 3
