@@ -119,6 +119,7 @@ def test_cleanup_failure_still_restores_model_and_overrides():
         sd_samplers=SimpleNamespace(fix_p_invalid_sampler_and_scheduler=lambda processing: None),
         profiling=SimpleNamespace(Profiler=nullcontext),
         extra_networks=SimpleNamespace(deactivate=deactivate),
+        generation_last=SimpleNamespace(persist_or_report=lambda processing, snapshot: events.append(("persist", snapshot))),
     )
 
     with pytest.raises(CleanupFailure):
@@ -130,3 +131,54 @@ def test_cleanup_failure_still_restores_model_and_overrides():
         ("restore-overrides", {"stored": True}),
     ]
     assert p._active_extra_network_data is None
+    # the request failed in its cleanup: it is not the last completed generation
+    assert not any(event[0] == "persist" for event in events)
+
+
+def test_last_generation_snapshot_persists_after_cleanup_succeeded():
+    events = []
+    active_data = {"lora": ["example"]}
+    snapshot = {"schema_version": 3}
+    result = object()
+    p = SimpleNamespace(
+        scripts=None,
+        sd_model=object(),
+        disable_extra_networks=False,
+        override_settings_restore_afterwards=True,
+        get_token_merging_ratio=lambda: 0.5,
+    )
+
+    def process_images_inner(processing):
+        processing._active_extra_network_data = active_data
+        # built in process_images_inner, while the request's state is live
+        processing._generation_last_snapshot = snapshot
+        return result
+
+    process_images = _load_process_images(
+        store_processing_override_settings=lambda processing: {"stored": True},
+        apply_processing_override_settings=lambda processing: None,
+        restore_processing_override_settings=lambda stored: events.append(("restore-overrides", stored)),
+        process_images_inner=process_images_inner,
+        sd_models=SimpleNamespace(apply_token_merging=lambda model, ratio: events.append(("token-merging", ratio))),
+        sd_samplers=SimpleNamespace(fix_p_invalid_sampler_and_scheduler=lambda processing: None),
+        profiling=SimpleNamespace(Profiler=nullcontext),
+        extra_networks=SimpleNamespace(deactivate=lambda processing, data: events.append(("deactivate", data))),
+        generation_last=SimpleNamespace(persist_or_report=lambda processing, captured: events.append(("persist", captured))),
+    )
+
+    assert process_images(p) is result
+    assert events == [
+        ("token-merging", 0.5),
+        ("deactivate", active_data),
+        ("token-merging", 0),
+        ("restore-overrides", {"stored": True}),
+        ("persist", snapshot),
+    ]
+    assert p._generation_last_snapshot is None
+
+
+def test_last_generation_snapshot_is_built_in_the_inner_loop_and_not_persisted_there():
+    inner = _function(ast.parse(Path("modules/processing.py").read_text()), "process_images_inner")
+    calls = {ast.unparse(node.func) for node in ast.walk(inner) if isinstance(node, ast.Call)}
+    assert "generation_last.snapshot_or_report" in calls
+    assert not calls & {"generation_last.persist_or_report", "generation_last.capture_or_report", "generation_last.capture_completed_generation"}

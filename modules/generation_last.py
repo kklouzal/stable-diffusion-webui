@@ -669,14 +669,45 @@ def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None
     persistent_artifact_cache.atomic_write(path, data)
 
 
+def _report_capture_failure():
+    from modules import errors  # not at the top: the tests load this module without the webui runtime
+    errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+
+
+def snapshot_or_report(p, processed) -> dict[str, Any] | None:
+    """The snapshot of a completed generation, built while the request's state (override settings, model) is still
+    live, for persist_or_report once the request's cleanup succeeded. None when there is nothing to capture, or when
+    the build failed: that is reported and never fails the generation it describes."""
+    try:
+        if getattr(p, "_generation_last_captured", False) or not _completed_successfully(p, processed):
+            return None
+        return build_snapshot(p, processed)
+    except Exception:
+        _report_capture_failure()
+        return None
+
+
+def persist_or_report(p, snapshot: dict[str, Any] | None) -> None:
+    """Persist a snapshot_or_report result once per processing object; a failure is reported, as in capture_or_report."""
+    if snapshot is None:
+        return
+    try:
+        with _LOCK:
+            if getattr(p, "_generation_last_captured", False):
+                return
+            persist_snapshot(snapshot)
+            p._generation_last_captured = True
+    except Exception:
+        _report_capture_failure()
+
+
 def capture_or_report(p, processed) -> None:
     """capture_completed_generation for a generation path: a snapshot that cannot be persisted is reported and never
     fails the generation it describes."""
     try:
         capture_completed_generation(p, processed)
     except Exception:
-        from modules import errors  # not at the top: the tests load this module without the webui runtime
-        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+        _report_capture_failure()
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:

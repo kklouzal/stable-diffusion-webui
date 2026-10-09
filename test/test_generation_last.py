@@ -155,6 +155,32 @@ class GenerationLastTests(unittest.TestCase):
         self.assertTrue(p._generation_last_captured)
         self.assertEqual(len(reports), 1)
 
+    def test_snapshot_built_during_the_request_is_persisted_later_once(self):
+        reports = []
+        errors = module("modules.errors", report=lambda message, exc_info=False: reports.append((message, exc_info)))
+        p = StableDiffusionProcessingTxt2Img()
+        snapshot = self.module.snapshot_or_report(p, self.processed)
+        self.assertEqual(snapshot["schema_version"], self.module.SCHEMA_VERSION)
+        self.assertIsNone(self.module.get_last_snapshot())  # building writes nothing
+        self.assertFalse(getattr(p, "_generation_last_captured", False))
+
+        self.module.persist_or_report(p, snapshot)
+        self.assertEqual(self.module.get_last_snapshot(), snapshot)
+        self.assertTrue(p._generation_last_captured)
+        with patch.object(self.module, "persist_snapshot") as persist:
+            self.module.persist_or_report(p, snapshot)  # once per processing object
+            self.module.persist_or_report(StableDiffusionProcessingTxt2Img(), None)  # nothing to capture
+        persist.assert_not_called()
+
+        with stub_modules({"modules.errors": errors}), patch.object(self.module, "persist_snapshot", side_effect=OSError("disk full")):
+            self.module.persist_or_report(StableDiffusionProcessingTxt2Img(), snapshot)
+        with stub_modules({"modules.errors": errors}), patch.object(self.module, "build_snapshot", side_effect=ValueError("bad")):
+            self.assertIsNone(self.module.snapshot_or_report(StableDiffusionProcessingTxt2Img(), self.processed))
+        self.assertEqual(reports, [("Failed to persist the last-generation snapshot", True)] * 2)
+
+        self.shared.state.interrupted = True
+        self.assertIsNone(self.module.snapshot_or_report(StableDiffusionProcessingTxt2Img(), self.processed))
+
     def test_cancelled_generation_does_not_replace_previous_snapshot(self):
         p = StableDiffusionProcessingTxt2Img()
         first = self.module.capture_completed_generation(p, self.processed)

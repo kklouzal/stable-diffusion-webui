@@ -18,7 +18,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
@@ -1067,6 +1067,7 @@ def _failed_batch_images(p):
 
 def process_images(p: StableDiffusionProcessing) -> Processed:
     p._active_extra_network_data = None
+    p._generation_last_snapshot = None
     stored_opts = None
     script_runner = p.scripts
     previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
@@ -1111,6 +1112,9 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             if script_runner is not None:
                 script_runner.end_generation(p, previous_script_lifecycle)
 
+    # A request whose cleanup failed (e.g. extra network deactivation) is not a completed generation.
+    generation_last.persist_or_report(p, p._generation_last_snapshot)
+    p._generation_last_snapshot = None
     return res
 
 
@@ -1399,11 +1403,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     if p.scripts is not None:
         p.scripts.postprocess(p, res)
 
-    # This is the common successful-completion path for UI and API generations.
-    # The snapshot helper ignores interrupted/cancelled and empty results, so those
-    # cannot replace the last completed generation.
-    from modules import generation_last
-    generation_last.capture_or_report(p, res)
+    # This is the common successful-completion path for UI and API generations. The snapshot is built here, while the
+    # request's override settings and model are live; process_images persists it once the request's cleanup succeeded.
+    # The snapshot helper ignores interrupted/cancelled and empty results, so those cannot replace the last completed
+    # generation.
+    p._generation_last_snapshot = generation_last.snapshot_or_report(p, res)
 
     return res
 
