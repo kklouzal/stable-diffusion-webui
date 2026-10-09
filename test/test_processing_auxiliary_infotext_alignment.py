@@ -346,19 +346,20 @@ def test_img2img_init_cache_helpers_share_payload_and_stats_boundaries(initializ
             "color_corrections": [np.ones(3)], "paste_to": (0, 0, 16, 16),
         }
 
-    assert set(payload()) == set(processing._IMG2IMG_INIT_CACHE_ATTRS)
+    # color_corrections is stored only for a request that computed it (add_color_corrections, part of the key)
+    assert set(payload()) == {*processing._IMG2IMG_INIT_CACHE_ATTRS, "color_corrections"}
     source = make(**payload(), is_using_inpainting_conditioning=True, extra_generation_params={})
-    source._store_img2img_init_cache(("key",), time.perf_counter(), {"VAE Encoder": "TAESD"})
+    source._store_img2img_init_cache(("key",), time.perf_counter(), {"VAE Encoder": "TAESD"}, True)
     stats = source.openclaw_img2img_init_cache_stats
     assert (stats["last_hit"], stats["cached"], stats["bypass_reason"], stats["hits"], stats["misses"]) == (False, True, None, 0, 1)
     source.init_latent.add_(1)  # the cache holds clones
     source.color_corrections[0][:] = 0
 
     target = make(extra_generation_params={"Denoising strength": 0.5})
-    assert target._restore_img2img_init_cache(("other key",)) is False
-    assert target._restore_img2img_init_cache(("key",)) is True
+    assert target._restore_img2img_init_cache(("other key",), True) is False
+    assert target._restore_img2img_init_cache(("key",), True) is True
     expected = payload()
-    for attr in processing._IMG2IMG_INIT_CACHE_ATTRS:
+    for attr in expected:
         restored, value = getattr(target, attr), expected[attr]
         if torch.is_tensor(value):
             assert torch.equal(restored, value)
