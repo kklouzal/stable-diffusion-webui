@@ -174,209 +174,12 @@ class NoiseScheduleVP:
             return t
 
 
-def model_wrapper(
-    model,
-    noise_schedule,
-    model_type="noise",
-    model_kwargs=None,
-    guidance_type="uncond",
-    #condition=None,
-    #unconditional_condition=None,
-    guidance_scale=1.,
-    classifier_fn=None,
-    classifier_kwargs=None,
-):
-    """Create a wrapper function for the noise prediction model.
-
-    DPM-Solver needs to solve the continuous-time diffusion ODEs. For DPMs trained on discrete-time labels, we need to
-    firstly wrap the model function to a noise prediction model that accepts the continuous time as the input.
-
-    We support four types of the diffusion model by setting `model_type`:
-
-        1. "noise": noise prediction model. (Trained by predicting noise).
-
-        2. "x_start": data prediction model. (Trained by predicting the data x_0 at time 0).
-
-        3. "v": velocity prediction model. (Trained by predicting the velocity).
-            The "v" prediction is derivation detailed in Appendix D of [1], and is used in Imagen-Video [2].
-
-            [1] Salimans, Tim, and Jonathan Ho. "Progressive distillation for fast sampling of diffusion models."
-                arXiv preprint arXiv:2202.00512 (2022).
-            [2] Ho, Jonathan, et al. "Imagen Video: High Definition Video Generation with Diffusion Models."
-                arXiv preprint arXiv:2210.02303 (2022).
-
-        4. "score": marginal score function. (Trained by denoising score matching).
-            Note that the score function and the noise prediction model follows a simple relationship:
-            ```
-                noise(x_t, t) = -sigma_t * score(x_t, t)
-            ```
-
-    We support three types of guided sampling by DPMs by setting `guidance_type`:
-        1. "uncond": unconditional sampling by DPMs.
-            The input `model` has the following format:
-            ``
-                model(x, t_input, **model_kwargs) -> noise | x_start | v | score
-            ``
-
-        2. "classifier": classifier guidance sampling [3] by DPMs and another classifier.
-            The input `model` has the following format:
-            ``
-                model(x, t_input, **model_kwargs) -> noise | x_start | v | score
-            ``
-
-            The input `classifier_fn` has the following format:
-            ``
-                classifier_fn(x, t_input, cond, **classifier_kwargs) -> logits(x, t_input, cond)
-            ``
-
-            [3] P. Dhariwal and A. Q. Nichol, "Diffusion models beat GANs on image synthesis,"
-                in Advances in Neural Information Processing Systems, vol. 34, 2021, pp. 8780-8794.
-
-        3. "classifier-free": classifier-free guidance sampling by conditional DPMs.
-            The input `model` has the following format:
-            ``
-                model(x, t_input, cond, **model_kwargs) -> noise | x_start | v | score
-            ``
-            And if cond == `unconditional_condition`, the model output is the unconditional DPM output.
-
-            [4] Ho, Jonathan, and Tim Salimans. "Classifier-free diffusion guidance."
-                arXiv preprint arXiv:2207.12598 (2022).
-
-
-    The `t_input` is the time label of the model, which may be discrete-time labels (i.e. 0 to 999)
-    or continuous-time labels (i.e. epsilon to T).
-
-    We wrap the model function to accept only `x` and `t_continuous` as inputs, and outputs the predicted noise:
-    ``
-        def model_fn(x, t_continuous) -> noise:
-            t_input = get_model_input_time(t_continuous)
-            return noise_pred(model, x, t_input, **model_kwargs)
-    ``
-    where `t_continuous` is the continuous time labels (i.e. epsilon to T). And we use `model_fn` for DPM-Solver.
-
-    ===============================================================
-
-    Args:
-        model: A diffusion model with the corresponding format described above.
-        noise_schedule: A noise schedule object, such as NoiseScheduleVP.
-        model_type: A `str`. The parameterization type of the diffusion model.
-                    "noise" or "x_start" or "v" or "score".
-        model_kwargs: A `dict`. A dict for the other inputs of the model function.
-        guidance_type: A `str`. The type of the guidance for sampling.
-                    "uncond" or "classifier" or "classifier-free".
-        condition: A pytorch tensor. The condition for the guided sampling.
-                    Only used for "classifier" or "classifier-free" guidance type.
-        unconditional_condition: A pytorch tensor. The condition for the unconditional sampling.
-                    Only used for "classifier-free" guidance type.
-        guidance_scale: A `float`. The scale for the guided sampling.
-        classifier_fn: A classifier function. Only used for the classifier guidance.
-        classifier_kwargs: A `dict`. A dict for the other inputs of the classifier function.
-    Returns:
-        A noise prediction model that accepts the noised data and the continuous time as the inputs.
-    """
-
-    model_kwargs = model_kwargs or {}
-    classifier_kwargs = classifier_kwargs or {}
-
-    def get_model_input_time(t_continuous):
-        """
-        Convert the continuous-time `t_continuous` (in [epsilon, T]) to the model input time.
-        For discrete-time DPMs, we convert `t_continuous` in [1 / N, 1] to `t_input` in [0, 1000 * (N - 1) / N].
-        For continuous-time DPMs, we just use `t_continuous`.
-        """
-        if noise_schedule.schedule == 'discrete':
-            return (t_continuous - 1. / noise_schedule.total_N) * 1000.
-        else:
-            return t_continuous
-
-    def noise_pred_fn(x, t_continuous, cond=None):
-        if t_continuous.reshape((-1,)).shape[0] == 1:
-            t_continuous = t_continuous.expand((x.shape[0]))
-        t_input = get_model_input_time(t_continuous)
-        if cond is None:
-            output = model(x, t_input, None, **model_kwargs)
-        else:
-            output = model(x, t_input, cond, **model_kwargs)
-        if model_type == "noise":
-            return output
-        elif model_type == "x_start":
-            alpha_t, sigma_t = noise_schedule.marginal_alpha(t_continuous), noise_schedule.marginal_std(t_continuous)
-            dims = x.dim()
-            return (x - expand_dims(alpha_t, dims) * output) / expand_dims(sigma_t, dims)
-        elif model_type == "v":
-            alpha_t, sigma_t = noise_schedule.marginal_alpha(t_continuous), noise_schedule.marginal_std(t_continuous)
-            dims = x.dim()
-            return expand_dims(alpha_t, dims) * output + expand_dims(sigma_t, dims) * x
-        elif model_type == "score":
-            sigma_t = noise_schedule.marginal_std(t_continuous)
-            dims = x.dim()
-            return -expand_dims(sigma_t, dims) * output
-
-    def cond_grad_fn(x, t_input, condition):
-        """
-        Compute the gradient of the classifier, i.e. nabla_{x} log p_t(cond | x_t).
-        """
-        with torch.enable_grad():
-            x_in = x.detach().requires_grad_(True)
-            log_prob = classifier_fn(x_in, t_input, condition, **classifier_kwargs)
-            return torch.autograd.grad(log_prob.sum(), x_in)[0]
-
-    def model_fn(x, t_continuous, condition, unconditional_condition):
-        """
-        The noise prediction model function that is used for DPM-Solver.
-        """
-        if t_continuous.reshape((-1,)).shape[0] == 1:
-            t_continuous = t_continuous.expand((x.shape[0]))
-        if guidance_type == "uncond":
-            return noise_pred_fn(x, t_continuous)
-        elif guidance_type == "classifier":
-            assert classifier_fn is not None
-            t_input = get_model_input_time(t_continuous)
-            cond_grad = cond_grad_fn(x, t_input, condition)
-            sigma_t = noise_schedule.marginal_std(t_continuous)
-            noise = noise_pred_fn(x, t_continuous)
-            return noise - guidance_scale * expand_dims(sigma_t, dims=cond_grad.dim()) * cond_grad
-        elif guidance_type == "classifier-free":
-            if guidance_scale == 1. or unconditional_condition is None:
-                return noise_pred_fn(x, t_continuous, cond=condition)
-            else:
-                x_in = torch.cat([x] * 2)
-                t_in = torch.cat([t_continuous] * 2)
-                if isinstance(condition, dict):
-                    assert isinstance(unconditional_condition, dict)
-                    c_in = {}
-                    for k in condition:
-                        if isinstance(condition[k], list):
-                            c_in[k] = [torch.cat([
-                                unconditional_condition[k][i],
-                                condition[k][i]]) for i in range(len(condition[k]))]
-                        else:
-                            c_in[k] = torch.cat([
-                                unconditional_condition[k],
-                                condition[k]])
-                elif isinstance(condition, list):
-                    c_in = []
-                    assert isinstance(unconditional_condition, list)
-                    for i in range(len(condition)):
-                        c_in.append(torch.cat([unconditional_condition[i], condition[i]]))
-                else:
-                    c_in = torch.cat([unconditional_condition, condition])
-                noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in).chunk(2)
-                return noise_uncond + guidance_scale * (noise - noise_uncond)
-
-    assert model_type in ["noise", "x_start", "v"]
-    assert guidance_type in ["uncond", "classifier", "classifier-free"]
-    return model_fn
-
-
 class UniPC:
     def __init__(
         self,
         model_fn,
         noise_schedule,
         predict_x0=True,
-        thresholding=False,
-        max_val=1.,
         variant='bh1',
         condition=None,
         unconditional_condition=None,
@@ -392,8 +195,6 @@ class UniPC:
         self.noise_schedule = noise_schedule
         self.variant = variant
         self.predict_x0 = predict_x0
-        self.thresholding = thresholding
-        self.max_val = max_val
         self.condition = condition
         self.unconditional_condition = unconditional_condition
         self.before_sample = before_sample
@@ -418,17 +219,6 @@ class UniPC:
         if infos and bool(torch.stack([info.reshape(-1) for info in infos]).any()):
             raise torch.linalg.LinAlgError("UniPC: singular coefficient matrix (repeated timesteps?)")
 
-    def dynamic_thresholding_fn(self, x0, t=None):
-        """
-        The dynamic thresholding method.
-        """
-        dims = x0.dim()
-        p = self.dynamic_thresholding_ratio
-        s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-        s = expand_dims(torch.maximum(s, s.new_full(s.shape, self.thresholding_max_val)), dims)
-        x0 = torch.clamp(x0, -s, s) / s
-        return x0
-
     def model(self, x, t):
         cond = self.condition
         uncond = self.unconditional_condition
@@ -452,17 +242,12 @@ class UniPC:
 
     def data_prediction_fn(self, x, t):
         """
-        Return the data prediction model (with thresholding).
+        Return the data prediction model.
         """
         noise = self.noise_prediction_fn(x, t)
         dims = x.dim()
         alpha_t, sigma_t = self.noise_schedule.marginal_alpha(t), self.noise_schedule.marginal_std(t)
         x0 = (x - expand_dims(sigma_t, dims) * noise) / expand_dims(alpha_t, dims)
-        if self.thresholding:
-            p = 0.995   # A hyperparameter in the paper of "Imagen" [1].
-            s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-            s = expand_dims(torch.maximum(s, s.new_full(s.shape, self.max_val)), dims)
-            x0 = torch.clamp(x0, -s, s) / s
         return x0
 
     def model_fn(self, x, t):
@@ -492,43 +277,6 @@ class UniPC:
         else:
             raise ValueError(f"Unsupported skip_type {skip_type}, need to be 'logSNR' or 'time_uniform' or 'time_quadratic'")
 
-    def get_orders_and_timesteps_for_singlestep_solver(self, steps, order, skip_type, t_T, t_0, device):
-        """
-        Get the order of each step for sampling by the singlestep DPM-Solver.
-        """
-        if order == 3:
-            K = steps // 3 + 1
-            if steps % 3 == 0:
-                orders = [3,] * (K - 2) + [2, 1]
-            elif steps % 3 == 1:
-                orders = [3,] * (K - 1) + [1]
-            else:
-                orders = [3,] * (K - 1) + [2]
-        elif order == 2:
-            if steps % 2 == 0:
-                K = steps // 2
-                orders = [2,] * K
-            else:
-                K = steps // 2 + 1
-                orders = [2,] * (K - 1) + [1]
-        elif order == 1:
-            K = steps
-            orders = [1,] * steps
-        else:
-            raise ValueError("'order' must be '1' or '2' or '3'.")
-        if skip_type == 'logSNR':
-            # To reproduce the results in DPM-Solver paper
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, K, device)
-        else:
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, steps, device)[torch.cumsum(torch.tensor([0,] + orders, device=device), 0)]
-        return timesteps_outer, orders
-
-    def denoise_to_zero_fn(self, x, s):
-        """
-        Denoise at the final step, which is equivalent to solve the ODE from lambda_s to infty by first-order discretization.
-        """
-        return self.data_prediction_fn(x, s)
-
     def multistep_uni_pc_update(self, x, model_prev_list, t_prev_list, t, order, **kwargs):
         if len(t.shape) == 0:
             t = t.view(-1)
@@ -539,7 +287,6 @@ class UniPC:
             return self.multistep_uni_pc_vary_update(x, model_prev_list, t_prev_list, t, order, **kwargs)
 
     def multistep_uni_pc_vary_update(self, x, model_prev_list, t_prev_list, t, order, use_corrector=True):
-        #print(f'using unified predictor-corrector with order {order} (solver type: vary coeff)')
         ns = self.noise_schedule
         assert order <= len(model_prev_list)
         dims = x.dim()
@@ -584,7 +331,6 @@ class UniPC:
             A_p = C_inv_p
 
         if use_corrector:
-            #print('using corrector')
             C_inv = self._inv(C)
             A_c = C_inv
 
@@ -643,7 +389,6 @@ class UniPC:
         return x_t, model_t
 
     def multistep_uni_pc_bh_update(self, x, model_prev_list, t_prev_list, t, order, x_t=None, use_corrector=True):
-        #print(f'using unified predictor-corrector with order {order} (solver type: B(h))')
         ns = self.noise_schedule
         assert order <= len(model_prev_list)
         dims = x.dim()
@@ -711,7 +456,6 @@ class UniPC:
             D1s = None
 
         if use_corrector:
-            #print('using corrector')
             # for order 1, we use a simplified version
             if order == 1:
                 rhos_c = b.new_full((1,), 0.5)
@@ -763,68 +507,58 @@ class UniPC:
         return x_t, model_t
 
 
-    def sample(self, x, steps=20, t_start=None, t_end=None, order=3, skip_type='time_uniform',
-        method='singlestep', lower_order_final=True, denoise_to_zero=False, solver_type='dpm_solver',
-        atol=0.0078, rtol=0.05, corrector=False, disable=False,
-    ):
+    def sample(self, x, steps=20, t_start=None, t_end=None, order=3, skip_type='time_uniform', lower_order_final=True, disable=False):
+        """Run the multistep UniPC solver for `steps` steps from t_start (default T) to t_end (default 1/N)."""
         t_0 = 1. / self.noise_schedule.total_N if t_end is None else t_end
         t_T = self.noise_schedule.T if t_start is None else t_start
         device = x.device
-        if method == 'multistep':
-            assert steps >= order, "UniPC order must be < sampling steps"
-            timesteps = self.get_time_steps(skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device)
-            #print(f"Running UniPC Sampling with {timesteps.shape[0]} timesteps, order {order}")
-            assert timesteps.shape[0] - 1 == steps
-            with torch.no_grad():
-                vec_t = timesteps[0].expand((x.shape[0]))
-                model_prev_list = [self.model_fn(x, vec_t)]
-                t_prev_list = [vec_t]
-                with tqdm.tqdm(total=steps, disable=disable) as pbar:
-                    # Init the first `order` values by lower order multistep DPM-Solver.
-                    for init_order in range(1, order):
-                        vec_t = timesteps[init_order].expand(x.shape[0])
-                        x, model_x = self.multistep_uni_pc_update(x, model_prev_list, t_prev_list, vec_t, init_order, use_corrector=True)
+        assert steps >= order, "UniPC order must be < sampling steps"
+        timesteps = self.get_time_steps(skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device)
+        assert timesteps.shape[0] - 1 == steps
+        with torch.no_grad():
+            vec_t = timesteps[0].expand((x.shape[0]))
+            model_prev_list = [self.model_fn(x, vec_t)]
+            t_prev_list = [vec_t]
+            with tqdm.tqdm(total=steps, disable=disable) as pbar:
+                # Init the first `order` values by lower order multistep DPM-Solver.
+                for init_order in range(1, order):
+                    vec_t = timesteps[init_order].expand(x.shape[0])
+                    x, model_x = self.multistep_uni_pc_update(x, model_prev_list, t_prev_list, vec_t, init_order, use_corrector=True)
+                    if model_x is None:
+                        model_x = self.model_fn(x, vec_t)
+                    if self.after_update is not None:
+                        self.after_update(x, model_x)
+                    model_prev_list.append(model_x)
+                    t_prev_list.append(vec_t)
+                    pbar.update()
+
+                for step in range(order, steps + 1):
+                    vec_t = timesteps[step].expand(x.shape[0])
+                    if lower_order_final:
+                        step_order = min(order, steps + 1 - step)
+                    else:
+                        step_order = order
+                    if step == steps:
+                        use_corrector = False
+                    else:
+                        use_corrector = True
+                    x, model_x =  self.multistep_uni_pc_update(x, model_prev_list, t_prev_list, vec_t, step_order, use_corrector=use_corrector)
+                    callback_model_x = model_x
+                    if callback_model_x is None and step == steps:
+                        callback_model_x = x
+                    if self.after_update is not None:
+                        self.after_update(x, callback_model_x)
+                    for i in range(order - 1):
+                        t_prev_list[i] = t_prev_list[i + 1]
+                        model_prev_list[i] = model_prev_list[i + 1]
+                    t_prev_list[-1] = vec_t
+                    # We do not need to evaluate the final model value.
+                    if step < steps:
                         if model_x is None:
                             model_x = self.model_fn(x, vec_t)
-                        if self.after_update is not None:
-                            self.after_update(x, model_x)
-                        model_prev_list.append(model_x)
-                        t_prev_list.append(vec_t)
-                        pbar.update()
-
-                    for step in range(order, steps + 1):
-                        vec_t = timesteps[step].expand(x.shape[0])
-                        if lower_order_final:
-                            step_order = min(order, steps + 1 - step)
-                        else:
-                            step_order = order
-                        #print('this step order:', step_order)
-                        if step == steps:
-                            #print('do not run corrector at the last step')
-                            use_corrector = False
-                        else:
-                            use_corrector = True
-                        x, model_x =  self.multistep_uni_pc_update(x, model_prev_list, t_prev_list, vec_t, step_order, use_corrector=use_corrector)
-                        callback_model_x = model_x
-                        if callback_model_x is None and step == steps:
-                            callback_model_x = x
-                        if self.after_update is not None:
-                            self.after_update(x, callback_model_x)
-                        for i in range(order - 1):
-                            t_prev_list[i] = t_prev_list[i + 1]
-                            model_prev_list[i] = model_prev_list[i + 1]
-                        t_prev_list[-1] = vec_t
-                        # We do not need to evaluate the final model value.
-                        if step < steps:
-                            if model_x is None:
-                                model_x = self.model_fn(x, vec_t)
-                            model_prev_list[-1] = model_x
-                        pbar.update()
-        else:
-            raise NotImplementedError()
+                        model_prev_list[-1] = model_x
+                    pbar.update()
         self.check_linalg_infos()
-        if denoise_to_zero:
-            x = self.denoise_to_zero_fn(x, torch.full((x.shape[0],), t_0, device=device))
         return x
 
 

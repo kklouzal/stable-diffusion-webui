@@ -20,7 +20,7 @@ def _sample(variant, order, predict_x0, dtype):
 
     alphas_cumprod = torch.cumprod(1 - torch.linspace(0.00085, 0.012, 1000, dtype=torch.float64), 0).to(dtype)
     sampler = uni_pc.UniPC(model_fn, uni_pc.NoiseScheduleVP("discrete", alphas_cumprod=alphas_cumprod), predict_x0=predict_x0, variant=variant)
-    return sampler.sample(x, steps=8, skip_type="time_uniform", method="multistep", order=order, lower_order_final=True)
+    return sampler.sample(x, steps=8, skip_type="time_uniform", order=order, lower_order_final=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -59,7 +59,7 @@ def test_every_skip_type_samples(skip_type):
     alphas_cumprod = torch.cumprod(1 - torch.linspace(0.00085, 0.012, 1000, dtype=torch.float64), 0).float()
     sampler = uni_pc.UniPC(lambda x_in, t_in, cond=None, uncond=None: x_in * 0.1, uni_pc.NoiseScheduleVP("discrete", alphas_cumprod=alphas_cumprod), predict_x0=True, variant="bh2")
 
-    out = sampler.sample(x, steps=6, skip_type=skip_type, method="multistep", order=2, lower_order_final=True)
+    out = sampler.sample(x, steps=6, skip_type=skip_type, order=2, lower_order_final=True)
 
     assert torch.isfinite(out).all()
 
