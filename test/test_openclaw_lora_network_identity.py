@@ -1014,18 +1014,19 @@ def test_wanted_names_are_built_once_per_published_set(lora_networks, monkeypatc
     networks = lora_networks
     built = []
     signature = networks.network_loaded_weight_signature
-    monkeypatch.setattr(networks, "network_loaded_weight_signature", lambda net: built.append(net.name) or signature(net))
+    monkeypatch.setattr(networks, "network_loaded_weight_signature", lambda net, *used: built.append(net.name) or signature(net, *used))
     alpha, _ = _published_net("alpha")
     beta, _ = _published_net("beta")
 
     networks._set_loaded_networks([alpha])
     names = networks.network_wanted_names()
-    assert built == ["alpha"]  # built at publish, reused by every later forward
+    assert built == ["alpha", "alpha"]  # the set's and its U-Net layer's, built at publish, reused by every later forward
     assert all(networks.network_wanted_names() is names for _ in range(3))
     assert names == (signature(alpha),)
+    assert networks.network_layer_wanted_names("layer") == (signature(alpha, False, True),)
 
     networks._set_loaded_networks([alpha, beta])
-    assert built == ["alpha", "alpha", "beta"]
+    assert built == ["alpha", "alpha", "alpha", "beta", "alpha", "beta"]
     networks.loaded_networks[:] = [beta]  # a direct list replacement is still observed
     assert networks.network_wanted_names() == (signature(beta),)
     networks._set_loaded_networks([])

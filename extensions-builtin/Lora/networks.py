@@ -1021,11 +1021,15 @@ def network_reset_cached_weight(self: Union[torch.nn.Conv2d, torch.nn.Linear]):
     self.network_bias_backup = None
 
 
-def network_loaded_weight_signature(net):
+def network_loaded_weight_signature(net, text_encoder=True, unet=True):
+    """Identity of network net's merged contribution: its source, multipliers, dyn dim and the merge implementation.
+    A layer's modules use only one of the multipliers (network.is_text_encoder_key), so a layer's signature names only
+    the ones it uses (text_encoder/unet): changing the other leaves its merge as it is. The published set's signature
+    (network_wanted_names) names both."""
     return (
         getattr(net, "source_key", network_source_key(getattr(net, "network_on_disk", None), getattr(net, "source_signature", None))),
-        float(getattr(net, "te_multiplier", 1.0)).hex(),
-        float(getattr(net, "unet_multiplier", 1.0)).hex(),
+        float(getattr(net, "te_multiplier", 1.0)).hex() if text_encoder else None,
+        float(getattr(net, "unet_multiplier", 1.0)).hex() if unet else None,
         getattr(net, "dyn_dim", None),
         LORA_APPLIED_IMPLEMENTATION_REVISION,
     )
@@ -1044,7 +1048,7 @@ def _wanted_names_state():
     them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks stamps
     source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always arrives as
     different objects. A network touches the layers its modules are keyed by, and through q/k/v projection modules
-    the combined projection they belong to.
+    the combined projection they belong to; its signature for a layer names the multipliers of those modules.
     """
     global _wanted_names_memo
     published = _wanted_names_memo[0]
@@ -1053,11 +1057,18 @@ def _wanted_names_state():
     published = tuple(loaded_networks)
     names = tuple(network_loaded_weight_signature(x) for x in published)
     by_layer = {}
-    for net, name in zip(published, names):
-        layers = set(net.modules)
-        layers.update(m.group(1) for m in map(re_x_proj.match, net.modules) if m)
-        for layer in layers:
-            by_layer.setdefault(layer, []).append(name)
+    for net in published:
+        text_encoder_uses = {}  # layer -> whether each module that touches it is a text encoder module
+        for key in net.modules:
+            m = re_x_proj.match(key)
+            for layer in (key, m.group(1)) if m else (key,):
+                text_encoder_uses.setdefault(layer, set()).add(network.is_text_encoder_key(key))
+        signatures = {}
+        for layer, uses in text_encoder_uses.items():
+            used = (True in uses, False in uses)
+            if used not in signatures:
+                signatures[used] = network_loaded_weight_signature(net, *used)
+            by_layer.setdefault(layer, []).append(signatures[used])
     _wanted_names_memo = (published, names, {layer: tuple(layer_names) for layer, layer_names in by_layer.items()})
     return _wanted_names_memo
 

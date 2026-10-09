@@ -528,6 +528,50 @@ def test_lora_set_change_touches_only_the_layers_of_changed_networks(bf16_lora, 
     assert torch.equal(shared.weight, base_shared) and torch.equal(only_b.weight, base_b)
 
 
+def test_changing_one_multiplier_re_merges_only_the_layers_that_use_it(bf16_lora, monkeypatch):
+    """A layer's signature named both multipliers of each network that touches it, so changing only te (or only unet)
+    re-merged every U-Net (or text encoder) layer of that network to the same bits."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(53)
+    te_layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    te_layer.network_layer_name = "transformer_text_model_encoder_layers_0_mlp_fc1"
+    unet_layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    unet_layer.network_layer_name = "diffusion_model_input_blocks_1_1_proj_in"
+    layers = (te_layer, unet_layer)
+    _publish_layers(networks, monkeypatch, *layers)
+    factors = {layer.network_layer_name: (_grid((8, 2), g), _grid((2, 8), g)) for layer in layers}
+    bases = [layer.weight.detach().clone() for layer in layers]
+
+    def use(te, unet):
+        net = _net(networks, "a")
+        for layer in layers:
+            up, down = factors[layer.network_layer_name]
+            _add_module(networks, net, layer, {"lora_up.weight": up, "lora_down.weight": down, "alpha": torch.tensor(2.0)}, networks.network_lora.NetworkModuleLora)
+        net.te_multiplier, net.unet_multiplier = te, unet
+        return net
+
+    def expected(layer, base, net):
+        up, down = factors[layer.network_layer_name]
+        multiplier = net.te_multiplier if layer is te_layer else net.unet_multiplier
+        return (base.double() + multiplier * (up.double() @ down.double())).to(torch.bfloat16)
+
+    merges = []
+    layer_delta = networks.network_layer_delta
+    monkeypatch.setattr(networks, "network_layer_delta", lambda net, name, *args: merges.append(name) or layer_delta(net, name, *args))
+
+    for net, merged in (
+        (use(1.0, 1.0), [te_layer, unet_layer]),
+        (use(0.5, 1.0), [te_layer]),
+        (use(0.5, 0.25), [unet_layer]),
+        (use(1.0, 1.0), [te_layer, unet_layer]),
+    ):
+        merges.clear()
+        assert networks._publish_applied_state([net])
+        assert merges == [layer.network_layer_name for layer in merged]
+        for layer, base in zip(layers, bases):
+            assert torch.equal(layer.weight, expected(layer, base, net))
+
+
 def test_switching_lora_functional_republishes_the_same_networks(bf16_lora, monkeypatch):
     """A lora_functional request restores the base weights in its forwards. The next merged request with the same
     networks was an applied-state hit: nothing re-merged before sampling, and CUDA graphs captured on the merged
