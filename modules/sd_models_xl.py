@@ -38,7 +38,7 @@ def get_learned_conditioning(self: sgm.models.diffusion.DiffusionEngine, batch: 
     force_zero_negative_prompt = is_negative_prompt and all(x == '' for x in batch)
     c = self.conditioner(sdxl_conds, force_zero_embeddings=['txt'] if force_zero_negative_prompt else [])
 
-    return c
+    return prompt_parser.ZeroedTextConditioning(c) if force_zero_negative_prompt else c
 
 
 def apply_model(self: sgm.models.diffusion.DiffusionEngine, x, t, cond):

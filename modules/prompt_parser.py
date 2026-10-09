@@ -190,7 +190,9 @@ def get_learned_conditioning(model, prompts: SdConditioning | list[str], steps, 
 
         cond_schedule = []
         for i, (end_at_step, _) in enumerate(prompt_schedule):
-            if isinstance(conds, dict):
+            if isinstance(conds, ZeroedTextConditioning):
+                cond = ZeroedTextConditioning({k: v[i] for k, v in conds.items()})
+            elif isinstance(conds, dict):
                 cond = {k: v[i] for k, v in conds.items()}
             else:
                 cond = conds[i]
@@ -269,7 +271,17 @@ def get_multicond_learned_conditioning(model, prompts, steps, hires_steps=None, 
     return MulticondLearnedConditioning(shape=(len(prompts),), batch=res)
 
 
+class ZeroedTextConditioning(dict):
+    """Dict conditioning (SD-XL) whose text embeddings the model zeroed instead of encoding them: an empty negative
+    prompt, as sgm's force_zero_embeddings. get_learned_conditioning keeps the mark on each row it splits off, and
+    reconstruct_cond_batch reports the marked rows (DictWithShape.zeroed_text_rows), so padding such a row to a longer
+    cond adds zeros, not the empty prompt's encoding (CFGDenoiser.pad_cond_uncond)."""
+
+
 class DictWithShape(dict):
+    zeroed_text_rows: tuple[bool, ...] = ()
+    """Per row, whether its text embeddings are zeroed (ZeroedTextConditioning); empty when nothing says so."""
+
     def __init__(self, x, shape=None):
         super().__init__()
         self.update(x)
@@ -290,14 +302,19 @@ def reconstruct_cond_batch(c: list[list[ScheduledPromptConditioning]], current_s
     else:
         res = torch.zeros((len(c),) + param.shape, device=param.device, dtype=param.dtype)
 
+    zeroed_text_rows = []
     for i, cond_schedule in enumerate(c):
         cond = scheduled_conditioning_at_step(cond_schedule, current_step).cond
 
         if is_dict:
             for k, param in cond.items():
                 res[k][i] = param
+            zeroed_text_rows.append(isinstance(cond, ZeroedTextConditioning))
         else:
             res[i] = cond
+
+    if is_dict:
+        res.zeroed_text_rows = tuple(zeroed_text_rows)
 
     return res
 
