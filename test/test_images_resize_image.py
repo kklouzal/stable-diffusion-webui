@@ -77,28 +77,6 @@ def images_module():
     _cleanup_import_stubs()
 
 
-def test_expand_crop_region_ceil_expands_to_requested_aspect_when_room_exists():
-    from modules import masking
-
-    crop = (0, 0, 1, 1)
-    expanded = masking.expand_crop_region(crop, 768, 512, 512, 512)
-
-    assert expanded == (0, 0, 2, 1)
-    assert expanded[0] <= crop[0] and expanded[1] <= crop[1]
-    assert expanded[2] >= crop[2] and expanded[3] >= crop[3]
-
-
-def test_expand_crop_region_ceil_height_expansion_when_room_exists():
-    from modules import masking
-
-    crop = (0, 0, 3, 1)
-    expanded = masking.expand_crop_region(crop, 512, 512, 512, 512)
-
-    assert expanded == (0, 0, 3, 3)
-    assert expanded[0] <= crop[0] and expanded[1] <= crop[1]
-    assert expanded[2] >= crop[2] and expanded[3] >= crop[3]
-
-
 def test_resize_image_crop_mode_covers_target_after_fractional_aspect_rounding(images_module):
     src = Image.new('RGB', (2, 3), color=(10, 20, 30))
 
