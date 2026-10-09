@@ -628,7 +628,7 @@ def decode_base64_to_image(encoding):
     An image of more than img_max_size_mp megapixels answers 413 once its header is read, before its pixels are
     decoded. A URL download may be as long as an image of that many pixels stored uncompressed as 8-bit RGBA (4 bytes
     per pixel): the byte budget follows the pixel budget instead of adding an unrelated limit. A decoded image
-    images.read cannot map to 8 bits (images.UnsupportedImageError) answers 422.
+    images.read cannot map to 8-bit sRGB (images.UnsupportedImageError) answers 422.
     Inside decode_inline_images_once, inline data decoded earlier in the request returns a new copy of that decode
     (URLs are always fetched: the resource may change)."""
     max_pixels = int(opts.img_max_size_mp * 1_000_000)

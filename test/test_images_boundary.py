@@ -412,3 +412,135 @@ def test_read_rejects_images_without_a_defined_value_range(images, array):
     with pytest.raises(images.UnsupportedImageError):
         images.read(io.BytesIO(data.getvalue()))
 
+
+# --- ICC profiles ----------------------------------------------------------------------------------------------------
+
+_BRADFORD = np.array([[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]])
+_D50 = np.array([0.9642, 1.0, 0.8249])  # the ICC PCS illuminant
+_SRGB_PRIMARIES = ((0.640, 0.330), (0.300, 0.600), (0.150, 0.060))
+_P3_PRIMARIES = ((0.680, 0.320), (0.265, 0.690), (0.150, 0.060))
+_D65_XY = (0.3127, 0.3290)
+
+
+def _xyz(xy):
+    x, y = xy
+    return np.array([x / y, 1.0, (1 - x - y) / y])
+
+
+def _rgb_to_xyz(primaries):
+    """Linear RGB -> XYZ for D65 white."""
+    columns = np.stack([_xyz(xy) for xy in primaries], axis=1)
+    return columns * np.linalg.solve(columns, _xyz(_D65_XY))
+
+
+def _icc_v4_matrix_trc(primaries):
+    """A minimal ICC v4 display profile: D65 primaries Bradford-adapted to D50 and the sRGB tone curve on every
+    channel. The same writer with sRGB primaries must give an sRGB profile, which checks it."""
+    adapt = np.linalg.inv(_BRADFORD) @ np.diag((_BRADFORD @ _D50) / (_BRADFORD @ _xyz(_D65_XY))) @ _BRADFORD
+    colorants = adapt @ _rgb_to_xyz(primaries)
+
+    def s15(value):
+        return int(round(value * 65536)).to_bytes(4, "big", signed=True)
+
+    def xyz_tag(xyz):
+        return b"XYZ " + bytes(4) + b"".join(s15(v) for v in xyz)
+
+    trc = b"para" + bytes(4) + (3).to_bytes(2, "big") + bytes(2) + b"".join(s15(v) for v in (2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045))
+    text = "test profile".encode("utf-16-be")
+    desc = b"mluc" + bytes(4) + (1).to_bytes(4, "big") + (12).to_bytes(4, "big") + b"enUS" + len(text).to_bytes(4, "big") + (28).to_bytes(4, "big") + text
+    tags = [(b"desc", desc), (b"cprt", desc), (b"wtpt", xyz_tag(_D50)), (b"rXYZ", xyz_tag(colorants[:, 0])), (b"gXYZ", xyz_tag(colorants[:, 1])),
+            (b"bXYZ", xyz_tag(colorants[:, 2])), (b"rTRC", trc), (b"gTRC", trc), (b"bTRC", trc)]
+    offset = 128 + 4 + 12 * len(tags)
+    table, data = b"", b""
+    for signature, body in tags:
+        body += bytes(-len(body) % 4)
+        table += signature + (offset + len(data)).to_bytes(4, "big") + len(body).to_bytes(4, "big")
+        data += body
+    size = offset + len(data)
+    header = (size.to_bytes(4, "big") + bytes(4) + bytes([4, 0x30, 0, 0]) + b"mntrRGB XYZ " + bytes(12) + b"acsp" + bytes(24)
+              + bytes(4) + b"".join(s15(v) for v in _D50) + bytes(4) + bytes(16) + bytes(28))
+    return header + len(tags).to_bytes(4, "big") + table + data
+
+
+def _srgb_encode(linear):
+    linear = np.clip(linear, 0.0, 1.0)
+    return np.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055)
+
+
+def _srgb_decode(encoded):
+    return np.where(encoded <= 0.04045, encoded / 12.92, ((encoded + 0.055) / 1.055) ** 2.4)
+
+
+def _p3_to_srgb_reference(rgb):
+    """Display P3 -> sRGB in float64 (same D65 white, same tone curve), clipped and rounded."""
+    matrix = np.linalg.inv(_rgb_to_xyz(_SRGB_PRIMARIES)) @ _rgb_to_xyz(_P3_PRIMARIES)
+    linear = _srgb_decode(rgb.astype(np.float64) / 255) @ matrix.T
+    return np.rint(_srgb_encode(linear) * 255).astype(np.int64)
+
+
+@pytest.mark.parametrize("profile", ["builtin", "written"])
+def test_srgb_tagged_images_keep_their_pixels(images, profile):
+    from PIL import ImageCms
+
+    icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes() if profile == "builtin" else _icc_v4_matrix_trc(_SRGB_PRIMARIES)
+    source = _random_rgb(64, 48, seed=3)
+
+    image = images.read(_png(source, icc_profile=icc))
+
+    assert np.array_equal(np.asarray(image), np.asarray(source))
+    assert image.info["icc_profile"] == icc
+
+
+def test_display_p3_images_convert_to_srgb(images):
+    rng = np.random.default_rng(4)
+    pixels = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    pixels[0, :4] = [(255, 0, 0), (0, 255, 0), (128, 128, 128), (255, 255, 255)]
+
+    image = images.read(_png(Image.fromarray(pixels), icc_profile=_icc_v4_matrix_trc(_P3_PRIMARIES)))
+
+    assert image.mode == "RGB" and "icc_profile" not in image.info
+    got = np.asarray(image).astype(np.int64)
+    assert np.abs(got - _p3_to_srgb_reference(pixels)).max() <= 1
+    assert got[0, 0].tolist() == [255, 0, 0]  # P3 red is outside sRGB: clipped
+    assert np.abs(got[0, 2] - 128).max() <= 1 and got[0, 3].tolist() == [255, 255, 255]
+
+
+def test_icc_conversion_keeps_alpha_palette_transparency_and_orientation(images):
+    icc = _icc_v4_matrix_trc(_P3_PRIMARIES)
+    rgba = Image.fromarray(np.random.default_rng(5).integers(0, 256, (16, 16, 4), dtype=np.uint8))
+    rgb_expected = np.asarray(images.read(_png(rgba.convert("RGB"), icc_profile=icc)))
+
+    converted = images.read(_png(rgba, icc_profile=icc))
+    assert converted.mode == "RGBA"
+    assert np.array_equal(np.asarray(converted.getchannel("A")), np.asarray(rgba.getchannel("A")))
+    assert np.array_equal(np.asarray(converted.convert("RGB")), rgb_expected)
+
+    palette = rgba.convert("RGB").quantize(16)
+    palette_converted = images.read(_png(palette, icc_profile=icc, transparency=0))
+    assert palette_converted.mode == "RGBA"
+    assert np.array_equal(np.asarray(palette_converted.getchannel("A")), np.where(np.asarray(palette) == 0, 0, 255))
+    assert np.array_equal(np.asarray(palette_converted.convert("RGB")), np.asarray(images.read(_png(palette.convert("RGB"), icc_profile=icc))))
+
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 90 degrees clockwise to display
+    wide = Image.fromarray(np.random.default_rng(6).integers(0, 256, (8, 20, 3), dtype=np.uint8))
+    rotated = images.read(_png(wide, icc_profile=icc, exif=exif.tobytes()))
+    assert rotated.size == (8, 20)
+    assert np.array_equal(np.asarray(rotated), np.asarray(images.read(_png(wide.transpose(Image.Transpose.ROTATE_270), icc_profile=icc))))
+
+
+def test_gray_images_ignore_their_profile(images):
+    mask = Image.fromarray(np.arange(256, dtype=np.uint8).reshape(16, 16))
+
+    image = images.read(_png(mask, icc_profile=_icc_v4_matrix_trc(_P3_PRIMARIES)))
+
+    assert image.mode == "L" and np.array_equal(np.asarray(image), np.asarray(mask))
+
+
+def test_invalid_or_mismatched_profiles_are_rejected(images):
+    from PIL import ImageCms
+
+    with pytest.raises(images.UnsupportedImageError):
+        images.read(_png(_random_rgb(4, 4), icc_profile=b"not an ICC profile" * 8))
+    with pytest.raises(images.UnsupportedImageError):  # an RGB image cannot be read through a Lab profile
+        images.read(_png(_random_rgb(4, 4), icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()))

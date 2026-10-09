@@ -13,12 +13,13 @@ import struct
 import numpy as np
 import piexif
 import piexif.helper
-from PIL import Image, ImageFont, ImageDraw, ImageColor, PngImagePlugin, ImageOps, ExifTags
+from PIL import Image, ImageCms, ImageFont, ImageDraw, ImageColor, PngImagePlugin, ImageOps, ExifTags
 # pillow_avif needs to be imported somewhere in code for it to work
 import pillow_avif # noqa: F401
 import string
 import json
 import hashlib
+import io
 
 from modules import sd_samplers, shared, script_callbacks, errors, png_writer
 from modules.paths_internal import roboto_ttf_file
@@ -926,8 +927,9 @@ def pixel_fingerprint(image):
 
 
 class UnsupportedImageError(ValueError):
-    """Decoded image data that has no defined mapping to 8 bits: a pixel mode whose value range the format does not
-    define (32-bit integer "I", float "F")."""
+    """Decoded image data that has no defined mapping to 8-bit sRGB: a pixel mode whose value range the format does
+    not define (32-bit integer "I", float "F"), or an embedded ICC profile that is malformed, cannot be a source
+    profile or does not match the pixel mode."""
 
 
 def read(fp, *, max_pixels=None, **kwargs):
@@ -945,8 +947,9 @@ def read(fp, *, max_pixels=None, **kwargs):
 
 
 def fix_image(image: Image.Image):
-    """Maps 16-bit grayscale to 8 bits and applies EXIF orientation and palette transparency. Orientation/transparency
-    errors are ignored (as before); unsupported modes raise UnsupportedImageError."""
+    """Maps 16-bit grayscale to 8 bits, applies EXIF orientation and palette transparency, and converts colours to
+    sRGB by an embedded ICC profile. Orientation/transparency errors are ignored (as before); unsupported modes and
+    profiles raise UnsupportedImageError."""
     if image is None:
         return None
 
@@ -958,7 +961,7 @@ def fix_image(image: Image.Image):
     except Exception:
         pass
 
-    return image
+    return _convert_to_srgb(image)
 
 
 _SIXTEEN_BIT_GRAY_MODES = frozenset(("I;16", "I;16B", "I;16L", "I;16N"))
@@ -982,6 +985,79 @@ def _sixteen_bit_gray_to_8_bit(image):
         gray = Image.merge("LA", (gray, Image.fromarray(np.where(values == key, 0, 255).astype(np.uint8))))
     gray.info = info
     return gray
+
+
+# The ICC colour space (header field) each convertible pixel mode needs. Gray images are never converted: in this
+# API they are masks, whose values are data rather than colours, and a gray image is the same on every display.
+_ICC_COLOUR_SPACES = {"RGB": "RGB ", "RGBA": "RGB ", "P": "RGB ", "PA": "RGB ", "CMYK": "CMYK"}
+_ICC_GRAY_MODES = frozenset(("1", "L", "LA", "La"))
+
+
+@functools.lru_cache(maxsize=16)
+def _icc_to_srgb_transform(icc_profile: bytes):
+    """(colour space, transform to sRGB from it, or None when an RGB profile is sRGB). The RGB transform maps RGB to
+    RGB, the CMYK one CMYK to RGB. LittleCMS transforms may be shared between threads; profile handles may not (tags
+    are read lazily), so the profiles live only here.
+
+    An RGB profile counts as sRGB when converting it to LittleCMS's built-in sRGB moves no colour of the 8-bit cube by
+    more than one code. Real "sRGB IEC61966-2.1" profiles do move some colours by one code (the s15Fixed16 rounding of
+    their colorants and curves), and images tagged with them keep their exact pixels. Decided once per profile: the
+    whole cube takes ~0.4 s for an sRGB profile, and any other profile fails within its first slice."""
+    try:
+        profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
+        colour_space = profile.profile.xcolor_space
+        in_mode = {"RGB ": "RGB", "CMYK": "CMYK"}.get(colour_space)
+        if in_mode is None:
+            return colour_space, None
+        # Perceptual reads a LUT profile's A2B0 table, the one browsers use; a matrix/TRC profile has one transform.
+        transform = ImageCms.buildTransform(
+            profile, ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")), in_mode, "RGB", renderingIntent=ImageCms.Intent.PERCEPTUAL,
+        )
+    except (OSError, ImageCms.PyCMSError) as e:
+        raise UnsupportedImageError(f"Invalid embedded ICC profile: {e}") from e
+    if in_mode == "CMYK":
+        return colour_space, transform
+
+    green_blue = np.empty((256, 256, 3), dtype=np.uint8)
+    green_blue[..., 1] = np.arange(256, dtype=np.uint8)[:, None]
+    green_blue[..., 2] = np.arange(256, dtype=np.uint8)[None, :]
+    for red in range(0, 256, 16):
+        cube = np.repeat(green_blue[None], 16, axis=0)
+        cube[..., 0] = np.arange(red, red + 16, dtype=np.uint8)[:, None, None]
+        cube = cube.reshape(16 * 256, 256, 3)
+        converted = np.asarray(ImageCms.applyTransform(Image.fromarray(cube), transform))
+        if np.abs(converted.astype(np.int16) - cube).max() > 1:
+            return colour_space, transform
+    return colour_space, None
+
+
+def _convert_to_srgb(image):
+    """Converts an image with an embedded RGB or CMYK ICC profile to sRGB, the colour space everything downstream
+    assumes, and drops the profile. Untagged images, gray images and sRGB profiles (_icc_to_srgb_transform) keep their
+    pixels and info."""
+    icc_profile = image.info.get("icc_profile")
+    if not icc_profile or image.mode in _ICC_GRAY_MODES:
+        return image
+
+    expected = _ICC_COLOUR_SPACES.get(image.mode)
+    if expected is None:
+        raise UnsupportedImageError(f"Unsupported image mode {image.mode} with an embedded ICC profile")
+    colour_space, transform = _icc_to_srgb_transform(bytes(icc_profile))
+    if colour_space != expected:
+        raise UnsupportedImageError(f"The embedded ICC profile's colour space {colour_space.strip()!r} does not match image mode {image.mode}")
+    if transform is None:
+        return image
+
+    info = {key: value for key, value in image.info.items() if key not in ("icc_profile", "transparency")}
+    if image.mode == "CMYK":
+        converted = ImageCms.applyTransform(image, transform)
+    else:
+        image = image.convert("RGBA" if image.has_transparency_data else "RGB")  # palettes and colour keys -> alpha
+        converted = ImageCms.applyTransform(image.convert("RGB"), transform)
+        if image.mode == "RGBA":
+            converted.putalpha(image.getchannel("A"))
+    converted.info = info
+    return converted
 
 
 def fix_png_transparency(image: Image.Image):
