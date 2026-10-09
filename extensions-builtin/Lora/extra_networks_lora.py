@@ -58,7 +58,9 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                 p.comment(f"{backend.label} LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
                 raise FatalLoraPreparationError(error)
 
-        # loaded_networks holds the requested networks in request order.
+        # loaded_networks holds the requested networks in request order. Infotext keys on the names this request
+        # used: an unchanged applied state (same sources and multipliers) keeps the published networks, whose
+        # mentioned_name is the name of the request that published them (another alias of the same file).
         is_hr_pass = getattr(p, "is_hr_pass", False)
         if not is_hr_pass or not hasattr(p, "lora_errors"):
             p.lora_errors = {}
@@ -72,9 +74,9 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             if not is_hr_pass or not hasattr(p, "lora_hashes"):
                 p.lora_hashes = {}
 
-            for item in networks.loaded_networks:
-                if item.network_on_disk.shorthash and item.mentioned_name:
-                    p.lora_hashes[item.mentioned_name.translate(self.remove_symbols)] = item.network_on_disk.shorthash
+            for name, item in zip(names, networks.loaded_networks):
+                if item.network_on_disk.shorthash:
+                    p.lora_hashes[name.translate(self.remove_symbols)] = item.network_on_disk.shorthash
 
             if p.lora_hashes:
                 p.extra_generation_params["Lora hashes"] = ', '.join(f'{k}: {v}' for k, v in p.lora_hashes.items())

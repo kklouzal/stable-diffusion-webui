@@ -1174,3 +1174,16 @@ def test_unmatched_lora_keys_are_reported_on_every_activation(lora_networks, mon
     networks.loaded_networks.clear()
     monkeypatch.setattr(networks, "_applied_state_key", None)
     assert "Lora errors" not in activate("alpha").extra_generation_params
+
+
+def test_lora_hashes_name_the_alias_this_request_used(lora_networks, monkeypatch):
+    """Switching between two names of one file with equal multipliers reuses the applied state, whose networks
+    carry the previous request's mentioned_name; the infotext used that stale alias."""
+    networks = lora_networks
+    parsed = networks.network.Network("alpha", networks.available_networks["alpha"])
+    activate = _activation(networks, monkeypatch, parsed)
+
+    assert activate("alpha-alias").extra_generation_params["Lora hashes"] == "alpha-alias: abc"
+    second = activate("alpha")
+    assert networks.loaded_networks[0].mentioned_name == "alpha-alias"  # the applied state was reused
+    assert second.extra_generation_params["Lora hashes"] == "alpha: abc"
