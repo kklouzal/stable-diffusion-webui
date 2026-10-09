@@ -109,15 +109,16 @@ def env(tmp_path):
         "modules.script_callbacks": script_callbacks,
         "modules.errors": errors,
         "modules.sd_samplers": types.ModuleType("modules.sd_samplers"),
-        "modules.images": None, "modules.torch_utils": None, "modules.upscaler": None, "modules.upscaler_utils": None,
+        "modules.png_writer": None, "modules.images": None, "modules.torch_utils": None, "modules.upscaler": None,
+        "modules.upscaler_utils": None,
     }
     with _modules(stubs):
-        for name in ("modules.images", "modules.torch_utils", "modules.upscaler", "modules.upscaler_utils"):
+        for name in ("modules.png_writer", "modules.images", "modules.torch_utils", "modules.upscaler", "modules.upscaler_utils"):
             sys.modules.pop(name)
         pkg = sys.modules["modules"]
         for attr in ("shared", "devices", "modelloader", "errors", "script_callbacks", "sd_samplers", "paths_internal"):
             setattr(pkg, attr, sys.modules[f"modules.{attr}"])
-        for attr in ("torch_utils", "images", "upscaler", "upscaler_utils"):
+        for attr in ("png_writer", "torch_utils", "images", "upscaler", "upscaler_utils"):
             setattr(pkg, attr, _load(f"modules.{attr}", ROOT / "modules" / f"{attr}.py"))
         yield SimpleNamespace(
             shared=shared, devices=devices, modelloader=modelloader, loader_calls=loader_calls,
