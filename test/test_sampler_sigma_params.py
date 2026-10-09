@@ -17,14 +17,17 @@ shared = init_shared()
 add_repositories_to_sys_path("k-diffusion")
 
 # sd_samplers first: importing sd_samplers_common on its own runs into a circular import
-from modules import sd_samplers, sd_samplers_common, sd_samplers_kdiffusion  # noqa: E402,F401
+from modules import sd_models, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion  # noqa: E402,F401
 
 DEFAULTS = dict(s_churn=0.0, s_tmin=0.0, s_tmax=0.0, s_noise=1.0)
 
 
 @pytest.fixture
 def make_sampler(monkeypatch):
-    monkeypatch.setattr(shared, "sd_model", SimpleNamespace(model=SimpleNamespace(conditioning_key="crossattn"), create_denoiser=lambda: SimpleNamespace()), raising=False)
+    model_data = sd_models.SdModelData()
+    model_data.sd_model = SimpleNamespace(model=SimpleNamespace(conditioning_key="crossattn"), create_denoiser=lambda: SimpleNamespace())
+    model_data.was_loaded_at_least_once = True
+    monkeypatch.setattr(sd_models, "model_data", model_data)
 
     def make(label):
         config = sd_samplers_kdiffusion.k_diffusion_samplers_map[label]

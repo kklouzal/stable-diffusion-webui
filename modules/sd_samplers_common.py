@@ -4,6 +4,7 @@ from collections import namedtuple
 import torch
 from PIL import Image
 from modules import devices, images, sd_vae_approx, sd_vae_taesd, shared
+from modules.sd_unet_row_memo import tensor_version
 from modules.shared import opts, state
 import k_diffusion.sampling
 
@@ -189,20 +190,40 @@ def replace_torchsde_browinan():
 replace_torchsde_browinan()
 
 
+def cpu_sigmas(model_wrap):
+    """The k-diffusion wrapper's sigma table (model_wrap.sigmas, on the device) as a CPU tensor, copied once per table.
+
+    One wrapper is built per sampling run (and per refiner switch), so get_sigmas, its schedule cache key and the
+    refiner switch read the table without a device-to-host copy and synchronization on every call. A replaced table,
+    or one mutated in place where the version counter is tracked, is copied again. Generation's inference tensors have
+    no version counter; nothing mutates a wrapper's table in place inside inference mode (per-request schedule options
+    build a new wrapper; see openclaw_cuda_graphs._schedule_signature)."""
+    sigmas = model_wrap.sigmas
+    version = tensor_version(sigmas)
+    cached = getattr(model_wrap, "openclaw_cpu_sigmas", None)
+    if cached is None or cached[0] is not sigmas or cached[1] != version:
+        cached = (sigmas, version, sigmas.detach().to(devices.cpu))
+        model_wrap.openclaw_cpu_sigmas = cached
+    return cached[2]
+
+
 def apply_refiner(cfg_denoiser, sigma=None):
     if opts.refiner_switch_by_sample_steps or sigma is None:
         completed_ratio = cfg_denoiser.step / cfg_denoiser.total_steps
         cfg_denoiser.p.extra_generation_params["Refiner switch by sampling steps"] = True
 
-    elif cfg_denoiser.p.refiner_checkpoint_info is None:
-        return False  # no refiner: skip the per-step sigma argmin, which only feeds the switch decision
+    elif cfg_denoiser.p.refiner_checkpoint_info is None or shared.sd_model.sd_checkpoint_info == cfg_denoiser.p.refiner_checkpoint_info:
+        return False  # no refiner, or switched to it already: skip reading sigma, which only feeds the switch decision
 
     else:
-        # torch.max(sigma) only to handle rare case where we might have different sigmas in the same batch
+        # torch.max(sigma) only to handle rare case where we might have different sigmas in the same batch. Read once
+        # to the host and matched against the CPU copy of the table: the same float32 arithmetic as on the device.
         try:
-            timestep = torch.argmin(torch.abs(cfg_denoiser.inner_model.sigmas.to(sigma.device) - torch.max(sigma)))
+            sigmas = cpu_sigmas(cfg_denoiser.inner_model)
         except AttributeError:  # for samplers that don't use sigmas (DDIM) sigma is actually the timestep
             timestep = torch.max(sigma).to(dtype=int)
+        else:
+            timestep = torch.argmin(torch.abs(sigmas - torch.max(sigma).to(devices.cpu)))
         completed_ratio = (999 - timestep) / 1000
 
     refiner_switch_at = cfg_denoiser.p.refiner_switch_at

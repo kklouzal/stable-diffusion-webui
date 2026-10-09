@@ -67,18 +67,18 @@ def _checkpoint_cache_key(checkpoint_info):
     )
 
 
-def _sigmas_cache_key(sigmas):
-    """Value key of a schedule tensor. Samplers and wrappers mutate schedule tensors in place, so object identity or a
-    partial (first/last) value is not a safe key: every value can change the pixels."""
+def _sigmas_cache_key(model_wrap):
+    """Value key of the wrapper's sigma table: every value can change the pixels, so object identity or a partial
+    (first/last) value is not a safe key. Built from the table's CPU copy (sd_samplers_common.cpu_sigmas)."""
+    sigmas = getattr(model_wrap, "sigmas", None)
     if not torch.is_tensor(sigmas) or sigmas.numel() == 0:
         return None
 
-    detached = sigmas.detach()
     return (
-        tuple(detached.shape),
-        str(detached.dtype),
-        str(detached.device),
-        tuple(detached.to(device=devices.cpu).contiguous().reshape(-1).tolist()),
+        tuple(sigmas.shape),
+        str(sigmas.dtype),
+        str(sigmas.device),
+        tuple(sd_samplers_common.cpu_sigmas(model_wrap).reshape(-1).tolist()),
     )
 
 
@@ -90,7 +90,7 @@ def _model_schedule_cache_signature(sd_model, model_wrap):
         bool(getattr(sd_model, "is_sdxl", False)),
         bool(getattr(sd_model, "is_sd2", False)),
         getattr(sd_model, "parameterization", None),
-        _sigmas_cache_key(getattr(model_wrap, "sigmas", None)),
+        _sigmas_cache_key(model_wrap),
         # DiscreteSchedule.sigma_to_t snaps to table indices when quantize is set (opts.enable_quantization when the
         # wrapper was built); sgm_uniform, normal and beta start from sigma_to_t.
         bool(model_wrap.quantize),
@@ -139,7 +139,8 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
 
         scheduler = sd_schedulers.schedulers_map.get(scheduler_name)
 
-        m_sigma_min, m_sigma_max = self.model_wrap.sigmas[0].item(), self.model_wrap.sigmas[-1].item()
+        model_sigmas = sd_samplers_common.cpu_sigmas(self.model_wrap)
+        m_sigma_min, m_sigma_max = model_sigmas[0].item(), model_sigmas[-1].item()
         sigma_min, sigma_max = (0.1, 10) if opts.use_old_karras_scheduler_sigmas else (m_sigma_min, m_sigma_max)
 
         if p.sampler_noise_scheduler_override:
@@ -285,8 +286,9 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             extra_params_kwargs['n'] = steps
 
         if 'sigma_min' in parameters:
-            extra_params_kwargs['sigma_min'] = self.model_wrap.sigmas[0].item()
-            extra_params_kwargs['sigma_max'] = self.model_wrap.sigmas[-1].item()
+            model_sigmas = sd_samplers_common.cpu_sigmas(self.model_wrap)
+            extra_params_kwargs['sigma_min'] = model_sigmas[0].item()
+            extra_params_kwargs['sigma_max'] = model_sigmas[-1].item()
 
         if 'sigmas' in parameters:
             extra_params_kwargs['sigmas'] = sigmas
