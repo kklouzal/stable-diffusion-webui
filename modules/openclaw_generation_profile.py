@@ -23,21 +23,22 @@ class GenerationProfileKey:
 
 _LOCK = threading.RLock()
 _TENSOR_CACHE: OrderedDict[GenerationProfileKey, torch.Tensor] = OrderedDict()
-_STATS = {
-    "hits": 0,
-    "misses": 0,
-    "stores": 0,
-    "evictions": 0,
-    "bypasses": 0,
-    "last_key": None,
-    "last_bypass_reason": None,
-}
+_STATS: dict[str, Any] = {}  # filled by _reset_stats() below
 
 
-def enabled() -> bool:
-    return True
+def _reset_stats() -> None:
+    _STATS.update({
+        "hits": 0,
+        "misses": 0,
+        "stores": 0,
+        "evictions": 0,
+        "bypasses": 0,
+        "last_key": None,
+        "last_bypass_reason": None,
+    })
 
 
+_reset_stats()
 _MAX_SIZE = openclaw_env.env_int("OPENCLAW_GENERATION_PROFILE_CACHE_MAX", 16, minimum=0)
 
 
@@ -58,7 +59,7 @@ def _jsonable_key(key: GenerationProfileKey | None) -> dict[str, Any] | None:
 def status() -> dict[str, Any]:
     with _LOCK:
         return {
-            "enabled": enabled(),
+            "enabled": True,
             "cache_size": len(_TENSOR_CACHE),
             "max_cache_size": _MAX_SIZE,
             **_STATS,
@@ -70,15 +71,7 @@ def clear() -> dict[str, Any]:
     with _LOCK:
         cleared = len(_TENSOR_CACHE)
         _TENSOR_CACHE.clear()
-        _STATS.update({
-            "hits": 0,
-            "misses": 0,
-            "stores": 0,
-            "evictions": 0,
-            "bypasses": 0,
-            "last_key": None,
-            "last_bypass_reason": None,
-        })
+        _reset_stats()
         if cleared:
             openclaw_cache_epochs.observe("E08", "invalidate", reason="cache_cleared", count=cleared)
         openclaw_cache_epochs.set_size("E08", current_size=0, capacity=_MAX_SIZE)
@@ -132,9 +125,6 @@ def tensor_for_key(key: GenerationProfileKey, factory: Callable[[], torch.Tensor
         openclaw_cache_epochs.observe("E08", "miss", reason="cache_miss", semantic_key=key)
 
     tensor = factory()
-    if not torch.is_tensor(tensor):
-        return tensor
-
     stored = tensor.detach().clone()
 
     with _LOCK:
