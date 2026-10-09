@@ -61,92 +61,6 @@ def truncate_path(target_path, base_path=cwd):
     return abs_target
 
 
-class MassFileListerCachedDir:
-    """A class that caches file metadata for a specific directory."""
-
-    def __init__(self, dirname):
-        self.files = None
-        self.files_cased = None
-        self.dirname = dirname
-
-        stats = ((x.name, x.stat(follow_symlinks=False)) for x in os.scandir(self.dirname))
-        files = [(n, s.st_mtime, s.st_ctime) for n, s in stats]
-        self.files = {x[0].lower(): x for x in files}
-        self.files_cased = {x[0]: x for x in files}
-
-    def update_entry(self, filename):
-        """Add a file to the cache"""
-        file_path = os.path.join(self.dirname, filename)
-        try:
-            stat = os.stat(file_path)
-            entry = (filename, stat.st_mtime, stat.st_ctime)
-            self.files[filename.lower()] = entry
-            self.files_cased[filename] = entry
-        except FileNotFoundError as e:
-            print(f'MassFileListerCachedDir.add_entry: "{file_path}" {e}')
-
-
-class MassFileLister:
-    """A class that provides a way to check for the existence and mtime/ctile of files without doing more than one stat call per file."""
-
-    def __init__(self):
-        self.cached_dirs = {}
-
-    def find(self, path):
-        """
-        Find the metadata for a file at the given path.
-
-        Returns:
-            tuple or None: A tuple of (name, mtime, ctime) if the file exists, or None if it does not.
-        """
-
-        dirname, filename = os.path.split(path)
-
-        cached_dir = self.cached_dirs.get(dirname)
-        if cached_dir is None:
-            cached_dir = MassFileListerCachedDir(dirname)
-            self.cached_dirs[dirname] = cached_dir
-
-        stats = cached_dir.files_cased.get(filename)
-        if stats is not None:
-            return stats
-
-        stats = cached_dir.files.get(filename.lower())
-        if stats is None:
-            return None
-
-        try:
-            os_stats = os.stat(path, follow_symlinks=False)
-            return filename, os_stats.st_mtime, os_stats.st_ctime
-        except Exception:
-            return None
-
-    def exists(self, path):
-        """Check if a file exists at the given path."""
-
-        return self.find(path) is not None
-
-    def mctime(self, path):
-        """
-        Get the modification and creation times for a file at the given path.
-
-        Returns:
-            tuple: A tuple of (mtime, ctime) if the file exists, or (0, 0) if it does not.
-        """
-
-        stats = self.find(path)
-        return (0, 0) if stats is None else stats[1:3]
-
-    def reset(self):
-        """Clear the cache of all directories."""
-        self.cached_dirs.clear()
-
-    def update_file_entry(self, path):
-        """Update the cache for a specific directory."""
-        dirname, filename = os.path.split(path)
-        if cached_dir := self.cached_dirs.get(dirname):
-            cached_dir.update_entry(filename)
-
 def topological_sort(dependencies):
     """Accepts a dictionary mapping name to its dependencies, returns a list of names ordered according to dependencies.
     Ignores errors relating to missing dependencies or circular dependencies
@@ -171,41 +85,6 @@ def topological_sort(dependencies):
     return result
 
 
-def open_folder(path):
-    """Open a folder in the file manager of the respect OS."""
-    # import at function level to avoid potential issues
-    from modules import headless_ui as gr
-    import platform
-    import sys
-    import subprocess
-
-    if not os.path.exists(path):
-        msg = f'Folder "{path}" does not exist. after you save an image, the folder will be created.'
-        print(msg)
-        gr.Info(msg)
-        return
-    elif not os.path.isdir(path):
-        msg = f"""
-WARNING
-An open_folder request was made with an path that is not a folder.
-This could be an error or a malicious attempt to run code on your computer.
-Requested path was: {path}
-"""
-        print(msg, file=sys.stderr)
-        gr.Warning(msg)
-        return
-
-    path = os.path.normpath(path)
-    if platform.system() == "Windows":
-        os.startfile(path)
-    elif platform.system() == "Darwin":
-        subprocess.Popen(["open", path])
-    elif "microsoft-standard-WSL2" in platform.uname().release:
-        subprocess.Popen(["explorer.exe", subprocess.check_output(["wslpath", "-w", path])])
-    else:
-        subprocess.Popen(["xdg-open", path])
-
-
 def load_file_from_url(
     url: str,
     *,
@@ -226,21 +105,7 @@ def load_file_from_url(
     """
     from urllib.parse import urlparse
     import requests
-    try:
-        from tqdm import tqdm
-    except ImportError:
-        class tqdm:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def update(self, n=1, *args, **kwargs):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                pass
+    from tqdm import tqdm
 
     if not file_name:
         parts = urlparse(url)
@@ -252,15 +117,17 @@ def load_file_from_url(
         os.makedirs(model_dir, exist_ok=True)
         temp_file = os.path.join(model_dir, f"{file_name}.tmp")
         print(f'\nDownloading: "{url}" to {cached_file}')
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        total_size = int(response.headers.get('content-length', 0))
-        with tqdm(total=total_size, unit='B', unit_scale=True, desc=file_name, disable=not progress) as progress_bar:
-            with open(temp_file, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        file.write(chunk)
-                        progress_bar.update(len(chunk))
+        # (connect, read) seconds: the read timeout bounds each wait for the next chunk, not the whole download, so a
+        # stalled connection fails the request (which may hold the generation queue lock) instead of hanging it.
+        with requests.get(url, stream=True, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            with tqdm(total=total_size, unit='B', unit_scale=True, desc=file_name, disable=not progress) as progress_bar:
+                with open(temp_file, 'wb') as file:
+                    for chunk in response.iter_content(chunk_size=1024):
+                        if chunk:
+                            file.write(chunk)
+                            progress_bar.update(len(chunk))
 
         if hash_prefix and not compare_sha256(temp_file, hash_prefix):
             print(f"Hash mismatch for {temp_file}. Deleting the temporary file.")
