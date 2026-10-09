@@ -1,36 +1,25 @@
-import importlib.util
 import os
-import sys
-import types
+from types import SimpleNamespace
 
 import pytest
 
-
-@pytest.fixture
-def cache_module(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "modules.paths", types.SimpleNamespace(data_path=str(tmp_path), script_path=str(tmp_path)))
-    spec = importlib.util.spec_from_file_location("cache_under_test", "modules/cache.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from test.helpers import load_source, module
 
 
 @pytest.fixture
-def hashes_module(monkeypatch, cache_module):
-    package = types.ModuleType("modules")
-    package.cache = cache_module
-    monkeypatch.setitem(sys.modules, "modules", package)
-    monkeypatch.setitem(sys.modules, "modules.cache", cache_module)
-    monkeypatch.setitem(sys.modules, "modules.shared", types.SimpleNamespace(cmd_opts=types.SimpleNamespace(no_hashing=True)))
-    monkeypatch.setitem(sys.modules, "modules.errors", types.SimpleNamespace(report=lambda *args, **kwargs: None))
-    artifacts_spec = importlib.util.spec_from_file_location("modules.persistent_artifact_cache", "modules/persistent_artifact_cache.py")
-    artifacts = importlib.util.module_from_spec(artifacts_spec)
-    artifacts_spec.loader.exec_module(artifacts)
-    monkeypatch.setitem(sys.modules, "modules.persistent_artifact_cache", artifacts)
-    spec = importlib.util.spec_from_file_location("hashes_under_test", "modules/hashes.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def cache_module(tmp_path):
+    return load_source("cache_under_test", "modules/cache.py", {"modules.paths": module("modules.paths", data_path=str(tmp_path), script_path=str(tmp_path))})
+
+
+@pytest.fixture
+def hashes_module(cache_module):
+    return load_source("hashes_under_test", "modules/hashes.py", {
+        "modules": module("modules", package=True, cache=cache_module),
+        "modules.cache": cache_module,
+        "modules.shared": module("modules.shared", cmd_opts=SimpleNamespace(no_hashing=True)),
+        "modules.errors": module("modules.errors", report=lambda *args, **kwargs: None),
+        "modules.persistent_artifact_cache": load_source("modules.persistent_artifact_cache", "modules/persistent_artifact_cache.py"),
+    })
 
 
 def replace_keeping_size_and_mtime(path, content):

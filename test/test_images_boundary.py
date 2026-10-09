@@ -1,12 +1,9 @@
 """modules/images.py correctness at the image boundary: tiling recombination, grid annotations on current Pillow,
 untrusted EXIF parsing, transparency flattening, 16-bit to 8-bit rounding, eager decode and saved file names."""
 
-import importlib.util
 import io
 import os
 import random
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,17 +13,12 @@ import piexif.helper
 import pytest
 from PIL import Image, PngImagePlugin
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _module(name, **attrs):
-    mod = types.ModuleType(name)
-    mod.__dict__.update(attrs)
-    return mod
+from modules import png_writer
+from test.helpers import ROOT, load_source, module
 
 
 @pytest.fixture
-def images(monkeypatch):
+def images():
     """A private copy of modules/images.py with only the webui modules it imports stubbed."""
     opts = SimpleNamespace(
         data={}, enable_pnginfo=True, jpeg_quality=80, webp_lossless=True, save_to_dirs=False, grid_save_to_dirs=False,
@@ -35,30 +27,24 @@ def images(monkeypatch):
         grid_background_color="#ffffff", grid_text_active_color="#000000", grid_text_inactive_color="#999999",
         directories_max_prompt_words=8, save_images_replace_action="Replace", png_parallel_encoder=True,
     )
-    stubs = {
-        "modules.shared": _module(
+    return load_source("c1_images_under_test", "modules/images.py", {
+        # `from modules import shared` reads the package attribute first: a stub package hands images.py these stubs
+        # (and the real png_writer) even after other tests imported the real webui modules.
+        "modules": module("modules", package=True),
+        "modules.shared": module(
             "modules.shared", opts=opts, cmd_opts=SimpleNamespace(unix_filenames_sanitization=False, filenames_max_length=128),
             state=SimpleNamespace(job_timestamp=""), prompt_styles=SimpleNamespace(get_style_prompts=lambda styles: []), sd_upscalers=[],
         ),
-        "modules.script_callbacks": _module(
+        "modules.script_callbacks": module(
             "modules.script_callbacks",
             ImageSaveParams=lambda image, p, filename, pnginfo: SimpleNamespace(image=image, p=p, filename=filename, pnginfo=pnginfo),
             before_image_saved_callback=lambda params: None, image_saved_callback=lambda params: None,
         ),
-        "modules.sd_samplers": _module("modules.sd_samplers", samplers_map={}),
-        "modules.errors": _module("modules.errors", report=lambda *a, **k: None, display=lambda *a, **k: None),
-        "modules.paths_internal": _module("modules.paths_internal", roboto_ttf_file=str(ROOT / "modules" / "Roboto-Regular.ttf")),
-    }
-    package = sys.modules.get("modules")
-    for name, stub in stubs.items():
-        monkeypatch.setitem(sys.modules, name, stub)
-        if package is not None:
-            monkeypatch.setattr(package, name.split(".")[1], stub, raising=False)
-
-    spec = importlib.util.spec_from_file_location("c1_images_under_test", ROOT / "modules" / "images.py")
-    loaded = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loaded)
-    return loaded
+        "modules.sd_samplers": module("modules.sd_samplers", samplers_map={}),
+        "modules.errors": module("modules.errors", report=lambda *a, **k: None, display=lambda *a, **k: None),
+        "modules.paths_internal": module("modules.paths_internal", roboto_ttf_file=str(ROOT / "modules" / "Roboto-Regular.ttf")),
+        "modules.png_writer": png_writer,
+    })
 
 
 def _random_rgb(w, h, seed=0):

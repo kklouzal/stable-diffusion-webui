@@ -1,25 +1,20 @@
-import importlib.util
-import sys
-import types
+from types import SimpleNamespace
 
 import pytest
 
-import modules.prompt_parser  # noqa: F401  (the real parser is used by parse_generation_parameters)
+from modules import prompt_parser
+from test.helpers import load_source, module
 
 
 @pytest.fixture
-def infotext_utils(monkeypatch):
-    shared = types.SimpleNamespace(opts=types.SimpleNamespace(infotext_skip_pasting=[], infotext_styles="Ignore", use_old_hires_fix_width_height=False))
-    infotext_versions = types.SimpleNamespace(parse_version=lambda text: None, v180_hr_styles=None, backcompat=lambda d: None)
-    monkeypatch.setitem(sys.modules, "modules", types.ModuleType("modules"))
-    monkeypatch.setitem(sys.modules, "modules.shared", shared)
-    monkeypatch.setitem(sys.modules, "modules.processing", types.SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "modules.infotext_versions", infotext_versions)
-    spec = importlib.util.spec_from_file_location("infotext_utils_under_test", "modules/infotext_utils.py")
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    return module
+def infotext_utils():
+    return load_source("infotext_utils_under_test", "modules/infotext_utils.py", {
+        "modules": module("modules", package=True),
+        "modules.shared": module("modules.shared", opts=SimpleNamespace(infotext_skip_pasting=[], infotext_styles="Ignore", use_old_hires_fix_width_height=False)),
+        "modules.processing": module("modules.processing"),
+        "modules.infotext_versions": module("modules.infotext_versions", parse_version=lambda text: None, v180_hr_styles=None, backcompat=lambda d: None),
+        "modules.prompt_parser": prompt_parser,  # the real parser is used by parse_generation_parameters
+    })
 
 
 @pytest.mark.parametrize("value", [
