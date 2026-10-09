@@ -147,3 +147,38 @@ def test_non_square_image_tiles_like_the_square_one_on_the_shared_axis(hypertile
     assert square.shape[0] == 4 * 4
     assert wide.shape[0] == 4 * 4
     assert int(wide[0][:, 0].max()) + 1 == int(square[0][:, 0].max()) + 1 == 32
+
+
+def test_sdxl_depth_table_tiles_only_its_depth0_layers_at_1024(hypertile):
+    """Pins the upstream SD-XL table (see the note on DEPTH_LAYERS_XL): every wrapped layer of an SD-XL ldm U-Net,
+    run on its real token grid at 1024x1024 with the defaults, and the set of layers that actually tile."""
+    level1 = [f"input_blocks.{i}.1.transformer_blocks.{t}.attn1" for i in (4, 5) for t in range(2)]
+    level1 += [f"output_blocks.{i}.1.transformer_blocks.{t}.attn1" for i in (3, 4, 5) for t in range(2)]
+    level2 = [f"{block}.1.transformer_blocks.{t}.attn1" for block in ("input_blocks.7", "input_blocks.8", "output_blocks.0",
+                                                                     "output_blocks.1", "output_blocks.2") for t in range(10)]
+    level2 += [f"middle_block.1.transformer_blocks.{t}.attn1" for t in range(10)]
+    grids = dict.fromkeys(level1, 64) | dict.fromkeys(level2, 32)  # 1024 px: latent 128, /2 and /4
+
+    unet = torch.nn.Module()
+    seen = {}
+    for name in grids:
+        parent = unet
+        *path, leaf = name.split(".")
+        for part in path:
+            if not hasattr(parent, part):
+                parent.add_module(part, torch.nn.Module())
+            parent = getattr(parent, part)
+
+        class Attention(torch.nn.Module):
+            def forward(self, tokens, _name=name):
+                seen[_name] = tokens.shape[0]
+                return tokens
+
+        parent.add_module(leaf, Attention())
+    hypertile.hypertile_hook_model(unet, 1024, 1024, enable=True, tile_size_max=256, swap_size=1, max_depth=3, is_sdxl=True)
+
+    assert len(getattr(unet, "__webui_hypertile_layers")) == 70
+    for name, side in grids.items():
+        unet.get_submodule(name)(torch.zeros(1, side * side, 1))
+    assert sorted(name for name, batch in seen.items() if batch > 1) == sorted(
+        name for name in level1 if name.endswith("transformer_blocks.0.attn1"))

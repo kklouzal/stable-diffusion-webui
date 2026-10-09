@@ -85,6 +85,13 @@ DEPTH_LAYERS = {
     ],
 }
 # XL layers, thanks for GitHub@gel-crabs for the help
+# Upstream behaviour, kept as is: unlike DEPTH_LAYERS (one depth per resolution level, tfernd's design), this table
+# mixes levels. Depth 0 is transformer_blocks.0 of the 1/2-resolution level (input_blocks.4-5, output_blocks.3-5),
+# depth 1 holds that level's transformer_blocks.1 together with all ten blocks of the 1/4-resolution level, and
+# depth 2 the middle block, also at 1/4 resolution. The 2**depth tile factor therefore differs between layers at the
+# same resolution; at 1024x1024 with the default tile size 256 only the 5 depth-0 layers of the 70 tile. Neither
+# upstream states an intended per-resolution layout for SD-XL (tfernd never covered it; A1111 shipped this table
+# with its first commit), so it is not changed here.
 DEPTH_LAYERS_XL = {
     0: [
         # SD 1.5 U-Net (diffusers)
