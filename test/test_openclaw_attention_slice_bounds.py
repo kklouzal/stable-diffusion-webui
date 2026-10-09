@@ -1,131 +1,70 @@
 import contextlib
-import importlib.util
-import sys
-import types
 import warnings
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-
-_ATTENTION_STUB_MODULES = []
-
-
-def _has_module_spec(name):
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:
-        return False
+from test.helpers import load_source, module
 
 
-def _setdefault_attention_stub(name, module):
-    if name not in sys.modules:
-        sys.modules[name] = module
-        _ATTENTION_STUB_MODULES.append(name)
-    return sys.modules[name]
+def _load_sd_hijack_optimizations():
+    """modules/sd_hijack_optimizations.py as a private module on stand-ins for shared/devices/hypernetworks and for
+    the ldm/sgm attention classes its optimizers patch (the tests keep set_sdpa_backend from patching them)."""
+    def default(value, default_value):
+        return value if value is not None else (default_value() if callable(default_value) else default_value)
+
+    class StubCrossAttention:
+        forward = staticmethod(lambda self, x, context=None, mask=None, **kwargs: x)
+
+    class StubAttnBlock:
+        forward = staticmethod(lambda self, x, **kwargs: x)
+
+    hypernetwork = module(
+        "modules.hypernetworks.hypernetwork",
+        attention_CrossAttention_forward=lambda self, x, context=None, mask=None, **kwargs: x,
+        apply_hypernetworks=lambda _nets, context: (context, context),
+    )
+    stubs = {
+        "modules": module("modules", package=True),
+        "modules.shared": module(
+            "modules.shared",
+            opts=SimpleNamespace(upcast_attn=False),
+            cmd_opts=SimpleNamespace(sub_quad_q_chunk_size=1024, sub_quad_kv_chunk_size=None, sub_quad_chunk_threshold=None),
+            device=torch.device("cpu"),
+            loaded_hypernetworks=[],
+        ),
+        "modules.devices": module("modules.devices", without_autocast=lambda disable=False: contextlib.nullcontext()),
+        "modules.sub_quadratic_attention": module(
+            "modules.sub_quadratic_attention",
+            efficient_dot_product_attention=lambda q, k, v, **_kwargs: torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0),
+        ),
+        "modules.hypernetworks": module("modules.hypernetworks", package=True, hypernetwork=hypernetwork),
+        "modules.hypernetworks.hypernetwork": hypernetwork,
+        "ldm.util": module("ldm.util", default=default),
+    }
+    for root in ("ldm", "sgm"):
+        attention = module(f"{root}.modules.attention", CrossAttention=StubCrossAttention)
+        model = module(f"{root}.modules.diffusionmodules.model", AttnBlock=StubAttnBlock)
+        diffusionmodules = module(f"{root}.modules.diffusionmodules", package=True, model=model)
+        submodules = module(f"{root}.modules", package=True, attention=attention, diffusionmodules=diffusionmodules)
+        stubs.update({
+            root: module(root, package=True, modules=submodules),
+            f"{root}.modules": submodules,
+            f"{root}.modules.attention": attention,
+            f"{root}.modules.diffusionmodules": diffusionmodules,
+            f"{root}.modules.diffusionmodules.model": model,
+        })
+    stubs["ldm"].util = stubs["ldm.util"]
+    return load_source("sd_hijack_optimizations_under_test", "modules/sd_hijack_optimizations.py", stubs)
 
 
-def _cleanup_attention_import_stubs():
-    for name in reversed(_ATTENTION_STUB_MODULES):
-        module = sys.modules.pop(name, None)
-        if "." not in name:
-            continue
-        parent_name, attr = name.rsplit(".", 1)
-        parent = sys.modules.get(parent_name)
-        if parent is not None and getattr(parent, attr, None) is module:
-            delattr(parent, attr)
-
-
-def _install_attention_import_stubs():
-    shared = types.ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(upcast_attn=False)
-    shared.cmd_opts = SimpleNamespace(sub_quad_q_chunk_size=1024, sub_quad_kv_chunk_size=None, sub_quad_chunk_threshold=None)
-    shared.device = torch.device("cpu")
-    shared.loaded_hypernetworks = []
-
-    devices = types.ModuleType("modules.devices")
-    devices.without_autocast = lambda disable=False: contextlib.nullcontext()
-
-    sub_quadratic_attention = types.ModuleType("modules.sub_quadratic_attention")
-    sub_quadratic_attention.efficient_dot_product_attention = lambda q, k, v, **_kwargs: torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
-
-    hypernetworks_pkg = types.ModuleType("modules.hypernetworks")
-    hypernetwork = types.ModuleType("modules.hypernetworks.hypernetwork")
-    hypernetwork.attention_CrossAttention_forward = lambda self, x, context=None, mask=None, **kwargs: x
-    hypernetwork.apply_hypernetworks = lambda _nets, context: (context, context)
-    hypernetworks_pkg.hypernetwork = hypernetwork
-
-    if not _has_module_spec("ldm.modules.attention") or not _has_module_spec("sgm.modules.attention"):
-        ldm_pkg = types.ModuleType("ldm")
-        ldm_pkg.__path__ = []
-        ldm_util = types.ModuleType("ldm.util")
-        ldm_util.default = lambda value, default_value: value if value is not None else (default_value() if callable(default_value) else default_value)
-        ldm_modules = types.ModuleType("ldm.modules")
-        ldm_modules.__path__ = []
-        ldm_attention = types.ModuleType("ldm.modules.attention")
-        ldm_diffusionmodules = types.ModuleType("ldm.modules.diffusionmodules")
-        ldm_diffusionmodules.__path__ = []
-        ldm_diffusion_model = types.ModuleType("ldm.modules.diffusionmodules.model")
-        sgm_pkg = types.ModuleType("sgm")
-        sgm_pkg.__path__ = []
-        sgm_modules = types.ModuleType("sgm.modules")
-        sgm_modules.__path__ = []
-        sgm_attention = types.ModuleType("sgm.modules.attention")
-        sgm_diffusionmodules = types.ModuleType("sgm.modules.diffusionmodules")
-        sgm_diffusionmodules.__path__ = []
-        sgm_diffusion_model = types.ModuleType("sgm.modules.diffusionmodules.model")
-
-        class StubCrossAttention:
-            forward = staticmethod(lambda self, x, context=None, mask=None, **kwargs: x)
-
-        class StubAttnBlock:
-            forward = staticmethod(lambda self, x, **kwargs: x)
-
-        ldm_attention.CrossAttention = StubCrossAttention
-        ldm_diffusion_model.AttnBlock = StubAttnBlock
-        sgm_attention.CrossAttention = StubCrossAttention
-        sgm_diffusion_model.AttnBlock = StubAttnBlock
-        ldm_pkg.util = ldm_util
-        ldm_pkg.modules = ldm_modules
-        ldm_modules.attention = ldm_attention
-        ldm_modules.diffusionmodules = ldm_diffusionmodules
-        ldm_diffusionmodules.model = ldm_diffusion_model
-        sgm_pkg.modules = sgm_modules
-        sgm_modules.attention = sgm_attention
-        sgm_modules.diffusionmodules = sgm_diffusionmodules
-        sgm_diffusionmodules.model = sgm_diffusion_model
-
-        _setdefault_attention_stub("ldm", ldm_pkg)
-        _setdefault_attention_stub("ldm.util", ldm_util)
-        _setdefault_attention_stub("ldm.modules", ldm_modules)
-        _setdefault_attention_stub("ldm.modules.attention", ldm_attention)
-        _setdefault_attention_stub("ldm.modules.diffusionmodules", ldm_diffusionmodules)
-        _setdefault_attention_stub("ldm.modules.diffusionmodules.model", ldm_diffusion_model)
-        _setdefault_attention_stub("sgm", sgm_pkg)
-        _setdefault_attention_stub("sgm.modules", sgm_modules)
-        _setdefault_attention_stub("sgm.modules.attention", sgm_attention)
-        _setdefault_attention_stub("sgm.modules.diffusionmodules", sgm_diffusionmodules)
-        _setdefault_attention_stub("sgm.modules.diffusionmodules.model", sgm_diffusion_model)
-    _setdefault_attention_stub("modules.shared", shared)
-    _setdefault_attention_stub("modules.devices", devices)
-    _setdefault_attention_stub("modules.sub_quadratic_attention", sub_quadratic_attention)
-    _setdefault_attention_stub("modules.hypernetworks", hypernetworks_pkg)
-    _setdefault_attention_stub("modules.hypernetworks.hypernetwork", hypernetwork)
-
-
-_install_attention_import_stubs()
-from modules import sd_hijack_optimizations as opt
-_cleanup_attention_import_stubs()
+opt = _load_sd_hijack_optimizations()
 
 
 @pytest.fixture(autouse=True)
 def attention_options(monkeypatch):
-    """Give every test its own shared.opts/loaded_hypernetworks.
-
-    The import stub above is only installed when modules.shared is not imported yet; after another test module imported
-    the real one (whose opts stays None until the webui loads its config), the attention forwards would read None.
-    """
+    """Give every test its own shared.opts/loaded_hypernetworks."""
     monkeypatch.setattr(opt.shared, "opts", SimpleNamespace(upcast_attn=False), raising=False)
     monkeypatch.setattr(opt.shared, "loaded_hypernetworks", [], raising=False)
 
@@ -528,9 +467,3 @@ def test_vae_attnblock_upcast_attn_turns_autocast_off_for_the_kernel(sdpa_select
     else:
         assert recorded_sdpa_calls == [(torch.bfloat16, torch.bfloat16, torch.bfloat16, True)]
     assert out.shape == x.shape
-
-
-if __name__ == "__main__":
-    test_doggettx_attention_keeps_positive_slice_when_memory_steps_exceed_tokens()
-    test_sdpa_math_backend_uses_non_deprecated_torch_nn_attention_api()
-    print("PASS attention slice bounds and SDPA deprecation smoke")
