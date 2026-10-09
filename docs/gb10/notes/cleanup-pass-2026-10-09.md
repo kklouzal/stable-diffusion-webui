@@ -21,7 +21,7 @@ work starts from a clean codebase. Any bug found along the way was fixed in the 
   - ImageIO 2.38.1, omegaconf 2.4.0, pydantic 2.14.0, pydantic_core 2.50.0, tokenizers 0.23.3.
   - The same tree gave identical gate results and byte-identical probe output on deploy9's image and on the new one.
   - All 19 model configs shared by both images parse identically under omegaconf 2.4.0.
-- **Not deployed yet** (see "Deploy-time actions").
+- **Deployed** on 2026-10-09 as `local/gb10-a1111:deploy10-c22a9794`. The deploy-time actions below were all done.
 - **Evidence.** Everything is in `~/audit-artifacts/gb10-a1111-cleanup-20261009/`:
   - `LEDGER.md` holds decisions and status.
   - `area-*.md` are the audit reports. Finding ids such as 4-05 refer to them.
@@ -250,7 +250,25 @@ their values and order, `/cmd-flags` and the schemas are unchanged, and every ke
   - The controller posts only the keys it changes.
 - **Startup.** A bad `OPENCLAW_CUDA_GRAPHS` value now fails startup.
 
-## Deploy-time actions
+## Deploy-time actions (done 2026-10-09)
+
+The results are in `~/audit-artifacts/gb10-a1111-cleanup-20261009/deploy10/`:
+- **Fixed-seed workloads.** `n-w1` (img2img 1280², full stack with ControlNet) and `plain` (txt2img through CUDA
+  graphs) are pixel-identical to deploy9 (`c1ef9b8c85874e4c` and `5aa1e18233497205`). Medians are 13.5 s and 4.2 s,
+  unchanged.
+- **Live API tests.** `test/live`: 34/34 passed.
+- **CUDA graphs and extensions.** Eager, capture and replay are bit-identical for txt2img and img2img (2 captures,
+  46 replays, 0 failures). The Hypertile, Tiled VAE and Tiled Diffusion images match deploy8's run of the same script.
+- **ControlNet.** An img2img without ControlNet fields, sent after one with them, returned one image and no
+  ControlNet infotext. `depth_anything` and `depth_anything_v2` returned depth maps; their first-use downloads took
+  54 s and 14 s.
+- **API surface versus deploy9.** Only the listed deltas changed. `/options` showed the controller's per-request
+  `override_settings` reset to the saved values by the restart. The controller sends them with
+  `override_settings_restore_afterwards: false`.
+- **Host.** Memory never dropped below 83 GiB available, the GPU peaked at 78 °C, and the container started with no
+  tracebacks.
+
+The steps as originally planned:
 
 1. **Image.** Built and checked: `local/gb10-a1111:cleanup-cand-c342f73a`.
    - The app tree matches the `.dockerignore` allowlist: no `test/`, `docs/`, `extensions/` or untracked host files.

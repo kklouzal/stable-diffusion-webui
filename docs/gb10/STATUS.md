@@ -10,17 +10,19 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 ## Production (checked 2026-10-09)
 
-- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy9-75a94f59`, which is also `latest` (image ID
-  `sha256:2708c45d4d9d...`). It was built from commit `75a94f59` and holds:
-  - the [2026-10-07 correctness audit](notes/correctness-audit-2026-10-07.md)
+- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy10-c22a9794`, which is also `latest` (image ID
+  `sha256:c4dcc49691e9...`). Deployed 2026-10-09 from commit `c22a9794`, it adds the
+  [2026-10-09 cleanup pass](notes/cleanup-pass-2026-10-09.md) to deploy9's:
+  - [2026-10-07 correctness audit](notes/correctness-audit-2026-10-07.md)
   - [performance pass 2](notes/performance-pass-2-2026-10-07.md)
-
-  Fixed-seed images are pixel-identical to deploy8. Requests are about 6% faster, and disk saves about 0.4 s faster.
-- **Not deployed yet.** The [2026-10-09 cleanup pass](notes/cleanup-pass-2026-10-09.md) (branch `cleanup-integration`
-  and its docs/tests follow-ups) is not deployed. Deploying it needs:
-  - an image rebuild
-  - the GPU live checks listed in that note
-  - removal of the retired host extension `Extensions/openclaw-conditioning-probe`
+- **Live verification** (neutral prompts):
+  - Fixed-seed images are pixel-identical to deploy9 (the img2img full-stack and plain txt2img workloads), at the same
+    speed.
+  - The live API tests pass, 34/34.
+  - CUDA-graph eager, capture and replay are bit-identical, and the extension checks match deploy8 pixel for pixel.
+  - ControlNet requests no longer leak into later requests.
+  - Depth Anything v1 and v2 work with the xinsir depth model.
+  - The retired host extension `Extensions/openclaw-conditioning-probe` has been removed.
 - **Builds.** `gb10/build.sh` and `gb10/run.sh` from this checkout (branch `latest`). System-Statistics' Rebuild button
   runs the same two scripts.
 
@@ -30,7 +32,8 @@ Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`.
 
 | Tag | Image ID | Contents |
 |---|---|---|
-| `deploy9-75a94f59` (= `latest`) | `2708c45d4d9d` | production: correctness audit + performance pass 2 |
+| `deploy10-c22a9794` (= `latest`) | `c4dcc49691e9` | production: the 2026-10-09 cleanup pass on top of deploy9 |
+| `deploy9-75a94f59` | `2708c45d4d9d` | correctness audit + performance pass 2 |
 | `deploy8-2b5e4039` | `e4501073fe84` | correctness audit plus its follow-ups (image-URL byte/pixel budgets, atomic patchers, sampler-registry publication) |
 | `deploy7-490eac83` | `db2612552043` | correctness audit, first deploy (live-verified in the audit note) |
 | `deploy5-293d3e2c` | `59626c7c24bc` | [2026-10-06 static performance pass](notes/performance-static-pass-2026-10-06.md) |
@@ -97,8 +100,7 @@ the container reads them:
 
 ## Open items
 
-1. Deploy the cleanup pass. The rebuild, the GPU live checks and the host action are listed in
-   [notes/cleanup-pass-2026-10-09.md](notes/cleanup-pass-2026-10-09.md), along with the owner items it deferred.
+1. The owner items the cleanup pass deferred are listed in [notes/cleanup-pass-2026-10-09.md](notes/cleanup-pass-2026-10-09.md).
 2. Owner decisions on host leftovers: the directories listed above that run.sh does not mount, and the quarantine copy
    `Extensions.quarantine/20260503-194044/sd-webui-prompt-all-in-one`.
 3. Adopt or replace the third-party extensions, starting with MultiDiffusion and detail-daemon (EXTENSIONS.md).
