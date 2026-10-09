@@ -35,6 +35,18 @@ The script reads these environment overrides:
 BuildKit is always on: a `DOCKER_BUILDKIT` other than `1` is overridden with a warning. The build always runs with
 `--pull` and runs through `sudo docker`.
 
+The build records its provenance as OCI labels on the image, which `gb10/run.sh` reads:
+
+| Label | Value |
+|---|---|
+| `org.opencontainers.image.revision` | `git rev-parse HEAD` of the checkout, with `-dirty` when `git status --porcelain` is not empty |
+| `org.opencontainers.image.version` | `git describe --tags` of the checkout: the infotext `Version` |
+| `org.opencontainers.image.base.name` / `.base.digest` | the base image and its registry digest (`docker buildx imagetools inspect`) |
+
+The build uses the base image by that digest, so the label names exactly the base it was built from. A failing `git`
+command or an unresolvable digest fails the build. Images built before these labels (deploy10 and older) have none,
+and they inherit NGC's `org.opencontainers.image.version` (`24.04`), which is not this fork's version.
+
 ## Deploy: `gb10/run.sh`
 
 ```bash

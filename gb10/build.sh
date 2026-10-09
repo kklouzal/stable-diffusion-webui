@@ -43,6 +43,30 @@ if [[ -n "${BUILD_CGROUP_PARENT}" ]]; then
   fi
 fi
 
+# Provenance, recorded as OCI labels on the image (gb10/run.sh reads them, so every image reports its own version):
+# - revision: the checkout's commit, with -dirty when it has uncommitted or untracked changes
+# - version: `git describe --tags`, the infotext Version (the image has no .git)
+# - base.name/base.digest: the base image, built by that digest so the label names exactly the base used
+SOURCE_REVISION="$(git -C "${PROJECT_ROOT}" rev-parse HEAD)"
+SOURCE_STATUS="$(git -C "${PROJECT_ROOT}" status --porcelain)"
+if [[ -n "${SOURCE_STATUS}" ]]; then
+  SOURCE_REVISION="${SOURCE_REVISION}-dirty"
+fi
+SOURCE_VERSION="$(git -C "${PROJECT_ROOT}" describe --tags)"
+BASE_IMAGE_NAME="${BASE_IMAGE%@*}"
+BASE_IMAGE_DIGEST="$(sudo docker buildx imagetools inspect "${BASE_IMAGE}" --format '{{json .Manifest.Digest}}')"
+BASE_IMAGE_DIGEST="${BASE_IMAGE_DIGEST//\"/}"
+if [[ ! "${BASE_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "[build.sh] ERROR: could not resolve the digest of ${BASE_IMAGE} (got '${BASE_IMAGE_DIGEST}')" >&2
+  exit 1
+fi
+LABEL_ARGS=(
+  --label "org.opencontainers.image.revision=${SOURCE_REVISION}"
+  --label "org.opencontainers.image.version=${SOURCE_VERSION}"
+  --label "org.opencontainers.image.base.name=${BASE_IMAGE_NAME}"
+  --label "org.opencontainers.image.base.digest=${BASE_IMAGE_DIGEST}"
+)
+
 CACHE_ARGS=(--build-arg BUILDKIT_INLINE_CACHE=1)
 CACHE_FROM_STATUS="not found"
 if sudo docker image inspect "${CACHE_FROM}" >/dev/null 2>&1; then
@@ -54,11 +78,13 @@ cat <<EOM
 [build.sh]
 Project root:              ${PROJECT_ROOT}
 Dockerfile:                ${DOCKERFILE}
-Base image:                ${BASE_IMAGE}
+Base image:                ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
 MSLK source repo:          ${MSLK_REPO}
 MSLK source commit:        ${MSLK_COMMIT}
 Image tag:                 ${IMAGE_TAG}
 A1111 source:              local fork checkout (${PROJECT_ROOT})
+Source revision:           ${SOURCE_REVISION}
+Source version:            ${SOURCE_VERSION}
 DOCKER_BUILDKIT:           ${DOCKER_BUILDKIT}
 BUILDKIT_PROGRESS:         ${BUILDKIT_PROGRESS}
 Docker build cache:        enabled
@@ -71,9 +97,10 @@ sudo env DOCKER_BUILDKIT="${DOCKER_BUILDKIT}" BUILDKIT_PROGRESS="${BUILDKIT_PROG
   --pull \
   "${PLACEMENT_ARGS[@]}" \
   "${CACHE_ARGS[@]}" \
+  "${LABEL_ARGS[@]}" \
   -f "${DOCKERFILE}" \
   -t "${IMAGE_TAG}" \
-  --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+  --build-arg BASE_IMAGE="${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}" \
   --build-arg MSLK_REPO="${MSLK_REPO}" \
   --build-arg MSLK_COMMIT="${MSLK_COMMIT}" \
   "${PROJECT_ROOT}"
