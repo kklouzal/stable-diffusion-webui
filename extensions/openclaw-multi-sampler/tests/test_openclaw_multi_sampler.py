@@ -331,6 +331,10 @@ def test_brownian_stages_get_independent_noise_from_the_shared_tree(monkeypatch)
     sampling = pytest.importorskip("k_diffusion.sampling")
     if not hasattr(sampling, "BrownianTreeNoiseSampler"):  # the harness stub is installed by the `multi` fixture only
         pytest.skip("k-diffusion not available")
+    # The tree's entropy source, seeded as webui's replacement (devices.randn_local) seeds it, independent of whichever
+    # modules.devices other tests left that replacement bound to.
+    brownian_interval = pytest.importorskip("torchsde._brownian.brownian_interval")
+    monkeypatch.setattr(brownian_interval, "_randn", lambda size, dtype, device, seed: torch.randn(size, generator=torch.Generator().manual_seed(int(seed))).to(device=device, dtype=dtype))
     x = torch.zeros(1, 4, 32, 32)
     full = sampling.get_sigmas_exponential(15, 0.0292, 14.6146)
     first, second = full[:8], full[7:]
