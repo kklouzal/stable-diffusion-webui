@@ -345,7 +345,8 @@ def test_applied_state_publication_takes_the_epoch_transaction_before_the_applic
     networks = lora_networks
     epochs = networks.openclaw_cache_epochs
     monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
-    entered = threading.Event(); bumped = threading.Event()
+    entered = threading.Event()
+    bumped = threading.Event()
     real_transaction = epochs.epoch_transaction
 
     @contextlib.contextmanager

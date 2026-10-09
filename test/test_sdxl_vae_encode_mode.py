@@ -1,6 +1,5 @@
 """SDXL VAE encodes return the posterior mean: independent of the global RNG, float32, equal to an independent oracle."""
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -10,17 +9,11 @@ from test.helpers import init_shared
 
 shared = init_shared()
 
-from modules import processing, sd_models_xl  # noqa: E402
+from modules import paths, sd_models_xl  # noqa: E402,F401  (paths puts repositories/ on sys.path for sgm)
 import sgm.models.diffusion  # noqa: E402
 from sgm.models.autoencoder import AutoencoderKL  # noqa: E402
 
 SCALE = 0.13025
-
-
-@pytest.fixture(autouse=True)
-def _real_webui_modules_package(monkeypatch):
-    # Other test files leave stub "modules" packages in sys.modules.
-    monkeypatch.setitem(sys.modules, "modules", processing.modules)
 
 
 def _tiny_sdxl_vae(dtype):

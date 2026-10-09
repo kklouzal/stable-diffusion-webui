@@ -1,25 +1,18 @@
 from pathlib import Path
 
 
-def _processing(monkeypatch):
-    """The real modules.processing, with sys.modules["modules"] pointing at the real package (other test files leave
-    stub "modules" packages there; the scripts loaded below import modules.* through it)."""
-    import importlib
-    import sys
+def _processing():
+    """The real modules.processing."""
+    from modules import processing
 
-    processing = importlib.import_module("modules.processing")
-    monkeypatch.setitem(sys.modules, "modules", processing.modules)
     return processing
 
 
-def _load_script(monkeypatch, name, **module_globals):
+def _load_script(name, **module_globals):
     """A private copy of scripts/<name>.py whose module globals in module_globals are replaced."""
-    import importlib.util
+    from test.helpers import load_source
 
-    _processing(monkeypatch)
-    spec = importlib.util.spec_from_file_location(f"{name}_under_test", f"scripts/{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_source(f"{name}_under_test", f"scripts/{name}.py")
     for key, value in module_globals.items():
         setattr(module, key, value)
     return module
@@ -79,7 +72,7 @@ def test_outpainting_mk2_marks_prepended_grid_as_non_sample(initialize, monkeypa
 
     for batch_size, return_grid, expected_images, expected_first in ((2, True, 3, 1), (2, False, 2, 0), (1, True, 1, 0)):
         opts = SimpleNamespace(return_grid=return_grid, grid_only_if_multiple=True, samples_save=False, grid_save=False)
-        module = _load_script(monkeypatch, "outpainting_mk_2", process_images=process_images, Processed=_processed, opts=opts, state=SimpleNamespace())
+        module = _load_script("outpainting_mk_2", process_images=process_images, Processed=_processed, opts=opts, state=SimpleNamespace())
         p = SimpleNamespace(width=64, height=64, init_images=[_image((64, 64))], n_iter=1, batch_size=batch_size)
 
         res = module.Script().run(p, None, 64, 4, ["left"], 1.0, 0.05)
@@ -100,7 +93,7 @@ def _run_loopback(monkeypatch, *, batch_count, loops, return_grid, grid_save=Fal
         return SimpleNamespace(seed=seed, info=f"info {seed}", images=[_image()])
 
     module = _load_script(
-        monkeypatch, "loopback",
+        "loopback",
         processing=SimpleNamespace(fix_seed=lambda p: None, setup_color_correction=lambda image: None, process_images=process_images),
         images=SimpleNamespace(image_grid=lambda imgs, rows=None: ("grid", len(imgs)), save_image=lambda image, *args, **kwargs: saved.append((image, args, kwargs))),
         opts=SimpleNamespace(img2img_color_correction=False, grid_save=grid_save, return_grid=return_grid, grid_format="png", grid_extended_filename=False),
@@ -142,7 +135,7 @@ def test_sd_upscale_tracks_per_result_infotexts(initialize, monkeypatch):
         return SimpleNamespace(seed=p.seed, info=f"info seed {p.seed}", images=[_image((p.width, p.height)) for _ in p.init_images])
 
     module = _load_script(
-        monkeypatch, "sd_upscale",
+        "sd_upscale",
         processing=SimpleNamespace(fix_seed=lambda p: None, process_images=process_images),
         shared=SimpleNamespace(sd_upscalers=[SimpleNamespace(name="None")]),
         devices=SimpleNamespace(torch_gc=lambda: None),
@@ -172,7 +165,7 @@ def _cell(x, y, z, ix, iy, iz):
 def test_xyz_grid_marks_first_image_as_sample_when_grid_disabled(initialize, monkeypatch):
     from types import SimpleNamespace
 
-    module = _load_script(monkeypatch, "xyz_grid", state=SimpleNamespace())
+    module = _load_script("xyz_grid", state=SimpleNamespace())
 
     for draw_grid, expected_first, expected_images in ((False, 0, 2), (True, 1, 4)):
         result = module.draw_xyz_grid(
@@ -194,7 +187,7 @@ def test_xyz_grid_drops_stale_lone_image_infotexts(initialize, monkeypatch):
         return _cell(pc.seed, None, None, 0, 0, 0)
 
     module = _load_script(
-        monkeypatch, "xyz_grid",
+        "xyz_grid",
         process_images=process_images,
         processing=SimpleNamespace(create_infotext=lambda pc, *args, **kwargs: f"grid {pc.extra_generation_params.get('X Values')}"),
         shared=SimpleNamespace(total_tqdm=SimpleNamespace(updateTotal=lambda total: None), state=SimpleNamespace(interrupted=False)),
@@ -227,7 +220,7 @@ def test_processing_branch_shape_helpers_keep_sensitive_semantics_local(initiali
     import torch
     from PIL import Image
 
-    processing = _processing(monkeypatch)
+    processing = _processing()
 
     pixels = (np.arange(2 * 3 * 3, dtype=np.uint8) * 14).reshape(2, 3, 3)
     expected = np.moveaxis(pixels.astype(np.float32) / 255.0, 2, 0)
@@ -298,7 +291,7 @@ def test_processing_loop_reuses_batch_slice_boundaries_without_resetting_seed_st
     # The two slicing sites sit inside process_images_inner (full pipeline), so they are checked on the AST.
     import ast
 
-    processing = _processing(monkeypatch)
+    processing = _processing()
     assert [processing._batch_slice_range(n, 3) for n in range(3)] == [(0, 3), (3, 6), (6, 9)]
 
     sites = []
@@ -336,7 +329,7 @@ def test_img2img_init_cache_helpers_share_payload_and_stats_boundaries(initializ
     import torch
     from PIL import Image
 
-    processing = _processing(monkeypatch)
+    processing = _processing()
     StableDiffusionProcessing = processing.StableDiffusionProcessing
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init", [None, None])
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init_stats", processing._cache_stats(last_hit=False, cached=False, bypass_reason=None))

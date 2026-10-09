@@ -4,7 +4,6 @@ Oracles are independent of the code under test: float64 reference values and the
 round(255 * E').
 """
 
-import sys
 
 import numpy as np
 import pytest
@@ -15,12 +14,6 @@ from test.helpers import init_shared
 shared = init_shared()
 
 from modules import processing, sd_samplers_common  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _real_webui_modules_package(monkeypatch):
-    # Other test files leave stub "modules" packages in sys.modules.
-    monkeypatch.setitem(sys.modules, "modules", processing.modules)
 
 
 def _probe_values():

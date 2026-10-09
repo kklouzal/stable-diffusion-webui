@@ -46,8 +46,6 @@ def test_conditioning_key_covers_parser_tokenization_and_effective_network_state
 def processing(initialize, monkeypatch):
     from modules import processing as processing_module
 
-    # Other test files leave stub "modules" packages in sys.modules; shared.sd_model resolves modules.sd_models through it.
-    monkeypatch.setitem(sys.modules, "modules", processing_module.modules)
     monkeypatch.setattr(processing_module.shared, "sd_model", SimpleNamespace(sd_checkpoint_info="checkpoint"), raising=False)
     monkeypatch.setattr(processing_module.devices, "autocast", contextlib.nullcontext)
     for name, value in {"use_old_scheduling": False, "sdxl_refiner_low_aesthetic_score": 2.5, "sdxl_refiner_high_aesthetic_score": 6.0}.items():
