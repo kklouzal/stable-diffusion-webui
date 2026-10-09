@@ -1459,7 +1459,9 @@ def network_MultiheadAttention_load_state_dict(self, *args, **kwargs):
     return originals.MultiheadAttention_load_state_dict(self, *args, **kwargs)
 
 
-def process_network_files(names: list[str] | None = None):
+def process_network_files(names: list[str] | None, available: dict, aliases: dict, forbidden: dict):
+    """Add the network files under the Lora directories (only those named in `names` when given) to the registries
+    `available`, `aliases` and `forbidden` (forbidden aliases) that the caller publishes."""
     candidates = list(shared.walk_files(shared.cmd_opts.lora_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir_backcompat, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
     candidates = [x for x in candidates if not any(torchao_model_cache.is_cache_path(x, backend.cache_dir_name) for backend in torchao_weight_quant.BACKENDS.values())]
@@ -1476,29 +1478,36 @@ def process_network_files(names: list[str] | None = None):
             errors.report(f"Failed to load network {name} from {filename}", exc_info=True)
             continue
 
-        available_networks[name] = entry
+        available[name] = entry
 
-        if entry.alias in available_network_aliases:
-            forbidden_network_aliases[entry.alias.lower()] = 1
+        if entry.alias in aliases:
+            forbidden[entry.alias.lower()] = 1
 
-        available_network_aliases[name] = entry
-        available_network_aliases[entry.alias] = entry
+        aliases[name] = entry
+        aliases[entry.alias] = entry
+
+
+def _publish_available_networks(available, aliases, forbidden):
+    """Replace the registries with complete new ones instead of rebuilding them in place: GET /sdapi/v1/loras
+    iterates available_networks on the event loop, outside queue_lock, and saw "dictionary changed size during
+    iteration" or a half-built registry while a refresh or a generation's name lookup rebuilt it."""
+    global available_networks, available_network_aliases, forbidden_network_aliases, available_network_hash_lookup
+    hash_lookup = {entry.shorthash: entry for entry in available.values() if entry.shorthash}
+    available_networks, available_network_aliases, forbidden_network_aliases, available_network_hash_lookup = available, aliases, forbidden, hash_lookup
 
 
 def update_available_networks_by_names(names: list[str]):
-    process_network_files(names)
+    available, aliases, forbidden = dict(available_networks), dict(available_network_aliases), dict(forbidden_network_aliases)
+    process_network_files(names, available, aliases, forbidden)
+    _publish_available_networks(available, aliases, forbidden)
 
 
 def list_available_networks():
-    available_networks.clear()
-    available_network_aliases.clear()
-    forbidden_network_aliases.clear()
-    available_network_hash_lookup.clear()
-    forbidden_network_aliases.update({"none": 1, "Addams": 1})
-
     os.makedirs(shared.cmd_opts.lora_dir, exist_ok=True)
 
-    process_network_files()
+    available, aliases, forbidden = {}, {}, {"none": 1, "Addams": 1}
+    process_network_files(None, available, aliases, forbidden)
+    _publish_available_networks(available, aliases, forbidden)
 
 
 re_network_name = re.compile(r"(.*)\s*\([0-9a-fA-F]+\)")

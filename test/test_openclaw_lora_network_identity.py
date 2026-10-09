@@ -1257,3 +1257,31 @@ def test_trashed_model_drops_lora_weight_backups(lora_networks):
     sd_models.send_model_to_trash(model)
 
     assert not hasattr(layer, "network_weights_backup") and not hasattr(layer, "network_bias_backup")
+
+
+def test_network_listing_publishes_new_registries_under_iterating_readers(lora_networks, monkeypatch, tmp_path):
+    """GET /sdapi/v1/loras iterates available_networks on the event loop while a refresh or a generation's lookup of
+    a new name rebuilt it in place ("dictionary changed size during iteration", or a half-built list)."""
+    import safetensors.torch
+    import torch
+    networks = lora_networks
+    lora_dir = tmp_path / "Lora"
+    lora_dir.mkdir()
+    for name in ("a", "b"):
+        safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / f"{name}.safetensors"))
+    monkeypatch.setattr(networks.shared.cmd_opts, "lora_dir", str(lora_dir), raising=False)
+    monkeypatch.setattr(networks.shared.cmd_opts, "lyco_dir_backcompat", str(tmp_path / "LyCORIS"), raising=False)
+    networks.list_available_networks()
+    listing = networks.available_networks
+    reader = iter(listing.values())
+    next(reader)
+
+    safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / "c.safetensors"))
+    networks.list_available_networks()
+    safetensors.torch.save_file({"x": torch.zeros(1)}, str(lora_dir / "d.safetensors"))
+    networks.update_available_networks_by_names(["d"])
+
+    assert [entry.name for entry in reader] == ["b"]  # the reader finishes the registry it started on
+    assert sorted(listing) == ["a", "b"]
+    assert sorted(networks.available_networks) == ["a", "b", "c", "d"]
+    assert networks.forbidden_network_aliases == {"none": 1, "Addams": 1}
