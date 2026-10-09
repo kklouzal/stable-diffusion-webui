@@ -1,4 +1,35 @@
-from test.test_openclaw_multi_sampler import _WatchingDict
+class _WatchingDict(dict):
+    """Records every mutation after which the watched key is missing."""
+
+    def __init__(self, *args, watch):
+        super().__init__(*args)
+        self.watch = watch
+        self.missing_after = []
+
+    def _check(self, op):
+        if self.watch not in self:
+            self.missing_after.append(op)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._check("setitem")
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._check("delitem")
+
+    def pop(self, *args):
+        result = super().pop(*args)
+        self._check("pop")
+        return result
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._check("update")
+
+    def clear(self):
+        super().clear()
+        self._check("clear")
 
 
 def test_set_samplers_never_drops_a_registered_name(initialize, monkeypatch):

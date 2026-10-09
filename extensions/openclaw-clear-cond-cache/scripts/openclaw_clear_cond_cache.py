@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any
 
+import torch
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 
@@ -53,8 +54,6 @@ def estimate_token_count(text: str, steps: int) -> dict[str, Any]:
         return {"ok": True, "token_count": token_count, "max_length": max_length}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "token_count": None, "max_length": None}
-
-
 
 
 def _backend_status_payload() -> dict[str, Any]:
@@ -118,12 +117,10 @@ def _checkpoint_detail(checkpoint_info: Any) -> str | None:
 
 
 def _wrap_backend_function(module: Any, attr: str, wrapper_factory) -> None:
-    current = getattr(module, attr, None)
-    if current is None:
-        return
+    # A missing target raises AttributeError: a renamed core function must fail the install, not drop its status hook.
+    current = getattr(module, attr)
     original = getattr(current, "__openclaw_backend_status_original__", current)
     wrapped = wrapper_factory(original)
-    wrapped.__openclaw_backend_status_wrapped__ = True
     wrapped.__openclaw_backend_status_original__ = original
     wrapped.__wrapped__ = original
     setattr(module, attr, wrapped)
@@ -133,7 +130,6 @@ def _install_backend_status_hooks() -> None:
     global _backend_hooks_installed, _backend_lora_hooks_installed
 
     if not _backend_hooks_installed:
-        from modules import sd_models as _sd_models
         from modules import sd_vae as _sd_vae
 
         _backend_hooks_installed = True
@@ -237,14 +233,14 @@ def _install_backend_status_hooks() -> None:
                     _pop_backend_activity(token)
             return wrapped
 
-        _wrap_backend_function(_sd_models, "reload_model_weights", _wrap_reload_model_weights)
-        _wrap_backend_function(_sd_models, "load_model", _wrap_load_model)
-        _wrap_backend_function(_sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
-        _wrap_backend_function(_sd_models, "load_model_weights", _wrap_load_model_weights)
-        _wrap_backend_function(_sd_models, "instantiate_from_config", _wrap_instantiate_from_config)
-        _wrap_backend_function(_sd_models, "send_model_to_device", _wrap_send_model_to_device)
-        _wrap_backend_function(_sd_models, "get_empty_cond", _wrap_get_empty_cond)
-        _wrap_backend_function(_sd_models, "apply_weight_quantization", _wrap_weight_quantization)
+        _wrap_backend_function(sd_models, "reload_model_weights", _wrap_reload_model_weights)
+        _wrap_backend_function(sd_models, "load_model", _wrap_load_model)
+        _wrap_backend_function(sd_models, "get_checkpoint_state_dict", _wrap_get_checkpoint_state_dict)
+        _wrap_backend_function(sd_models, "load_model_weights", _wrap_load_model_weights)
+        _wrap_backend_function(sd_models, "instantiate_from_config", _wrap_instantiate_from_config)
+        _wrap_backend_function(sd_models, "send_model_to_device", _wrap_send_model_to_device)
+        _wrap_backend_function(sd_models, "get_empty_cond", _wrap_get_empty_cond)
+        _wrap_backend_function(sd_models, "apply_weight_quantization", _wrap_weight_quantization)
         _wrap_backend_function(_sd_vae, "load_vae", _wrap_load_vae)
 
     if _backend_lora_hooks_installed:
@@ -312,8 +308,6 @@ def _unwrap_compiled_module(module: Any) -> Any:
 
 
 def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, Any]:
-    import torch
-
     module = getter()
     if module is None:
         _compile_status[name] = False
@@ -324,7 +318,7 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
     unwrapped = _unwrap_compiled_module(module)
 
     if enabled:
-        if slot and id(module) == slot.get("compiled_id") and id(unwrapped) == slot.get("original_id"):
+        if slot and unwrapped is slot["original"] and module is not unwrapped:
             _compile_status[name] = True
             return {"name": name, "enabled": True, "changed": False, "already_compiled": True}
 
@@ -336,23 +330,9 @@ def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, 
             setter(compiled)
         finally:
             _pop_backend_activity(token)
-        _compile_slots[name] = {
-            "original": original,
-            "original_id": id(original),
-            "compiled_id": id(compiled),
-        }
+        _compile_slots[name] = {"original": original}
         _compile_status[name] = True
         return {"name": name, "enabled": True, "changed": True, "mode": "reduce-overhead", "dynamic": True}
-
-    if slot and id(module) == slot.get("compiled_id"):
-        token = _push_backend_activity("torch_compile", f"Restoring uncompiled {name.upper()}")
-        try:
-            setter(slot["original"])
-        finally:
-            _pop_backend_activity(token)
-        _compile_slots.pop(name, None)
-        _compile_status[name] = False
-        return {"name": name, "enabled": False, "changed": True}
 
     if module is not unwrapped:
         token = _push_backend_activity("torch_compile", f"Restoring uncompiled {name.upper()}")
@@ -489,16 +469,11 @@ def on_model_loaded(_: Any) -> None:
 
 
 def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
-    try:
-        import torch
-
-        torch.backends.cudnn.benchmark = bool(enabled)
-        return {
-            "ok": True,
-            "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
-        }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
+    torch.backends.cudnn.benchmark = bool(enabled)
+    return {
+        "ok": True,
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+    }
 
 
 def _normalize_cache_targets(targets: Any | None) -> set[str]:
@@ -617,7 +592,6 @@ def on_app_started(_: object, app: FastAPI) -> None:
     async def _token_counter_compat(request: Request):
         return await _token_count(request)
 
-
     @app.post("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile(request: Request):
         data = await request.json()
@@ -642,12 +616,7 @@ def on_app_started(_: object, app: FastAPI) -> None:
 
     @app.get("/sdapi/v1/openclaw/cudnn-benchmark")
     async def _cudnn_benchmark_status():
-        try:
-            import torch
-
-            return {"ok": True, "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc), "cudnn_benchmark": None}
+        return {"ok": True, "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)}
 
     @app.post("/sdapi/v1/openclaw/model-merge")
     async def _model_merge(request: Request):
@@ -686,11 +655,8 @@ _install_backend_status_hooks()
 # model_loaded callback. Some startup work is already inside original call
 # frames before extension hooks can wrap them, so this fills the unavoidable
 # gaps without adding measurable work to generation itself.
-try:
-    if not getattr(sd_models.model_data, "was_loaded_at_least_once", False):
-        _startup_model_load_token = _push_backend_activity("startup_model_load", "Starting Web UI / loading initial model")
-except Exception:
-    _startup_model_load_token = None
+if not getattr(sd_models.model_data, "was_loaded_at_least_once", False):
+    _startup_model_load_token = _push_backend_activity("startup_model_load", "Starting Web UI / loading initial model")
 
 script_callbacks.on_app_started(on_app_started)
 script_callbacks.on_model_loaded(on_model_loaded)

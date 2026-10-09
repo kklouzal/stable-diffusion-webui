@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import sys
 import tempfile
@@ -34,8 +35,6 @@ def tearDownModule():
 
 def install_a1111_stubs():
     modules_pkg = types.ModuleType("modules")
-    paths_mod = types.ModuleType("modules.paths")
-    paths_mod.models_path = "/tmp"
     sd_models_mod = types.ModuleType("modules.sd_models")
     sd_models_mod.checkpoints_list = {}
     sd_models_mod.list_models = lambda: None
@@ -45,6 +44,9 @@ def install_a1111_stubs():
     shared_mod = types.ModuleType("modules.shared")
     shared_mod.state = types.SimpleNamespace(begin=lambda: None, end=lambda: None, job=None, textinfo=None)
     shared_mod.cmd_opts = types.SimpleNamespace(lora_dir="/tmp/Lora", lyco_dir_backcompat="/tmp/LyCORIS")
+    shared_mod.opts = types.SimpleNamespace(list_hidden_files=True)
+    paths_internal_mod = types.ModuleType("modules.paths_internal")
+    paths_internal_mod.cwd = os.getcwd()
     call_queue_mod = types.ModuleType("modules.call_queue")
     call_queue_mod.queue_lock = RecordingLock()
     script_callbacks_mod = types.ModuleType("modules.script_callbacks")
@@ -56,13 +58,19 @@ def install_a1111_stubs():
         {
             "modules": modules_pkg,
             "modules.call_queue": call_queue_mod,
-            "modules.paths": paths_mod,
+            "modules.paths_internal": paths_internal_mod,
             "modules.script_callbacks": script_callbacks_mod,
             "modules.sd_models": sd_models_mod,
             "modules.sd_vae": sd_vae_mod,
             "modules.shared": shared_mod,
         }
     )
+    # A1111's real walker (modules/util.py), which the Lora extension lists LoRAs with
+    util_spec = importlib.util.spec_from_file_location("modules.util", EXT_ROOT.parents[1] / "modules" / "util.py")
+    util_mod = importlib.util.module_from_spec(util_spec)
+    sys.modules["modules.util"] = util_mod
+    util_spec.loader.exec_module(util_mod)
+    shared_mod.walk_files = util_mod.walk_files
 
 
 class RecordingLock:
@@ -379,6 +387,19 @@ class ConversionCorrectnessTests(unittest.TestCase):
                         self.assertEqual(info.filepath, path)
                 self.assertEqual(self.convert.resolve_lora_info("linked-dir/linked").filepath, a1111_paths[1])
                 self.assertIsNone(self.convert.resolve_lora_info(str(linked_target / "linked.safetensors")))
+
+    def test_lora_listing_skips_hidden_directories_as_a1111_does(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lora_dir = Path(tmpdir) / "Lora"
+            hidden = lora_dir / ".hidden" / "style.safetensors"
+            hidden.parent.mkdir(parents=True)
+            hidden.write_bytes(b"x")
+            cmd_opts = types.SimpleNamespace(lora_dir=str(lora_dir), lyco_dir_backcompat=str(Path(tmpdir) / "LyCORIS"))
+            with mock.patch.object(self.convert.shared, "cmd_opts", cmd_opts):
+                for list_hidden_files, expected in ((True, [str(hidden)]), (False, [])):
+                    with self.subTest(list_hidden_files=list_hidden_files), \
+                            mock.patch.object(self.convert.shared.opts, "list_hidden_files", list_hidden_files):
+                        self.assertEqual([item["path"] for item in self.convert.list_loras()], expected)
 
     def test_lora_metadata_drops_source_content_hashes(self):
         original = {"sshs_model_hash": "aa", "sshs_legacy_hash": "bb", "modelspec.hash_sha256": "0xcc", "ss_output_name": "style"}

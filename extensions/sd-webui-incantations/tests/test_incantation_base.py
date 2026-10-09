@@ -32,10 +32,7 @@ class _Recorder:
     def get_infotext_fields(self):
         return []
 
-    def get_paste_field_names(self):
-        return []
-
-    def get_xyz_axis_options(self):
+    def get_xyz_axis_options(self, xyz_grid):
         return []
 
     def postprocess_batch(self, p, *args, **kwargs):

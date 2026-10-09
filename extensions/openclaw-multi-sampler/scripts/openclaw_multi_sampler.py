@@ -213,7 +213,7 @@ def _chain_boundaries(definition: dict[str, Any], steps: int) -> tuple[list[str]
     switch_ats = _chain_switch_points(definition, len(samplers))
     boundaries = [0]
     for point in switch_ats:
-        boundaries.append(max(boundaries[-1], min(_safe_int(point, 0), steps)))
+        boundaries.append(max(boundaries[-1], min(point, steps)))
     boundaries.append(steps)
     _validate_stage_spans(boundaries, steps)
     return samplers, boundaries
@@ -513,13 +513,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         state.sampling_steps = launch_steps
         state.sampling_step = 0
         self.last_latent = x
-        self.sampler_extra_args = {
-            "cond": conditioning,
-            "image_cond": image_conditioning,
-            "uncond": unconditional_conditioning,
-            "cond_scale": p.cfg_scale,
-            "s_min_uncond": self.s_min_uncond,
-        }
+        self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
         p.extra_generation_params["Sampler chain"] = _format_stage_scheduler_metadata(stages)
         scheduler_names = [scheduler_name for _sampler_name, scheduler_name, _stage_sigmas, _start, _end in stages if scheduler_name]
         if scheduler_names:

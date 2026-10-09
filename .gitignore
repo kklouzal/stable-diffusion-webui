@@ -25,8 +25,6 @@ __pycache__
 !/extensions/openclaw-clear-cond-cache/**
 !/extensions/sd-webui-teacache/
 !/extensions/sd-webui-teacache/**
-!/extensions/openclaw-conditioning-probe/
-!/extensions/openclaw-conditioning-probe/**
 !/extensions/openclaw-denoise-ramp/
 !/extensions/openclaw-denoise-ramp/**
 !/extensions/openclaw-multi-sampler/

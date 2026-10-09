@@ -29,6 +29,7 @@ DEFAULT_MAX_CONSECUTIVE = 4
 DEFAULT_START = 0.35
 DEFAULT_END = 0.90
 
+# NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
 SDXL_POLYNOMIAL_COEFFICIENTS = (
     4.72656327e-03,
     1.09937816e+00,
@@ -122,14 +123,13 @@ def _call_signature(
     timesteps: Optional[torch.Tensor],
     context: Optional[torch.Tensor],
     y: Optional[torch.Tensor],
-    kwargs: dict,
 ):
+    # Extra forward kwargs are not part of the key: _patched_forward_inner never caches a call that has any.
     return (
         _tensor_signature(h),
         _tensor_signature(timesteps),
         _tensor_signature(context),
         _tensor_signature(y),
-        tuple(sorted(kwargs.keys())),
     )
 
 
@@ -153,7 +153,7 @@ def _teacache_patch_is_live(unet) -> bool:
     )
 
 
-def _restore_patched_unet(unet, original_forward=None) -> None:
+def _restore_patched_unet(unet) -> None:
     if unet is None or not getattr(unet, "_teacache_patched", False):
         return
     if not _teacache_patch_is_live(unet):
@@ -163,7 +163,7 @@ def _restore_patched_unet(unet, original_forward=None) -> None:
         # raises). Leave the pass-through patch in place; it delegates while it is not on top, and a later
         # process()/postprocess() restores it once the wrapper above has restored its own baseline.
         return
-    original_forward = getattr(unet, "_openclaw_teacache_original_forward", None) or original_forward
+    original_forward = getattr(unet, "_openclaw_teacache_original_forward", None)
     if original_forward is not None:
         unet.forward = original_forward
     unet._teacache_patched = False
@@ -176,14 +176,10 @@ def _has_masked_denoising(p: processing.StableDiffusionProcessing) -> bool:
 
 
 def _unet_has_external_forward_hook(unet) -> bool:
-    # ControlNet's owner-scoped wrapper deliberately no longer uses the legacy
-    # _original_forward attribute. Treat its live ownership marker as an
-    # external hook too, so TeaCache never wraps above ControlNet and later
-    # restores across its ownership boundary. A TeaCache patch that is no longer
-    # on top means some other callable wraps it: never re-patch over that either.
+    # ControlNet's live ownership marker, or a TeaCache patch that is no longer on top, means another callable
+    # wraps the UNet: TeaCache never wraps above it nor restores across its ownership boundary.
     return (
-        getattr(unet, "_original_forward", None) is not None
-        or getattr(unet, "_controlnet_forward_hook_owner", None) is not None
+        getattr(unet, "_controlnet_forward_hook_owner", None) is not None
         or (getattr(unet, "_teacache_patched", False) and not _teacache_patch_is_live(unet))
     )
 
@@ -217,21 +213,18 @@ class TeaCacheSession:
         self.consecutive_hits: dict[int, int] = {}
         self.use_cache = True
 
-    def _device_scalar(self, value: float, reference: torch.Tensor, cache: dict[tuple[str, torch.dtype], torch.Tensor]) -> torch.Tensor:
+    def _device_constant(
+        self,
+        value: float | tuple[float, ...],
+        reference: torch.Tensor,
+        cache: dict[tuple[str, torch.dtype], torch.Tensor],
+    ) -> torch.Tensor:
         key = (str(reference.device), reference.dtype)
         tensor = cache.get(key)
         if tensor is None:
             tensor = reference.new_tensor(value)
             cache[key] = tensor
         return tensor
-
-    def _coefficient_tensor(self, reference: torch.Tensor) -> torch.Tensor:
-        key = (str(reference.device), reference.dtype)
-        coeffs = self._coefficient_tensors.get(key)
-        if coeffs is None:
-            coeffs = reference.new_tensor(SDXL_POLYNOMIAL_COEFFICIENTS)
-            self._coefficient_tensors[key] = coeffs
-        return coeffs
 
     def update_condition(
         self,
@@ -266,13 +259,13 @@ class TeaCacheSession:
                 self.use_cache = False
 
         if self.use_cache:
-            # NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
             distance = self.distances.get(lane)
             if distance is None or distance.device != current_fb.device:
                 distance = current_fb.new_zeros(())
             relative_distance = relative_l1_distance(previous_fb, current_fb)
-            distance = distance + sdxl_polynomial_distance(relative_distance, self._coefficient_tensor(relative_distance))
-            threshold = self._device_scalar(self.threshold, distance, self._threshold_tensors)
+            coeffs = self._device_constant(SDXL_POLYNOMIAL_COEFFICIENTS, relative_distance, self._coefficient_tensors)
+            distance = distance + sdxl_polynomial_distance(relative_distance, coeffs)
+            threshold = self._device_constant(self.threshold, distance, self._threshold_tensors)
             should_refresh = torch.logical_or(torch.logical_not(torch.isfinite(distance)), torch.ge(distance, threshold))
             if conditioning_changed is not False:
                 should_refresh = torch.logical_or(should_refresh, conditioning_changed.to(should_refresh.device))
@@ -290,7 +283,6 @@ class TeaCacheSession:
     def next_step(self):
         self.current_step += 1
         self.call_index = 0
-        self.use_cache = True
 
     def current_residual(self, signature: tuple) -> Optional[torch.Tensor]:
         cached = self.residuals.get(self.call_index)
@@ -320,7 +312,6 @@ class TeaCacheSession:
 
 class TeaCacheScript(scripts.Script):
     def __init__(self):
-        self.original_forward = None
         self.patched_unet = None
 
     def title(self):
@@ -383,7 +374,6 @@ class TeaCacheScript(scripts.Script):
             if getattr(unet, "_teacache_patched", False):
                 raise RuntimeError("TeaCache UNet patch is missing its original forward")
             original_forward = unet.forward
-        self.original_forward = original_forward
         self.patched_unet = unet
         unet.forward = patched_forward.__get__(unet)
         unet._teacache_patched = True
@@ -430,9 +420,8 @@ class TeaCacheScript(scripts.Script):
         unet = self.patched_unet
         if unet is None and p is not None:
             unet = p.sd_model.model.diffusion_model
-        _restore_patched_unet(unet, self.original_forward)
+        _restore_patched_unet(unet)
         _set_cache(None)
-        self.original_forward = None
         self.patched_unet = None
 
 
@@ -479,7 +468,7 @@ def _patched_forward_inner(
     h = self.input_blocks[1](h, emb, context)
     hs.append(h)
 
-    signature = _call_signature(h, timesteps, context, y, kwargs)
+    signature = _call_signature(h, timesteps, context, y)
     first_block_residual = h - original_h
     cache.update_condition(first_block_residual, signature, context, y)
 

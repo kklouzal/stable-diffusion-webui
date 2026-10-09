@@ -5,7 +5,7 @@ import modules.scripts as scripts
 from modules import headless_ui as gr
 from modules import script_callbacks
 from modules.processing import StableDiffusionProcessing
-from scripts.ui_wrapper import UIWrapper
+from scripts.ui_wrapper import UIWrapper, add_xyz_axis_options
 from scripts.pag import PAGExtensionScript
 from scripts.cfg_combiner import CFGCombinerScript
 from scripts.smoothed_energy_guidance import SEGExtensionScript
@@ -70,11 +70,8 @@ class IncantBaseExtensionScript(scripts.Script):
                                         out.extend(module_param_list)
                 # setup fields
                 self.infotext_fields = []
-                self.paste_field_names = []
                 for module_info in submodules:
-                        module = module_info.module
-                        self.infotext_fields.extend(module.get_infotext_fields())
-                        self.paste_field_names.extend(module.get_paste_field_names())
+                        self.infotext_fields.extend(module_info.module.get_infotext_fields())
                 return out
 
         def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
@@ -122,20 +119,11 @@ class IncantBaseExtensionScript(scripts.Script):
 
 # XYZ Plot
 # Based on @mcmonkey4eva's XYZ Plot implementation here: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/blob/master/scripts/dynamic_thresholding.py
-def make_axis_options(extra_axis_options):
-        xyz_grid = scripts.loaded_script_module("xyz_grid.py")
-        current_opts = {x.label for x in xyz_grid.axis_options}
-        for opt in extra_axis_options:
-                if opt.label not in current_opts:
-                        xyz_grid.axis_options.append(opt)
-                        current_opts.add(opt.label)
-
-
 def callback_before_ui():
         try:
+                xyz_grid = scripts.loaded_script_module("xyz_grid.py")
                 for module_info in submodules:
-                        module = module_info.module
-                        make_axis_options(module.get_xyz_axis_options())
+                        add_xyz_axis_options(xyz_grid, module_info.module.get_xyz_axis_options(xyz_grid))
         except Exception:
                 logger.exception("Incantation: Error while making axis options")
 

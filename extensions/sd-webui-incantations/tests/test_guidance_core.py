@@ -36,8 +36,15 @@ def tearDownModule():
 
 
 def install_a1111_stubs():
+    # The extension's modules bind these stubs when imported: drop the ones imported against an earlier install.
+    for name in [name for name in sys.modules if name == "scripts" or name.startswith("scripts.")]:
+        del sys.modules[name]
     modules_pkg = types.ModuleType("modules")
-    headless_ui_mod = types.ModuleType("modules.headless_ui")
+    # The real inert component surface (no WebUI dependencies): ui() defaults are what the API's script args use.
+    headless_ui_spec = importlib.util.spec_from_file_location("modules.headless_ui", REPO_ROOT / "modules" / "headless_ui.py")
+    headless_ui_mod = importlib.util.module_from_spec(headless_ui_spec)
+    sys.modules["modules.headless_ui"] = headless_ui_mod  # it registers itself as "gradio" while loading
+    headless_ui_spec.loader.exec_module(headless_ui_mod)
     scripts_mod = types.ModuleType("modules.scripts")
     scripts_mod.Script = object
     scripts_mod.AlwaysVisible = object()
@@ -73,22 +80,7 @@ def install_a1111_stubs():
     processing_mod = types.ModuleType("modules.processing")
     processing_mod.StableDiffusionProcessing = object
     shared_mod = types.ModuleType("modules.shared")
-    shared_mod.device = torch.device("cpu")
     shared_mod.opts = types.SimpleNamespace(batch_cond_uncond=False)
-    samplers_mod = types.ModuleType("modules.sd_samplers_cfg_denoiser")
-
-    def catenate_conds(conds):
-        if not isinstance(conds[0], dict):
-            return torch.cat(conds)
-        return {key: torch.cat([x[key] for x in conds]) for key in conds[0]}
-
-    def subscript_cond(cond, a, b):
-        if not isinstance(cond, dict):
-            return cond[a:b]
-        return {key: value[a:b] for key, value in cond.items()}
-
-    samplers_mod.catenate_conds = catenate_conds
-    samplers_mod.subscript_cond = subscript_cond
     sd_samplers_mod = types.ModuleType("modules.sd_samplers")
     sd_samplers_mod.all_samplers_map = {}
 
@@ -106,6 +98,11 @@ def install_a1111_stubs():
             self.options = options or {}
 
     sd_samplers_common_mod.SamplerData = SamplerData
+    # The timestep sampler registry, as modules/sd_samplers_timesteps.py declares it.
+    sd_samplers_timesteps_mod = types.ModuleType("modules.sd_samplers_timesteps")
+    sd_samplers_timesteps_mod.samplers_data_timesteps = [
+        SamplerData(name, None) for name in ("DDIM", "DDIM CFG++", "PLMS", "UniPC")
+    ]
     sd_samplers_kdiffusion_mod = types.ModuleType("modules.sd_samplers_kdiffusion")
 
     class CFGDenoiserKDiffusion:
@@ -133,9 +130,9 @@ def install_a1111_stubs():
             "modules.script_callbacks": script_callbacks_mod,
             "modules.processing": processing_mod,
             "modules.shared": shared_mod,
-            "modules.sd_samplers_cfg_denoiser": samplers_mod,
             "modules.sd_samplers": sd_samplers_mod,
             "modules.sd_samplers_common": sd_samplers_common_mod,
+            "modules.sd_samplers_timesteps": sd_samplers_timesteps_mod,
             "modules.sd_samplers_kdiffusion": sd_samplers_kdiffusion_mod,
             "modules.sd_unet_row_memo": row_memo_mod,
         }
@@ -207,28 +204,6 @@ class DynamicThresholdingTests(unittest.TestCase):
         out = dt.dynthresh_from_relative(relative, uncond, 9.0)
         self.assertEqual(out.shape, uncond.shape)
         self.assertTrue(torch.isfinite(out).all())
-
-    def test_dynthresh_rejects_ragged_batch_ratio_without_assert(self):
-        dt = DynThresh(
-            7.0,
-            1.0,
-            "Constant",
-            0.0,
-            "Constant",
-            0.0,
-            4.0,
-            10,
-            True,
-            "MEAN",
-            "AD",
-            1.0,
-        )
-        dt.step = 1
-        cond = torch.randn(3, 4, 4, 4)
-        uncond = torch.randn(2, 4, 4, 4)
-
-        with self.assertRaisesRegex(ValueError, "constant across batches"):
-            dt.dynthresh(cond, uncond, 9.0, None)
 
     @staticmethod
     def _bits(tensor):
@@ -445,6 +420,38 @@ class DynamicThresholdingLifecycleTests(unittest.TestCase):
         self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler"})
         self.assertEqual(self.dynamic_thresholding.Script.registered_samplers, set())
 
+    def test_every_timestep_sampler_is_rejected(self):
+        # They run CFGDenoiserTimesteps; DDIM CFG++ used to slip through a hard-coded name list and get a
+        # k-diffusion CFG denoiser, i.e. silently wrong math.
+        script = self.dynamic_thresholding.Script()
+        args = (7.0, 100.0, "Constant", 0.0, "Constant", 0.0, 4.0, True, "MEAN", "AD", 1.0, 0, [], [], [])
+        for name in ("DDIM", "DDIM CFG++", "PLMS", "UniPC"):
+            p = types.SimpleNamespace(sampler_name=name, sampler=None, sd_model=object(), steps=4, extra_generation_params={})
+            with self.subTest(sampler=name), self.assertRaisesRegex(RuntimeError, "Cannot use sampler"):
+                script.process_batch(p, True, *args)
+            self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler"})
+
+    def test_ui_defaults_enable_dynthres_without_explicit_minimums(self):
+        # Requests that enable DynThres but leave the scheduler minimums to their defaults (partial args, an
+        # infotext re-run of a constant-mode image, the X/Y/Z mimic scale axis) get the ui() values.
+        script = self.dynamic_thresholding.Script()
+        controls = script.ui(False)
+        defaults = [control.value for control in controls]
+        self.assertEqual([c.label for c in controls if c.label.startswith("Minimum value")], [
+            "Minimum value of the Mimic Scale Scheduler", "Minimum value of the CFG Scale Scheduler"])
+        self.assertEqual((defaults[4], defaults[6]), (0.0, 0.0))
+
+        p = types.SimpleNamespace(sampler_name="Euler", sampler=None, sd_model=object(), steps=4, extra_generation_params={})
+        script.process_batch(p, True, *defaults[1:], 0, [], [], [])
+        denoiser = self.sd_samplers.all_samplers_map[p.sampler_name].constructor(object()).model_wrap_cfg
+        denoiser.step, denoiser.total_steps = 1, 4
+        x_out = torch.randn(2, 4, 4, 4)
+        out = denoiser.combine_denoised(x_out, [[(0, 1.0)]], {"crossattn": torch.zeros(1, 77, 8)}, 7.0)
+        self.assertEqual(tuple(out.shape), (1, 4, 4, 4))
+        self.assertTrue(torch.isfinite(out).all())
+        script.postprocess_batch(p, True, *defaults[1:], batch_number=0, images=[])
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler"})
+
 
 class CFGCombinerTests(unittest.TestCase):
     @classmethod
@@ -511,8 +518,6 @@ class CFGCombinerTests(unittest.TestCase):
             pag_end_step=10,
             step=1,
             pag_sanf=False,
-            cfg_interval_enable=False,
-            cfg_interval_scheduled_value=7.0,
         )
 
     def test_pag_guidance_reads_cond_rows_of_pag_output(self):
@@ -771,7 +776,6 @@ class PAGBatchingTests(unittest.TestCase):
         pag_params.pag_scale = 3.0
         pag_params.pag_start_step = 0
         pag_params.pag_end_step = 10
-        pag_params.noise_levels = [1.0] * 4
         attn = types.SimpleNamespace(pag_enable=False)
         to_q = types.SimpleNamespace(seg_enable=True)
         pag_params.crossattn_modules = [attn]
@@ -829,152 +833,103 @@ class PAGBatchingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not recorded"):
             script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=None), pag_params)
 
-    def test_pag_noise_helpers_handle_degenerate_step_counts(self):
-        self.assertEqual(self.pag.calculate_noise_level(0, 0), 0.0)
-        self.assertEqual(self.pag.calculate_noise_level(-1, 4), 80.0)
-        self.assertEqual(self.pag.calculate_noise_level(4, 4), 0.0)
-        self.assertEqual(self.pag.find_closest_index(1.0, 0), 0)
+    @staticmethod
+    def attention_module():
+        class CrossAttention(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.to_v = torch.nn.Linear(8, 8, bias=False)
 
-    def test_pag_find_closest_index_honors_custom_noise_curve(self):
-        target = self.pag.calculate_noise_level(2, 5, sigma_min=0.01, sigma_max=10.0, rho=5)
+            def forward(self, x):
+                return self.to_v(x) * 2
 
-        self.assertEqual(
-            self.pag.find_closest_index(target, 5, sigma_min=0.01, sigma_max=10.0, rho=5),
-            2,
-        )
+        return CrossAttention()
 
-    def test_cfg_schedulers_handle_zero_steps_and_clamp_progress(self):
-        for schedule in self.pag._CFG_SCHEDULE_DISPATCH:
-            self.assertTrue(math.isfinite(self.pag.cfg_scheduler(schedule, 0, 0, 8.0)))
-        self.assertEqual(self.pag.cfg_scheduler("Linear", 0, 0, 8.0), 8.0)
-        self.assertEqual(self.pag.linear_schedule(-1, 4, 8.0), 16.0)
-        self.assertEqual(self.pag.invlinear_schedule(5, 4, 8.0), 16.0)
+    @staticmethod
+    def processing():
+        return types.SimpleNamespace(incant_cfg_params={"pag_params": None}, extra_generation_params={})
 
-    def test_cfg_interval_registers_without_pag_attention_modules(self):
+    def test_script_args_keep_the_positions_api_callers_send(self):
+        # The controller sends the 13 Incantations args positionally (README "A1111 API argument order"): PAG's
+        # slice is 9 of them, with the removed CFG Scheduler's 4 placeholders before PAG SANF.
+        controls = self.pag.PAGExtensionScript().setup_ui(False)
+        self.assertEqual([c.label for c in controls], [
+            "PAG Active", "PAG Scale", "PAG Start Step", "PAG End Step",
+            "Enable CFG Scheduler", "CFG Schedule Type", "CFG Noise Interval Low", "CFG Noise Interval High",
+            "Use Saliency-Adaptive Noise Fusion",
+        ])
+        self.assertEqual([c.value for c in controls[4:8]], [False, "Constant", 0, 100])
+
+    def test_removed_cfg_scheduler_fails_the_request(self):
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
         script = self.pag.PAGExtensionScript()
+        script.get_cross_attn_modules = lambda: [self.attention_module()]
+        for active in (False, True):
+            p = self.processing()
+            with self.subTest(pag_active=active), self.assertRaisesRegex(ValueError, "CFG Scheduler"):
+                script.pag_process_batch(p, active, 3.0, 0, 150, True, "Constant", 0.0, 100.0, False)
+            self.assertEqual(callbacks, [])
+            self.assertEqual(p.extra_generation_params, {})
+            self.assertIsNone(p.incant_cfg_params["pag_params"])
 
-        def fail_if_called():
-            raise AssertionError("CFG interval should not need PAG attention modules")
-
-        script.get_cross_attn_modules = fail_if_called
-
-        class Processing:
-            def __init__(self):
-                self.incant_cfg_params = {"pag_params": None}
-                self.steps = 4
-                self.cfg_scale = 8.0
-                self.batch_size = 1
-                self.extra_generation_params = {}
-
-        p = Processing()
-        script.pag_process_batch(
-            p,
-            False,
-            0.0,
-            0,
-            150,
-            True,
-            "Linear",
-            0.0,
-            100.0,
-            False,
-        )
-
-        self.assertEqual(len(callbacks), 1)
-        pag_params = p.incant_cfg_params["pag_params"]
-        params = types.SimpleNamespace(sampling_step=1)
-        callbacks[0](params)
-        self.assertEqual(
-            pag_params.cfg_interval_scheduled_value,
-            self.pag.cfg_scheduler("Linear", 1, 4, 8.0),
-        )
-        script.remove_callbacks()
+        # Its other placeholders are ignored, as they were while it was off.
+        p = self.processing()
+        script.pag_process_batch(p, True, 3.0, 0, 150, False, "Linear", 10.0, 20.0, False)
+        self.assertEqual(len(callbacks), 2)
+        self.assertNotIn("CFG Interval Enable", p.extra_generation_params)
+        script.postprocess_batch(p)
         self.assertEqual(callbacks, [])
 
-    def test_inactive_pag_batch_clears_previous_callbacks(self):
+    def test_inactive_pag_batch_clears_previous_callbacks_and_hooks(self):
+        # A failed generation skips postprocess_batch; the next (PAG-off) batch must not keep its state.
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
+        attn = self.attention_module()
         script = self.pag.PAGExtensionScript()
+        script.get_cross_attn_modules = lambda: [attn]
 
-        class Processing:
-            def __init__(self):
-                self.incant_cfg_params = {"pag_params": None}
-                self.steps = 4
-                self.cfg_scale = 8.0
-                self.batch_size = 1
-                self.extra_generation_params = {}
+        p = self.processing()
+        script.pag_process_batch(p, True, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
+        self.assertEqual(len(callbacks), 2)
+        self.assertIs(p.incant_cfg_params["pag_params"].crossattn_modules[0], attn)
+        self.assertEqual(p.extra_generation_params["PAG Active"], True)
+        x = torch.randn(1, 3, 8)
+        with torch.no_grad():
+            plain = attn(x)
+            attn.pag_enable = True
+            # The perturbed pass replaces the attention output with the to_v output.
+            self.assertTrue(torch.equal(attn(x), attn.to_v(x)))
+            attn.pag_enable = False
 
-        p = Processing()
-        script.pag_process_batch(
-            p,
-            False,
-            0.0,
-            0,
-            150,
-            True,
-            "Linear",
-            0.0,
-            100.0,
-            False,
-        )
-
-        self.assertEqual(len(callbacks), 1)
-        self.assertIsNotNone(script._cfg_denoiser_callback)
-
-        script.pag_process_batch(
-            p,
-            False,
-            0.0,
-            0,
-            150,
-            False,
-            "Linear",
-            0.0,
-            100.0,
-            False,
-        )
-
+        script.pag_process_batch(self.processing(), False, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
         self.assertEqual(callbacks, [])
-        self.assertIsNone(script._cfg_denoiser_callback)
+        self.assertEqual(script._callbacks, [])
+        self.assertFalse(hasattr(attn, "pag_enable"))
+        self.assertFalse(hasattr(attn.to_v, "pag_parent_module"))
+        self.assertEqual(len(attn._forward_hooks), 0)
+        self.assertEqual(len(attn.to_v._forward_hooks), 0)
+        with torch.no_grad():
+            self.assertTrue(torch.equal(attn(x), plain))
 
-    def test_pag_without_attention_modules_does_not_leave_inactive_combiner_state(self):
+    def test_pag_fails_when_model_has_no_middle_attention(self):
+        # Requested PAG must not silently render without PAG under an infotext that says "PAG Active".
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
         script = self.pag.PAGExtensionScript()
         script.get_cross_attn_modules = lambda: []
-
-        class Processing:
-            def __init__(self):
-                self.incant_cfg_params = {"pag_params": None}
-                self.steps = 4
-                self.cfg_scale = 8.0
-                self.batch_size = 1
-                self.extra_generation_params = {}
-
-        p = Processing()
-        script.pag_process_batch(
-            p,
-            True,
-            3.0,
-            0,
-            150,
-            False,
-            "Constant",
-            0.0,
-            100.0,
-            False,
-        )
-
+        p = self.processing()
+        with self.assertRaisesRegex(RuntimeError, "PAG: no middle-block"):
+            script.pag_process_batch(p, True, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
         self.assertEqual(callbacks, [])
+        self.assertEqual(p.extra_generation_params, {})
         self.assertIsNone(p.incant_cfg_params["pag_params"])
 
 
 def _legacy_gaussian_blur_2d(img, kernel_size, sigma):
     # Pre-separable production SEG blur (reflect pad + k x k depthwise conv of
     # query-dtype outer-product taps), verbatim minus its kernel cache. Kept as
-    # an independent oracle for gaussian_blur_queries.
+    # an independent oracle for the production query blur.
     min_spatial = min(img.shape[-2:])
     max_reflect_kernel = min_spatial - (min_spatial % 2 - 1)
     kernel_size = min(kernel_size, max_reflect_kernel)
@@ -1007,6 +962,11 @@ def _legacy_blur_seg_cond_queries(output, *, heads, head_dim, downscale_h, downs
     q_blur = q_blur.reshape(half_batch, heads, head_dim, seq_len)
     q_blur = q_blur.view(half_batch, heads * head_dim, seq_len).transpose(1, 2)
     return torch.cat((q_passthrough, q_blur), dim=0)
+
+
+def _blur_queries(seg, q, height, width, kernel_size, sigma):
+    # The production query blur as _blur_seg_uncond_queries applies it: fp32 result rounded to the query dtype.
+    return seg._gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma).to(q.dtype)
 
 
 class SEGBlurTests(unittest.TestCase):
@@ -1064,18 +1024,18 @@ class SEGBlurTests(unittest.TestCase):
         # The hook runs under bf16 autocast, which would otherwise round the
         # fp32 operators and the intermediate of the matmuls to bf16.
         q = torch.randn(2, 40 * 24, 6).to(torch.bfloat16)
-        expected = self.seg.gaussian_blur_queries(q, 40, 24, kernel_size=49, sigma=8.0)
+        expected = _blur_queries(self.seg, q, 40, 24, kernel_size=49, sigma=8.0)
         with torch.autocast("cpu", dtype=torch.bfloat16):
-            out = self.seg.gaussian_blur_queries(q, 40, 24, kernel_size=49, sigma=8.0)
+            out = _blur_queries(self.seg, q, 40, 24, kernel_size=49, sigma=8.0)
         self.assertTrue(torch.equal(out, expected))
 
     def test_gaussian_blur_clamps_kernel_to_shorter_spatial_side(self):
         q = torch.randn(2, 2 * 9, 3)
-        out = self.seg.gaussian_blur_queries(q, 2, 9, kernel_size=13, sigma=2.0)
+        out = _blur_queries(self.seg, q, 2, 9, kernel_size=13, sigma=2.0)
         self.assertEqual(tuple(out.shape), tuple(q.shape))
         self.assertTrue(torch.isfinite(out).all())
         # A 2-pixel side admits at most a 3-tap reflect kernel, on both axes.
-        self.assertTrue(torch.equal(out, self.seg.gaussian_blur_queries(q, 2, 9, kernel_size=3, sigma=2.0)))
+        self.assertTrue(torch.equal(out, _blur_queries(self.seg, q, 2, 9, kernel_size=3, sigma=2.0)))
 
     def test_blur_operator_rows_sum_to_one(self):
         for n, kernel_size in ((40, 41), (24, 25), (7, 7), (2, 3), (1, 1)):
@@ -1104,7 +1064,7 @@ class SEGBlurTests(unittest.TestCase):
             new = self.seg._blur_seg_uncond_queries(output.clone(), 2, kernel_size=49, sigma=2.0**11, is_inf_blur=True, **geometry)
             old = _legacy_blur_seg_cond_queries(
                 output,
-                blur_fn=lambda q: self.seg.gaussian_blur_inf(q, 1.0, 2.0**11),
+                blur_fn=lambda q: self.seg.gaussian_blur_inf(q),
                 **geometry,
             )
             with self.subTest(dtype=dtype):
@@ -1121,9 +1081,9 @@ class SEGBlurTests(unittest.TestCase):
             q_passthrough, q_blur = output.split((n_cond, n_rows - n_cond), dim=0)
             if is_inf_blur:
                 q_blur = q_blur.view(q_blur.shape[0], -1, 4, 3).transpose(1, 2).permute(0, 1, 3, 2).reshape(-1, 3, 7, 6)
-                q_blur = self.seg.gaussian_blur_inf(q_blur, 1.0, 8.0).reshape(-1, 4, 3, 42).view(-1, 12, 42).transpose(1, 2)
+                q_blur = self.seg.gaussian_blur_inf(q_blur).reshape(-1, 4, 3, 42).view(-1, 12, 42).transpose(1, 2)
             else:
-                q_blur = self.seg.gaussian_blur_queries(q_blur, 7, 6, 49, 8.0)
+                q_blur = _blur_queries(self.seg, q_blur, 7, 6, 49, 8.0)
             expected = torch.cat((q_passthrough, q_blur), dim=0)
             target = output.clone()
             out = self.seg._blur_seg_uncond_queries(target, n_cond, **geometry)
@@ -1161,12 +1121,12 @@ class SEGBlurTests(unittest.TestCase):
         q = torch.randn(2, 9 * 7, 4).to(torch.bfloat16)
         try:
             with torch.autocast("cpu", dtype=torch.bfloat16):
-                out = self.seg.gaussian_blur_queries(q, 9, 7, kernel_size=49, sigma=8.0)
+                out = _blur_queries(self.seg, q, 9, 7, kernel_size=49, sigma=8.0)
                 operator = self.seg._gaussian_blur_operator(9, 7, 8.0, torch.device("cpu"))
         finally:
             self.seg._gaussian_blur_operator.cache_clear()
         self.assertEqual(operator.dtype, torch.float32)
-        self.assertTrue(torch.equal(out, self.seg.gaussian_blur_queries(q, 9, 7, kernel_size=49, sigma=8.0)))
+        self.assertTrue(torch.equal(out, _blur_queries(self.seg, q, 9, 7, kernel_size=49, sigma=8.0)))
 
     def test_uncond_blur_follows_cond_row_count_for_and_prompts(self):
         # AND prompts: 3 cond rows + 1 uncond row. Only the uncond row is blurred; a half split
@@ -1231,12 +1191,11 @@ class SEGBlurTests(unittest.TestCase):
         callbacks = sys.modules["modules.script_callbacks"].callback_registry
         callbacks.clear()
         script, params, attn = self._hooked_seg()
-        script._cfg_denoiser_callback = lambda step: script.on_cfg_denoiser_callback(step, params)
-        callbacks.append(script._cfg_denoiser_callback)
+        callbacks.append(script.track_callback(lambda step: script.on_cfg_denoiser_callback(step, params)))
         p = types.SimpleNamespace(extra_generation_params={}, incant_cfg_params={})
         script.seg_process_batch(p, False, 3.0, 0, 150)
         self.assertEqual(callbacks, [])
-        self.assertIsNone(script._cfg_denoiser_callback)
+        self.assertEqual(script._callbacks, [])
         self.assertFalse(hasattr(attn.to_q, "seg_enable"))
         self.assertEqual(len(attn.to_q._forward_hooks), 0)
 
@@ -1261,28 +1220,6 @@ class SEGBlurTests(unittest.TestCase):
                 x = torch.randn(rows, 6 * 5, 6)
                 with self.subTest(rows=rows):
                     self.assertTrue(torch.equal(attn.to_q(x), torch.nn.functional.linear(x, attn.to_q.weight)))
-
-
-class ModuleHookTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        install_a1111_stubs()
-        cls.module_hooks = importlib.import_module("scripts.incant_utils.module_hooks")
-
-    def test_forward_hook_handle_removal_is_local(self):
-        layer = torch.nn.Linear(2, 2, bias=False)
-        calls = {"count": 0}
-
-        def hook(module, args, output):
-            calls["count"] += 1
-            return output
-
-        handle = self.module_hooks.module_add_forward_hook(layer, hook)
-        layer(torch.ones(1, 2))
-        self.assertEqual(calls["count"], 1)
-        handle.remove()
-        layer(torch.ones(1, 2))
-        self.assertEqual(calls["count"], 1)
 
 
 class SharedHelperTests(unittest.TestCase):
@@ -1313,15 +1250,34 @@ class SharedHelperTests(unittest.TestCase):
             },
         })
 
+    def test_timed_records_the_block_also_when_it_raises(self):
+        timings = {}
+        with self.timing.timed(timings, "hook"):
+            pass
+        with self.assertRaisesRegex(ValueError, "boom"):
+            with self.timing.timed(timings, "hook"):
+                raise ValueError("boom")
+        self.assertEqual(timings["hook"]["calls"], 2)
+        self.assertGreaterEqual(timings["hook"]["total_seconds"], 0.0)
+
     def test_xyz_field_setter_enables_feature_only_when_unset(self):
         setter = self.ui_wrapper.xyz_field_setter
         p = types.SimpleNamespace()
-        setter("cfg_interval_schedule", "pag_active", also_enable="cfg_interval_enable")(p, "Linear", [])
-        self.assertEqual(vars(p), {"cfg_interval_schedule": "Linear", "pag_active": True, "cfg_interval_enable": True})
+        setter("pag_scale", "pag_active")(p, 2.5, [])
+        self.assertEqual(vars(p), {"pag_scale": 2.5, "pag_active": True})
 
         p = types.SimpleNamespace(pag_active=False)
         setter("pag_sanf", "pag_active", boolean=True)(p, "True", [])
         self.assertEqual(vars(p), {"pag_active": False, "pag_sanf": True})
+
+    def test_xyz_axis_options_are_appended_once_in_order(self):
+        def option(label):
+            return types.SimpleNamespace(label=label)
+
+        xyz_grid = types.SimpleNamespace(axis_options=[option("Seed"), option("[SEG] Active")])
+        self.ui_wrapper.add_xyz_axis_options(xyz_grid, [option("[SEG] Active"), option("[PAG] Active"), option("[PAG] SANF")])
+        self.ui_wrapper.add_xyz_axis_options(xyz_grid, [option("[PAG] Active")])
+        self.assertEqual([o.label for o in xyz_grid.axis_options], ["Seed", "[SEG] Active", "[PAG] Active", "[PAG] SANF"])
 
 
 if __name__ == "__main__":

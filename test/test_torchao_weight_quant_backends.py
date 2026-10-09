@@ -74,10 +74,10 @@ def test_storage_gating_and_policy_signature_layout(monkeypatch):
 
 
 def test_backend_status_hooks_target_live_functions():
-    # _wrap_backend_function skips missing attributes silently, so a rename would drop a status hook unnoticed.
+    # The status hooks name these core functions by string; a rename fails the extension's install at startup.
     root = Path(__file__).resolve().parents[1]
     source = (root / "extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py").read_text()
-    assert '_wrap_backend_function(_sd_models, "apply_weight_quantization"' in source
+    assert '_wrap_backend_function(sd_models, "apply_weight_quantization"' in source
     assert callable(sd_models.apply_weight_quantization)
     assert '_wrap_backend_function(_lora_networks, "prepare_quant_active_config"' in source
     assert "\ndef prepare_quant_active_config(backend):" in (root / "extensions-builtin/Lora/networks.py").read_text().replace("\r\n", "\n")

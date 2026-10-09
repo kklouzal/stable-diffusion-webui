@@ -1,71 +1,14 @@
-"""TeaCache lane invalidation and UNet forward ownership (extensions/sd-webui-teacache/scripts/teacache.py).
+"""TeaCache lane invalidation and UNet forward ownership (scripts/teacache.py); fixtures are in conftest.py.
 
 CPU-only. A tiny UNet stand-in follows sgm ``UNetModel.forward``'s call structure (first block blind to the
 cross-attention context, deeper blocks conditioned on it), so cache decisions and restore behaviour run through
 the real patched forward.
 """
 
-import importlib.util
-import sys
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
-
-TEACACHE_PATH = Path(__file__).resolve().parents[1] / "extensions" / "sd-webui-teacache" / "scripts" / "teacache.py"
-
-
-def _install_stub_modules(monkeypatch):
-    def module(name, **attrs):
-        mod = ModuleType(name)
-        for key, value in attrs.items():
-            setattr(mod, key, value)
-        monkeypatch.setitem(sys.modules, name, mod)
-        return mod
-
-    class InputAccordion:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return False
-
-        def __exit__(self, *args):
-            return False
-
-    module("sgm")
-    module("sgm.modules")
-    module("sgm.modules.diffusionmodules")
-    # Timestep-dependent stand-in for the sinusoidal embedding.
-    module(
-        "sgm.modules.diffusionmodules.openaimodel",
-        timestep_embedding=lambda timesteps, dim, repeat_only=False: timesteps[:, None].float().expand(-1, dim) * 0.01,
-    )
-    module("modules")
-    module("modules.headless_ui", Row=lambda *a, **k: None, Slider=lambda *a, **k: None, Number=lambda *a, **k: None)
-    module("modules.processing", StableDiffusionProcessing=object)
-    module("modules.script_callbacks", on_cfg_after_cfg=lambda callback: callback)
-    module("modules.scripts", Script=object, AlwaysVisible=object())
-    module("modules.sd_samplers_common", setup_img2img_steps=lambda p, steps=None: (steps or p.steps, steps or p.steps))
-    module("modules.sd_hijack_unet", th=torch)
-    module("modules.ui_components", InputAccordion=InputAccordion)
-
-
-def _load(monkeypatch, name="teacache_lanes_under_test"):
-    spec = importlib.util.spec_from_file_location(name, TEACACHE_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, name, mod)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture
-def teacache(monkeypatch):
-    _install_stub_modules(monkeypatch)
-    mod = _load(monkeypatch)
-    yield mod
-    mod._set_cache(None)
 
 
 class FakeUNet:
@@ -298,14 +241,14 @@ def test_patched_forward_failure_under_wrapper_keeps_the_wrapper(teacache):
     assert teacache._get_cache() is None
 
 
-def test_patch_from_an_earlier_script_load_is_still_restored(monkeypatch, teacache):
+def test_patch_from_an_earlier_script_load_is_still_restored(teacache, load_teacache):
     unet = FakeUNet()
     original = unet.reference
     unet.forward = original
     p = _processing(unet)
     teacache.TeaCacheScript().process(p, True)
 
-    reloaded = _load(monkeypatch, "teacache_lanes_reloaded")
+    reloaded = load_teacache("teacache_reloaded")
     reloaded.TeaCacheScript().process(p, False)
 
     assert unet.forward is original

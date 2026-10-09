@@ -10,6 +10,7 @@ record is what Processed and the API expose::
 
 Seconds are rounded to 6 decimals at every accumulation step.
 """
+import time
 
 
 def _accumulate(entry, elapsed, calls):
@@ -20,6 +21,21 @@ def _accumulate(entry, elapsed, calls):
 def record(timings, name, elapsed):
     """Add one call taking ``elapsed`` seconds to ``timings[name]``."""
     _accumulate(timings.setdefault(name, {"total_seconds": 0.0, "calls": 0}), float(elapsed), 1)
+
+
+class timed:
+    """``with timed(timings, name):`` record()s the block's wall time into ``timings[name]``, also when it raises."""
+    __slots__ = ("timings", "name", "started")
+
+    def __init__(self, timings, name):
+        self.timings = timings
+        self.name = name
+
+    def __enter__(self):
+        self.started = time.perf_counter()
+
+    def __exit__(self, *exc_info):
+        record(self.timings, self.name, time.perf_counter() - self.started)
 
 
 def merge_into_processing(p, extension, hook_timings):

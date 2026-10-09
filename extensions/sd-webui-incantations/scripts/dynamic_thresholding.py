@@ -3,10 +3,6 @@
 #
 # Author: Alex 'mcmonkey' Goodwin
 # GitHub URL: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding
-# Created: 2022/01/26
-# Last updated: 2023/01/30
-#
-# For usage help, view the README.md file in the extension root, or via the GitHub page.
 #
 ##################
 
@@ -14,12 +10,15 @@ import logging
 
 from modules import headless_ui as gr
 import dynthres_core
-from modules import scripts, script_callbacks, sd_samplers, sd_samplers_common
+from modules import scripts, script_callbacks, sd_samplers, sd_samplers_common, sd_samplers_timesteps
 from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
+from scripts.ui_wrapper import add_xyz_axis_options, cond_crossattn
 
 logger = logging.getLogger(__name__)
 
-UNSUPPORTED_SAMPLERS = ("DDIM", "PLMS", "UniPC")
+# The timestep samplers (DDIM, DDIM CFG++, PLMS, UniPC) run a CompVisSampler whose CFGDenoiserTimesteps has no
+# k-diffusion CFG denoiser to wrap: swapping in CustomCFGDenoiser would silently compute the wrong math.
+UNSUPPORTED_SAMPLERS = frozenset(sampler.name for sampler in sd_samplers_timesteps.samplers_data_timesteps)
 
 ######################### Data values #########################
 MODES_WITH_VALUE = ["Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth"]
@@ -38,7 +37,6 @@ class Script(scripts.Script):
             with gr.Row():
                 enabled = gr.Checkbox(value=False, label="Enable Dynamic Thresholding (CFG Scale Fix)", elem_classes=["dynthres-enabled"], elem_id='dynthres_enabled')
             with gr.Group():
-                gr.HTML(value="View <a style=\"border-bottom: 1px #00ffff dotted;\" href=\"https://github.com/mcmonkeyprojects/sd-dynamic-thresholding/wiki/Usage-Tips\">the wiki for usage tips.</a><br><br>", elem_id='dynthres_wiki_link')
                 mimic_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label='Mimic CFG Scale', value=7.0, elem_id='dynthres_mimic_scale')
                 with gr.Accordion("Advanced Options", open=False, elem_id='dynthres_advanced_opts'):
                     with gr.Row():
@@ -47,8 +45,8 @@ class Script(scripts.Script):
                     with gr.Row():
                         mimic_mode = gr.Dropdown(dynthres_core.DynThresh.Modes, value="Constant", label="Mimic Scale Scheduler", elem_id='dynthres_mimic_mode')
                         cfg_mode = gr.Dropdown(dynthres_core.DynThresh.Modes, value="Constant", label="CFG Scale Scheduler", elem_id='dynthres_cfg_mode')
-                    mimic_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label="Minimum value of the Mimic Scale Scheduler", elem_id='dynthres_mimic_scale_min')
-                    cfg_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label="Minimum value of the CFG Scale Scheduler", elem_id='dynthres_cfg_scale_min')
+                    mimic_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, value=0.0, label="Minimum value of the Mimic Scale Scheduler", elem_id='dynthres_mimic_scale_min')
+                    cfg_scale_min = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, value=0.0, label="Minimum value of the CFG Scale Scheduler", elem_id='dynthres_cfg_scale_min')
                     sched_val = gr.Slider(minimum=0.0, maximum=40.0, step=0.5, value=4.0, label="Scheduler Value", info="Value unique to the scheduler mode - for Power Up/Down, this is the power. For Linear/Cosine Repeating, this is the number of repeats per image.", elem_id='dynthres_sched_val')
                     with gr.Row():
                         separate_feature_channels = gr.Checkbox(value=True, label="Separate Feature Channels", elem_id='dynthres_separate_feature_channels')
@@ -98,7 +96,6 @@ class Script(scripts.Script):
         if not enabled:
             return
         orig_sampler_name = p.sampler_name
-        # Timestep samplers (DDIM, PLMS, UniPC) have no k-diffusion CFG denoiser to wrap.
         if orig_sampler_name in UNSUPPORTED_SAMPLERS:
             raise RuntimeError(f"Cannot use sampler {orig_sampler_name} with Dynamic Thresholding")
         mimic_scale = getattr(p, 'dynthres_mimic_scale', mimic_scale)
@@ -128,7 +125,8 @@ class Script(scripts.Script):
             p.extra_generation_params["CFG scale minimum"] = cfg_scale_min
         if cfg_mode in MODES_WITH_VALUE or mimic_mode in MODES_WITH_VALUE:
             p.extra_generation_params["Scheduler value"] = sched_val
-        # Note: the ID number is to protect the edge case of multiple simultaneous runs with different settings
+        # A fresh ID per batch gives this batch's renamed sampler its own all_samplers_map key, so it never collides
+        # with one a failed batch left registered.
         Script.last_id += 1
         # Percentage to portion
         threshold_percentile *= 0.01
@@ -157,7 +155,7 @@ class Script(scripts.Script):
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
 
-    def postprocess_batch(self, p, enabled, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi, batch_number, images):
+    def postprocess_batch(self, p, *args, **kwargs):
         self._restore_original_sampler(p)
 
 ######################### K-Diffusion Implementation logic #########################
@@ -168,9 +166,7 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
         self.main_class = dt_data
 
     def combine_denoised(self, x_out, conds_list, uncond, cond_scale):
-        if isinstance(uncond, dict) and 'crossattn' in uncond:
-            uncond = uncond['crossattn']
-        denoised_uncond = x_out[-uncond.shape[0]:]
+        denoised_uncond = x_out[-cond_crossattn(uncond).shape[0]:]
         self.main_class.step = self.step
         self.main_class.max_steps = self.total_steps
 
@@ -179,8 +175,7 @@ class CustomCFGDenoiser(cfgdenoisekdiff):
 
 ######################### XYZ Plot Script Support logic #########################
 
-def make_axis_options():
-    xyz_grid = scripts.loaded_script_module("xyz_grid.py")
+def make_axis_options(xyz_grid):
     def apply_mimic_scale(p, x, xs):
         if x != 0:
             p.dynthres_enabled = True
@@ -191,7 +186,7 @@ def make_axis_options():
         for x in xs:
             if x not in dynthres_core.DynThresh.Modes:
                 raise RuntimeError(f"Unknown Scheduler: {x}")
-    extra_axis_options = [
+    return [
         xyz_grid.AxisOption("[DynThres] Mimic Scale", float, apply_mimic_scale),
         xyz_grid.AxisOption("[DynThres] Separate Feature Channels", int,
                             xyz_grid.apply_field("dynthres_separate_feature_channels")),
@@ -205,12 +200,11 @@ def make_axis_options():
         xyz_grid.AxisOption("[DynThres] CFG minimum", float, xyz_grid.apply_field("dynthres_cfg_scale_min")),
         xyz_grid.AxisOption("[DynThres] Scheduler value", float, xyz_grid.apply_field("dynthres_scheduler_val"))
     ]
-    if not any("[DynThres]" in x.label for x in xyz_grid.axis_options):
-        xyz_grid.axis_options.extend(extra_axis_options)
 
 def callback_before_ui():
     try:
-        make_axis_options()
+        xyz_grid = scripts.loaded_script_module("xyz_grid.py")
+        add_xyz_axis_options(xyz_grid, make_axis_options(xyz_grid))
     except Exception:
         logger.exception("Failed to add Dynamic Thresholding support for X/Y/Z Plot Script")
 

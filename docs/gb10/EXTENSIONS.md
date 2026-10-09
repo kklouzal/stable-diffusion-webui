@@ -14,7 +14,6 @@ Live directories as of 2026-09-25:
 
 - `multidiffusion-upscaler-for-automatic1111`
 - `openclaw-clear-cond-cache`
-- `openclaw-conditioning-probe`
 - `openclaw-denoise-ramp`
 - `openclaw-multi-sampler`
 - `sd-webui-controlnet`
@@ -54,8 +53,6 @@ Currently first-class:
   - upstream `Mikubill/sd-webui-controlnet` v1.1.455 (`56cec5b`, GPL-3.0), committed byte-identical first, followed by a separate commit that holds the GB10 edits (legacy remote API field normalization used by A1111-Controller, headless submit-button guard, hook and ZoeDepth fixes)
   - `gb10/run.sh` additionally applies the tracked `gb10/patch-controlnet-*.py` patchers on deploy
   - model weights (`models/*.safetensors`, identity pinned by the committed `.sha256` sidecars) and `annotator/downloads/` stay out of git. Each deploy's resync removes `annotator/downloads/`, so annotators such as ZoeDepth re-download on first use.
-- `openclaw-conditioning-probe`
-  - diagnostic API endpoints (`/sdapi/v1/openclaw/conditioning-probe/*`) that hash conditioning, embedding, and quantization state for cache-coherency audits
 - `openclaw-denoise-ramp`, `openclaw-multi-sampler`, `sd-webui-model-converter`
   - GB10-owned sampler, denoise-ramp, and model conversion extensions
 

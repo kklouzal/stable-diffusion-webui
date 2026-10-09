@@ -23,11 +23,14 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 
 ## Source map
 
-- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (DDIM, PLMS and UniPC are rejected with an error). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
+- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (the timestep samplers DDIM, DDIM CFG++, PLMS and UniPC are rejected with an error). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
 - `scripts/pag.py` and `scripts/smoothed_energy_guidance.py`: Incantations guidance source with GB10 lifecycle fixes.
-- `scripts/cfg_combiner.py`: GB10-owned CFG composition glue for PAG, CFG interval scheduling, and CFG-Fix coexistence.
-- Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
+- `scripts/cfg_combiner.py`: GB10-owned CFG composition glue for PAG and CFG-Fix coexistence.
 - `scripts/incantation_base.py`: GB10-trimmed A1111 entrypoint that exposes only the supported combined guidance stack.
+- `scripts/ui_wrapper.py`: the submodule base class (per-batch callback and hook bookkeeping) and shared X/Y/Z and conditioning helpers; `scripts/incant_utils/`: module field/lookup helpers and the timing records behind the API's `openclaw_extension_timings`.
+- `tests/`: CPU unit tests with A1111 stubbed; run them in their own pytest process.
+- Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
+- Removed PAG's CFG Scheduler ("CFG Interval": noise-interval CFG and CFG weight schedules). Its four script args stay as placeholders, see below.
 
 
 ## A1111 API argument order
@@ -49,6 +52,8 @@ Keep the `incantations` always-on script argument order stable unless a caller m
 13. `pag_sanf`
 
 This ordering intentionally differs from the PAG UI visual order because `pag_sanf` was appended last historically. Preserve behavior over cosmetic ordering.
+
+Arguments 9-12 belonged to the removed CFG Scheduler and are kept only so `pag_sanf` keeps its position (the controller sends `false, "Constant", 0.0, 100.0` there). `cfg_interval_enable` must be false: true fails the request, also when it comes from the infotext of an image made with the scheduler. The other three are ignored.
 
 ## GB10 ownership doctrine
 
