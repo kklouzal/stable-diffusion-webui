@@ -1512,9 +1512,15 @@ def _reload_model_weights(sd_model, info, forced_reload):
         openclaw_lifecycle_epochs.discard_pending_vae_commit(sd_model)
         raise reload_exc_info[1].with_traceback(reload_exc_info[2])
 
+    model_data.set_sd_model(sd_model)
+
+    # The pad_cond_uncond padding is the new text encoder's empty prompt, computed as load_model does.
+    with devices.autocast(), torch.no_grad():
+        sd_model.cond_stage_model_empty_prompt = get_empty_cond(sd_model)
+    timer.record("calculate empty prompt")
+
     print(f"Weights loaded in {timer.summary()}.")
 
-    model_data.set_sd_model(sd_model)
     sd_unet.apply_unet()
     openclaw_cuda_graphs.note_model_loaded(sd_model)
     vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
