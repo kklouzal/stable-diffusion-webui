@@ -95,7 +95,7 @@ hidden at ~95% GPU utilization.
   the test that installs them, and be4f8e3b moved the file's tests to `extensions/sd-webui-teacache/tests/`.)
 - GPU unit tests (before the merge of the PAG workstream): UNet/attention/graph suites 127/127; full core and
   extension suites with `--gpus all` showed no new failures versus the same commit range on the pre-change tree.
-  bf16 native norms were measured on GB10 (`test/benchmark_unet_norms.py`).
+  bf16 native norms were measured on GB10 (`test/benchmark_unet_norms.py`, moved to `tools/` on 2026-10-09).
 - Ruff on the 105 changed Python files: 82 findings vs 83 on the same files before (no new rule categories).
 - NOT yet run: any end-to-end generation on the new code, fixed-seed image comparison against the previous build, and
   per-workload s/step / peak-memory A/B. Two host lockups on 2026-10-06 coincided with GPU replay jobs on this host,

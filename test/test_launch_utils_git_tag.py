@@ -62,8 +62,6 @@ def test_outside_a_git_checkout_is_none_without_running_git(git, monkeypatch):
     assert git.calls == []
 
 
-@pytest.mark.xfail(strict=True, reason="needs the docs stream's git_tag() without the CHANGELOG.md fallback; "
-                                       "drop this marker when merging that branch")
 def test_a_changelog_is_never_read_as_the_version(git, monkeypatch, tmp_path):
     monkeypatch.setattr(launch_utils, "_script_path_is_git_repo", lambda: False)
     (tmp_path / "CHANGELOG.md").write_text("## v1.10.1\n\n### Bug Fixes:\n", encoding="utf-8")
