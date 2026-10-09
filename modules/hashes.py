@@ -5,7 +5,6 @@ import os.path
 from modules import shared, errors, persistent_artifact_cache
 import modules.cache
 
-dump_cache = modules.cache.dump_cache
 cache = modules.cache.cache
 
 
@@ -54,8 +53,6 @@ def sha256(filename, title, use_addnet_hash=False):
         print(f"{sha256_value}")
 
         hashes[title] = {"source_revision": after, "sha256": sha256_value}
-
-    dump_cache()
 
     return sha256_value
 
