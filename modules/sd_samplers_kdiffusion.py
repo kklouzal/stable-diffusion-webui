@@ -177,6 +177,11 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
                 p.extra_generation_params["Beta schedule alpha"] = opts.beta_dist_alpha
                 p.extra_generation_params["Beta schedule beta"] = opts.beta_dist_beta
 
+        elif p.is_hr_pass and p.extra_generation_params.get("Schedule type"):
+            # The hires pass runs on the model's own schedule (its sampler has no default scheduler). Unrecorded, the
+            # first pass's "Schedule type" would read back as the hires one; "Automatic" reads back as this schedule.
+            p.extra_generation_params["Hires schedule type"] = "Automatic"
+
         def make_sigmas():
             if sigmas_kwargs is None:
                 sigmas = self.model_wrap.get_sigmas(steps)
