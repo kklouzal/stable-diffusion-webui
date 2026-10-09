@@ -1,7 +1,8 @@
-"""Ultimate SD Upscale sub-canvas patcher: fail-closed patching and a bitwise differential against the full canvas.
+"""Ultimate SD Upscale per-tile size and sub-canvas patcher: fail-closed patching, tiles processed at their crop's own
+size, and a bitwise differential of the sub-canvas window against the full canvas.
 
-The differential runs the unpatched and the patched USDU passes against the real
-StableDiffusionProcessingImg2Img.init (mask blur, crop region, crop/resize, overlay, latent mask, inpainting
+The differential runs the patched USDU passes with the window and with the full canvas (same tile sizes) against the
+real StableDiffusionProcessingImg2Img.init (mask blur, crop region, crop/resize, overlay, latent mask, inpainting
 conditioning) and the real apply_overlay; only the UNet/VAE are replaced by a deterministic per-pixel function of
 the init latent, nmask and image conditioning.
 """
@@ -31,31 +32,25 @@ def run_patcher(target: Path, *extra: str, check: bool = True) -> subprocess.Com
 
 
 # The patcher imports patchlib as a sibling module, as under run.sh.
-PATCHER_MODULE = load_source("gb10_patch_ultimate_upscale_subcanvas", PATCHER, {"patchlib": load_source("patchlib", GB10 / "patchlib.py")})
+PATCHLIB = load_source("patchlib", GB10 / "patchlib.py")
+PATCHER_MODULE = load_source("gb10_patch_ultimate_upscale_subcanvas", PATCHER, {"patchlib": PATCHLIB})
 
 
 @pytest.fixture()
 def usdu_source(tmp_path: Path) -> Path:
-    """The installed script as run.sh hands it to this patcher: lifecycle-patched, sub-canvas not.
+    """The installed script as run.sh hands it to this patcher: lifecycle-patched (whichever release), sub-canvas not.
 
-    An already deployed script is un-patched here, and the patcher must turn the result back into its exact bytes.
+    The installed sub-canvas release (this one or deploy10) is reverted exactly; the upgrade from deploy10 is tested
+    in test_gb10_tiled_extension_patchers.py.
     """
     if INSTALLED_UU is None:
         pytest.skip(f"installed Ultimate Upscale fixture missing: {EXTENSION}")
-    installed = (INSTALLED_UU / "scripts" / "ultimate-upscale.py").read_bytes()
-    text = installed.decode("utf-8")
+    text = (INSTALLED_UU / "scripts" / "ultimate-upscale.py").read_text(encoding="utf-8")
     if PATCHER_MODULE.MARKER in text:
-        for block in reversed(PATCHER_MODULE.BLOCKS):
-            assert text.count(block.patched) == block.count
-            text = text.replace(block.patched, block.original)
+        text = next(filter(None, (PATCHLIB._revert_previous(text, blocks) for blocks in (PATCHER_MODULE.BLOCKS, PATCHER_MODULE.DEPLOY10))))
     target = tmp_path / EXTENSION / "scripts" / "ultimate-upscale.py"
     target.parent.mkdir(parents=True)
     target.write_bytes(text.encode("utf-8"))
-    if PATCHER_MODULE.MARKER in installed.decode("utf-8"):
-        probe = tmp_path / "roundtrip.py"
-        probe.write_bytes(target.read_bytes())
-        run_patcher(probe)
-        assert probe.read_bytes() == installed
     return target
 
 
@@ -148,11 +143,19 @@ def real_modules(monkeypatch):
 
 
 @pytest.fixture()
-def usdu_pair(usdu_source: Path, tmp_path: Path, real_modules):
+def usdu_pair(usdu_source: Path, tmp_path: Path, real_modules, monkeypatch):
+    """(patched with the sub-canvas window off: every tile sees the whole canvas, patched)."""
     patched_path = tmp_path / "patched-ultimate-upscale.py"
     shutil.copyfile(usdu_source, patched_path)
     run_patcher(patched_path)
-    return load_source("usdu_unpatched_fixture", usdu_source), load_source("usdu_patched_fixture", patched_path)
+    full_canvas = load_source("usdu_full_canvas_fixture", patched_path)
+    monkeypatch.setattr(full_canvas, "_gb10_subcanvas_plan", lambda p, image, mask: None)
+    return full_canvas, load_source("usdu_patched_fixture", patched_path)
+
+
+@pytest.fixture()
+def usdu_upstream(usdu_source: Path, real_modules):
+    return load_source("usdu_unpatched_fixture", usdu_source)
 
 
 class Recorder:
@@ -161,6 +164,7 @@ class Recorder:
     def __init__(self, env):
         self.env = env
         self.calls = []
+        self.sizes = []  # (crop region size, processing size) of every "Only masked" tile
 
     def process_images(self, p):
         import numpy as np
@@ -170,6 +174,8 @@ class Recorder:
         processing = self.env.processing
         self.calls.append((p.init_images[0].size, p.image_mask.size))
         p.init([""], [p.seed], [p.seed])
+        if p.inpaint_full_res:  # False: the mask blurred to nothing and img2img fell back to the whole image
+            self.sizes.append((tuple(p.paste_to[2:]), (p.width, p.height)))
         if p.image_mask is not None and p.paste_to is not None and p.inpaint_full_res:
             x = p.init_latent[0].float()
             n = p.nmask[0].float()
@@ -230,7 +236,7 @@ def run_usdu(env, module, monkeypatch, case, *, scripts=None):
     seams.mode = module.USDUSFMode(case["seams"])
     if seams.mode != module.USDUSFMode.NONE:
         results.append(seams.start(p, image, rows, cols))
-    return results, recorder.calls
+    return results, recorder
 
 
 def assert_same(expected, actual):
@@ -269,11 +275,13 @@ def random_cases(count, seed=20261006):
 
 @pytest.mark.parametrize("case", [dict(c, seed=i) for i, c in enumerate(EDGE_CASES + random_cases(64))])
 def test_subcanvas_tiles_are_bitwise_identical_to_full_canvas(usdu_pair, real_modules, monkeypatch, case):
-    unpatched, patched = usdu_pair
-    expected, full_calls = run_usdu(real_modules, unpatched, monkeypatch, case)
-    actual, window_calls = run_usdu(real_modules, patched, monkeypatch, case)
+    full_canvas, patched = usdu_pair
+    expected, full = run_usdu(real_modules, full_canvas, monkeypatch, case)
+    actual, window = run_usdu(real_modules, patched, monkeypatch, case)
+    full_calls, window_calls = full.calls, window.calls
 
     assert_same(expected, actual)
+    assert window.sizes == full.sizes
     canvas = case["canvas"]
     assert len(window_calls) == len(full_calls) > 1
     # Only the first tile (before the last-generation snapshot) has to see the whole canvas.
@@ -282,6 +290,58 @@ def test_subcanvas_tiles_are_bitwise_identical_to_full_canvas(usdu_pair, real_mo
         assert any(call[0] != canvas for call in window_calls[1:])
     # else: a mask that blurs to nothing made img2img fall back to the whole image (upstream shrinks the canvas to
     # the tile size); the patched run must and does reproduce that through the full-canvas path.
+
+
+@pytest.mark.parametrize("case", [dict(c, seed=i) for i, c in enumerate(EDGE_CASES + random_cases(64))])
+def test_every_tile_is_processed_at_its_crop_size(usdu_pair, usdu_upstream, real_modules, monkeypatch, case):
+    """Upstream resamples (almost) every tile's crop to a different processing size; the patch never does when the
+    canvas sides are multiples of 8, and otherwise misses by less than 8 pixels per side."""
+    _, patched = usdu_pair
+    _, upstream = run_usdu(real_modules, usdu_upstream, monkeypatch, case)
+    _, recorder = run_usdu(real_modules, patched, monkeypatch, case)
+
+    assert any(crop != size for crop, size in upstream.sizes)
+    assert recorder.sizes
+    for crop, size in recorder.sizes:
+        assert size[0] % 8 == 0 and size[1] % 8 == 0
+        if case["canvas"][0] % 8 == 0 and case["canvas"][1] % 8 == 0:
+            assert crop == size
+        else:
+            assert 0 <= size[0] - crop[0] < 8 and 0 <= size[1] - crop[1] < 8
+
+
+@pytest.mark.parametrize("seams_width, seams_padding", [(64, 16), (50, 13), (24, 0), (37, 5)])
+def test_band_pass_band_is_not_stretched(usdu_pair, usdu_upstream, real_modules, monkeypatch, seams_width, seams_padding):
+    """Upstream processes the band at width + 2 * padding, which the latent stride rounds; the band is then
+    resized back. Each band now runs at its crop's own size, and the tile size and padding are restored after it."""
+    _, patched = usdu_pair
+    case = dict(canvas=(512, 384), tile=(128, 128), padding=0, mask_blur=0, redraw=2, seams=1, seams_padding=seams_padding,
+                seams_blur=0, seams_width=seams_width, seed=3)
+    _, upstream = run_usdu(real_modules, usdu_upstream, monkeypatch, case)
+    _, recorder = run_usdu(real_modules, patched, monkeypatch, case)
+    assert len(recorder.sizes) == 3 + 2  # bands at x = 128, 256, 384 and y = 128, 256
+    assert all(crop == size for crop, size in recorder.sizes)
+    if (seams_width + 2 * seams_padding) % 8:
+        assert all(size[0] % 8 or size[1] % 8 for _, size in upstream.sizes)
+
+
+def test_tile_size_holds_for_its_tile_only(usdu_pair, real_modules, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    _, patched = usdu_pair
+    recorder = Recorder(real_modules)
+    monkeypatch.setattr(real_modules.processing, "process_images", recorder.process_images)
+    p = make_p(real_modules, 8)
+    p.width, p.height, p.inpaint_full_res_padding = 576, 576, 32
+    image = canvas_image(1024, 1024, 5)
+    mask = Image.new("L", image.size, "black")
+    ImageDraw.Draw(mask).rectangle((256, 256, 767, 767), fill="white")  # an interior 512 x 512 tile
+    patched._gb10_process_tile(types.SimpleNamespace(), p, image, mask)
+
+    (crop, size), = recorder.sizes
+    # blurred bbox 512 + 2 * 20 (blur reach of 8) = 552, + 2 * 32 padding = 616 = 77 * 8: exact without extra padding
+    assert crop == size == (616, 616)
+    assert (p.width, p.height, p.inpaint_full_res_padding) == (576, 576, 32)
 
 
 class _Script:
@@ -361,12 +421,12 @@ def test_plan_gate_keeps_full_canvas_when_the_canvas_is_observable(usdu_pair, re
 
 
 def test_audited_and_disabled_scripts_keep_the_fast_path_exact(usdu_pair, real_modules, monkeypatch):
-    unpatched, patched = usdu_pair
+    full_canvas, patched = usdu_pair
     case = dict(canvas=(320, 256), tile=(64, 64), padding=16, mask_blur=4, redraw=0, seams=2, seams_padding=8, seams_blur=4, seams_width=16, seed=7)
-    expected, _ = run_usdu(real_modules, unpatched, monkeypatch, case, scripts=_inert_runner())
-    actual, calls = run_usdu(real_modules, patched, monkeypatch, case, scripts=_inert_runner())
+    expected, _ = run_usdu(real_modules, full_canvas, monkeypatch, case, scripts=_inert_runner())
+    actual, recorder = run_usdu(real_modules, patched, monkeypatch, case, scripts=_inert_runner())
 
-    assert sum(call[0] != case["canvas"] for call in calls) == len(calls) - 1
+    assert sum(call[0] != case["canvas"] for call in recorder.calls) == len(recorder.calls) - 1
     assert_same(expected, actual)
 
 
@@ -401,3 +461,4 @@ def test_processing_drift_fails_fast_instead_of_returning_a_different_canvas(usd
     case = dict(canvas=(320, 256), tile=(64, 64), padding=16, mask_blur=4, redraw=0, seams=0, seams_padding=0, seams_blur=0, seams_width=8, seed=7)
     with pytest.raises(RuntimeError, match="sub-canvas mismatch"):
         run_usdu(real_modules, patched, monkeypatch, case)
+

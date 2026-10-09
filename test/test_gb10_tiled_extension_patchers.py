@@ -46,7 +46,7 @@ def run_patcher(patcher: Path, target: Path, *extra: str, check: bool = True) ->
 def upstream_text(installed: str) -> str:
     """The installed script with each patcher's current or deploy10 release reverted (exactly, see patchlib)."""
     text = installed
-    for releases in ((SUBCANVAS_MODULE.BLOCKS,), (UU_MODULE.BLOCKS, UU_MODULE.DEPLOY10)):
+    for releases in ((SUBCANVAS_MODULE.BLOCKS, SUBCANVAS_MODULE.DEPLOY10), (UU_MODULE.BLOCKS, UU_MODULE.DEPLOY10)):
         for blocks in releases:
             reverted = PATCHLIB._revert_previous(text, blocks)
             if reverted is not None:
@@ -95,13 +95,15 @@ def test_patchers_turn_upstream_and_the_installed_release_into_the_same_bytes(ul
 
     deploy10 = tmp_path / "deploy10.py"
     deploy10.write_bytes(upstream_text(installed.decode("utf-8")).encode("utf-8"))
-    for blocks in (UU_MODULE.DEPLOY10, SUBCANVAS_MODULE.BLOCKS):
+    for blocks in (UU_MODULE.DEPLOY10, SUBCANVAS_MODULE.DEPLOY10):
         text = deploy10.read_text(encoding="utf-8")
         for block in blocks:
             text = text.replace(block.original, block.patched)
         deploy10.write_text(text, encoding="utf-8")
-    outdated = run_patcher(UU_PATCHER, deploy10, "--check", check=False)
-    assert outdated.returncode != 0 and "patch outdated" in outdated.stderr
+    assert installed in (deploy10.read_bytes(), both)  # the host runs the deploy10 release or this one
+    for patcher in (UU_PATCHER, SUBCANVAS_PATCHER):
+        outdated = run_patcher(patcher, deploy10, "--check", check=False)
+        assert outdated.returncode != 0 and "patch outdated" in outdated.stderr
     for patcher in (UU_PATCHER, SUBCANVAS_PATCHER):
         run_patcher(patcher, deploy10)
     assert deploy10.read_bytes() == both
