@@ -1,17 +1,15 @@
 import logging
-import time
 from os import environ
 import functools
 import math
 
-import modules.scripts as scripts
 from modules import headless_ui as gr
 
 from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 
-from scripts.ui_wrapper import UIWrapper, xyz_field_setter
+from scripts.ui_wrapper import UIWrapper, cond_crossattn, xyz_field_setter
 from scripts.incant_utils import module_hooks, timing
 
 import torch
@@ -40,12 +38,13 @@ GitHub URL: https://github.com/v0xie/sd-webui-incantations
 
 class SEGStateParams:
         def __init__(self):
-                self.seg_active: bool = False      # SEG guidance scale
+                self.seg_active: bool = False
                 self.seg_blur_sigma: float = 1.0
-                self.seg_blur_threshold: float = 15.0 # 2^13 ~= 8192
+                # Blur sigmas above this are the infinite blur (a global mean); the UI's 11.0 maximum is one.
+                self.seg_blur_threshold: float = 10.5
                 self.seg_start_step: int = 0
                 self.seg_end_step: int = 150
-                self.crossattn_modules = [] # callable lambda
+                self.crossattn_modules = [] # the hooked middle-block self-attention modules
                 self.openclaw_extension_timings = {}
                 # (cond rows, uncond rows) of the current step's CFG batch, set by the cfg_denoiser callback.
                 self.cfg_rows = None
@@ -53,9 +52,7 @@ class SEGStateParams:
 
 def cfg_row_counts(text_cond, text_uncond):
         """(cond rows, uncond rows) of A1111's CFG batch from CFGDenoiserParams' conditioning (tensor or SDXL dict)."""
-        cond = text_cond.get('crossattn') if isinstance(text_cond, dict) else text_cond
-        uncond = text_uncond.get('crossattn') if isinstance(text_uncond, dict) else text_uncond
-        return int(cond.shape[0]), int(uncond.shape[0])
+        return int(cond_crossattn(text_cond).shape[0]), int(cond_crossattn(text_uncond).shape[0])
 
 
 def seg_attention_grid(seq_len, height, width):
@@ -96,7 +93,7 @@ def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, do
                 q_blur = q_blur.permute(0, 1, 3, 2).reshape(
                         n_blur * heads, head_dim, downscale_h, downscale_w
                 )
-                q_blur = gaussian_blur_inf(q_blur, 1.0, sigma)
+                q_blur = gaussian_blur_inf(q_blur)
                 q_blur = q_blur.reshape(n_blur, heads, head_dim, seq_len)
                 q_blur = q_blur.view(n_blur, heads * head_dim, seq_len).transpose(1, 2)
         else:
@@ -108,10 +105,7 @@ def _blur_seg_uncond_queries(output, n_cond, *, heads, head_dim, downscale_h, do
 
 class SEGExtensionScript(UIWrapper):
         def __init__(self):
-                self.paste_field_names = []
-                self.infotext_fields = []
-                self._cfg_denoiser_callback = None
-                self._seg_hook_handles = []
+                super().__init__()
                 self._seg_hooked_modules = []
 
         # Setup menu ui detail
@@ -124,19 +118,13 @@ class SEGExtensionScript(UIWrapper):
                                 start_step = gr.Slider(value = 0, minimum = 0, maximum = 150, step = 1, label="SEG Start Step", elem_id = 'seg_start_step', info="")
                                 end_step = gr.Slider(value = 150, minimum = 0, maximum = 150, step = 1, label="SEG End Step", elem_id = 'seg_end_step', info="")
 
-                params = [active, seg_blur_sigma, start_step, end_step]
-
                 self.infotext_fields = [
                         (active, lambda d: gr.Checkbox.update(value='SEG Active' in d)),
                         (seg_blur_sigma, 'SEG Blur Sigma'),
                         (start_step, 'SEG Start Step'),
                         (end_step, 'SEG End Step'),
                 ]
-                for p in params:
-                        p.do_not_save_to_config = True
-                        self.paste_field_names.append(p.elem_id)
-
-                return params
+                return [active, seg_blur_sigma, start_step, end_step]
 
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
                self.seg_process_batch(p, *args, **kwargs)
@@ -166,18 +154,12 @@ class SEGExtensionScript(UIWrapper):
                         })
                 self.create_hook(p, active, seg_blur_sigma, start_step, end_step)
 
-        def create_hook(self, p: StableDiffusionProcessing, active, seg_blur_sigma, start_step, end_step, *args, **kwargs):
-                # Create a list of parameters for each concept
+        def create_hook(self, p: StableDiffusionProcessing, active, seg_blur_sigma, start_step, end_step):
                 seg_params = SEGStateParams()
-
-                # Add to p's incant_cfg_params
-                if not hasattr(p, 'incant_cfg_params'):
-                        logger.error("No incant_cfg_params found in p")
                 p.incant_cfg_params['seg_params'] = seg_params
 
                 seg_params.seg_active = active
                 seg_params.seg_blur_sigma = seg_blur_sigma
-                seg_params.seg_blur_threshold = 10.5
                 seg_params.seg_start_step = start_step
                 seg_params.seg_end_step = end_step
 
@@ -189,19 +171,17 @@ class SEGExtensionScript(UIWrapper):
                         raise RuntimeError("SEG: no middle-block self-attention modules found on the loaded model")
                 seg_params.crossattn_modules = self_attn_modules
 
-                self.remove_callbacks()
                 def cfg_denoise_callback(callback_params):
                         return self.on_cfg_denoiser_callback(callback_params, seg_params)
 
-                self._cfg_denoiser_callback = cfg_denoise_callback
                 if seg_params.seg_active:
                         self.ready_hijack_forward(seg_params, seg_blur_sigma, p.height, p.width)
 
                 logger.debug('Hooked callbacks')
-                script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
+                script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
 
         def postprocess_batch(self, p, *args, **kwargs):
-                seg_params = getattr(p, "incant_cfg_params", {}).get("seg_params") if getattr(p, "incant_cfg_params", None) else None
+                seg_params = (getattr(p, "incant_cfg_params", None) or {}).get("seg_params")
                 if seg_params is not None:
                         timing.merge_into_processing(p, "Incantations.SEGExtensionScript", seg_params.openclaw_extension_timings)
                         seg_params.openclaw_extension_timings = {}
@@ -209,18 +189,8 @@ class SEGExtensionScript(UIWrapper):
                 self.remove_callbacks()
                 logger.debug('Removed SEG hooks and callbacks')
 
-        def remove_callbacks(self):
-                if self._cfg_denoiser_callback is not None:
-                        script_callbacks.remove_callbacks_for_function(self._cfg_denoiser_callback)
-                        self._cfg_denoiser_callback = None
-
         def remove_all_hooks(self):
-                if not self._seg_hook_handles and not self._seg_hooked_modules:
-                        return
-                for handle in self._seg_hook_handles:
-                        handle.remove()
-                self._seg_hook_handles = []
-
+                self.remove_hook_handles()
                 for module in self._seg_hooked_modules:
                         module_hooks.modules_remove_field(module.to_q, 'seg_enable')
                         module_hooks.modules_remove_field(module.to_q, 'seg_parent_module')
@@ -236,9 +206,8 @@ class SEGExtensionScript(UIWrapper):
                         module_hooks.modules_add_field(module.to_q, 'seg_enable', False)
                         module_hooks.modules_add_field(module.to_q, 'seg_parent_module', [module])
 
+                # The fields above are added before this hook is installed and removed only after its handles.
                 def seg_to_q_hook(module, input, kwargs, output):
-                        if not hasattr(module, 'seg_enable'):
-                                return
                         if not module.seg_enable:
                                 return
                         batch_size, seq_len, inner_dim = input[0].shape
@@ -294,33 +263,21 @@ class SEGExtensionScript(UIWrapper):
                                 is_inf_blur=is_inf_blur,
                         )
 
-                # Create hooks and keep RemovableHandles so cleanup does not need
-                # to rewrite PyTorch hook tables globally.
+                # Keep RemovableHandles so cleanup does not need to rewrite PyTorch hook tables globally.
                 for module in selfattn_modules:
-                        self._seg_hook_handles.append(module_hooks.module_add_forward_hook(module.to_q, seg_to_q_hook, hook_type="forward", with_kwargs=True))
+                        self.add_forward_hook(module.to_q, seg_to_q_hook)
 
-        def get_middle_block_modules(self):
-                """ Get all attention modules from the middle block
-                Refere to page 22 of the SEG paper, Appendix A.2
-
-                """
+        def get_cross_attn_modules(self):
+                """ The middle block's self-attention (attn1) modules """
                 middle_block_modules = module_hooks.get_modules(
                         network_layer_name_filter = 'middle_block_',
                         module_name_filter = 'CrossAttention'
                 )
-                middle_block_modules = [m for m in middle_block_modules if 'attn1' in m.network_layer_name]
-                return middle_block_modules
-
-        def get_cross_attn_modules(self):
-                """ Get all cross attention modules """
-                return self.get_middle_block_modules()
+                return [m for m in middle_block_modules if 'attn1' in m.network_layer_name]
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
-                started = time.perf_counter()
-                try:
+                with timing.timed(seg_params.openclaw_extension_timings, "cfg_denoiser_callback"):
                         self._on_cfg_denoiser_callback(params, seg_params)
-                finally:
-                        timing.record(seg_params.openclaw_extension_timings, "cfg_denoiser_callback", time.perf_counter() - started)
 
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, seg_params: SEGStateParams):
                 # Keep SEG hooks installed for the batch; per-step work only toggles
@@ -338,18 +295,15 @@ class SEGExtensionScript(UIWrapper):
                                 getattr(shared.opts, 'batch_cond_uncond', False),
                         )
                 for module in seg_params.crossattn_modules:
-                        if hasattr(module.to_q, 'seg_enable'):
-                                module.to_q.seg_enable = should_enable
+                        module.to_q.seg_enable = should_enable
 
-        def get_xyz_axis_options(self) -> list:
-                xyz_grid = scripts.loaded_script_module("xyz_grid.py")
-                extra_axis_options = [
+        def get_xyz_axis_options(self, xyz_grid) -> list:
+                return [
                         xyz_grid.AxisOption("[SEG] Active", str, xyz_field_setter('seg_active', 'seg_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[SEG] SEG Blur Sigma", float, xyz_field_setter("seg_blur_sigma", 'seg_active')),
                         xyz_grid.AxisOption("[SEG] SEG Start Step", int, xyz_field_setter("seg_start_step", 'seg_active')),
                         xyz_grid.AxisOption("[SEG] SEG End Step", int, xyz_field_setter("seg_end_step", 'seg_active')),
                 ]
-                return extra_axis_options
 
 
 # Gaussian blur
@@ -378,20 +332,14 @@ def _gaussian_blur_operator(n, kernel_size, sigma, device):
         return operator.to(device)
 
 
-def gaussian_blur_queries(q, height, width, kernel_size, sigma):
+def _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma):
         """Reflect-padded Gaussian blur of (batch, height*width, channels) queries over their (height, width) grid.
 
-        Same math as the reference k x k outer-product depthwise conv, done as two
-        small GEMMs on the native query layout without permute copies. Taps and
-        accumulation are fp32, where the reference rounded its 2-D taps to the
-        query dtype; with TF32 matmul (devices.enable_tf32) the taps still keep
-        more mantissa bits than bf16.
+        Returns the fp32 result; the caller rounds it to the query dtype. Same math as the reference
+        k x k outer-product depthwise conv, done as two small GEMMs on the native query layout without
+        permute copies. Taps and accumulation are fp32, where the reference rounded its 2-D taps to the
+        query dtype; with TF32 matmul (devices.enable_tf32) the taps still keep more mantissa bits than bf16.
         """
-        return _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma).to(q.dtype)
-
-
-def _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma):
-        """gaussian_blur_queries before the final cast: the fp32 (batch, height*width, channels) result."""
         min_spatial = min(height, width)
         kernel_size = min(kernel_size, min_spatial - (min_spatial % 2 - 1))
         blur_h = _gaussian_blur_operator(height, kernel_size, float(sigma), q.device)
@@ -404,5 +352,6 @@ def _gaussian_blur_queries_fp32(q, height, width, kernel_size, sigma):
         return q_blur.view(batch, height * width, channels)
 
 
-def gaussian_blur_inf(img, kernel_size, sigma):
+def gaussian_blur_inf(img):
+        """The infinite-sigma blur: every pixel becomes the spatial mean of its channel."""
         return img.mean(dim=(-2, -1), keepdim=True).expand_as(img)

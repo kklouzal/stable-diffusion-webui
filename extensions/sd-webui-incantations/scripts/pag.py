@@ -1,18 +1,15 @@
 import logging
-import time
 import weakref
 from contextlib import suppress
 from os import environ
-import modules.scripts as scripts
 from modules import headless_ui as gr
-from scripts.ui_wrapper import UIWrapper, xyz_field_setter
+from scripts.ui_wrapper import UIWrapper, cond_crossattn, xyz_field_setter
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
 from modules import shared, sd_unet_row_memo
 from scripts.incant_utils import module_hooks, timing
 
-import math
 import torch
 
 
@@ -27,29 +24,6 @@ An unofficial implementation of "Self-Rectifying Diffusion Sampling with Perturb
       author={Donghoon Ahn and Hyoungwon Cho and Jaewon Min and Wooseok Jang and Jungwoo Kim and SeonHwa Kim and Hyun Hee Park and Kyong Hwan Jin and Seungryong Kim},
       year={2024},
       eprint={2403.17377},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
-}
-
-Include noise interval for CFG and PAG guidance in the sampling process from "Applying Guidance in a Limited Interval Improves
-Sample and Distribution Quality in Diffusion Models"
-
-@misc{kynkäänniemi2024applying,
-      title={Applying Guidance in a Limited Interval Improves Sample and Distribution Quality in Diffusion Models},
-      author={Tuomas Kynkäänniemi and Miika Aittala and Tero Karras and Samuli Laine and Timo Aila and Jaakko Lehtinen},
-      year={2024},
-      eprint={2404.07724},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
-}
-
-Include CFG schedulers from "Analysis of Classifier-Free Guidance Weight Schedulers"
-
-@misc{wang2024analysis,
-      title={Analysis of Classifier-Free Guidance Weight Schedulers},
-      author={Xi Wang and Nicolas Dufour and Nefeli Andreou and Marie-Paule Cani and Victoria Fernandez Abrevaya and David Picard and Vicky Kalogeiton},
-      year={2024},
-      eprint={2404.13040},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
 }
@@ -70,54 +44,18 @@ GitHub URL: https://github.com/v0xie/sd-webui-incantations
 """
 
 
-SCHEDULES = [
-        'Constant',
-        'Clamp-Linear (c=4.0)',
-        'Clamp-Linear (c=2.0)',
-        'Clamp-Linear (c=1.0)',
-        'Linear',
-        'Inverse-Linear',
-        'Cosine',
-        'Clamp-Cosine (c=4.0)',
-        'Clamp-Cosine (c=2.0)',
-        'Clamp-Cosine (c=1.0)',
-        'Sine',
-        'Interval',
-        'PCS (s=0.01)',
-        'PCS (s=0.1)',
-        'PCS (s=1.0)',
-        'PCS (s=2.0)',
-        'PCS (s=4.0)',
-]
-
-
 class PAGStateParams:
         def __init__(self):
-                self.pag_active: bool = False      # PAG guidance scale
+                self.pag_active: bool = False
                 self.pag_sanf: bool = False # saliency-adaptive noise fusion, handled in cfg_combiner
-                self.pag_scale: int = -1      # PAG guidance scale
+                self.pag_scale: float = -1      # PAG guidance scale
                 self.pag_start_step: int = 0
                 self.pag_end_step: int = 150
-                self.cfg_interval_enable: bool = False
-                self.cfg_interval_schedule: str = 'Constant'
-                self.cfg_interval_low: float = 0
-                self.cfg_interval_high: float = 50.0
-                self.cfg_interval_scheduled_value: float = 7.0
                 self.step : int = 0
-                self.max_sampling_step : int = 1
-                self.guidance_scale: int = -1 # CFG
-                self.current_noise_level: float = 100.0
-                self.crossattn_modules = [] # callable lambda
+                self.crossattn_modules = [] # the hooked middle-block self-attention modules
                 self.pag_x_out = None
                 self.openclaw_extension_timings = {}
-                self.noise_levels = []
-                self.cfg_schedule_values = []
                 self.seg_q_modules = None
-
-
-def cond_crossattn(cond):
-        """Return the cross-attention tensor for plain or SDXL dict conditioning."""
-        return cond.get('crossattn') if isinstance(cond, dict) else cond
 
 
 def cond_batch_size(cond):
@@ -153,9 +91,9 @@ def _seg_to_q_modules():
         return modules
 
 
-def _suspend_seg_for_pag_hidden_pass(seg_q_modules=None):
+def _suspend_seg_for_pag_hidden_pass(seg_q_modules):
         saved = []
-        for to_q in (seg_q_modules if seg_q_modules is not None else _seg_to_q_modules()):
+        for to_q in seg_q_modules:
                 saved.append((to_q, getattr(to_q, 'seg_enable', False)))
                 to_q.seg_enable = False
         return saved
@@ -207,9 +145,7 @@ def pag_cond_rows_x_out(inner_model, memo, preserve_call_sequence, whole_calls=F
 
 class PAGExtensionScript(UIWrapper):
         def __init__(self):
-                self._cfg_denoiser_callback = None
-                self._cfg_denoised_callback = None
-                self._pag_hook_handles = []
+                super().__init__()
                 self._pag_hooked_modules = []
                 self._recorded_denoiser = None
 
@@ -224,48 +160,23 @@ class PAGExtensionScript(UIWrapper):
                                 start_step = gr.Slider(value = 0, minimum = 0, maximum = 150, step = 1, label="PAG Start Step", elem_id = 'pag_start_step', info="")
                                 end_step = gr.Slider(value = 150, minimum = 0, maximum = 150, step = 1, label="PAG End Step", elem_id = 'pag_end_step', info="")
 
-                with gr.Accordion('CFG Scheduler', open=False):
-                        cfg_interval_enable = gr.Checkbox(value=False, default=False, label="Enable CFG Scheduler", elem_id='cfg_interval_enable', info="If enabled, applies CFG only within noise interval with the selected schedule type. PAG must be enabled (scale can be 0). SDXL recommend CFG=15; CFG interval (0.28, 5.42]")
-                        with gr.Row():
-                                cfg_schedule = gr.Dropdown(
-                                        value='Constant',
-                                        choices= SCHEDULES,
-                                        label="CFG Schedule Type",
-                                        elem_id='cfg_interval_schedule',
-                                )
-                                cfg_interval_low = gr.Slider(value = 0, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval Low", elem_id = 'cfg_interval_low', info="")
-                                cfg_interval_high = gr.Slider(value = 100, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval High", elem_id = 'cfg_interval_high', info="")
+                # The CFG Scheduler ("CFG Interval") was removed. Its four inputs stay so the positional Incantations
+                # args keep their slots: API callers (the controller) send [False, "Constant", 0.0, 100.0] there and
+                # PAG SANF after them (README, "A1111 API argument order"). Enabling it fails the request; the other
+                # three are ignored, as they always were while it was off.
+                cfg_interval_enable = gr.Checkbox(value=False, label="Enable CFG Scheduler", elem_id='cfg_interval_enable', info="Removed; must stay off")
+                cfg_schedule = gr.Dropdown(value='Constant', choices=['Constant'], label="CFG Schedule Type", elem_id='cfg_interval_schedule', info="Removed; ignored")
+                cfg_interval_low = gr.Slider(value = 0, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval Low", elem_id = 'cfg_interval_low', info="Removed; ignored")
+                cfg_interval_high = gr.Slider(value = 100, minimum = 0, maximum = 100, step = 0.1, label="CFG Noise Interval High", elem_id = 'cfg_interval_high', info="Removed; ignored")
 
-                active.do_not_save_to_config = True
-                pag_sanf.do_not_save_to_config = True
-                pag_scale.do_not_save_to_config = True
-                start_step.do_not_save_to_config = True
-                end_step.do_not_save_to_config = True
-                cfg_interval_enable.do_not_save_to_config = True
-                cfg_schedule.do_not_save_to_config = True
-                cfg_interval_low.do_not_save_to_config = True
-                cfg_interval_high.do_not_save_to_config = True
                 self.infotext_fields = [
                         (active, lambda d: gr.Checkbox.update(value='PAG Active' in d)),
                         (pag_sanf, lambda d: gr.Checkbox.update(value='PAG SANF' in d)),
                         (pag_scale, 'PAG Scale'),
                         (start_step, 'PAG Start Step'),
                         (end_step, 'PAG End Step'),
+                        # Re-running the infotext of an image made with the CFG Scheduler fails instead of rendering without it.
                         (cfg_interval_enable, 'CFG Interval Enable'),
-                        (cfg_schedule, 'CFG Interval Schedule'),
-                        (cfg_interval_low, 'CFG Interval Low'),
-                        (cfg_interval_high, 'CFG Interval High')
-                ]
-                self.paste_field_names = [
-                        'pag_active',
-                        'pag_sanf',
-                        'pag_scale',
-                        'pag_start_step',
-                        'pag_end_step',
-                        'cfg_interval_enable',
-                        'cfg_interval_schedule',
-                        'cfg_interval_low',
-                        'cfg_interval_high',
                 ]
                 return [active, pag_scale, start_step, end_step, cfg_interval_enable, cfg_schedule, cfg_interval_low, cfg_interval_high, pag_sanf]
 
@@ -278,46 +189,38 @@ class PAGExtensionScript(UIWrapper):
                 self.remove_callbacks()
                 self.remove_main_pass_recorder()
 
+                # cfg_schedule, cfg_interval_low and cfg_interval_high are the removed CFG Scheduler's placeholder slots.
+                if cfg_interval_enable:
+                        raise ValueError("Incantations: the PAG CFG Scheduler (CFG Interval) was removed; cfg_interval_enable must be false")
+
                 active = getattr(p, "pag_active", active)
-                pag_sanf = getattr(p, "pag_sanf", pag_sanf)
-                cfg_interval_enable = getattr(p, "cfg_interval_enable", cfg_interval_enable)
-                if active is False and cfg_interval_enable is False:
+                if not active:
                         return
+                pag_sanf = getattr(p, "pag_sanf", pag_sanf)
                 pag_scale = getattr(p, "pag_scale", pag_scale)
                 start_step = getattr(p, "pag_start_step", start_step)
                 end_step = getattr(p, "pag_end_step", end_step)
 
-                cfg_schedule = getattr(p, "cfg_interval_schedule", cfg_schedule)
-                cfg_interval_low = getattr(p, "cfg_interval_low", cfg_interval_low)
-                cfg_interval_high = getattr(p, "cfg_interval_high", cfg_interval_high)
+                crossattn_modules = self.get_cross_attn_modules()
+                if not crossattn_modules:
+                        # Requested PAG must never render without PAG, under an infotext that says "PAG Active".
+                        # (module_hooks.get_modules returns [] for a model without a layer mapping.)
+                        raise RuntimeError("PAG: no middle-block self-attention modules found on the loaded model")
 
-                if active:
-                        p.extra_generation_params.update({
-                                "PAG Active": active,
-                                "PAG SANF": pag_sanf,
-                                "PAG Scale": pag_scale,
-                                "PAG Start Step": start_step,
-                                "PAG End Step": end_step,
-                        })
-                if cfg_interval_enable:
-                        p.extra_generation_params.update({
-                                "CFG Interval Enable": cfg_interval_enable,
-                                "CFG Interval Schedule": cfg_schedule,
-                                "CFG Interval Low": cfg_interval_low,
-                                "CFG Interval High": cfg_interval_high
-                        })
-                self.create_hook(p, active, pag_scale, start_step, end_step, cfg_interval_enable, cfg_schedule, cfg_interval_low, cfg_interval_high, pag_sanf)
+                p.extra_generation_params.update({
+                        "PAG Active": active,
+                        "PAG SANF": pag_sanf,
+                        "PAG Scale": pag_scale,
+                        "PAG Start Step": start_step,
+                        "PAG End Step": end_step,
+                })
+                self.create_hook(p, active, pag_scale, start_step, end_step, pag_sanf, crossattn_modules)
 
-        def create_hook(self, p: StableDiffusionProcessing, active, pag_scale, start_step, end_step, cfg_interval_enable, cfg_schedule, cfg_interval_low, cfg_interval_high, pag_sanf, *args, **kwargs):
-                # Create a list of parameters for each concept
+        def create_hook(self, p: StableDiffusionProcessing, active, pag_scale, start_step, end_step, pag_sanf, crossattn_modules):
                 pag_params = PAGStateParams()
-
-                # Add to p's incant_cfg_params
-                if not hasattr(p, 'incant_cfg_params'):
-                        logger.error("No incant_cfg_params found in p")
                 p.incant_cfg_params['pag_params'] = pag_params
 
-                # Preserve any setup timing already recorded before state was attached.
+                # A zero-time entry: the API's openclaw_extension_timings has always listed this hook.
                 timing.record(pag_params.openclaw_extension_timings, "create_hook_setup", 0.0)
 
                 pag_params.pag_active = active
@@ -325,71 +228,21 @@ class PAGExtensionScript(UIWrapper):
                 pag_params.pag_scale = pag_scale
                 pag_params.pag_start_step = start_step
                 pag_params.pag_end_step = end_step
-                pag_params.cfg_interval_enable = cfg_interval_enable
-                pag_params.cfg_interval_schedule = cfg_schedule
-                pag_params.max_sampling_step = p.steps
-                pag_params.guidance_scale = p.cfg_scale
-                pag_params.cfg_interval_scheduled_value = p.cfg_scale
-
-                pag_params.noise_levels = [calculate_noise_level(i, pag_params.max_sampling_step) for i in range(pag_params.max_sampling_step + 1)]
-                if pag_params.cfg_interval_enable:
-                       # Refer to 3.1 Practice in the paper
-                       # We want to round high and low noise levels to the nearest integer index
-                       low_index = find_closest_index(cfg_interval_low, pag_params.max_sampling_step)
-                       high_index = find_closest_index(cfg_interval_high, pag_params.max_sampling_step)
-                       pag_params.cfg_interval_low = pag_params.noise_levels[low_index]
-                       pag_params.cfg_interval_high = pag_params.noise_levels[high_index]
-                       begin_range = min(pag_params.cfg_interval_low, pag_params.cfg_interval_high)
-                       end_range = max(pag_params.cfg_interval_low, pag_params.cfg_interval_high)
-                       pag_params.cfg_schedule_values = []
-                       for i, noise_level in enumerate(pag_params.noise_levels):
-                               scheduled_cfg_scale = cfg_scheduler(
-                                       pag_params.cfg_interval_schedule,
-                                       i,
-                                       pag_params.max_sampling_step,
-                                       pag_params.guidance_scale,
-                               )
-                               pag_params.cfg_schedule_values.append(
-                                       scheduled_cfg_scale if begin_range <= noise_level <= end_range else 1.0
-                               )
-                       logger.debug(f"Step Aligned CFG Interval (low, high): ({low_index}, {high_index}), Step Aligned CFG Interval: ({round(pag_params.cfg_interval_low, 4)}, {round(pag_params.cfg_interval_high, 4)})")
+                pag_params.crossattn_modules = crossattn_modules
+                self.ready_hijack_forward(crossattn_modules)
 
                 def cfg_denoise_callback(callback_params):
                         return self.on_cfg_denoiser_callback(callback_params, pag_params)
 
-                self._cfg_denoiser_callback = cfg_denoise_callback
+                def cfg_denoised_callback(callback_params):
+                        return self.on_cfg_denoised_callback(callback_params, pag_params)
 
-                # CFG interval scheduling only needs the cfg-denoiser callback;
-                # do not make it depend on PAG attention hook discovery.
-                if pag_params.pag_active:
-                        cross_attn_modules = self.get_cross_attn_modules()
-                        pag_params.crossattn_modules = [m for m in cross_attn_modules if 'CrossAttention' in m.__class__.__name__]
-                        if len(pag_params.crossattn_modules) == 0:
-                                logger.error("No cross attention modules found, cannot proceed with PAG")
-                                pag_params.pag_active = False
-
-                if not pag_params.pag_active and not pag_params.cfg_interval_enable:
-                        p.incant_cfg_params['pag_params'] = None
-                        self.remove_callbacks()
-                        return
-
-                cfg_denoised_callback = None
-                if pag_params.pag_active:
-                        def cfg_denoised_callback(callback_params):
-                                return self.on_cfg_denoised_callback(callback_params, pag_params)
-
-                        self._cfg_denoised_callback = cfg_denoised_callback
-                        self.ready_hijack_forward(pag_params.crossattn_modules, pag_scale)
-
+                script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
+                script_callbacks.on_cfg_denoised(self.track_callback(cfg_denoised_callback))
                 logger.debug('Hooked PAG callbacks')
-                script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
-                if cfg_denoised_callback is not None:
-                        script_callbacks.on_cfg_denoised(cfg_denoised_callback)
-
-
 
         def postprocess_batch(self, p, *args, **kwargs):
-                pag_params = getattr(p, "incant_cfg_params", {}).get("pag_params") if getattr(p, "incant_cfg_params", None) else None
+                pag_params = (getattr(p, "incant_cfg_params", None) or {}).get("pag_params")
                 if pag_params is not None:
                         timing.merge_into_processing(p, "Incantations.PAGExtensionScript", pag_params.openclaw_extension_timings)
                         pag_params.openclaw_extension_timings = {}
@@ -417,21 +270,8 @@ class PAGExtensionScript(UIWrapper):
                 if not sd_unet_row_memo.uninstall(denoiser):
                         logger.warning("Not removing the PAG main-pass recorder because another wrapper replaced run_inner_model")
 
-        def remove_callbacks(self):
-                if self._cfg_denoiser_callback is not None:
-                        script_callbacks.remove_callbacks_for_function(self._cfg_denoiser_callback)
-                        self._cfg_denoiser_callback = None
-                if self._cfg_denoised_callback is not None:
-                        script_callbacks.remove_callbacks_for_function(self._cfg_denoised_callback)
-                        self._cfg_denoised_callback = None
-
         def remove_all_hooks(self):
-                if not self._pag_hook_handles and not self._pag_hooked_modules:
-                        return
-                for handle in self._pag_hook_handles:
-                        handle.remove()
-                self._pag_hook_handles = []
-
+                self.remove_hook_handles()
                 for module in self._pag_hooked_modules:
                         to_v = getattr(module, 'to_v', None)
                         module_hooks.modules_remove_field(module, 'pag_enable')
@@ -440,7 +280,7 @@ class PAGExtensionScript(UIWrapper):
                                 module_hooks.modules_remove_field(to_v, 'pag_parent_module')
                 self._pag_hooked_modules = []
 
-        def ready_hijack_forward(self, crossattn_modules, pag_scale):
+        def ready_hijack_forward(self, crossattn_modules):
                 """ Create hooks in the forward pass of the cross attention modules
                 Copies the output of the to_v module to the parent module
                 Then applies the PAG perturbation to the output of the cross attention module (multiplication by identity)
@@ -455,20 +295,17 @@ class PAGExtensionScript(UIWrapper):
                         if to_v is not None:
                                 module_hooks.modules_add_field(to_v, 'pag_parent_module', [module])
 
-                def to_v_pre_hook(module, input, kwargs, output):
+                # The fields above are added before these hooks are installed and removed only after their handles.
+                def to_v_forward_hook(module, input, kwargs, output):
                         """ Copy the output of the to_v module to the parent module """
-                        parent_module = getattr(module, 'pag_parent_module', None)
-                        # copy the output of the to_v module to the parent module
-                        parent_module[0].pag_last_to_v = output.detach()
+                        module.pag_parent_module[0].pag_last_to_v = output.detach()
 
-                def pag_pre_hook(module, input, kwargs, output):
-                        if hasattr(module, 'pag_enable') and getattr(module, 'pag_enable', False) is False:
-                                return
-                        if not hasattr(module, 'pag_last_to_v'):
+                def pag_forward_hook(module, input, kwargs, output):
+                        if not module.pag_enable:
                                 return
 
                         # get the last to_v output and save it
-                        last_to_v = getattr(module, 'pag_last_to_v', None)
+                        last_to_v = module.pag_last_to_v
 
                         _, seq_len, _ = output.shape
                         if last_to_v is not None:
@@ -477,77 +314,29 @@ class PAGExtensionScript(UIWrapper):
                                 return last_to_v[:, :seq_len, :]
                         return output
 
-                # Create hooks and keep RemovableHandles so cleanup does not need
-                # to rewrite PyTorch hook tables globally.
+                # Keep RemovableHandles so cleanup does not need to rewrite PyTorch hook tables globally.
                 for module in crossattn_modules:
-                        self._pag_hook_handles.append(module_hooks.module_add_forward_hook(module, pag_pre_hook, hook_type="forward", with_kwargs=True))
+                        self.add_forward_hook(module, pag_forward_hook)
                         to_v = getattr(module, 'to_v', None)
                         if to_v is not None:
-                                self._pag_hook_handles.append(module_hooks.module_add_forward_hook(to_v, to_v_pre_hook, hook_type="forward", with_kwargs=True))
-
-        def get_middle_block_modules(self):
-                """ Get all attention modules from the middle block
-                Refere to page 22 of the PAG paper, Appendix A.2
-
-                """
-                try:
-                        m = shared.sd_model
-                        nlm = m.network_layer_mapping
-                        middle_block_modules = [m for m in nlm.values() if 'middle_block_1_transformer_blocks_0_attn1' in m.network_layer_name and 'CrossAttention' in m.__class__.__name__]
-                        return middle_block_modules
-                except AttributeError:
-                        logger.exception("AttributeError in get_middle_block_modules", stack_info=True)
-                        return []
-                except Exception:
-                        logger.exception("Exception in get_middle_block_modules", stack_info=True)
-                        return []
+                                self.add_forward_hook(to_v, to_v_forward_hook)
 
         def get_cross_attn_modules(self):
-                """ Get all cross attention modules """
-                return self.get_middle_block_modules()
+                """ The middle block's self-attention modules; refer to page 22 of the PAG paper, Appendix A.2 """
+                return module_hooks.get_modules(
+                        network_layer_name_filter='middle_block_1_transformer_blocks_0_attn1',
+                        module_name_filter='CrossAttention',
+                )
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
-                started = time.perf_counter()
-                try:
+                with timing.timed(pag_params.openclaw_extension_timings, "cfg_denoiser_callback"):
                         self._on_cfg_denoiser_callback(params, pag_params)
-                finally:
-                        timing.record(pag_params.openclaw_extension_timings, "cfg_denoiser_callback", time.perf_counter() - started)
 
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
                 # mutable state. Removing hooks here disables the extra PAG pass.
                 pag_params.step = params.sampling_step
                 pag_params.pag_x_out = None
-
-                # CFG Interval. Keep rho fixed to the upstream/default curve for now;
-                # changing it is quality-affecting and should be a separate tuning pass.
-                if 0 <= pag_params.step < len(pag_params.noise_levels):
-                        pag_params.current_noise_level = pag_params.noise_levels[pag_params.step]
-                else:
-                        pag_params.current_noise_level = calculate_noise_level(
-                                i=pag_params.step,
-                                N=pag_params.max_sampling_step,
-                        )
-
-                if pag_params.cfg_interval_enable:
-                        if 0 <= pag_params.step < len(pag_params.cfg_schedule_values):
-                                pag_params.cfg_interval_scheduled_value = pag_params.cfg_schedule_values[pag_params.step]
-                        else:
-                                start = pag_params.cfg_interval_low
-                                end = pag_params.cfg_interval_high
-                                begin_range = start if start <= end else end
-                                end_range = end if start <= end else start
-                                scheduled_cfg_scale = cfg_scheduler(
-                                        pag_params.cfg_interval_schedule,
-                                        pag_params.step,
-                                        pag_params.max_sampling_step,
-                                        pag_params.guidance_scale,
-                                )
-                                pag_params.cfg_interval_scheduled_value = (
-                                        scheduled_cfg_scale
-                                        if begin_range <= pag_params.current_noise_level <= end_range
-                                        else 1.0
-                                )
 
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
@@ -568,22 +357,18 @@ class PAGExtensionScript(UIWrapper):
 
 
         def on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
-                started = time.perf_counter()
-                try:
+                with timing.timed(pag_params.openclaw_extension_timings, "cfg_denoised_callback"):
                         self._on_cfg_denoised_callback(params, pag_params)
-                finally:
-                        timing.record(pag_params.openclaw_extension_timings, "cfg_denoised_callback", time.perf_counter() - started)
 
         def _on_cfg_denoised_callback(self, params: CFGDenoisedParams, pag_params: PAGStateParams):
                 """ Callback function for the CFGDenoisedParams
                 Refer to pg.22 A.2 of the PAG paper for how CFG and PAG combine
 
                 """
-                # Run only within interval
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step or pag_params.pag_scale <= 0:
+                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
                         return
 
                 memo = sd_unet_row_memo.disarm(self.recorded_denoiser())
@@ -602,16 +387,13 @@ class PAGExtensionScript(UIWrapper):
                         pag_params.seg_q_modules = _seg_to_q_modules()
                 seg_saved_state = _suspend_seg_for_pag_hidden_pass(pag_params.seg_q_modules)
                 try:
-                        hidden_started = time.perf_counter()
-                        try:
+                        with timing.timed(pag_params.openclaw_extension_timings.setdefault("details", {}), "pag_hidden_denoise"):
                                 pag_params.pag_x_out = pag_cond_rows_x_out(
                                         params.inner_model,
                                         memo,
                                         preserve_call_sequence=sd_unet_row_memo.hypertile_unet_enabled(getattr(shared.sd_model, 'model', None)),
                                         whole_calls=whole_calls,
                                 )
-                        finally:
-                                timing.record(pag_params.openclaw_extension_timings.setdefault("details", {}), "pag_hidden_denoise", time.perf_counter() - hidden_started)
                 finally:
                         memo.clear()
                         _restore_seg_after_pag_hidden_pass(seg_saved_state)
@@ -619,222 +401,11 @@ class PAGExtensionScript(UIWrapper):
                         for module in pag_params.crossattn_modules:
                                 module.pag_enable = False
 
-        def get_xyz_axis_options(self) -> list:
-                xyz_grid = scripts.loaded_script_module("xyz_grid.py")
-                extra_axis_options = [
+        def get_xyz_axis_options(self, xyz_grid) -> list:
+                return [
                         xyz_grid.AxisOption("[PAG] Active", str, xyz_field_setter('pag_active', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[PAG] SANF", str, xyz_field_setter('pag_sanf', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
                         xyz_grid.AxisOption("[PAG] PAG Scale", float, xyz_field_setter("pag_scale", 'pag_active')),
                         xyz_grid.AxisOption("[PAG] PAG Start Step", int, xyz_field_setter("pag_start_step", 'pag_active')),
                         xyz_grid.AxisOption("[PAG] PAG End Step", int, xyz_field_setter("pag_end_step", 'pag_active')),
-                        xyz_grid.AxisOption("[PAG] Enable CFG Scheduler", str, xyz_field_setter('cfg_interval_enable', 'pag_active', boolean=True), choices=xyz_grid.boolean_choice(reverse=True)),
-                        xyz_grid.AxisOption("[PAG] CFG Noise Interval Low", float, xyz_field_setter("cfg_interval_low", 'pag_active')),
-                        xyz_grid.AxisOption("[PAG] CFG Noise Interval High", float, xyz_field_setter("cfg_interval_high", 'pag_active')),
-                        xyz_grid.AxisOption("[PAG] CFG Schedule Type", str, xyz_field_setter('cfg_interval_schedule', 'pag_active', also_enable='cfg_interval_enable'), choices=lambda: SCHEDULES),
                 ]
-                return extra_axis_options
-
-
-
-def calculate_noise_level(i, N, sigma_min=0.002, sigma_max=80.0, rho=3):
-    """
-    Calculate the noise level for a given sampling step index.
-
-    Parameters:
-    i (int): Index of the current sampling step (0-based index).
-    N (int): Total number of sampling steps.
-    sigma_min (float): Minimum sigma value for min noise level, default 0.002.
-    sigma_max (float): Maximum sigma value for max noise level, default 80.0.
-    rho (int): Discretization parameter, default 3 for SD-XL, 7 for EDM2.
-
-    Returns:
-    float: Calculated noise level for the given step.
-    """
-    if N <= 0:
-        return 0.0
-    if i <= 0:
-        return sigma_max
-    if i >= N or N == 1:
-        return 0.0
-    sigma_max_p = sigma_max ** (1/rho)
-    sigma_min_p = sigma_min ** (1/rho)
-    inner_term = sigma_max_p + (i / (N - 1)) * (sigma_min_p - sigma_max_p)
-    noise_level = inner_term ** rho
-
-    return noise_level
-
-
-def find_closest_index(noise_level: float, N: int, sigma_min=0.002, sigma_max=80.0, rho=3, tol=1e-6):
-    """
-    Given a noise level, find the closest integer index in the range [0, N-1] that corresponds to the noise level.
-
-    Parameters:
-    noise_level (float): Target noise level to find the closest index for.
-    N (int): Total number of sampling steps.
-    sigma_min (float): Minimum sigma value for min noise level, default 0.002.
-    sigma_max (float): Maximum sigma value for max noise level, default 80.0.
-    rho (int): Discretization parameter, default 3 for SD-XL, 7 for EDM2.
-
-    Returns:
-    int: The closest index to the specified noise level.
-    """
-    # Min/max noise levels for the given range
-    if N <= 0:
-        return 0
-    if noise_level <= sigma_min:
-        return N
-    if noise_level >= sigma_max:
-        return 0
-
-    low, high = 0, N - 1
-    while low <= high:
-        mid = (low + high) // 2
-        mid_nl = calculate_noise_level(mid, N, sigma_min, sigma_max, rho)
-        if abs(mid_nl - noise_level) < tol:
-            return mid
-        elif mid_nl < noise_level:
-            high = mid - 1
-        else:
-            low = mid + 1
-
-    # If exact match not found, return the index with noise level closest to the target
-    low = max(0, min(N, low))
-    high = max(0, min(N, high))
-    low_delta = abs(calculate_noise_level(low, N, sigma_min, sigma_max, rho) - noise_level)
-    high_delta = abs(calculate_noise_level(high, N, sigma_min, sigma_max, rho) - noise_level)
-    if low_delta < high_delta:
-        return low
-    return high
-
-
-### CFG Schedulers
-
-
-def cfg_scheduler(schedule: str, step: int, max_steps: int, w0: float) -> float:
-        """
-        Constant scheduler for CFG guidance weight.
-
-        Parameters:
-        step (int): Current sampling step.
-        max_steps (int): Total number of sampling steps.
-        w0 (float): Constant value for the guidance weight.
-
-        Returns:
-        float: Scheduled guidance weight value.
-        """
-        scheduler = _CFG_SCHEDULE_DISPATCH.get(schedule)
-        if scheduler is None:
-                logger.error("Invalid CFG schedule: %s", schedule)
-                scheduler = constant_schedule
-        if max_steps <= 0:
-                return w0
-        return scheduler(step, max_steps, w0)
-
-
-def _schedule_progress(step: int, max_steps: int) -> float:
-        if max_steps <= 0:
-                return 0.0
-        return max(0.0, min(1.0, step / max_steps))
-
-
-def constant_schedule(step: int, max_steps: int, w0: float):
-        """
-        Constant scheduler for CFG guidance weight.
-        """
-        return w0
-
-
-def linear_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized linear scheduler for CFG guidance weight.
-        Such that integral 0-> T ~ w(t) dt  = w*T
-        """
-        # return w0 * (1 - step / max_steps)
-        return w0 * 2 * (1 - _schedule_progress(step, max_steps))
-
-
-def clamp_linear_schedule(step: int, max_steps: int, w0: float, c: float):
-        """
-        Normalized clamp-linear scheduler for CFG guidance weight.
-        """
-        return max(c, linear_schedule(step, max_steps, w0))
-
-
-def clamp_cosine_schedule(step: int, max_steps: int, w0: float, c: float):
-        """
-        Normalized clamp-cosine scheduler for CFG guidance weight.
-        """
-        return max(c, cosine_schedule(step, max_steps, w0))
-
-
-def invlinear_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized inverse linear scheduler for CFG guidance weight.
-        """
-        # return w0 * (step / max_steps)
-        return w0 * 2 * _schedule_progress(step, max_steps)
-
-
-def powered_cosine_schedule(step: int, max_steps: int, w0: float, s: float):
-        """
-        Normalized cosine scheduler for CFG guidance weight.
-        """
-        progress = _schedule_progress(step, max_steps)
-        return w0 * ((1 - math.cos(math.pi * (1 - progress)**s))/2.0)
-
-
-def cosine_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized cosine scheduler for CFG guidance weight.
-        """
-        return w0 * (1 + math.cos(math.pi * _schedule_progress(step, max_steps)))
-
-
-def sine_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized sine scheduler for CFG guidance weight.
-        """
-        return w0 * (math.sin((math.pi * _schedule_progress(step, max_steps)) - (math.pi / 2)) + 1)
-
-
-def v_shape_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized V-shape scheduler for CFG guidance weight.
-        """
-        if step < max_steps / 2:
-                return invlinear_schedule(step, max_steps, w0)
-        return linear_schedule(step, max_steps, w0)
-
-
-def a_shape_schedule(step: int, max_steps: int, w0: float):
-        """
-        Normalized A-shape scheduler for CFG guidance weight.
-        """
-        if step < max_steps / 2:
-                return linear_schedule(step, max_steps, w0)
-        return invlinear_schedule(step, max_steps, w0)
-
-
-_CFG_SCHEDULE_DISPATCH = {
-        'Constant': constant_schedule,
-        'Linear': linear_schedule,
-        'Clamp-Linear (c=4.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 4.0),
-        'Clamp-Linear (c=2.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 2.0),
-        'Clamp-Linear (c=1.0)': lambda step, max_steps, w0: clamp_linear_schedule(step, max_steps, w0, 1.0),
-        'Inverse-Linear': invlinear_schedule,
-        'PCS (s=0.01)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 0.01),
-        'PCS (s=0.1)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 0.1),
-        'PCS (s=1.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 1.0),
-        'PCS (s=2.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 2.0),
-        'PCS (s=4.0)': lambda step, max_steps, w0: powered_cosine_schedule(step, max_steps, w0, 4.0),
-        'Clamp-Cosine (c=4.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 4.0),
-        'Clamp-Cosine (c=2.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 2.0),
-        'Clamp-Cosine (c=1.0)': lambda step, max_steps, w0: clamp_cosine_schedule(step, max_steps, w0, 1.0),
-        'Cosine': cosine_schedule,
-        'Sine': sine_schedule,
-        'V-Shape': v_shape_schedule,
-        'A-Shape': a_shape_schedule,
-        # Interval bounds are already applied from the user's selected noise range;
-        # this schedule should not add a second hard-coded step interval.
-        'Interval': constant_schedule,
-}

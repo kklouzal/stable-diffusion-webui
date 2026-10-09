@@ -1,11 +1,10 @@
 import logging
-import time
 import torch
 import torch.nn.functional as F
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
-from scripts.ui_wrapper import UIWrapper
+from scripts.ui_wrapper import UIWrapper, cond_crossattn
 from scripts.incant_utils import timing
 
 logger = logging.getLogger(__name__)
@@ -47,12 +46,11 @@ def _sanf_guidance_blend(cfg_x, pag_x):
 class CFGCombinerScript(UIWrapper):
         """Owns GB10 Incantations CFG denoiser composition.
 
-        PAG and the CFG interval scheduler need to change A1111's
-        ``CFGDenoiser.combine_denoised`` result.  The abandoned upstream
-        extension used A1111's generic patch stack and attempted to unpatch on
-        every denoiser callback.  That made ownership unclear and could bypass
-        wrappers from quality-critical extensions such as Dynamic Thresholding /
-        CFG-Fix.
+        PAG needs to change A1111's ``CFGDenoiser.combine_denoised`` result.
+        The abandoned upstream extension used A1111's generic patch stack and
+        attempted to unpatch on every denoiser callback.  That made ownership
+        unclear and could bypass wrappers from quality-critical extensions such
+        as Dynamic Thresholding / CFG-Fix.
 
         GB10 keeps this lifecycle explicit:
         - capture the currently-installed combine_denoised callable once
@@ -61,33 +59,17 @@ class CFGCombinerScript(UIWrapper):
           compose
         - restore only if the denoiser still points at our exact wrapper
         """
-        def __init__(self):
-                self._cfg_denoiser_callback = None
-
         # Setup menu ui detail
         def setup_ui(self, is_img2img):
-            self.infotext_fields = []
-            self.paste_field_names = []
             return []
 
-        def before_process(self, p: StableDiffusionProcessing, *args, **kwargs):
-            logger.debug("CFGCombinerScript before_process")
-            if not hasattr(p, 'incant_cfg_params'):
-                p.incant_cfg_params = {}
-
-        def process(self, p: StableDiffusionProcessing, *args, **kwargs):
-            pass
-
-        def before_process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
-            pass
-
         def process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
-            """Register only when PAG/CFG interval state exists for this batch.
+            """Register only when PAG state exists for this batch.
 
-            The combiner is a no-op without PAG/CFG interval parameters, but
-            registering it anyway adds a CFG denoiser callback on every sampler
-            step and patches ``combine_denoised`` on the first step. Skipping
-            that inactive path preserves output semantics and removes avoidable
+            The combiner is a no-op without PAG parameters, but registering it
+            anyway adds a CFG denoiser callback on every sampler step and
+            patches ``combine_denoised`` on the first step. Skipping that
+            inactive path preserves output semantics and removes avoidable
             per-step Python work for normal generations.
             """
             logger.debug("CFGCombinerScript process_batch")
@@ -97,8 +79,7 @@ class CFGCombinerScript(UIWrapper):
             def cfg_denoise_callback(params):
                 return self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
 
-            self._cfg_denoiser_callback = cfg_denoise_callback
-            script_callbacks.on_cfg_denoiser(cfg_denoise_callback)
+            script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
             logger.debug('Hooked CFG combiner callback')
 
         def postprocess_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
@@ -110,14 +91,6 @@ class CFGCombinerScript(UIWrapper):
                 cfg_dict["openclaw_extension_timings"] = {}
             self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
-
-        def remove_callbacks(self):
-            if self._cfg_denoiser_callback is not None:
-                    script_callbacks.remove_callbacks_for_function(self._cfg_denoiser_callback)
-                    self._cfg_denoiser_callback = None
-
-        def get_xyz_axis_options(self) -> list:
-            return []
 
         def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict):
             """Callback for when the CFG denoiser is available.
@@ -187,102 +160,71 @@ class CFGCombinerScript(UIWrapper):
             cfg_dict['wrapped_combine_denoised'] = None
 
 
-def combine_denoised_pass_conds_list(*args, **kwargs):
-        """Owned combine_denoised wrapper for PAG and CFG interval scheduling.
+def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, original_func, cfg_dict):
+        """Owned combine_denoised wrapper adding PAG guidance.
 
         The captured original_func is intentionally called for the base CFG path
         so Dynamic Thresholding / CFG-Fix and similar extensions can still
         rescale the base CFG result before PAG is added.
         """
-        original_func = kwargs.get('original_func')
-        cfg_dict = kwargs.get('cfg_dict') or {}
         pag_params = cfg_dict.get('pag_params')
-        if original_func is None:
-                raise RuntimeError("GB10 CFG combiner missing original combine_denoised function")
-
         if pag_params is None:
-                return original_func(*args)
+                return original_func(x_out, conds_list, uncond, cond_scale)
 
-        def new_combine_denoised(x_out, conds_list, uncond, cond_scale):
-                # SDXL passes dict conditioning here; keep the original object for
-                # the captured combiner, but use the cross-attention tensor for
-                # shape/index math in GB10's PAG/SANF path.
-                uncond_tensor = uncond.get('crossattn') if isinstance(uncond, dict) else uncond
-                if uncond_tensor is None:
-                        raise RuntimeError("GB10 CFG combiner could not derive unconditional tensor")
-                denoised_uncond = x_out[-uncond_tensor.shape[0]:]
+        # SDXL passes dict conditioning here; keep the original object for
+        # the captured combiner, but use the cross-attention tensor for
+        # shape/index math in GB10's PAG/SANF path.
+        uncond_tensor = cond_crossattn(uncond)
+        if uncond_tensor is None:
+                raise RuntimeError("GB10 CFG combiner could not derive unconditional tensor")
+        denoised_uncond = x_out[-uncond_tensor.shape[0]:]
+        timings = cfg_dict.setdefault("openclaw_extension_timings", {})
 
-                ### Variables
-                # 0. Standard CFG Value
-                cfg_scale = cond_scale
+        # Build the base CFG result by delegating to the captured original combiner.
+        # This is intentionally important for compatibility with extensions such
+        # as Dynamic Thresholding / CFG-Fix, which wrap combine_denoised to rescale
+        # the CFG result. Older local code recomputed CFG here and accidentally
+        # bypassed those wrappers whenever PAG was active.
+        with timing.timed(timings, "combine_original"):
+                denoised = original_func(x_out, conds_list, uncond, cond_scale)
 
-                # 1. CFG Interval
-                if pag_params.cfg_interval_enable:
-                        cfg_scale = pag_params.cfg_interval_scheduled_value
-
-                # Build the base CFG result by delegating to the captured original combiner.
-                # This is intentionally important for compatibility with extensions such
-                # as Dynamic Thresholding / CFG-Fix, which wrap combine_denoised to rescale
-                # the CFG result. Older local code recomputed CFG here and accidentally
-                # bypassed those wrappers whenever PAG was active.
-                original_started = time.perf_counter()
-                try:
-                        denoised = original_func(x_out, conds_list, uncond, cfg_scale)
-                finally:
-                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_original", time.perf_counter() - original_started)
-
-                # 2. PAG
-                run_pag = False
-                pag_active = pag_params.pag_active
-                pag_x_out = pag_params.pag_x_out
-                pag_scale = pag_params.pag_scale
-
-                if not pag_active or not (pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step) or pag_scale <= 0:
-                        run_pag = False
-                elif pag_x_out is None:
-                        logger.warning("PAG was requested but no PAG denoised output is available; using base CFG only")
-                else:
-                        run_pag = pag_active
-
-                # Dynamic Thresholding can be composed cleanly with the base CFG path above.
-                # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
-                # blend, so it cannot faithfully preserve a dynamically-thresholded base.
-                # In that case keep the previous SANF behavior rather than pretending both
-                # rescalers are fully applied.
-                if run_pag:
-                        # The PAG pass evaluates exactly the cond rows, which lead x_out.
-                        n_cond = x_out.shape[0] - uncond_tensor.shape[0]
-                        if pag_x_out.shape[0] != n_cond:
-                                raise RuntimeError(f"PAG output has {pag_x_out.shape[0]} rows, expected the {n_cond} cond rows of x_out")
-
-                use_saliency_map = pag_params.pag_sanf
-                if use_saliency_map and run_pag:
-                        denoised = denoised_uncond.clone()
-
-                ### Add PAG guidance on top of the base CFG result
-                for i, conds in enumerate(conds_list):
-                        for cond_index, weight in conds:
-                                if not run_pag:
-                                        continue
-                                pag_delta = x_out[cond_index] - pag_x_out[cond_index]
-                                pag_x = pag_delta * (weight * pag_scale)
-
-                                if not use_saliency_map:
-                                        pag_blend_started = time.perf_counter()
-                                        try:
-                                                denoised[i] += pag_x
-                                        finally:
-                                                timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_pag_blend", time.perf_counter() - pag_blend_started)
-                                        continue
-
-                                # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
-                                sanf_started = time.perf_counter()
-                                try:
-                                        model_delta = x_out[cond_index] - denoised_uncond[i]
-                                        sal_cfg = _sanf_guidance_blend(model_delta * (weight * cfg_scale), pag_x)
-                                        denoised[i] += sal_cfg
-                                finally:
-                                        timing.record(cfg_dict.setdefault("openclaw_extension_timings", {}), "combine_sanf_blend", time.perf_counter() - sanf_started)
-
+        pag_x_out = pag_params.pag_x_out
+        pag_scale = pag_params.pag_scale
+        if not pag_params.pag_active or not (pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step) or pag_scale <= 0:
                 return denoised
-        return new_combine_denoised(*args)
+        if pag_x_out is None:
+                logger.warning("PAG was requested but no PAG denoised output is available; using base CFG only")
+                return denoised
+
+        # The PAG pass evaluates exactly the cond rows, which lead x_out.
+        n_cond = x_out.shape[0] - uncond_tensor.shape[0]
+        if pag_x_out.shape[0] != n_cond:
+                raise RuntimeError(f"PAG output has {pag_x_out.shape[0]} rows, expected the {n_cond} cond rows of x_out")
+
+        # Dynamic Thresholding can be composed cleanly with the base CFG path above.
+        # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
+        # blend, so it cannot faithfully preserve a dynamically-thresholded base.
+        # In that case keep the previous SANF behavior rather than pretending both
+        # rescalers are fully applied.
+        use_saliency_map = pag_params.pag_sanf
+        if use_saliency_map:
+                denoised = denoised_uncond.clone()
+
+        ### Add PAG guidance on top of the base CFG result
+        for i, conds in enumerate(conds_list):
+                for cond_index, weight in conds:
+                        pag_delta = x_out[cond_index] - pag_x_out[cond_index]
+                        pag_x = pag_delta * (weight * pag_scale)
+
+                        if not use_saliency_map:
+                                with timing.timed(timings, "combine_pag_blend"):
+                                        denoised[i] += pag_x
+                                continue
+
+                        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
+                        with timing.timed(timings, "combine_sanf_blend"):
+                                model_delta = x_out[cond_index] - denoised_uncond[i]
+                                sal_cfg = _sanf_guidance_blend(model_delta * (weight * cond_scale), pag_x)
+                                denoised[i] += sal_cfg
+
+        return denoised

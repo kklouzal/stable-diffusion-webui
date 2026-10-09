@@ -33,6 +33,8 @@ class DynThresh:
     Modes = ("Constant", "Linear Down", "Cosine Down", "Half Cosine Down", "Linear Up", "Cosine Up", "Half Cosine Up", "Power Up", "Power Down", "Linear Repeating", "Cosine Repeating", "Sawtooth")
 
     def __init__(self, mimic_scale, threshold_percentile, mimic_mode, mimic_scale_min, cfg_mode, cfg_scale_min, sched_val, max_steps, separate_feature_channels, scaling_startpoint, variability_measure, interpolate_phi):
+        # step and max_steps drive the scale schedules; the A1111 CustomCFGDenoiser sets both from the sampler on
+        # every step, so this max_steps only matters to direct users.
         self.mimic_scale = mimic_scale
         self.threshold_percentile = threshold_percentile
         self.mimic_mode = mimic_mode
@@ -161,15 +163,3 @@ class DynThresh:
             actual_res = actual_res * self.interpolate_phi + cfg_target * (1.0 - self.interpolate_phi)
 
         return actual_res.to(dtype=orig_dtype)
-
-    def dynthresh(self, cond, uncond, cfg_scale, weights):
-        # uncond shape is (batch, 4, height, width)
-        if uncond.shape[0] <= 0 or cond.shape[0] % uncond.shape[0] != 0:
-            raise ValueError("Expected # of conds per batch to be constant across batches")
-        conds_per_batch = cond.shape[0] // uncond.shape[0]
-        cond_stacked = cond.reshape((-1, conds_per_batch, *uncond.shape[1:]))
-        diff = cond_stacked - uncond.unsqueeze(1)
-        if weights is not None:
-            diff = diff * weights.to(device=diff.device, dtype=diff.dtype)
-        relative = diff.sum(1)
-        return self.dynthresh_from_relative(relative, uncond, cfg_scale)

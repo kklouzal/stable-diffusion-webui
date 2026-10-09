@@ -8,43 +8,33 @@ from modules import shared
 logger = logging.getLogger(__name__)
 
 
-def modules_add_field(modules, field, value=None):
+def modules_add_field(module, field, value=None):
     """ Add a field to a module if it isn't already added.
     Args:
-        modules (list): Module or list of modules to add the field to
+        module: Module to add the field to
         field (str): Field name to add
         value (any): Value to assign to the field
     Returns:
         None
 
     """
-    if not isinstance(modules, list):
-        modules = [modules]
-    for module in modules:
-        if not hasattr(module, field):
-            setattr(module, field, value)
-        else:
-            logger.warning(f"Field {field} already exists in module {module}")
+    if not hasattr(module, field):
+        setattr(module, field, value)
+    else:
+        logger.warning(f"Field {field} already exists in module {module}")
 
 
-def modules_remove_field(modules, field):
-    """ Remove a field from a module if it exists.
+def modules_remove_field(module, field):
+    """ Remove a field from a module if it exists (cleanup is idempotent).
     Args:
-        modules (list): Module or list of modules to add the field to
-        field (str): Field name to add
-        value (any): Value to assign to the field
+        module: Module to remove the field from
+        field (str): Field name to remove
     Returns:
         None
 
     """
-    if not isinstance(modules, list):
-        modules = [modules]
-    for module in modules:
-        if hasattr(module, field):
-                delattr(module, field)
-        else:
-            # Field already absent; cleanup is idempotent.
-            continue
+    if hasattr(module, field):
+        delattr(module, field)
 
 
 def get_modules(network_layer_name_filter: Optional[str] = None, module_name_filter: Optional[str] = None):
@@ -74,35 +64,3 @@ def get_modules(network_layer_name_filter: Optional[str] = None, module_name_fil
     except Exception:
         logger.exception("Exception in get_modules", stack_info=True)
         return []
-
-
-
-def module_add_forward_hook(module, hook_fn, hook_type="forward", with_kwargs=False):
-    """ Adds a forward hook to a module.
-
-    hook_fn should be a function that accepts the following arguments:
-        forward hook, no kwargs: hook(module, args, output) -> None or modified output
-        forward hook, with kwargs: hook(module, args, kwargs output) -> None or modified output
-
-    Args:
-        module (torch.nn.Module): Module to hook
-        hook_fn (Callable): Function to call when the hook is triggered
-        hook_type (str, optional): Type of hook to create. Defaults to "forward". Can be "forward" or "pre_forward".
-        with_kwargs (bool, optional): Whether the hook function should accept keyword arguments. Defaults to False.
-
-    Returns:
-        torch.utils.hooks.RemovableHandle: Handle for the hook
-    """
-    if module is None:
-        raise ValueError("module must be provided")
-    if not callable(hook_fn):
-        raise ValueError("hook_fn must be a callable function")
-
-    if hook_type == "forward":
-        handle = module.register_forward_hook(hook_fn, with_kwargs=with_kwargs)
-    elif hook_type == "pre_forward":
-        handle = module.register_forward_pre_hook(hook_fn, with_kwargs=with_kwargs)
-    else:
-        raise ValueError(f"Invalid hook type {hook_type}. Must be 'forward' or 'pre_forward'.")
-
-    return handle
