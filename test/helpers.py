@@ -180,3 +180,30 @@ def available_test_device():
         except Exception:
             pass
     return torch.device("cpu")
+
+
+@contextlib.contextmanager
+def stubbed_generation_last(data_path: str | Path) -> Iterator[tuple[types.ModuleType, types.ModuleType]]:
+    """modules/generation_last.py without the webui runtime, for the block: yields (generation_last, the
+    modules.shared stand-in it reads opts/state from).
+
+    Its webui imports are stand-ins (modules.paths pointing at data_path, modules.scripts holding the real
+    script_arg_range compiled on its own) except the stdlib-only modules.persistent_artifact_cache, which is the
+    real file. The stubs stay installed for the whole block: generation_last imports modules.errors when it reports
+    a failure."""
+    import ast
+
+    scripts_source = ROOT / "modules" / "scripts.py"
+    tree = ast.parse(scripts_source.read_text(encoding="utf-8"))
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "script_arg_range"]
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(scripts_source), "exec"), namespace)
+
+    shared = module("modules.shared", opts=types.SimpleNamespace(CLIP_stop_at_last_layers=2),
+                    state=types.SimpleNamespace(interrupted=False, stopping_generation=False))
+    scripts = module("modules.scripts", script_arg_range=namespace["script_arg_range"])
+    package = module("modules", package=True, scripts=scripts)
+    paths = module("modules.paths", data_path=str(data_path))
+    with stub_modules({"modules": package, "modules.paths": paths, "modules.shared": shared, "modules.scripts": scripts}):
+        package.persistent_artifact_cache = load_source("modules.persistent_artifact_cache", "modules/persistent_artifact_cache.py")
+        yield load_source("modules.generation_last", "modules/generation_last.py"), shared
