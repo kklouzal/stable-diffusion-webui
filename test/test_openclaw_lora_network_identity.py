@@ -1197,3 +1197,60 @@ def test_bundled_ti_hash_follows_the_infotext_option(lora_networks, monkeypatch,
 
     assert str(shorthash) == ("my_lora" if enabled else "")
     assert entries == (["emb: my_lora"] if enabled else [])
+
+
+def _sd1_like_model(torch):
+    model = torch.nn.Module()
+    model.is_sdxl = False
+    model.cond_stage_model = torch.nn.Linear(2, 2)
+    model.model = torch.nn.Module()
+    model.model.diffusion_model = torch.nn.Linear(2, 2)
+    return model
+
+
+def test_parsed_networks_and_applied_state_belong_to_one_model(lora_networks, monkeypatch):
+    """Parsed networks hold the layers they were matched against and the applied key describes weights merged into
+    one model: a replaced model (load callback) or a switch to another cached model (no callback) drops both."""
+    import torch
+    networks = lora_networks
+    parses = []
+
+    def load_network(name, _on_disk):
+        net = networks.network.Network(name, networks.available_networks["alpha"])
+        parses.append(networks.shared.sd_model)
+        return net
+
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "load_network", load_network)
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    first, second = _sd1_like_model(torch), _sd1_like_model(torch)
+
+    monkeypatch.setattr(networks.shared, "sd_model", first)
+    networks.assign_network_names_to_compvis_modules(first)
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None])
+    published_key = networks._applied_state_key
+
+    networks.assign_network_names_to_compvis_modules(first)  # e.g. a VAE reload: same model, same layers
+    assert len(networks.networks_in_memory) == 1 and networks._applied_state_key == published_key
+    assert not networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first]
+
+    monkeypatch.setattr(networks.shared, "sd_model", second)
+    networks.assign_network_names_to_compvis_modules(second)
+    assert networks.networks_in_memory == {} and networks.loaded_networks == [] and networks._applied_state_key is None
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first, second]
+
+    monkeypatch.setattr(networks.shared, "sd_model", first)  # a cached model made current again: no callback runs
+    assert networks.load_networks(["alpha"], [1.0], [1.0], [None]) and parses == [first, second, first]
+
+
+def test_trashed_model_drops_lora_weight_backups(lora_networks):
+    import torch
+    from modules import sd_models
+    model = _sd1_like_model(torch)
+    layer = model.model.diffusion_model
+    layer.network_weights_backup = layer.weight.detach().clone()
+    layer.network_bias_backup = layer.bias.detach().clone()
+
+    sd_models.send_model_to_trash(model)
+
+    assert not hasattr(layer, "network_weights_backup") and not hasattr(layer, "network_bias_backup")

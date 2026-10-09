@@ -1135,6 +1135,11 @@ def send_model_to_device(m):
 
 def send_model_to_trash(m):
     with _model_acceleration_boundary("model_to_trash", m):
+        # The Lora extension's CPU copies of each merged layer's base weights are plain attributes: Module.to(meta)
+        # leaves them, and they live as long as anything still references a layer.
+        for module in m.modules():
+            module.__dict__.pop("network_weights_backup", None)
+            module.__dict__.pop("network_bias_backup", None)
         if model_has_torchao_quantization(m):
             # TorchAO tensor subclasses are not safe on the generic Module.to(meta)
             # trash path. The caller is discarding the tree, so just drop references

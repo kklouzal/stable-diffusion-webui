@@ -54,6 +54,9 @@ def _record_lora_steady_state(*, hit, reason, identity_ms, load_parse_ms=0.0, pu
             for operation in t["avoided"]:
                 t["avoided"][operation] += 1
 _applied_state_key = None
+_model_token = None
+"""Identity token of the model loaded_networks, networks_in_memory and _applied_state_key refer to; that model holds
+it as network_lora_model_token (see _adopt_model)."""
 
 
 module_types = [
@@ -180,7 +183,41 @@ def assign_network_names_to_compvis_modules(sd_model):
         network_layer_mapping[network_name] = module
         module.network_layer_name = network_name
 
+    previous = getattr(sd_model, "network_layer_mapping", None)
+    layers_replaced = previous is None or previous.keys() != network_layer_mapping.keys() or any(previous[name] is not layer for name, layer in network_layer_mapping.items())
     sd_model.network_layer_mapping = network_layer_mapping
+    _adopt_model(sd_model, layers_replaced)
+
+
+def _adopt_model(sd_model, layers_replaced=False):
+    """Make `sd_model` the model that parsed networks and the applied state refer to.
+
+    Parsed networks hold the layers of the model they were matched against (NetworkModule.sd_module, the key match,
+    the shapes), and the applied state key describes weights merged into that model. When another model becomes
+    current (a load, or a switch to a cached model, which runs no model_loaded callback) or the model's layers were
+    replaced, both are dropped: the cache would otherwise keep the old model's layers (and their CPU weight backups)
+    alive and apply stale parses, and an equal applied key would skip merging into the new model. Layers carry their
+    own merge state (network_current_names and backups), so the next publication reconciles every layer.
+    """
+    global _applied_state_key, _model_token
+    if not layers_replaced and _model_token is not None and getattr(sd_model, "network_lora_model_token", None) is _model_token:
+        return
+    with openclaw_cache_epochs.epoch_transaction():
+        with _network_application_lock:
+            dropped_sources = list(networks_in_memory)
+            had_applied_state = bool(loaded_networks) or _applied_state_key is not None
+            networks_in_memory.clear()
+            for source_key in dropped_sources:
+                openclaw_cache_epochs.observe("E12", "invalidate", reason="entry_invalid", semantic_key=source_key)
+            openclaw_cache_epochs.set_size("E12", current_size=0, capacity=shared.opts.lora_in_memory_limit)
+            _set_loaded_networks([])
+            _applied_state_key = None
+            _model_token = object()
+            sd_model.network_lora_model_token = _model_token
+            if dropped_sources:
+                openclaw_cache_epochs.bump_epoch("lora_source_epoch", reason="checkpoint_loaded")
+            if had_applied_state:
+                openclaw_cache_epochs.bump_epoch("lora_applied_epoch", reason="checkpoint_loaded")
 
 
 class BundledTIHash(str):
@@ -598,6 +635,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     """Stage parsing off-lock, then atomically publish source and applied state."""
     started = time.perf_counter()
     emb_db = sd_hijack.model_hijack.embedding_db
+    _adopt_model(shared.sd_model)
 
     def resolve(name):
         return available_networks.get(name) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name)
