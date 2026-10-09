@@ -333,23 +333,115 @@ def test_failed_apply_restores_without_epoch_or_stale_publish(lora_networks, mon
     assert calls == [(("new",),), (("old",),)]
 
 
-def test_irrelevant_generation_inputs_not_in_applied_key(lora_networks):
+def test_irrelevant_generation_inputs_not_in_applied_key():
     source = Path("extensions-builtin/Lora/networks.py").read_text()
     key_block = source[source.index("def network_applied_state_key"):source.index("def _apply_loaded_state_to_model")]
     for forbidden in ("prompt", "seed", "cfg", "sampler"):
         assert forbidden not in key_block.lower()
 
 
-def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts():
-    source = Path("extensions-builtin/Lora/networks.py").read_text()
-    publish = source[source.index("def _publish_applied_state"):source.index("def load_network(")]
-    assert publish.index("epoch_transaction") < publish.index("_network_application_lock")
-    assert publish.count('bump_epoch("lora_applied_epoch"') == 2
-    assert 'observe("E12", "reject"' in publish
-    assert "semantic_key=wanted_key" in publish
-    assert "current_network_state_identity" in Path("modules/processing.py").read_text()
-    # CUDA graphs drop captured LoRA state through note_lora_loaded on every apply/unload.
-    assert source.count("openclaw_cuda_graphs.note_lora_loaded(") >= 2
+def test_applied_state_publication_takes_the_epoch_transaction_before_the_application_lock(lora_networks, monkeypatch):
+    import contextlib
+    networks = lora_networks
+    epochs = networks.openclaw_cache_epochs
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    entered = threading.Event(); bumped = threading.Event()
+    real_transaction = epochs.epoch_transaction
+
+    @contextlib.contextmanager
+    def transaction():
+        with real_transaction():
+            entered.set()
+            yield
+
+    monkeypatch.setattr(epochs, "epoch_transaction", transaction)
+    net = _applied_network(networks, "alpha")
+    publisher = threading.Thread(target=lambda: networks._publish_applied_state([net]), daemon=True)
+    bumper = threading.Thread(target=lambda: (epochs.bump_epoch("checkpoint_object_epoch", reason="checkpoint_commit"), bumped.set()), daemon=True)
+    networks._network_application_lock.acquire()
+    try:
+        publisher.start()
+        assert entered.wait(5), "the epoch transaction must be taken before the LoRA application lock"
+        bumper.start()
+        assert not bumped.wait(0.1)  # a lifecycle bump cannot interleave with the publication
+    finally:
+        networks._network_application_lock.release()
+        publisher.join(5)
+        if bumper.ident is not None:
+            bumper.join(5)
+    assert not publisher.is_alive() and bumped.is_set() and networks.loaded_networks == [net]
+
+
+def test_applied_state_publication_reports_opaque_outcomes_and_drops_captured_graphs(lora_networks, monkeypatch):
+    networks = lora_networks
+    observed, graphs = [], []
+    monkeypatch.setattr(networks.openclaw_cache_epochs, "observe", lambda family, event, *, reason, semantic_key=None, count=1: observed.append((family, event, reason, semantic_key)))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: graphs.append("lora_changed"))
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    old = _applied_network(networks, "old")
+    new = _applied_network(networks, "new")
+    old_key, new_key, empty_key = (networks.network_applied_state_key(nets) for nets in ([old], [new], []))
+
+    assert networks._publish_applied_state([old])
+    assert not networks._publish_applied_state([old])
+    assert graphs == ["lora_changed"]  # CUDA graphs drop captured LoRA state on a change, not on a hit
+    assert observed == [("E12", "publish", "published", old_key), ("E12", "hit", "cache_hit", old_key)]
+
+    def apply():
+        if networks.loaded_networks == [new]:
+            raise RuntimeError("injected")
+
+    observed.clear()
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", apply)
+    before = _epochs(networks)
+    with pytest.raises(RuntimeError, match="injected"):
+        networks._publish_applied_state([new])
+    assert observed == [("E12", "reject", "rejected", new_key)]
+    assert graphs == ["lora_changed"] and _epochs(networks) == before
+
+    observed.clear()
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    assert networks._publish_applied_state([])  # unloading is a change too
+    assert graphs == ["lora_changed", "lora_changed"]
+    assert observed == [("E12", "publish", "published", empty_key)]
+    assert _epoch(networks, "lora_applied_epoch") == before["lora_applied_epoch"] + 1
+
+
+def test_execution_identity_is_device_and_precision_not_epoch_history(lora_networks, monkeypatch):
+    import torch
+    networks = lora_networks
+    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+    monkeypatch.setattr(networks.devices, "dtype", torch.float16, raising=False)
+    monkeypatch.setattr(networks.devices, "dtype_unet", torch.float16, raising=False)
+    identity = networks._execution_identity()
+    for dimension in ("checkpoint_object_epoch", "model_movement_epoch", "lora_applied_epoch", "device_epoch", "precision_epoch"):
+        networks.openclaw_cache_epochs.bump_epoch(dimension, reason="other")
+    assert networks._execution_identity() == identity  # a clean unload/reactivation keeps the identity
+
+    seen = {identity}
+    for name, value in (("device", torch.device("meta")), ("dtype", torch.bfloat16), ("dtype_unet", torch.bfloat16)):
+        monkeypatch.setattr(networks.devices, name, value, raising=False)
+        assert networks._execution_identity() not in seen, name
+        seen.add(networks._execution_identity())
+
+
+def test_source_key_is_the_resolved_source_bytes_and_parser_revision(lora_networks, tmp_path, monkeypatch):
+    networks = lora_networks
+    source = tmp_path / "alpha.safetensors"
+    source.write_bytes(b"weights")
+    link = tmp_path / "alias.safetensors"
+    link.symlink_to(source)
+    signature = networks.network_file_signature(source)
+
+    key = networks.network_source_key(SimpleNamespace(filename=str(link)))
+    assert key == (str(source.resolve()), signature, networks.LORA_SOURCE_SCHEMA_REVISION)
+    for dimension in ("lora_applied_epoch", "checkpoint_object_epoch", "textual_inversion_epoch"):
+        networks.openclaw_cache_epochs.bump_epoch(dimension, reason="other")
+    assert networks.network_source_key(SimpleNamespace(filename=str(source))) == key  # lifecycle epochs are not source identity
+    assert networks.network_source_key(SimpleNamespace(filename=str(source)), ("sha256", "other")) != key
+    monkeypatch.setattr(networks, "LORA_SOURCE_SCHEMA_REVISION", "lora-source-next")
+    assert networks.network_source_key(SimpleNamespace(filename=str(source))) != key
+    assert networks.network_source_key(None) is None
 
 
 def test_epoch_transaction_prevents_lifecycle_interleave_with_apply_publication(lora_networks):

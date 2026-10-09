@@ -48,10 +48,21 @@ def test_unreadable_driver_version_fails_the_deploy(tmp_path):
     assert "cannot read the host NVIDIA driver version" in result.stderr
 
 
-def test_namespace_no_longer_tracks_the_a1111_commit_and_old_namespaces_are_kept():
-    block = _namespace_block()
-    source = RUN_SH.read_text(encoding="utf8")
+def test_namespace_does_not_track_the_a1111_commit(tmp_path):
+    result = _derive(tmp_path, namespace_env="A1111_COMMIT_HASH=0123456789abcdef0123456789abcdef01234567")
 
-    assert "${A1111_COMMIT_HASH}" not in block.split("\n", 1)[1]
-    assert "rm -rf" not in source[source.index("COMPILE_CACHE_NAMESPACE_PATHS=("):source.index("TARGET_IMAGE_ID=")]
-    assert "other namespace dirs hold" in source
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "torch-2.14.0a0_4fdf77b940.nv26.8-triton-3.8.0_git4c7e62b7-cuda-13.4.1.012-driver-580.178.04"
+
+
+def test_namespace_dirs_are_owned_by_the_runtime_user_and_other_namespaces_are_kept():
+    # Text contract: the block runs sudo install/setpriv/find against the host cache root.
+    source = RUN_SH.read_text(encoding="utf8")
+    block = source[source.index("COMPILE_CACHE_NAMESPACE_PATHS=("):source.index("TARGET_IMAGE_ID=")]
+
+    for family in ("torchinductor", "triton", "cuda"):
+        assert f'"${{OPENCLAW_COMPILE_CACHE_ROOT}}/{family}/${{OPENCLAW_COMPILE_CACHE_NAMESPACE}}"' in block
+    assert 'install -d -o 2323 -g 2323 -m 0750 "${cache_namespace_path}"' in block
+    assert "sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -w" in block
+    assert "rm -rf" not in block
+    assert "other namespace dirs hold" in block
