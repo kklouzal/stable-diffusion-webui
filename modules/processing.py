@@ -597,21 +597,6 @@ class StableDiffusionProcessing:
             opts.textual_inversion_add_hashes_to_infotext,
         )
 
-    @staticmethod
-    def _conditioning_cache_miss_reason(previous_key, current_key):
-        if previous_key is None:
-            return "cold"
-        labels = (
-            "namespace", "dependency_epoch", "prompt", "steps", "hires_steps", "scheduling",
-            "clip_skip", "sdxl_clip_skip", "checkpoint", "network_state", "extra_network_data",
-            "sdxl_crop", "sdxl_crop", "dimensions", "dimensions", "fp8_storage",
-            "fp16_weight_cache", "emphasis", "old_emphasis", "comma_padding_backtrack",
-            "prompt_dimensions", "prompt_dimensions", "negative_prompt", "refiner_aesthetic_score", "refiner_aesthetic_score",
-            "ti_hashes_infotext",
-        )
-        changed = [label for label, before, after in zip(labels, previous_key, current_key) if before != after]
-        return "changed:" + ",".join(dict.fromkeys(changed)) if changed else "evicted"
-
     def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):
         """Return conditioning from one namespace-owned, atomically published cache slot."""
         if shared.opts.use_old_scheduling:
@@ -637,8 +622,8 @@ class StableDiffusionProcessing:
                     _replay_conditioning_infotext(model_hijack.extra_generation_params, cache[2])
                     return cache[1]
 
-                reason = self._conditioning_cache_miss_reason(cache[0], cached_params)
-                openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss" if reason == "cold" else "dependency_changed", semantic_key=semantic_key)
+                # An occupied slot with a different key: some key input (prompt, settings or a dependency epoch) changed.
+                openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss" if cache[0] is None else "dependency_changed", semantic_key=semantic_key)
                 started = time.perf_counter()
                 infotext = model_hijack.extra_generation_params
                 model_hijack.extra_generation_params = {}
