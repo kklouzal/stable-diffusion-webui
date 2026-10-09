@@ -505,6 +505,11 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None, fn: Any | None = None) -
     if getattr(sys.modules.get("modules.shared"), "loaded_hypernetworks", None):
         return "hypernetworks"
 
+    # An alternative UNet (sd_unet.apply_unet, e.g. a TensorRT engine) is extension Python that UNetModel.forward
+    # dispatches to per call while the native UNet sits on the CPU; neither its identity nor its state is keyed.
+    if getattr(sys.modules.get("modules.sd_unet"), "current_unet", None) is not None:
+        return "alternative_unet"
+
     models = _denoiser_models(fn, p)
     # A per-request instance override (Tiled Diffusion: MultiDiffusion/DemoFusion replace inner_model.forward or
     # the CFG denoiser's forward, MixtureOfDiffusers replaces sd_model.apply_model) is Python that replay skips:

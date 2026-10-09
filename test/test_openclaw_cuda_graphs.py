@@ -761,6 +761,14 @@ class CudaGraphRequestOverrideTests(GraphTestCase):
             shared.loaded_hypernetworks = []
             self.assertIsNone(self.reason())
 
+    def test_alternative_unet_bypasses(self):
+        # sd_unet.apply_unet routes UNetModel.forward to extension Python (current_unet) that no key part identifies.
+        sd_unet = module("modules.sd_unet", current_unet=object())
+        with stub_modules({"modules.sd_unet": sd_unet}):
+            self.assertEqual(self.reason(), "alternative_unet")
+            sd_unet.current_unet = None
+            self.assertIsNone(self.reason())
+
     def test_override_bypass_runs_eager_and_records_reason(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)
         try:
