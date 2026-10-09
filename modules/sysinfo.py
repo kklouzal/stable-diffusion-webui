@@ -37,20 +37,6 @@ def get():
     return text
 
 
-re_checksum = re.compile(r'"Checksum": "([0-9a-fA-F]{64})"')
-
-
-def check(x):
-    m = re.search(re_checksum, x)
-    if not m:
-        return False
-
-    replaced = re.sub(re_checksum, f'"Checksum": "{checksum_token}"', x)
-
-    h = hashlib.sha256(replaced.encode("utf8"))
-    return h.hexdigest() == m.group(1)
-
-
 def get_cpu_info():
     cpu_info = {"model": platform.processor()}
     try:
