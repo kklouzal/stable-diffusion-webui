@@ -24,11 +24,6 @@ attention_CrossAttention_forward = ldm.modules.attention.CrossAttention.forward
 diffusionmodules_model_nonlinearity = ldm.modules.diffusionmodules.model.nonlinearity
 diffusionmodules_model_AttnBlock_forward = ldm.modules.diffusionmodules.model.AttnBlock.forward
 
-# new memory efficient cross attention blocks do not support hypernets and we already
-# have memory efficient cross attention anyway, so this disables SD2.0's memory efficient cross attention
-ldm.modules.attention.MemoryEfficientCrossAttention = ldm.modules.attention.CrossAttention
-ldm.modules.attention.BasicTransformerBlock.ATTENTION_MODES["softmax-xformers"] = ldm.modules.attention.CrossAttention
-
 # silence new console spam from SD2
 ldm.modules.attention.print = shared.ldm_print
 ldm.modules.diffusionmodules.model.print = shared.ldm_print
@@ -353,15 +348,6 @@ class TextualInversionEmbeddings(torch.nn.Embedding):
 
     def forward(self, input_ids):
         return EmbeddingsWithFixes.forward(self, input_ids)
-
-
-def add_circular_option_to_conv_2d():
-    conv2d_constructor = torch.nn.Conv2d.__init__
-
-    def conv2d_constructor_circular(self, *args, **kwargs):
-        return conv2d_constructor(self, *args, padding_mode='circular', **kwargs)
-
-    torch.nn.Conv2d.__init__ = conv2d_constructor_circular
 
 
 model_hijack = StableDiffusionModelHijack()
