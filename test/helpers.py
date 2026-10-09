@@ -167,3 +167,16 @@ class WatchingDict(dict):
     def clear(self):
         super().clear()
         self._check("clear")
+
+
+def available_test_device():
+    """cuda:0 when a CUDA device is present and accepts an allocation, else cpu."""
+    import torch
+
+    if torch.cuda.is_available():
+        try:
+            torch.empty((), device="cuda:0")
+            return torch.device("cuda:0")
+        except Exception:
+            pass
+    return torch.device("cpu")
