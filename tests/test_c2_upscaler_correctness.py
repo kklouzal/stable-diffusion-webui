@@ -389,12 +389,10 @@ def pp_upscale(env):
     scripts_postprocessing = types.ModuleType("modules.scripts_postprocessing")
     scripts_postprocessing.ScriptPostprocessing = type("ScriptPostprocessing", (), {})
     scripts_postprocessing.PostprocessedImage = object  # annotations only
-    ui = types.ModuleType("modules.ui")
-    ui.switch_values_symbol = ""
     ui_components = types.ModuleType("modules.ui_components")
-    ui_components.FormRow = ui_components.ToolButton = ui_components.InputAccordion = None
+    ui_components.FormRow = ui_components.InputAccordion = None
     stubs = {
-        "modules.scripts_postprocessing": scripts_postprocessing, "modules.ui": ui, "modules.ui_components": ui_components,
+        "modules.scripts_postprocessing": scripts_postprocessing, "modules.ui_components": ui_components,
         "modules.headless_ui": types.ModuleType("modules.headless_ui"),
     }
     with _modules(stubs):
