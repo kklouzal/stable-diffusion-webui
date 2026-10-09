@@ -101,8 +101,7 @@ def create_binary_mask(image, round=True):
 
 
 def _resize_latent_mask(image, size, round=True):
-    resampling = Image.Resampling.BOX if hasattr(Image, "Resampling") else Image.BOX
-    latmask = image.convert('L').resize(size, resample=resampling)
+    latmask = image.convert('L').resize(size, resample=Image.Resampling.BOX)
     latmask = np.asarray(latmask, dtype=np.float32) / 255.0
 
     if round:
@@ -295,7 +294,6 @@ class StableDiffusionProcessing:
     uc: tuple = field(default=None, init=False)
 
     rng: rng.ImageRNG | None = field(default=None, init=False)
-    step_multiplier: int = field(default=1, init=False)
     color_corrections: list = field(default=None, init=False)
 
     all_prompts: list = field(default=None, init=False)
@@ -677,7 +675,6 @@ class StableDiffusionProcessing:
 
         sampler_config = sd_samplers.find_sampler_config(self.sampler_name)
         total_steps = sampler_config.total_steps(self.steps) if sampler_config else self.steps
-        self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
 
         self.uc = self.get_conds_with_caching("uc", prompt_parser.get_learned_conditioning, negative_prompts, total_steps, self.cached_uc, self.extra_network_data)

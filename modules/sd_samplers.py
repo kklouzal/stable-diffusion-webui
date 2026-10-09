@@ -74,10 +74,6 @@ def set_samplers():
     _resolve_sampler_and_scheduler.cache_clear()
 
 
-def visible_sampler_names():
-    return [x.name for x in samplers if x.name not in samplers_hidden]
-
-
 def visible_samplers():
     return [x for x in samplers if x.name not in samplers_hidden]
 

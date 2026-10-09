@@ -41,7 +41,7 @@ def apply_unet(option=None):
         return
 
     if current_unet is not None:
-        print(f"Dectivating unet: {current_unet.option.label}")
+        print(f"Deactivating unet: {current_unet.option.label}")
         current_unet.deactivate()
 
     current_unet_option = new_option
