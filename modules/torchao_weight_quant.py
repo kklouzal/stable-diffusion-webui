@@ -28,6 +28,8 @@ LINEAR_COVERAGE_CHOICES = [
 ]
 LINEAR_COVERAGE_DEFAULT = [LINEAR_COVERAGE_UNET_OTHER]
 OUT_FEATURE_MULTIPLE = 16
+# Suffixes of the model attributes `network_<name>_<suffix>` that mark the Lora extension's prepared active config.
+PREPARED_MARKERS = ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,6 +68,20 @@ class Backend:
         if out_features % OUT_FEATURE_MULTIPLE != 0:
             return f"out_features_not_multiple_of_{OUT_FEATURE_MULTIPLE}"
         return None
+
+    def clear_prepared_markers(self, model) -> None:
+        """Drop `model`'s prepared-config markers, so the next LoRA activation rebuilds the quantized weights."""
+        for suffix in PREPARED_MARKERS:
+            try:
+                delattr(model, f"network_{self.name}_{suffix}")
+            except AttributeError:
+                pass
+
+    def capture_base(self, module) -> None:
+        """Store CPU copies of `module`'s current weight and bias as its BF16 base (`network_<name>_base_weight/_bias`)."""
+        bias = getattr(module, "bias", None)
+        setattr(module, f"network_{self.name}_base_weight", module.weight.detach().to(torch.device("cpu"), copy=True))
+        setattr(module, f"network_{self.name}_base_bias", bias.detach().to(torch.device("cpu"), copy=True) if bias is not None else None)
 
 
 @functools.cache

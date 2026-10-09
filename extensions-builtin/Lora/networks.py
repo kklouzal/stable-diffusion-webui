@@ -999,11 +999,7 @@ def network_quant_mark_model_unprepared(backend, model=None):
     model = model or getattr(shared, "sd_model", None)
     if model is None:
         return
-    for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
-        try:
-            delattr(model, f"network_{backend.name}_{suffix}")
-        except Exception:
-            pass
+    backend.clear_prepared_markers(model)
 
 
 def network_quant_is_model_prepared(backend, model=None):
@@ -1069,15 +1065,13 @@ def network_quant_managed_modules_match_current_names(backend, model, wanted_nam
 
 
 def network_quant_capture_managed_base(backend, model, force=False):
-    base_weight_attr, base_bias_attr = f"network_{backend.name}_base_weight", f"network_{backend.name}_base_bias"
+    base_weight_attr = f"network_{backend.name}_base_weight"
     captured = 0
     with torch.no_grad():
         for _fqn, module in network_quant_managed_modules(backend, model):
             if getattr(module, base_weight_attr, None) is not None and not force:
                 continue
-            setattr(module, base_weight_attr, module.weight.detach().to(devices.cpu, copy=True))
-            bias = getattr(module, "bias", None)
-            setattr(module, base_bias_attr, bias.detach().to(devices.cpu, copy=True) if bias is not None else None)
+            backend.capture_base(module)
             captured += 1
     return captured
 

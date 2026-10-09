@@ -461,7 +461,10 @@ def linear_skip_reason(backend, module, fqn):
     policy_reason = linear_policy_skip_reason(backend, fqn)
     if policy_reason is not None:
         return policy_reason
+    return lora_backup_skip_reason(fqn) or backend.technical_linear_skip_reason(module)
 
+
+def lora_backup_skip_reason(fqn):
     # The A1111 LoRA hook for torch.nn.MultiheadAttention mutates the parent
     # module in_proj_weight/out_proj.weight directly instead of flowing through
     # Linear.forward. When out_proj.weight is a TorchAO tensor subclass, the backup
@@ -470,8 +473,7 @@ def linear_skip_reason(backend, module, fqn):
     # Linear layers still use the merge-then-quantize path.
     if fqn.endswith((".attn.out_proj", ".self_attn.out_proj")):
         return "multihead_attention_out_proj_lora_backup"
-
-    return backend.technical_linear_skip_reason(module)
+    return None
 
 
 def apply_weight_quantization(backend, model, timer, source_path=None):
@@ -509,7 +511,7 @@ def apply_weight_quantization(backend, model, timer, source_path=None):
                 incompatible_reasons[technical_reason] = incompatible_reasons.get(technical_reason, 0) + 1
                 reason = technical_reason
             else:
-                reason = linear_skip_reason(backend, module, fqn)
+                reason = lora_backup_skip_reason(fqn)
 
             if reason is None:
                 eligible += 1
@@ -524,17 +526,11 @@ def apply_weight_quantization(backend, model, timer, source_path=None):
     try:
         try:
             delattr(model, f"network_{name}_managed_modules")
-        except Exception:
+        except AttributeError:
             pass
         for _fqn, module in managed_modules:
-            setattr(module, f"network_{name}_base_weight", module.weight.detach().to(devices.cpu, copy=True))
-            setattr(module, f"network_{name}_base_bias", module.bias.detach().to(devices.cpu, copy=True) if module.bias is not None else None)
-
-        for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
-            try:
-                delattr(model, f"network_{name}_{suffix}")
-            except Exception:
-                pass
+            backend.capture_base(module)
+        backend.clear_prepared_markers(model)
 
         selected_coverage = sorted(selected_linear_coverage(backend))
         cache_loaded = torchao_model_cache.load_into_model(backend, model, source_path, quant_filter, shared.device, selected_coverage)
@@ -1095,11 +1091,7 @@ def restore_torchao_quantized_linears_for_reload(model, *, target_device=None, t
         # quantized+LoRA weights from the masters; otherwise a model moved back to the device after a VAE reload
         # keeps running the plain masters (no LoRA, no quantization) while its markers say it is prepared.
         for backend in torchao_weight_quant.BACKENDS.values():
-            for suffix in ("active_config_signature", "prepare_stats", "prepare_error", "active_config_ready"):
-                try:
-                    delattr(model, f"network_{backend.name}_{suffix}")
-                except AttributeError:
-                    pass
+            backend.clear_prepared_markers(model)
         print(f"Restored {restored} TorchAO-quantized Linear modules to BF16 before reload or move", flush=True)
     return restored
 
