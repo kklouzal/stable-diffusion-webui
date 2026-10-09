@@ -9,7 +9,7 @@ import re
 
 from modules import shared, errors, cache, scripts
 from modules.gitpython_hack import Repo
-from modules.paths_internal import extensions_dir, extensions_builtin_dir, script_path  # noqa: F401
+from modules.paths_internal import extensions_dir, extensions_builtin_dir
 
 extensions: list[Extension] = []
 extension_paths: dict[str, Extension] = {}
@@ -134,8 +134,6 @@ class Extension:
         self.name = name
         self.path = path
         self.enabled = enabled
-        self.status = ''
-        self.can_update = False
         self.is_builtin = is_builtin
         self.commit_hash = ''
         self.commit_date = None
@@ -174,7 +172,6 @@ class Extension:
         # read it first; either way do_read_info_from_repo() has already set this extension's fields.
         if d is not None:
             self.from_dict(d)
-        self.status = 'unknown' if self.status == '' else self.status
 
     def do_read_info_from_repo(self):
         repo = None
@@ -214,31 +211,6 @@ class Extension:
         res = [x for x in res if os.path.splitext(x.path)[1].lower() == extension and os.path.isfile(x.path)]
 
         return res
-
-    def check_updates(self):
-        repo = Repo(self.path)
-        branch_name = f'{repo.remote().name}/{self.branch}'
-        for fetch in repo.remote().fetch(dry_run=True):
-            if self.branch and fetch.name != branch_name:
-                continue
-            if fetch.flags != fetch.HEAD_UPTODATE:
-                self.can_update = True
-                self.status = "new commits"
-                return
-
-        try:
-            origin = repo.rev_parse(branch_name)
-            if repo.head.commit != origin:
-                self.can_update = True
-                self.status = "behind HEAD"
-                return
-        except Exception:
-            self.can_update = False
-            self.status = "unknown (remote error)"
-            return
-
-        self.can_update = False
-        self.status = "latest"
 
     def fetch_and_reset_hard(self, commit=None):
         repo = Repo(self.path)
