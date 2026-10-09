@@ -17,29 +17,29 @@ OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS:-1}"
 OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX:-4}"
 OPENCLAW_COMPILE_CACHE_ROOT="${OPENCLAW_COMPILE_CACHE_ROOT:-${HOST_ROOT}/Caches/compile}"
 
-LOCAL_DIRS=(
-  BLIP
-  CLIP
-  Codeformer
-  deepbooru
-  GFPGAN
-  Hypernetworks
-  karlo
-  Lora
-  RealESGRAN
-  torch_deepdanbooru
-  VAE
-  VAE-approx
-  Embeddings
-  Extensions
-  Models
-  config
+# Host directory under HOST_ROOT -> path under the container's app directory. One table drives the host mkdir,
+# the ownership repair and the bind mounts, in this order.
+HOST_DIR_MOUNTS=(
+  BLIP:models/BLIP
+  CLIP:models/CLIP
+  Codeformer:models/Codeformer
+  GFPGAN:models/GFPGAN
+  Hypernetworks:models/hypernetworks
+  karlo:models/karlo
+  Lora:models/Lora
+  RealESGRAN:models/ESRGAN
+  torch_deepdanbooru:models/torch_deepdanbooru
+  VAE:models/VAE
+  VAE-approx:models/VAE-approx
+  Embeddings:embeddings
+  Extensions:extensions
+  Models:models/Stable-diffusion
 )
+HOST_DIRS=("${HOST_DIR_MOUNTS[@]%%:*}" config)
 
-for d in "${LOCAL_DIRS[@]}"; do
+for d in "${HOST_DIRS[@]}"; do
   sudo mkdir -p "${HOST_ROOT}/${d}"
 done
-sudo mkdir -p "${OPENCLAW_COMPILE_CACHE_ROOT}"
 
 if [[ ! -e "${HOST_ROOT}/Outputs" ]]; then
   sudo ln -s "${OUTPUTS_TARGET}" "${HOST_ROOT}/Outputs"
@@ -56,15 +56,12 @@ fi
 
 sudo mkdir -p "${HOST_ROOT}/config/generation-last"
 sudo touch "${HOST_ROOT}/config/config.json" \
-           "${HOST_ROOT}/config/ui-config.json" \
            "${HOST_ROOT}/config/styles.csv"
 
 OWNED_EXTENSIONS=()
-if [[ -d "${PROJECT_ROOT}/extensions" ]]; then
-  while IFS= read -r -d "" extension_path; do
-    OWNED_EXTENSIONS+=("$(basename "${extension_path}")")
-  done < <(find "${PROJECT_ROOT}/extensions" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
-fi
+while IFS= read -r -d "" extension_path; do
+  OWNED_EXTENSIONS+=("$(basename "${extension_path}")")
+done < <(find "${PROJECT_ROOT}/extensions" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
 if [[ ${#OWNED_EXTENSIONS[@]} -eq 0 ]]; then
   echo "ERROR: no owned extensions discovered under ${PROJECT_ROOT}/extensions" >&2
@@ -75,56 +72,9 @@ printf "Discovered owned extensions:"
 printf " %s" "${OWNED_EXTENSIONS[@]}"
 printf "\n"
 
-# Stop the bind-mounted live container before mutating Extensions underneath it.
-sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-
-for extension_name in "${OWNED_EXTENSIONS[@]}"; do
-  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
-  owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
-  sudo mkdir -p "${owned_extension_target}"
-  # Mirror the repo source, but keep runtime data that extensions write inside their own
-  # directory: openclaw-multi-sampler's saved chains (data/) and ControlNet's downloaded
-  # annotator weights (annotator/downloads/). The /*** form protects the directory AND its
-  # contents: 'P /data/' alone protects only the directory entry, so when the checkout has its
-  # own (git-ignored, empty) data/ directory rsync descends into it and deletes the saved files.
-  sudo rsync -a --checksum --delete --delete-excluded \
-    --filter 'P /data/***' \
-    --filter 'P /annotator/downloads/***' \
-    --exclude '.git/' \
-    --exclude '__pycache__/' \
-    --exclude '*.pyc' \
-    --exclude '.DS_Store' \
-    "${owned_extension_source}/" "${owned_extension_target}/"
-done
-
-# The owned extensions mirrored above carry their fixes in the tracked source. The host-installed third-party
-# extensions below are patched in place: each patcher (gb10/patchlib.py contract) patches upstream text or verifies
-# already-patched text, and fails the deploy on anything else, including a missing file.
-MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"
-if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then
-  sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${MULTIDIFFUSION_ROOT}"
-fi
-ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
-sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${ULTIMATE_UPSCALE_ROOT}"
-
-sudo chown -R 2323:2323 \
-  "${HOST_ROOT}/BLIP" \
-  "${HOST_ROOT}/CLIP" \
-  "${HOST_ROOT}/Codeformer" \
-  "${HOST_ROOT}/deepbooru" \
-  "${HOST_ROOT}/GFPGAN" \
-  "${HOST_ROOT}/Hypernetworks" \
-  "${HOST_ROOT}/karlo" \
-  "${HOST_ROOT}/Lora" \
-  "${HOST_ROOT}/RealESGRAN" \
-  "${HOST_ROOT}/torch_deepdanbooru" \
-  "${HOST_ROOT}/VAE" \
-  "${HOST_ROOT}/VAE-approx" \
-  "${HOST_ROOT}/Embeddings" \
-  "${HOST_ROOT}/Extensions" \
-  "${HOST_ROOT}/Models" \
-  "${HOST_ROOT}/config"
+# Everything that can fail without touching the live container runs before it is removed, so a bad IMAGE_TAG, an
+# unreadable driver version, an unwritable cache namespace or an extension source a patcher rejects leaves
+# production running.
 
 A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 # Inductor/Triton/driver-JIT output depends on the image's compiler stack and the host driver, not on the
@@ -163,6 +113,63 @@ if (( ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} )); then
   echo "Compile cache: ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} other namespace dirs hold $(sudo du -csh "${OTHER_COMPILE_CACHE_NAMESPACES[@]}" | tail -n 1 | cut -f 1) under ${OPENCLAW_COMPILE_CACHE_ROOT} (kept)"
 fi
 
+TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
+
+# The owned extensions are mirrored from the tracked source below. The host-installed third-party extensions are
+# patched in place: each patcher (gb10/patchlib.py contract) patches upstream text or verifies already-patched text,
+# and fails on anything else, including a missing file. $1 is the Extensions directory to patch.
+patch_third_party_extensions() {
+  local extensions_root="$1"
+  if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then
+    sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${extensions_root}/multidiffusion-upscaler-for-automatic1111"
+  fi
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
+}
+
+# Rehearse the patchers on a scratch copy of the third-party checkouts while production still runs: nothing under
+# Extensions changes before the live container is gone, and a source a patcher rejects fails the deploy here.
+PATCH_REHEARSAL_ROOT="$(mktemp -d -t gb10-patch-rehearsal.XXXXXX)"
+trap 'sudo rm -rf -- "${PATCH_REHEARSAL_ROOT}"' EXIT
+echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
+for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
+  if [[ -d "${HOST_ROOT}/Extensions/${third_party_extension}" ]]; then
+    sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
+      "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"
+  fi
+done
+patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}" >/dev/null
+
+# Stop the bind-mounted live container before mutating Extensions underneath it.
+sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
+  owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
+  sudo mkdir -p "${owned_extension_target}"
+  # Mirror the repo source, but keep runtime data and model weights that live inside an extension's own
+  # directory: openclaw-multi-sampler's saved chains (data/), ControlNet's downloaded annotator weights
+  # (annotator/downloads/) and ControlNet models (models/; the checkout's git-ignored copies are mirrored, a model
+  # placed only on the host survives). The /*** form protects the directory AND its contents: 'P /data/' alone
+  # protects only the directory entry, so when the checkout has its own (git-ignored, empty) data/ directory rsync
+  # descends into it and deletes the saved files. Tool caches are excluded and so removed from the target.
+  sudo rsync -a --checksum --delete --delete-excluded \
+    --filter 'P /data/***' \
+    --filter 'P /annotator/downloads/***' \
+    --filter 'P /models/***' \
+    --exclude '.git/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.DS_Store' \
+    --exclude '.ruff_cache/' \
+    --exclude '.pytest_cache/' \
+    "${owned_extension_source}/" "${owned_extension_target}/"
+done
+
+patch_third_party_extensions "${HOST_ROOT}/Extensions"
+
+sudo chown -R 2323:2323 "${HOST_DIRS[@]/#/${HOST_ROOT}/}"
+
 DOCKER_ARGS=(
   -d
   --init
@@ -175,7 +182,8 @@ DOCKER_ARGS=(
   -e A1111_PORT="${PORT}"
   -e A1111_COMMIT_HASH="${A1111_COMMIT_HASH}"
   -e A1111_VERSION_TAG="${A1111_VERSION_TAG}"
-  -e COMMANDLINE_ARGS="${COMMANDLINE_ARGS:---listen --port ${PORT} --no-hashing --disable-console-progressbars --api --nowebui --opt-sdp-attention --opt-channelslast --dtype bfloat16 --precision autocast --enable-insecure-extension-access}"
+  # Empty selects the image launcher's API-only default flags (gb10-a1111-launch), with --port A1111_PORT.
+  -e COMMANDLINE_ARGS="${COMMANDLINE_ARGS:-}"
   -e OPENCLAW_SDPA_BACKEND="${OPENCLAW_SDPA_BACKEND}"
   -e OPENCLAW_CUDA_GRAPHS="${OPENCLAW_CUDA_GRAPHS}"
   -e OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
@@ -185,30 +193,18 @@ DOCKER_ARGS=(
   -e TRITON_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e CUDA_CACHE_PATH="/opt/stable-diffusion-webui/cache/compile/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e GENERATION_LAST_DIR="/opt/stable-diffusion-webui/generation-last"
-  -v "${HOST_ROOT}/BLIP:/opt/stable-diffusion-webui/models/BLIP"
-  -v "${HOST_ROOT}/CLIP:/opt/stable-diffusion-webui/models/CLIP"
-  -v "${HOST_ROOT}/Codeformer:/opt/stable-diffusion-webui/models/Codeformer"
-  -v "${HOST_ROOT}/deepbooru:/opt/stable-diffusion-webui/models/deepbooru"
-  -v "${HOST_ROOT}/GFPGAN:/opt/stable-diffusion-webui/models/GFPGAN"
-  -v "${HOST_ROOT}/Hypernetworks:/opt/stable-diffusion-webui/models/hypernetworks"
-  -v "${HOST_ROOT}/karlo:/opt/stable-diffusion-webui/models/karlo"
-  -v "${HOST_ROOT}/Lora:/opt/stable-diffusion-webui/models/Lora"
-  -v "${HOST_ROOT}/RealESGRAN:/opt/stable-diffusion-webui/models/ESRGAN"
-  -v "${HOST_ROOT}/torch_deepdanbooru:/opt/stable-diffusion-webui/models/torch_deepdanbooru"
-  -v "${HOST_ROOT}/VAE:/opt/stable-diffusion-webui/models/VAE"
-  -v "${HOST_ROOT}/VAE-approx:/opt/stable-diffusion-webui/models/VAE-approx"
-  -v "${HOST_ROOT}/Embeddings:/opt/stable-diffusion-webui/embeddings"
-  -v "${HOST_ROOT}/Extensions:/opt/stable-diffusion-webui/extensions"
-  -v "${HOST_ROOT}/Models:/opt/stable-diffusion-webui/models/Stable-diffusion"
+)
+for mount in "${HOST_DIR_MOUNTS[@]}"; do
+  DOCKER_ARGS+=(-v "${HOST_ROOT}/${mount%%:*}:/opt/stable-diffusion-webui/${mount#*:}")
+done
+DOCKER_ARGS+=(
   -v "${HOST_ROOT}/Outputs:/opt/stable-diffusion-webui/outputs"
   -v "${OPENCLAW_COMPILE_CACHE_ROOT}:/opt/stable-diffusion-webui/cache/compile"
   -v "${HOST_ROOT}/config/config.json:/opt/stable-diffusion-webui/config.json"
-  -v "${HOST_ROOT}/config/ui-config.json:/opt/stable-diffusion-webui/ui-config.json"
   -v "${HOST_ROOT}/config/styles.csv:/opt/stable-diffusion-webui/styles.csv"
   -v "${HOST_ROOT}/config/generation-last:/opt/stable-diffusion-webui/generation-last"
 )
 
-TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
 if ! sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
   "${IMAGE_TAG}"; then
   observed_image_id="$(sudo "$DOCKER_BIN" inspect "${CONTAINER_NAME}" --format '{{.Image}}' 2>/dev/null || true)"

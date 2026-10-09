@@ -6,11 +6,9 @@ A1111_RUN_AS_USER="${A1111_RUN_AS_USER:-a1111}"
 
 mkdir -p "$A1111_HOME/tmp" "$A1111_HOME/models/ControlNet" "$A1111_HOME/models/VAE-approx"
 
-for f in "$A1111_HOME/config.json" "$A1111_HOME/ui-config.json"; do
-  if [[ ! -e "$f" || ! -s "$f" ]]; then
-    printf '{}\n' > "$f"
-  fi
-done
+if [[ ! -s "$A1111_HOME/config.json" ]]; then
+  printf '{}\n' > "$A1111_HOME/config.json"
+fi
 
 if [[ ! -e "$A1111_HOME/styles.csv" ]]; then
   : > "$A1111_HOME/styles.csv"
@@ -22,7 +20,6 @@ chown -R "$A1111_RUN_AS_USER:$A1111_RUN_AS_USER" \
   "$A1111_HOME/models/VAE-approx"
 chown "$A1111_RUN_AS_USER:$A1111_RUN_AS_USER" \
   "$A1111_HOME/config.json" \
-  "$A1111_HOME/ui-config.json" \
   "$A1111_HOME/styles.csv" || true
 
 cd "$A1111_HOME"

@@ -1,4 +1,5 @@
-"""gb10/run.sh applies every deploy patcher after the owned-extension sync and before the container starts."""
+"""gb10/run.sh ordering: everything that can fail runs while production still serves; the live container is removed
+only right before the owned-extension sync, the third-party patchers and the new container start."""
 from __future__ import annotations
 
 import re
@@ -6,25 +7,42 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 RUN_SH = (ROOT / "gb10" / "run.sh").read_text(encoding="utf-8")
+TEARDOWN = 'sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}"'
 
 
-def test_every_patcher_runs_exactly_once_and_every_referenced_patcher_exists():
-    invoked = re.findall(r'^\s*sudo python3 "\$\{PROJECT_ROOT\}/gb10/(patch-[\w-]+\.py)" "\$\{\w+\}"$', RUN_SH, flags=re.M)
+def test_every_patcher_runs_exactly_once_per_pass_and_every_referenced_patcher_exists():
+    function = RUN_SH[RUN_SH.index("patch_third_party_extensions() {"):]
+    function = function[:function.index("\n}\n")]
+    invoked = re.findall(r'^\s*sudo python3 "\$\{PROJECT_ROOT\}/gb10/(patch-[\w-]+\.py)" "\$\{extensions_root\}/[\w-]+"$', function, flags=re.M)
     on_disk = sorted(path.name for path in (ROOT / "gb10").glob("patch-*.py"))
     assert sorted(invoked) == on_disk
-    # An apply run already verifies an already-patched target; a separate --check run would re-prove the same bytes.
+    # Patchers run only through the function (rehearsal, then the real pass); an apply run already verifies an
+    # already-patched target, so a separate --check run would re-prove the same bytes.
+    assert len(re.findall(r"gb10/patch-[\w-]+\.py", RUN_SH)) == len(on_disk)
     assert not re.search(r'gb10/patch-[\w-]+\.py" --check', RUN_SH)
+    md_guard = function.index('if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then')
+    assert md_guard < function.index("patch-multidiffusion-performance.py") < function.index("\n  fi\n", md_guard)
+    assert function.index("patch-ultimate-upscale-state-lifecycle.py") < function.index("patch-ultimate-upscale-subcanvas.py")
 
 
-def test_patchers_run_after_the_extension_sync_and_before_the_container_starts():
-    sync = RUN_SH.index("rsync -a ")
-    md_block = RUN_SH.index('if [[ -d "${MULTIDIFFUSION_ROOT}" ]]; then')
-    md_end = RUN_SH.index("\nfi\n", md_block)
-    multidiffusion = RUN_SH.index("gb10/patch-multidiffusion-performance.py")
-    lifecycle = RUN_SH.index("gb10/patch-ultimate-upscale-state-lifecycle.py")
-    subcanvas = RUN_SH.index("gb10/patch-ultimate-upscale-subcanvas.py")
-    container_start = RUN_SH.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}"')
-
-    assert 'MULTIDIFFUSION_ROOT="${HOST_ROOT}/Extensions/multidiffusion-upscaler-for-automatic1111"' in RUN_SH
-    assert 'ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"' in RUN_SH
-    assert sync < md_block < multidiffusion < md_end < lifecycle < subcanvas < container_start
+def test_failable_steps_precede_the_teardown_and_mutations_follow_it():
+    teardown = RUN_SH.index(TEARDOWN)
+    before = (
+        "find \"${PROJECT_ROOT}/extensions\"",  # owned-extension discovery (fails on none)
+        "--entrypoint python \"${IMAGE_TAG}\"",  # image compile-stack probe
+        "cannot read the host NVIDIA driver version",
+        "compile cache namespace is not writable",
+        'image inspect "${IMAGE_TAG}"',
+        'patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}"',
+    )
+    for step in before:
+        assert RUN_SH.index(step) < teardown, step
+    sync = RUN_SH.index("rsync -a --checksum --delete")
+    patch = RUN_SH.index('patch_third_party_extensions "${HOST_ROOT}/Extensions"')
+    chown = RUN_SH.index("sudo chown -R 2323:2323")
+    start = RUN_SH.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}"')
+    assert teardown < sync < patch < chown < start
+    # The rehearsal patches a scratch copy, never the live Extensions tree, and removes it on exit.
+    rehearsal = RUN_SH[RUN_SH.index("PATCH_REHEARSAL_ROOT=") : teardown]
+    assert "mktemp -d" in rehearsal and "trap 'sudo rm -rf -- \"${PATCH_REHEARSAL_ROOT}\"' EXIT" in rehearsal
+    assert '"${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"' in rehearsal
