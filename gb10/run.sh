@@ -53,10 +53,11 @@ for d in "${HOST_DIRS[@]}"; do
   sudo mkdir -p "${HOST_ROOT}/${d}"
 done
 
-if [[ ! -e "${HOST_ROOT}/Outputs" ]]; then
+# Host paths are created and written as root, so they are also tested as root: the invoking user may not see them.
+if ! sudo test -e "${HOST_ROOT}/Outputs" && ! sudo test -L "${HOST_ROOT}/Outputs"; then
   sudo ln -s "${OUTPUTS_TARGET}" "${HOST_ROOT}/Outputs"
-elif [[ -L "${HOST_ROOT}/Outputs" ]]; then
-  current_target="$(readlink "${HOST_ROOT}/Outputs")"
+elif sudo test -L "${HOST_ROOT}/Outputs"; then
+  current_target="$(sudo readlink "${HOST_ROOT}/Outputs")"
   if [[ "${current_target}" != "${OUTPUTS_TARGET}" ]]; then
     echo "ERROR: ${HOST_ROOT}/Outputs points to ${current_target}, expected ${OUTPUTS_TARGET}" >&2
     exit 1
@@ -68,7 +69,7 @@ fi
 
 sudo mkdir -p "${HOST_ROOT}/config/generation-last"
 # A new settings file starts as {}: the app treats an empty one as damaged (modules/settings_file.py).
-if [[ ! -e "${HOST_ROOT}/config/config.json" ]]; then
+if ! sudo test -e "${HOST_ROOT}/config/config.json"; then
   printf '{}\n' | sudo tee "${HOST_ROOT}/config/config.json" >/dev/null
 fi
 sudo touch "${HOST_ROOT}/config/styles.csv"
@@ -170,7 +171,7 @@ fi
 # directory to patch.
 patch_third_party_extensions() {
   local extensions_root="$1"
-  if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then
+  if sudo test -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111"; then
     sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${extensions_root}/multidiffusion-upscaler-for-automatic1111"
   fi
   sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
@@ -242,7 +243,7 @@ rollback() {
     { sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}" >/dev/null && sudo "${DOCKER_BIN}" rm "${CONTAINER_NAME}" >/dev/null; } || ok=0
   fi
   for extension_name in "${OWNED_EXTENSIONS[@]}"; do
-    if [[ -d "${EXTENSION_BACKUP_ROOT}/${extension_name}" ]]; then
+    if sudo test -d "${EXTENSION_BACKUP_ROOT}/${extension_name}"; then
       mirror_owned_extension "${EXTENSION_BACKUP_ROOT}/${extension_name}" "${HOST_ROOT}/Extensions/${extension_name}" || ok=0
     fi
   done
@@ -289,7 +290,7 @@ trap 'exit 143' TERM
 # Extensions changes before the live container is stopped, and a source a patcher rejects fails the deploy here.
 echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
 for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
-  if [[ -d "${HOST_ROOT}/Extensions/${third_party_extension}" ]]; then
+  if sudo test -d "${HOST_ROOT}/Extensions/${third_party_extension}"; then
     sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
       "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"
   fi
@@ -300,7 +301,7 @@ patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}" >/dev/null
 # a rollback can put it back.
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do
   owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
-  if [[ -d "${owned_extension_target}" ]]; then
+  if sudo test -d "${owned_extension_target}"; then
     sudo rsync -a --exclude '/data/' --exclude '/annotator/downloads/' --exclude '/models/' \
       "${owned_extension_target}/" "${EXTENSION_BACKUP_ROOT}/${extension_name}/"
   else

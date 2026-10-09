@@ -128,7 +128,8 @@ save()
 
 FAKE_SUDO = r'''#!/bin/sh
 # Runs the command as the current user; the ownership operations the deploy does as root become checks that the
-# arguments are well formed.
+# arguments are well formed. Every command is recorded in $FAKE_SUDO_LOG.
+printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
 case "$1" in
   chown) exit 0 ;;
   install) shift; args=""; while [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) args="$args $1"; shift ;; esac; done; exec install $args ;;
@@ -265,11 +266,15 @@ def deploy(tmp_path):
         def state(self):
             return json.loads(state_path.read_text(encoding="utf-8"))
 
+        def sudo_commands(self):
+            return (tmp_path / "sudo.log").read_text(encoding="utf-8").splitlines()
+
         def run(self, **env):
             full_env = {
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "FAKE_DOCKER_STATE": str(state_path),
+                "FAKE_SUDO_LOG": str(tmp_path / "sudo.log"),
                 "DOCKER_BIN": str(bin_dir / "docker"),
                 "HOST_ROOT": str(host),
                 "OUTPUTS_TARGET": str(outputs),
@@ -333,6 +338,22 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
     assert f"{deploy.host}/Caches/app:/opt/stable-diffusion-webui/cache" in mounts
     assert f"{deploy.host}/Caches/compile:/opt/stable-diffusion-webui/cache/compile" in mounts
     assert list(deploy.tmp.iterdir()) == []
+    # Host paths written as root are also tested as root.
+    sudo_commands = deploy.sudo_commands()
+    for check in (f"test -e {deploy.host}/config/config.json", f"test -d {deploy.host}/Extensions/ext-a",
+                  f"test -d {deploy.host}/Extensions/ultimate-upscale-for-automatic1111", f"test -L {deploy.host}/Outputs"):
+        assert check in sudo_commands
+
+
+def test_an_outputs_symlink_to_an_unmounted_target_is_kept(deploy, tmp_path):
+    """A dangling Outputs link (the NAS not mounted yet) to the expected target is the expected link, not a conflict."""
+    target = tmp_path / "unmounted"
+    (deploy.host / "Outputs").symlink_to(target)
+
+    result = deploy.run(OUTPUTS_TARGET=str(target))
+
+    assert result.returncode == 0, result.stderr
+    assert os.readlink(deploy.host / "Outputs") == str(target)
 
 
 def test_a_container_that_dies_during_startup_is_replaced_by_the_previous_one(deploy):
