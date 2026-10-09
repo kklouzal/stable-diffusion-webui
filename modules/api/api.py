@@ -81,11 +81,10 @@ def _validate_override_settings(override_settings, opts) -> None:
     for key, value in (override_settings or {}).items():
         if opts.data.get(key) == value:
             continue  # opts.set leaves an unchanged value alone before looking the option up
-        option = opts.data_labels.get(key)
-        if option is None:
+        if key not in opts.data_labels:
             raise HTTPException(status_code=422, detail=f"override_settings: unknown option {key!r}")
-        if not opts.same_type(option.default, value):
-            raise HTTPException(status_code=422, detail=f"override_settings: option {key!r} expects a value of type {type(option.default).__name__}, got {type(value).__name__} {value!r}")
+        if mismatch := opts.api_type_mismatch(key, value):
+            raise HTTPException(status_code=422, detail=f"override_settings: option {key!r} {mismatch}")
 
 
 def _response_parameters(request, *, include_images: bool) -> dict[str, Any]:
@@ -483,21 +482,11 @@ def script_name_to_index(name, scripts):
 
 
 def _request_bool(req, key, default):
-    """A boolean request field: JSON true/false, 0/1, or the openclaw_env text grammar ("false" is False; bool()
-    made every non-empty string True). Missing -> default; null -> False, as bool(None) was."""
-    if not isinstance(req, dict) or key not in req:
-        return default
-    value = req[key]
-    if value is None or isinstance(value, bool):
-        return bool(value)
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        try:
-            return openclaw_env.parse_bool(value, key)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-    raise HTTPException(status_code=422, detail=f"{key}={value!r} is not a boolean")
+    """A boolean request field (openclaw_env.json_bool); a value that is not a boolean answers 422."""
+    try:
+        return openclaw_env.json_bool(req, key, default)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 def validate_sampler_name(name):

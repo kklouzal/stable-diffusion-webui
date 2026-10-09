@@ -16,14 +16,38 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
 
 
-def parse_bool(value: str, what: str) -> bool:
-    """The boolean grammar above for one non-empty string; `what` names the value in the ValueError."""
+def bool_token(value: str) -> bool | None:
+    """The boolean grammar above for one string: True, False, or None for any other text."""
     normalized = value.strip().lower()
     if normalized in _TRUE:
         return True
     if normalized in _FALSE:
         return False
-    raise ValueError(f"{what}={value!r} is not a boolean; use 1/true/yes/on or 0/false/no/off")
+    return None
+
+
+def parse_bool(value: str, what: str) -> bool:
+    """bool_token for one non-empty string; other text raises ValueError, which names the value `what`."""
+    parsed = bool_token(value)
+    if parsed is None:
+        raise ValueError(f"{what}={value!r} is not a boolean; use 1/true/yes/on or 0/false/no/off")
+    return parsed
+
+
+def json_bool(data, key: str, default):
+    """Field `key` of a JSON object as a boolean: missing -> default; null -> False, as bool(None); true/false, 0/1, or
+    text in the grammar above ("false" is False: bool() made every non-empty string True). Anything else raises
+    ValueError."""
+    if not isinstance(data, dict) or key not in data:
+        return default
+    value = data[key]
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return parse_bool(value, key)
+    raise ValueError(f"{key}={value!r} is not a boolean")
 
 
 def env_bool(name: str, default):

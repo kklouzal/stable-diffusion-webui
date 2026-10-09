@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from modules import headless_ui as gr
 
-from modules import errors
+from modules import errors, openclaw_env
 from modules.shared_cmd_options import cmd_opts
 from modules.paths_internal import script_path
 
@@ -170,8 +170,8 @@ class Options:
         if is_api and option.restrict_api:
             return False
 
-        if is_api and not self.same_type(option.default, value):
-            raise ValueError(f"setting {key!r} expects a value of type {type(option.default).__name__}, got {type(value).__name__} {value!r}")
+        if is_api and (mismatch := self.api_type_mismatch(key, value)):
+            raise ValueError(f"setting {key!r} {mismatch}")
 
         try:
             setattr(self, key, value)
@@ -215,6 +215,13 @@ class Options:
         type_y = self.typemap.get(type(y), type(y))
 
         return type_x == type_y
+
+    def api_type_mismatch(self, key, value):
+        """Why the API may not store value in option key (see set()), or None when same_type() accepts it."""
+        default = self.data_labels[key].default
+        if not self.same_type(default, value):
+            return f"expects a value of type {type(default).__name__}, got {type(value).__name__} {value!r}"
+        return None
 
     def load(self, filename):
         try:
@@ -333,12 +340,10 @@ class Options:
         expected_type = type(default_value)
         if expected_type == bool:
             if isinstance(value, str):
-                normalized = value.strip().lower()
-                if normalized in ("true", "1", "yes", "on"):
-                    return True
-                if normalized in ("false", "0", "no", "off"):
-                    return False
-                raise ValueError(f"setting {key!r} expects a boolean, got {value!r}")
+                parsed = openclaw_env.bool_token(value)
+                if parsed is None:
+                    raise ValueError(f"setting {key!r} expects a boolean, got {value!r}")
+                return parsed
 
             value = bool(value)
         else:

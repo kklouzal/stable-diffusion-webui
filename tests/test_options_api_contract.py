@@ -32,8 +32,9 @@ def test_api_set_rejects_a_value_of_another_type_instead_of_storing_it(options_m
     opts = make_opts(options_module)
 
     # The JSON string "false" stored in a bool option would read as True.
-    with pytest.raises(ValueError, match="enable_feature"):
+    with pytest.raises(ValueError) as raised:
         opts.set("enable_feature", "false", is_api=True)
+    assert str(raised.value) == "setting 'enable_feature' expects a value of type bool, got str 'false'"
     with pytest.raises(ValueError, match="clip_skip"):
         opts.set("clip_skip", "2", is_api=True)
     with pytest.raises(ValueError, match="vae"):
@@ -143,5 +144,6 @@ def test_cast_value_rejects_unrecognized_boolean_text(options_module):
 
     assert opts.cast_value("enable_feature", "False") is False
     assert opts.cast_value("enable_feature", " true ") is True
-    with pytest.raises(ValueError, match="enable_feature"):
+    with pytest.raises(ValueError) as raised:
         opts.cast_value("enable_feature", "maybe")
+    assert str(raised.value) == "setting 'enable_feature' expects a boolean, got 'maybe'"
