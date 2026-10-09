@@ -33,6 +33,19 @@ def _original_reload_model_weights(sd_model=None, info=None, forced_reload=False
     return CURRENT_STATUS_MODULE._backend_status_payload()
 
 
+def _noop(*args, **kwargs):
+    del args, kwargs
+
+
+def _load_core_module(name: str) -> types.ModuleType:
+    """Load a dependency-free core module (no A1111 imports) from the checkout under its real name."""
+    spec = importlib.util.spec_from_file_location(f"modules.{name}", EXT_ROOT.parents[1] / "modules" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve string annotations through sys.modules
+    spec.loader.exec_module(module)
+    return module
+
+
 def install_a1111_stubs() -> None:
     modules_pkg = types.ModuleType("modules")
     call_queue_mod = types.ModuleType("modules.call_queue")
@@ -47,6 +60,9 @@ def install_a1111_stubs() -> None:
     script_callbacks_mod.on_model_loaded = lambda _callback: None
     sd_models_mod = types.ModuleType("modules.sd_models")
     sd_models_mod.reload_model_weights = _original_reload_model_weights
+    # every function the backend-status hooks wrap must exist, or the install fails
+    for name in ("load_model", "get_checkpoint_state_dict", "load_model_weights", "instantiate_from_config", "send_model_to_device", "get_empty_cond", "apply_weight_quantization"):
+        setattr(sd_models_mod, name, _noop)
     sd_models_mod.model_data = types.SimpleNamespace(was_loaded_at_least_once=True, sd_model=None)
     sd_vae_mod = types.ModuleType("modules.sd_vae")
     sd_vae_mod.load_vae = lambda model, vae_file=None, vae_source="from unknown source": None
@@ -55,11 +71,16 @@ def install_a1111_stubs() -> None:
     processing_mod = types.ModuleType("modules.processing")
 
     class StableDiffusionProcessing:
+        conditioning_cache_lock = threading.RLock()
         cached_c = [None]
         cached_uc = [None]
         cached_img2img_init = [None]
 
     class StableDiffusionProcessingImg2Img:
+        @staticmethod
+        def clear_img2img_init_cache():
+            StableDiffusionProcessing.cached_img2img_init = [None, None]
+
         @staticmethod
         def img2img_init_cache_status():
             return {}
@@ -71,11 +92,9 @@ def install_a1111_stubs() -> None:
     processing_mod.StableDiffusionProcessing = StableDiffusionProcessing
     processing_mod.StableDiffusionProcessingImg2Img = StableDiffusionProcessingImg2Img
     processing_mod.StableDiffusionProcessingTxt2Img = StableDiffusionProcessingTxt2Img
-    openclaw_cache_epochs_mod = types.ModuleType("modules.openclaw_cache_epochs")
-    # the real boolean grammar (the module has no A1111 dependencies)
-    openclaw_env_spec = importlib.util.spec_from_file_location("modules.openclaw_env", EXT_ROOT.parents[1] / "modules" / "openclaw_env.py")
-    openclaw_env_mod = importlib.util.module_from_spec(openclaw_env_spec)
-    openclaw_env_spec.loader.exec_module(openclaw_env_mod)
+    # the real epoch registry and boolean grammar, fresh per call
+    openclaw_cache_epochs_mod = _load_core_module("openclaw_cache_epochs")
+    openclaw_env_mod = _load_core_module("openclaw_env")
     textual_inversion_pkg = types.ModuleType("modules.textual_inversion")
     textual_inversion_mod = types.ModuleType("modules.textual_inversion.textual_inversion")
     textual_inversion_pkg.textual_inversion = textual_inversion_mod
@@ -128,7 +147,7 @@ class BackendStatusReloadTests(unittest.TestCase):
 
         first_module = import_extension_module()
         first_wrapper = sd_models.reload_model_weights
-        self.assertTrue(getattr(first_wrapper, "__openclaw_backend_status_wrapped__", False))
+        self.assertIs(first_wrapper.__openclaw_backend_status_original__, _original_reload_model_weights)
 
         second_module = import_extension_module()
         second_wrapper = sd_models.reload_model_weights
@@ -146,6 +165,14 @@ class BackendStatusReloadTests(unittest.TestCase):
         self.assertEqual(status["label"], "Reloading checkpoint")
         self.assertFalse(second_module._backend_status_payload()["active"])
         self.assertIs(first_module._backend_status_payload()["active"], False)
+
+    def test_missing_wrap_target_fails_the_install(self):
+        for module_name, attr in (("modules.sd_models", "get_empty_cond"), ("modules.sd_vae", "load_vae")):
+            with self.subTest(target=f"{module_name}.{attr}"):
+                install_a1111_stubs()
+                delattr(sys.modules[module_name], attr)
+                with self.assertRaisesRegex(AttributeError, attr):
+                    import_extension_module()
 
 
 class _FakeApp:
@@ -289,13 +316,107 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/token_counter", {"text": "a b c"}), {"ok": True, "token_count": 3})
 
 
+class _Vae:
+    def eval(self):
+        return self
+
+
+class _Compiled:
+    def __init__(self, original):
+        self._orig_mod = original
+
+
+class TorchCompileSlotTests(unittest.TestCase):
+    def setUp(self):
+        install_a1111_stubs()
+        self.module = import_extension_module()
+        self.compiled_originals = []
+        self.module.torch = types.SimpleNamespace(compile=lambda original, **kwargs: self.compiled_originals.append(original) or _Compiled(original))
+        self.model = types.SimpleNamespace(first_stage_model=_Vae())
+        sys.modules["modules.sd_models"].model_data.sd_model = self.model
+
+    def test_vae_compile_slot_tracks_the_module_objects(self):
+        vae = self.model.first_stage_model
+        self.assertEqual(self.module.apply_torch_compile_settings(vae=True), {
+            "ok": True, "desired": {"vae": True}, "status": {"vae": True, "last_error": None},
+            "results": [{"name": "vae", "enabled": True, "changed": True, "mode": "reduce-overhead", "dynamic": True}],
+        })
+        compiled = self.model.first_stage_model
+        self.assertIs(compiled._orig_mod, vae)
+
+        again = self.module.apply_torch_compile_settings(vae=True)
+        self.assertEqual(again["results"], [{"name": "vae", "enabled": True, "changed": False, "already_compiled": True}])
+        self.assertIs(self.model.first_stage_model, compiled)
+
+        disabled = self.module.apply_torch_compile_settings(vae=False)
+        self.assertEqual((disabled["status"], disabled["results"]), ({"vae": False, "last_error": None}, [{"name": "vae", "enabled": False, "changed": True}]))
+        self.assertIs(self.model.first_stage_model, vae)
+
+        # a reloaded model's VAE is a new object: compile it, never reinstall the old one
+        self.module.apply_torch_compile_settings(vae=True)
+        self.model.first_stage_model = fresh = _Vae()
+        self.assertEqual(self.module.apply_torch_compile_settings(vae=True)["results"][0]["changed"], True)
+        self.assertIs(self.model.first_stage_model._orig_mod, fresh)
+        self.assertEqual(self.compiled_originals, [vae, vae, fresh])
+
+
+class ClearCondCacheTests(unittest.TestCase):
+    def setUp(self):
+        install_a1111_stubs()
+        self.module = import_extension_module()
+        processing = sys.modules["modules.processing"]
+        self.base = processing.StableDiffusionProcessing
+        self.txt2img = processing.StableDiffusionProcessingTxt2Img
+        self.base.cached_c = [("c",), "c"]
+        self.base.cached_uc = [("uc",), "uc"]
+        self.txt2img.cached_hr_c = [("hr_c",), "hr_c"]
+        self.txt2img.cached_hr_uc = [("hr_uc",), "hr_uc"]
+        self.base.cached_img2img_init = [("img2img",), {"init_latent": object()}]
+
+    def _cached_keys(self):
+        return [self.base.cached_c[0], self.base.cached_uc[0], self.txt2img.cached_hr_c[0], self.txt2img.cached_hr_uc[0], self.base.cached_img2img_init[0]]
+
+    def _conditioning_epochs(self):
+        return self.module.openclaw_cache_epochs.epoch_subset(("conditioner_epoch", "conditioning_hook_epoch"))
+
+    def test_clear_cond_cache_supports_granular_targets(self):
+        result = self.module.clear_cond_cache(["img2img_init"])
+
+        self.assertEqual(result["targets"], ["img2img_init"])
+        self.assertEqual(result["cleared"], ["StableDiffusionProcessing.cached_img2img_init"])
+        self.assertEqual(self._cached_keys(), [("c",), ("uc",), ("hr_c",), ("hr_uc",), None])
+        self.assertEqual(self._conditioning_epochs(), (("conditioner_epoch", 0), ("conditioning_hook_epoch", 0)))
+
+    def test_clear_cond_cache_default_preserves_legacy_clear_all_behavior(self):
+        result = self.module.clear_cond_cache()
+
+        self.assertEqual(result["targets"], ["c", "hr_c", "hr_uc", "img2img_init", "uc"])
+        self.assertEqual(self._cached_keys(), [None] * 5)
+        self.assertEqual(self._conditioning_epochs(), (("conditioner_epoch", 1), ("conditioning_hook_epoch", 1)))
+
+
 class TokenCountTests(unittest.TestCase):
     def setUp(self):
         install_a1111_stubs()
         self.module = import_extension_module()
 
-    def test_counts_the_longest_scheduled_prompt(self):
-        self.assertEqual(self.module.estimate_token_count("a b c", 20), {"ok": True, "token_count": 5, "max_length": 75})
+    def test_token_count_falls_back_to_input_text_when_prompt_schedule_is_empty(self):
+        self.module.prompt_parser.get_learned_conditioning_prompt_schedules = lambda _prompts, _steps: []
+
+        result = self.module.estimate_token_count("fallback prompt", 20)
+
+        self.assertEqual(result, {"ok": True, "token_count": len("fallback prompt"), "max_length": 75})
+
+    def test_token_count_uses_longest_scheduled_prompt(self):
+        schedules = [
+            [[5, "short"], [10, "medium prompt"]],
+            [[20, "the longest scheduled prompt"]],
+        ]
+        self.module.prompt_parser.get_learned_conditioning_prompt_schedules = lambda _prompts, _steps: schedules
+
+        result = self.module.estimate_token_count("ignored base prompt", 20)
+
+        self.assertEqual(result, {"ok": True, "token_count": len("the longest scheduled prompt"), "max_length": 75})
 
     def test_missing_text_encoder_is_not_reported_as_a_count(self):
         self.module.model_hijack = types.SimpleNamespace(get_prompt_lengths=lambda prompt: ("-", "-"))
