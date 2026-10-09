@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 from collections import namedtuple
-import enum
 
 import torch
 import torch.nn as nn
@@ -13,13 +12,6 @@ import modules.models.sd3.mmdit
 NetworkWeights = namedtuple('NetworkWeights', ['network_key', 'sd_key', 'w', 'sd_module'])
 
 metadata_tags_order = {"ss_sd_model_name": 1, "ss_resolution": 2, "ss_clip_skip": 3, "ss_num_train_images": 10, "ss_tag_frequency": 20}
-
-
-class SdVersion(enum.Enum):
-    Unknown = 1
-    SD1 = 2
-    SD2 = 3
-    SDXL = 4
 
 
 class NetworkOnDisk:
@@ -56,18 +48,6 @@ class NetworkOnDisk:
             hashes.sha256_from_cache(self.filename, "lora/" + self.name, use_addnet_hash=self.is_safetensors) or
             ''
         )
-
-        self.sd_version = self.detect_version()
-
-    def detect_version(self):
-        if str(self.metadata.get('ss_base_model_version', "")).startswith("sdxl_"):
-            return SdVersion.SDXL
-        elif str(self.metadata.get('ss_v2', "")) == "True":
-            return SdVersion.SD2
-        elif len(self.metadata):
-            return SdVersion.SD1
-
-        return SdVersion.Unknown
 
     def set_hash(self, v):
         self.hash = v

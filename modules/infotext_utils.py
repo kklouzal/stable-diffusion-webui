@@ -1,11 +1,8 @@
 from __future__ import annotations
 import json
 import re
-import sys
 
 from modules import shared, processing, infotext_versions, prompt_parser
-
-sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]  # alias for old name
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
@@ -53,13 +50,18 @@ def unquote(text):
 
 
 def add_paste_fields(tabname, init_img, fields, override_settings_component=None):
+    """Registers a tab's infotext fields; plain (component, target) pairs are converted to PasteField in place.
+
+    init_img and override_settings_component are accepted for extension compatibility and ignored: only the removed
+    browser UI's paste button used them.
+    """
 
     if fields:
         for i in range(len(fields)):
             if not isinstance(fields[i], PasteField):
                 fields[i] = PasteField(*fields[i])
 
-    paste_fields[tabname] = {"init_img": init_img, "fields": fields, "override_settings_component": override_settings_component}
+    paste_fields[tabname] = {"fields": fields}
 
 
 def restore_old_hires_fix_params(res):
@@ -280,35 +282,6 @@ infotext_to_setting_name_mapping = [
 
 def infotext_setting_name_mapping():
     return [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext] + infotext_to_setting_name_mapping
-
-
-def create_override_settings_dict(text_pairs):
-    """creates processing's override_settings parameters from a UI multiselect
-
-    Example input:
-        ['Clip skip: 2', 'Model hash: e6e99610c4', 'ENSD: 31337']
-
-    Example output:
-        {'CLIP_stop_at_last_layers': 2, 'sd_model_checkpoint': 'e6e99610c4', 'eta_noise_seed_delta': 31337}
-    """
-
-    res = {}
-
-    params = {}
-    for pair in text_pairs:
-        k, v = pair.split(":", maxsplit=1)
-
-        params[k] = v.strip()
-
-    for param_name, setting_name in infotext_setting_name_mapping():
-        value = params.get(param_name, None)
-
-        if value is None:
-            continue
-
-        res[setting_name] = shared.opts.cast_value(setting_name, value)
-
-    return res
 
 
 def get_override_settings(params, *, skip_fields=None):

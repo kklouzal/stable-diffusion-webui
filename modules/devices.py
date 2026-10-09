@@ -1,12 +1,8 @@
-import sys
 import contextlib
 from functools import lru_cache
 
 import torch
-from modules import errors, shared, npu_specific
-
-if sys.platform == "darwin":
-    from modules import mac_specific
+from modules import errors, shared
 
 if shared.cmd_opts.use_ipex:
     from modules import xpu_specific
@@ -14,13 +10,6 @@ if shared.cmd_opts.use_ipex:
 
 def has_xpu() -> bool:
     return shared.cmd_opts.use_ipex and xpu_specific.has_xpu
-
-
-def has_mps() -> bool:
-    if sys.platform != "darwin":
-        return False
-    else:
-        return mac_specific.has_mps
 
 
 def cuda_no_autocast(device_id=None) -> bool:
@@ -51,14 +40,8 @@ def get_optimal_device_name():
     if torch.cuda.is_available():
         return get_cuda_device_string()
 
-    if has_mps():
-        return "mps"
-
     if has_xpu():
         return xpu_specific.get_xpu_device_string()
-
-    if npu_specific.has_npu:
-        return npu_specific.get_npu_device_string()
 
     return "cpu"
 
@@ -81,21 +64,8 @@ def torch_gc():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
 
-    if has_mps():
-        mac_specific.torch_mps_gc()
-
     if has_xpu():
         xpu_specific.torch_xpu_gc()
-
-    if npu_specific.has_npu:
-        torch_npu_set_device()
-        npu_specific.torch_npu_gc()
-
-
-def torch_npu_set_device():
-    # Work around due to bug in torch_npu, revert me after fixed, @see https://gitee.com/ascend/pytorch/issues/I8KECW?from=project-issue
-    if npu_specific.has_npu:
-        torch.npu.set_device(0)
 
 
 def enable_tf32():
@@ -211,6 +181,18 @@ def manual_cast(target_dtype):
                     delattr(module_type, "org_forward")
 
 
+@lru_cache
+def _autocast_needs_manual_cast() -> bool:
+    """
+    Whether autocast() has to use manual_cast instead of torch.autocast: an IPEX XPU, or a GTX 16xx card.
+
+    Resolved once, on the first autocast() that gets this far: --use-ipex and the XPU probe are fixed at import and the
+    CUDA device at startup (nothing switches the current device later). A failed probe (no CUDA device) raises and is
+    not cached.
+    """
+    return has_xpu() or cuda_no_autocast()
+
+
 def autocast(disable=False):
     if disable:
         return contextlib.nullcontext()
@@ -229,7 +211,7 @@ def autocast(disable=False):
     if dtype == torch.float32 or dtype_inference == torch.float32:
         return contextlib.nullcontext()
 
-    if has_xpu() or has_mps() or cuda_no_autocast():
+    if _autocast_needs_manual_cast():
         return manual_cast(dtype)
 
     return torch.autocast("cuda", dtype=dtype)

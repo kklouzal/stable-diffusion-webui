@@ -57,7 +57,7 @@ def _shared():
     shared = types.ModuleType("modules.shared")
     shared.opts = SimpleNamespace(
         ESRGAN_tile=192, ESRGAN_tile_overlap=8, enable_upscale_progressbar=False, upscaling_max_images_in_cache=5,
-        SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8, ldsr_steps=1, ldsr_cached=False,
+        SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8,
         font="", n_rows=-1,
     )
     shared.cmd_opts = SimpleNamespace(no_half=False, upcast_sampling=False, unix_filenames_sanitization=False, filenames_max_length=128)
@@ -109,15 +109,16 @@ def env(tmp_path):
         "modules.script_callbacks": script_callbacks,
         "modules.errors": errors,
         "modules.sd_samplers": types.ModuleType("modules.sd_samplers"),
-        "modules.images": None, "modules.torch_utils": None, "modules.upscaler": None, "modules.upscaler_utils": None,
+        "modules.png_writer": None, "modules.images": None, "modules.torch_utils": None, "modules.upscaler": None,
+        "modules.upscaler_utils": None,
     }
     with _modules(stubs):
-        for name in ("modules.images", "modules.torch_utils", "modules.upscaler", "modules.upscaler_utils"):
+        for name in ("modules.png_writer", "modules.images", "modules.torch_utils", "modules.upscaler", "modules.upscaler_utils"):
             sys.modules.pop(name)
         pkg = sys.modules["modules"]
         for attr in ("shared", "devices", "modelloader", "errors", "script_callbacks", "sd_samplers", "paths_internal"):
             setattr(pkg, attr, sys.modules[f"modules.{attr}"])
-        for attr in ("torch_utils", "images", "upscaler", "upscaler_utils"):
+        for attr in ("png_writer", "torch_utils", "images", "upscaler", "upscaler_utils"):
             setattr(pkg, attr, _load(f"modules.{attr}", ROOT / "modules" / f"{attr}.py"))
         yield SimpleNamespace(
             shared=shared, devices=devices, modelloader=modelloader, loader_calls=loader_calls,
@@ -329,57 +330,25 @@ def test_scunet_uses_the_shared_model_cache(env):
     assert env.loader_calls[-1][1]["expected_architecture"] == "SCUNet"
 
 
-def test_unloadable_ldsr_fails_instead_of_lanczos(env):
-    ldsr_arch = types.ModuleType("ldsr_model_arch")
-    ldsr_arch.LDSR = lambda model, yaml: pytest.fail("LDSR must not be constructed without a model")
-    stubs = {"ldsr_model_arch": ldsr_arch, "sd_hijack_autoencoder": types.ModuleType("x"), "sd_hijack_ddpm_v1": types.ModuleType("y")}
-    with _modules(stubs):
-        module = _load_script(env, "extensions-builtin/LDSR/scripts/ldsr_model.py")
-        upscaler = module.UpscalerLDSR(str(env.tmp_path))
-        upscaler.model_path = str(env.tmp_path)
+def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
+    # modules.util.load_file_from_url contract: saved as `file_name` if given, else as the URL's basename.
+    downloads = []
 
-        with pytest.raises(RuntimeError, match="Unable to load LDSR model"):
-            upscaler.upscale(_random_image(16, 16, seed=0), 2, None)
+    def load_file_from_url(url, *, model_dir, file_name=None, **kwargs):
+        downloads.append((url, model_dir, file_name))
+        return str(Path(model_dir) / (file_name or Path(url).name))
 
+    env.modelloader.load_file_from_url = load_file_from_url
+    env.modelloader.load_cached_spandrel_model = lambda path, **kwargs: (env.loader_calls.append((path, kwargs)), object())[1]
+    module = _load_script(env, "extensions-builtin/ScuNET/scripts/scunet_model.py")
+    upscaler = module.UpscalerScuNET(str(env.tmp_path))
+    upscaler.model_download_path = str(env.tmp_path)
 
-# --- LDSR decodes once ------------------------------------------------------------------------------------------
+    upscaler.load_model(upscaler.model_url)
 
-def test_ldsr_decodes_the_sample_once(env, monkeypatch):
-    ddim = types.ModuleType("ldm.models.diffusion.ddim")
-    ddim.DDIMSampler = object
-    util = types.ModuleType("ldm.util")
-    util.instantiate_from_config = util.ismap = None
-    stubs = {
-        "ldm": _package("ldm"), "ldm.models": _package("ldm.models"), "ldm.models.diffusion": _package("ldm.models.diffusion"),
-        "ldm.models.diffusion.ddim": ddim, "ldm.util": util, "modules.sd_hijack": types.ModuleType("modules.sd_hijack"),
-    }
-    with _modules(stubs):
-        sys.modules["modules"].sd_hijack = stubs["modules.sd_hijack"]
-        arch = _load_private("_c2_ldsr_model_arch", ROOT / "extensions-builtin/LDSR/ldsr_model_arch.py")
-
-    decodes = []
-    sample = torch.full((1, 3, 4, 4), 0.25)
-
-    class Model:
-        first_stage_key = "image"
-        cond_stage_key = "LR_image"
-
-        def get_input(self, batch, key, return_first_stage_outputs=False, force_c_encode=False, return_original_cond=False):
-            assert not return_first_stage_outputs  # that would decode the 4x input just to log it
-            return [torch.zeros(1, 3, 4, 4), "cond"]
-
-        def decode_first_stage(self, z, **kwargs):
-            decodes.append(kwargs)
-            return z * 2
-
-        def ema_scope(self, _context):
-            return contextlib.nullcontext()
-
-    monkeypatch.setattr(arch, "convsample_ddim", lambda model, cond, **kwargs: (sample, {}))
-    log = arch.make_convolutional_sample({"image": None}, Model(), custom_steps=1)
-
-    assert decodes == [{}]
-    assert torch.equal(log["sample"], sample * 2)
+    assert downloads == [(upscaler.model_url, str(env.tmp_path), None)]
+    # spandrel dispatches on the extension: a name without .pth raises "Unsupported model file extension".
+    assert env.loader_calls[-1][0] == str(env.tmp_path / "scunet_color_real_gan.pth")
 
 
 # --- extras "Upscale" script -------------------------------------------------------------------------------------
@@ -389,12 +358,10 @@ def pp_upscale(env):
     scripts_postprocessing = types.ModuleType("modules.scripts_postprocessing")
     scripts_postprocessing.ScriptPostprocessing = type("ScriptPostprocessing", (), {})
     scripts_postprocessing.PostprocessedImage = object  # annotations only
-    ui = types.ModuleType("modules.ui")
-    ui.switch_values_symbol = ""
     ui_components = types.ModuleType("modules.ui_components")
-    ui_components.FormRow = ui_components.ToolButton = ui_components.InputAccordion = None
+    ui_components.FormRow = ui_components.InputAccordion = None
     stubs = {
-        "modules.scripts_postprocessing": scripts_postprocessing, "modules.ui": ui, "modules.ui_components": ui_components,
+        "modules.scripts_postprocessing": scripts_postprocessing, "modules.ui_components": ui_components,
         "modules.headless_ui": types.ModuleType("modules.headless_ui"),
     }
     with _modules(stubs):

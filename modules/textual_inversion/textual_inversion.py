@@ -1,7 +1,7 @@
 import os
 import threading
 from collections import namedtuple
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 import torch
 import tqdm
@@ -150,7 +150,6 @@ class EmbeddingDatabase:
         return embedding
 
     def get_expected_shape(self):
-        devices.torch_npu_set_device()
         vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
         return vec.shape[1]
 
@@ -465,6 +464,154 @@ def apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, pre
     p.height = preview_height
 
 
+def make_training_dir(log_directory, subdir, enabled):
+    """Create and return log_directory/subdir, or return None when that training output is disabled."""
+    if not enabled:
+        return None
+
+    path = os.path.join(log_directory, subdir)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def make_grad_clipper(clip_grad_mode, clip_grad_value, steps, initial_step):
+    """Return (clip function, schedule of its clip value), or (None, None) when gradient clipping is off."""
+    clip_grad = torch.nn.utils.clip_grad_value_ if clip_grad_mode == "value" else \
+        torch.nn.utils.clip_grad_norm_ if clip_grad_mode == "norm" else \
+        None
+    if not clip_grad:
+        return None, None
+
+    return clip_grad, LearnRateScheduler(clip_grad_value, steps, initial_step, verbose=False)
+
+
+def epoch_geometry(ds):
+    """Return (gradient_step, steps_per_epoch, batches_per_epoch) of a PersonalizedBase dataset.
+
+    One optimizer step consumes batch_size * gradient_step images. An epoch stops after its last full gradient
+    accumulation window (batches_per_epoch batches), which works as drop_last for gradient accumulation.
+    """
+    batches = len(ds) // ds.batch_size
+    return ds.gradient_step, batches // ds.gradient_step, batches - batches % ds.gradient_step
+
+
+def training_batches(dl, trained, optimizer, scheduler, clip_grad_sched, steps, initial_step, gradient_step, batches_per_epoch):
+    """Yield (j, batch) for every training batch, j counting the batches of the current epoch.
+
+    The caller runs one optimizer step every gradient_step batches and advances trained.step. Before each batch this
+    applies the learning-rate schedule (and the clip-value schedule, when clipping) for trained.step. Iteration ends
+    when the learning-rate schedule is finished or the job is interrupted; either way the caller saves the result.
+    """
+    for _ in range((steps - initial_step) * gradient_step):
+        if scheduler.finished or shared.state.interrupted:
+            return
+        for j, batch in enumerate(dl):
+            # works as a drop_last=True for gradient accumulation
+            if j == batches_per_epoch:
+                break
+            scheduler.apply(optimizer, trained.step)
+            if scheduler.finished or shared.state.interrupted:
+                return
+            if clip_grad_sched is not None:
+                clip_grad_sched.step(trained.step)
+
+            yield j, batch
+
+
+@contextmanager
+def training_session(error_message, unload, offloaded_models, network=None):
+    """Hold the process-wide state of one training run and restore it however the run ends.
+
+    With `unload`, `offloaded_models` move to the CPU and live previews pause (parallel_processing_allowed). `network`
+    (a Hypernetwork) is in train mode for the run, and gradient checkpointing is on. A failure is reported and
+    re-raised, so the API answers with the error and the caller skips its final save.
+    """
+    old_parallel_processing_allowed = shared.parallel_processing_allowed
+    try:
+        if unload:
+            shared.parallel_processing_allowed = False
+            for model in offloaded_models:
+                model.to(devices.cpu)
+        if network is not None:
+            network.train()
+        sd_hijack_checkpoint.add()
+        yield
+    except Exception:
+        errors.report(error_message, exc_info=True)
+        raise
+    finally:
+        if network is not None:
+            network.eval()
+        sd_hijack_checkpoint.remove()
+        for model in offloaded_models:
+            model.to(devices.device)
+        shared.parallel_processing_allowed = old_parallel_processing_allowed
+
+
+def render_training_preview(batch, *, p_kwargs, txt2img_preview, training_width, training_height, unload, offloaded_models, images_dir, forced_filename, tensorboard_writer, epoch_num, step):
+    """Generate, show and save one training preview; return (image or None, text naming the saved image).
+
+    `txt2img_preview` holds the preview arguments of apply_txt2img_preview_params, or is None to preview the batch
+    prompt at the training size. The preview reseeds the global torch RNG; the CPU and CUDA RNG states are restored
+    afterwards so the training noise does not repeat after every preview.
+    """
+    from modules import processing
+
+    last_saved_image = os.path.join(images_dir, forced_filename)
+    rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        for model in offloaded_models:
+            model.to(devices.device)
+
+        p = processing.StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, do_not_save_grid=True, do_not_save_samples=True, **p_kwargs)
+
+        if txt2img_preview is not None:
+            apply_txt2img_preview_params(p, *txt2img_preview)
+        else:
+            p.prompt = batch.cond_text[0]
+            p.steps = 20
+            p.width = training_width
+            p.height = training_height
+
+        preview_text = p.prompt
+
+        with closing(p):
+            processed = processing.process_images(p)
+            image = processed.images[0] if len(processed.images) > 0 else None
+
+        if unload:
+            for model in offloaded_models:
+                model.to(devices.cpu)
+    finally:
+        torch.set_rng_state(rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_state)
+
+    if image is not None:
+        shared.state.assign_current_image(image)
+
+        last_saved_image, _ = images.save_image(image, images_dir, "", p.seed, p.prompt, shared.opts.samples_format, processed.infotexts[0], p=p, forced_filename=forced_filename, save_to_dirs=False)
+        last_saved_image += f", prompt: {preview_text}"
+
+        if tensorboard_writer is not None and shared.opts.training_tensorboard_save_images:
+            tensorboard_add_image(tensorboard_writer, f"Validation at epoch {epoch_num}", image, step)
+
+    return image, last_saved_image
+
+
+def training_textinfo(loss_step, steps_done, prompt, saved_kind, last_saved_file, last_saved_image):
+    return f"""
+<p>
+Loss: {loss_step:.7f}<br/>
+Step: {steps_done}<br/>
+Last prompt: {html.escape(prompt)}<br/>
+Last saved {saved_kind}: {html.escape(last_saved_file)}<br/>
+Last saved image: {html.escape(last_saved_image)}<br/>
+</p>
+"""
+
+
 def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_step, data_root, log_directory, training_width, training_height, varsize, steps, clip_grad_mode, clip_grad_value, shuffle_tags, tag_drop_out, latent_sampling_method, use_weight, create_image_every, save_embedding_every, template_filename, save_image_with_stored_embedding, preview_from_txt2img, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height):
     from modules import processing
 
@@ -482,24 +629,9 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
 
     log_directory = os.path.join(log_directory, datetime.datetime.now().strftime("%Y-%m-%d"), embedding_name)
     unload = shared.opts.unload_models_when_training
-
-    if save_embedding_every > 0:
-        embedding_dir = os.path.join(log_directory, "embeddings")
-        os.makedirs(embedding_dir, exist_ok=True)
-    else:
-        embedding_dir = None
-
-    if create_image_every > 0:
-        images_dir = os.path.join(log_directory, "images")
-        os.makedirs(images_dir, exist_ok=True)
-    else:
-        images_dir = None
-
-    if create_image_every > 0 and save_image_with_stored_embedding:
-        images_embeds_dir = os.path.join(log_directory, "image_embeddings")
-        os.makedirs(images_embeds_dir, exist_ok=True)
-    else:
-        images_embeds_dir = None
+    embedding_dir = make_training_dir(log_directory, "embeddings", save_embedding_every > 0)
+    images_dir = make_training_dir(log_directory, "images", create_image_every > 0)
+    images_embeds_dir = make_training_dir(log_directory, "image_embeddings", create_image_every > 0 and save_image_with_stored_embedding)
 
     hijack = sd_hijack.model_hijack
 
@@ -512,14 +644,9 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
         return embedding, filename
 
     scheduler = LearnRateScheduler(learn_rate, steps, initial_step)
-    clip_grad = torch.nn.utils.clip_grad_value_ if clip_grad_mode == "value" else \
-        torch.nn.utils.clip_grad_norm_ if clip_grad_mode == "norm" else \
-        None
-    if clip_grad:
-        clip_grad_sched = LearnRateScheduler(clip_grad_value, steps, initial_step, verbose=False)
+    clip_grad, clip_grad_sched = make_grad_clipper(clip_grad_mode, clip_grad_value, steps, initial_step)
     # dataset loading may take a while, so input validations and early returns should be done before this
     shared.state.textinfo = f"Preparing dataset from {html.escape(data_root)}..."
-    old_parallel_processing_allowed = shared.parallel_processing_allowed
 
     tensorboard_writer = None
     if shared.opts.training_enable_tensorboard:
@@ -539,65 +666,40 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
 
     dl = modules.textual_inversion.dataset.PersonalizedDataLoader(ds, latent_sampling_method=latent_sampling_method, batch_size=ds.batch_size, pin_memory=pin_memory)
 
-    if unload:
-        shared.parallel_processing_allowed = False
-        shared.sd_model.first_stage_model.to(devices.cpu)
+    txt2img_preview = (preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height) if preview_from_txt2img else None
+    offloaded_models = [shared.sd_model.first_stage_model]
 
-    embedding.vec.requires_grad = True
-    optimizer = torch.optim.AdamW([embedding.vec], lr=scheduler.learn_rate, weight_decay=0.0)
-    if shared.opts.save_optimizer_state:
-        optimizer_state_dict = None
-        if os.path.exists(f"{filename}.optim"):
-            optimizer_saved_dict = torch.load(f"{filename}.optim", map_location='cpu')
-            if embedding.checksum() == optimizer_saved_dict.get('hash', None):
-                optimizer_state_dict = optimizer_saved_dict.get('optimizer_state_dict', None)
+    with training_session("Error training embedding", unload, offloaded_models):
+        embedding.vec.requires_grad = True
+        optimizer = torch.optim.AdamW([embedding.vec], lr=scheduler.learn_rate, weight_decay=0.0)
+        if shared.opts.save_optimizer_state:
+            optimizer_state_dict = None
+            if os.path.exists(f"{filename}.optim"):
+                optimizer_saved_dict = torch.load(f"{filename}.optim", map_location='cpu')
+                if embedding.checksum() == optimizer_saved_dict.get('hash', None):
+                    optimizer_state_dict = optimizer_saved_dict.get('optimizer_state_dict', None)
 
-        if optimizer_state_dict is not None:
-            optimizer.load_state_dict(optimizer_state_dict)
-            print("Loaded existing optimizer from checkpoint")
-        else:
-            print("No saved optimizer exists in checkpoint")
+            if optimizer_state_dict is not None:
+                optimizer.load_state_dict(optimizer_state_dict)
+                print("Loaded existing optimizer from checkpoint")
+            else:
+                print("No saved optimizer exists in checkpoint")
 
-    scaler = torch.amp.GradScaler("cuda")
+        scaler = torch.amp.GradScaler("cuda")
 
-    batch_size = ds.batch_size
-    gradient_step = ds.gradient_step
-    # n steps = batch_size * gradient_step * n image processed
-    steps_per_epoch = len(ds) // batch_size // gradient_step
-    max_steps_per_epoch = len(ds) // batch_size - (len(ds) // batch_size) % gradient_step
-    loss_step = 0
-    _loss_step = 0 #internal
+        gradient_step, steps_per_epoch, batches_per_epoch = epoch_geometry(ds)
+        loss_step = 0
+        _loss_step = 0 #internal
 
-    last_saved_file = "<none>"
-    last_saved_image = "<none>"
-    forced_filename = "<none>"
-    embedding_yet_to_be_embedded = False
+        last_saved_file = "<none>"
+        last_saved_image = "<none>"
+        embedding_yet_to_be_embedded = False
 
-    is_training_inpainting_model = shared.sd_model.model.conditioning_key in {'hybrid', 'concat'}
-    img_c = None
+        is_training_inpainting_model = shared.sd_model.model.conditioning_key in {'hybrid', 'concat'}
+        img_c = None
 
-    pbar = tqdm.tqdm(total=steps - initial_step)
-    try:
-        sd_hijack_checkpoint.add()
-
-        for _ in range((steps-initial_step) * gradient_step):
-            if scheduler.finished:
-                break
-            if shared.state.interrupted:
-                break
-            for j, batch in enumerate(dl):
-                # works as a drop_last=True for gradient accumulation
-                if j == max_steps_per_epoch:
-                    break
-                scheduler.apply(optimizer, embedding.step)
-                if scheduler.finished:
-                    break
-                if shared.state.interrupted:
-                    break
-
-                if clip_grad:
-                    clip_grad_sched.step(embedding.step)
-
+        with tqdm.tqdm(total=steps - initial_step, leave=False) as pbar:
+            for j, batch in training_batches(dl, embedding, optimizer, scheduler, clip_grad_sched, steps, initial_step, gradient_step, batches_per_epoch):
                 with devices.autocast():
                     x = batch.latent_sample.to(devices.device, non_blocking=pin_memory)
                     if use_weight:
@@ -648,7 +750,7 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
                     # Before saving, change name to match current checkpoint.
                     embedding_name_every = f'{embedding_name}-{steps_done}'
                     last_saved_file = os.path.join(embedding_dir, f'{embedding_name_every}.pt')
-                    save_embedding(embedding, optimizer, checkpoint, embedding_name_every, last_saved_file, remove_cached_checksum=True)
+                    save_embedding(embedding, optimizer, checkpoint, embedding_name_every, last_saved_file)
                     embedding_yet_to_be_embedded = True
 
                 write_loss(log_directory, "textual_inversion_loss.csv", embedding.step, steps_per_epoch, {
@@ -657,43 +759,11 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
                 })
 
                 if images_dir is not None and steps_done % create_image_every == 0:
-                    forced_filename = f'{embedding_name}-{steps_done}'
-                    last_saved_image = os.path.join(images_dir, forced_filename)
-
-                    shared.sd_model.first_stage_model.to(devices.device)
-
-                    p = processing.StableDiffusionProcessingTxt2Img(
-                        sd_model=shared.sd_model,
-                        do_not_save_grid=True,
-                        do_not_save_samples=True,
-                        do_not_reload_embeddings=True,
+                    image, last_saved_image = render_training_preview(
+                        batch, p_kwargs={"do_not_reload_embeddings": True}, txt2img_preview=txt2img_preview, training_width=training_width, training_height=training_height,
+                        unload=unload, offloaded_models=offloaded_models, images_dir=images_dir, forced_filename=f'{embedding_name}-{steps_done}',
+                        tensorboard_writer=tensorboard_writer, epoch_num=epoch_num, step=embedding.step,
                     )
-
-                    if preview_from_txt2img:
-                        apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height)
-                    else:
-                        p.prompt = batch.cond_text[0]
-                        p.steps = 20
-                        p.width = training_width
-                        p.height = training_height
-
-                    preview_text = p.prompt
-
-                    with closing(p):
-                        processed = processing.process_images(p)
-                        image = processed.images[0] if len(processed.images) > 0 else None
-
-                    if unload:
-                        shared.sd_model.first_stage_model.to(devices.cpu)
-
-                    if image is not None:
-                        shared.state.assign_current_image(image)
-
-                        last_saved_image, last_text_info = images.save_image(image, images_dir, "", p.seed, p.prompt, shared.opts.samples_format, processed.infotexts[0], p=p, forced_filename=forced_filename, save_to_dirs=False)
-                        last_saved_image += f", prompt: {preview_text}"
-
-                        if tensorboard_writer and shared.opts.training_tensorboard_save_images:
-                            tensorboard_add_image(tensorboard_writer, f"Validation at epoch {epoch_num}", image, embedding.step)
 
                     if save_image_with_stored_embedding and os.path.exists(last_saved_file) and embedding_yet_to_be_embedded:
 
@@ -722,46 +792,30 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
                         embedding_yet_to_be_embedded = False
 
                 shared.state.job_no = embedding.step
+                shared.state.textinfo = training_textinfo(loss_step, steps_done, batch.cond_text[0], "embedding", last_saved_file, last_saved_image)
 
-                shared.state.textinfo = f"""
-<p>
-Loss: {loss_step:.7f}<br/>
-Step: {steps_done}<br/>
-Last prompt: {html.escape(batch.cond_text[0])}<br/>
-Last saved embedding: {html.escape(last_saved_file)}<br/>
-Last saved image: {html.escape(last_saved_image)}<br/>
-</p>
-"""
-        filename = os.path.join(shared.cmd_opts.embeddings_dir, f'{embedding_name}.pt')
-        save_embedding(embedding, optimizer, checkpoint, embedding_name, filename, remove_cached_checksum=True)
-    except Exception:
-        errors.report("Error training embedding", exc_info=True)
-    finally:
-        pbar.leave = False
-        pbar.close()
-        shared.sd_model.first_stage_model.to(devices.device)
-        shared.parallel_processing_allowed = old_parallel_processing_allowed
-        sd_hijack_checkpoint.remove()
+        save_embedding(embedding, optimizer, checkpoint, embedding_name, filename)
 
     return embedding, filename
 
 
-def save_embedding(embedding, optimizer, checkpoint, embedding_name, filename, remove_cached_checksum=True):
-    old_embedding_name = embedding.name
-    old_sd_checkpoint = embedding.sd_checkpoint if hasattr(embedding, "sd_checkpoint") else None
-    old_sd_checkpoint_name = embedding.sd_checkpoint_name if hasattr(embedding, "sd_checkpoint_name") else None
-    old_cached_checksum = embedding.cached_checksum if hasattr(embedding, "cached_checksum") else None
+def save_with_identity(trained, checkpoint, name, filename, **attributes):
+    """Save an Embedding or Hypernetwork as `name` trained on `checkpoint`, setting any extra `attributes` too.
+
+    The identity stays set after a successful save; a failed save restores the previous values and re-raises.
+    """
+    identity = {"sd_checkpoint": checkpoint.shorthash, "sd_checkpoint_name": checkpoint.model_name, "name": name, **attributes}
+    old_identity = {key: getattr(trained, key) for key in identity}
     try:
-        embedding.sd_checkpoint = checkpoint.shorthash
-        embedding.sd_checkpoint_name = checkpoint.model_name
-        if remove_cached_checksum:
-            embedding.cached_checksum = None
-        embedding.name = embedding_name
-        embedding.optimizer_state_dict = optimizer.state_dict()
-        embedding.save(filename)
-    except:
-        embedding.sd_checkpoint = old_sd_checkpoint
-        embedding.sd_checkpoint_name = old_sd_checkpoint_name
-        embedding.name = old_embedding_name
-        embedding.cached_checksum = old_cached_checksum
+        for key, value in identity.items():
+            setattr(trained, key, value)
+        trained.save(filename)
+    except BaseException:
+        for key, value in old_identity.items():
+            setattr(trained, key, value)
         raise
+
+
+def save_embedding(embedding, optimizer, checkpoint, embedding_name, filename):
+    embedding.optimizer_state_dict = optimizer.state_dict()
+    save_with_identity(embedding, checkpoint, embedding_name, filename, cached_checksum=None)

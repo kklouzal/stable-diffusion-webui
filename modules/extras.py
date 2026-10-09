@@ -8,7 +8,6 @@ import torch
 import tqdm
 
 from modules import shared, sd_models, sd_vae, sd_models_config, errors
-from modules import headless_ui as gr
 import safetensors.torch
 
 
@@ -63,26 +62,19 @@ def to_half(tensor, enable):
     return tensor
 
 
-def read_metadata(primary_model_name, secondary_model_name, tertiary_model_name):
-    metadata = {}
-
-    for checkpoint_name in [primary_model_name, secondary_model_name, tertiary_model_name]:
-        checkpoint_info = sd_models.checkpoints_list.get(checkpoint_name, None)
-        if checkpoint_info is None:
-            continue
-
-        metadata.update(checkpoint_info.metadata)
-
-    return json.dumps(metadata, indent=4, ensure_ascii=False)
-
-
 def run_modelmerger(id_task, primary_model_name, secondary_model_name, tertiary_model_name, interp_method, multiplier, save_as_half, custom_name, checkpoint_format, config_source, bake_in_vae, discard_weights, save_metadata, add_merge_recipe, copy_metadata_fields, metadata_json):
+    """Merges checkpoints into a new one in the checkpoint directory, then rescans the checkpoint list.
+
+    Returns a one-element list holding the status message. A rejected request's message starts with "Failed:".
+    The only caller, /sdapi/v1/openclaw/model-merge (openclaw-clear-cond-cache), reads the message as the last
+    element and tests that prefix.
+    """
     shared.state.begin(job="model-merge")
 
     def fail(message):
         shared.state.textinfo = message
         shared.state.end()
-        return [*[gr.update() for _ in range(4)], message]
+        return [message]
 
     def weighted_sum(theta0, theta1, alpha):
         return ((1 - alpha) * theta0) + (alpha * theta1)
@@ -318,4 +310,4 @@ def run_modelmerger(id_task, primary_model_name, secondary_model_name, tertiary_
     shared.state.textinfo = "Checkpoint saved"
     shared.state.end()
 
-    return [*[gr.Dropdown.update(choices=sd_models.checkpoint_tiles()) for _ in range(4)], "Checkpoint saved to " + output_modelname]
+    return ["Checkpoint saved to " + output_modelname]

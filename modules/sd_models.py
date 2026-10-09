@@ -82,7 +82,7 @@ class CheckpointInfo:
 
         def read_metadata():
             metadata = read_metadata_from_safetensors(filename)
-            self.modelspec_thumbnail = metadata.pop('modelspec.thumbnail', None)
+            metadata.pop('modelspec.thumbnail', None)
 
             return metadata
 
@@ -362,9 +362,7 @@ class SkipWritingToConfig:
 def check_fp8(model):
     if model is None:
         return None
-    if devices.get_optimal_device_name() == "mps":
-        enable_fp8 = False
-    elif shared.opts.fp8_storage == "Enable":
+    if shared.opts.fp8_storage == "Enable":
         enable_fp8 = True
     elif getattr(model, "is_sdxl", False) and shared.opts.fp8_storage == "Enable for SDXL":
         enable_fp8 = True
@@ -377,8 +375,6 @@ def weight_quant_storage_enabled(backend, model):
     """Whether the `<backend>_storage` option requests TorchAO weight quantization for `model`; None without a model."""
     if model is None:
         return None
-    if devices.get_optimal_device_name() == "mps":
-        return False
     storage = getattr(shared.opts, f"{backend.name}_storage")
     return storage == "Enable" or (storage == "Enable for SDXL" and bool(getattr(model, "is_sdxl", False)))
 

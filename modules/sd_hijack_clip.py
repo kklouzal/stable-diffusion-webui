@@ -235,7 +235,6 @@ class TextConditionalModel(torch.nn.Module):
             for fixes in self.hijack.fixes:
                 for _position, embedding in fixes:
                     used_embeddings[embedding.name] = embedding
-            devices.torch_npu_set_device()
             z = self.process_tokens(tokens, multipliers)
             zs.append(z)
 
@@ -310,8 +309,7 @@ class FrozenCLIPEmbedderWithCustomWordsBase(TextConditionalModel):
         self.hijack = hijack
 
         self.wrapped = wrapped
-        """Original FrozenCLIPEmbedder module; can also be FrozenOpenCLIPEmbedder or xlmr.BertSeriesModelWithTransformation,
-        depending on model."""
+        """Original FrozenCLIPEmbedder module; can also be FrozenOpenCLIPEmbedder, depending on model."""
 
         self.is_trainable = getattr(wrapped, 'is_trainable', False)
         self.input_key = getattr(wrapped, 'input_key', 'txt')

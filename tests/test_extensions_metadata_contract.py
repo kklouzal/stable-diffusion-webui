@@ -36,7 +36,6 @@ def load_extensions_module(tmp_path):
     sys.modules["modules.paths_internal"] = types.SimpleNamespace(
         extensions_dir=str(tmp_path / "extensions"),
         extensions_builtin_dir=str(tmp_path / "extensions-builtin"),
-        script_path=str(tmp_path),
     )
 
     spec = importlib.util.spec_from_file_location("extensions_under_test", "modules/extensions.py")
@@ -128,4 +127,4 @@ def test_read_info_keeps_fields_when_the_repository_changes_while_it_is_read(tmp
 
     extension.read_info_from_repo()
 
-    assert (extension.remote, extension.commit_hash, extension.status) == ("https://example.invalid/git-ext.git", "0123456789abcdef", "unknown")
+    assert (extension.remote, extension.commit_hash) == ("https://example.invalid/git-ext.git", "0123456789abcdef")

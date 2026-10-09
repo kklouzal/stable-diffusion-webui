@@ -4,7 +4,6 @@ import contextlib
 import datetime
 import functools
 import pytz
-import io
 import math
 import os
 from collections import namedtuple
@@ -896,27 +895,6 @@ Steps: {json_info["steps"]}, Sampler: {sampler}, CFG scale: {json_info["scale"]}
             errors.report("Error parsing NovelAI image generation parameters", exc_info=True)
 
     return geninfo, items
-
-
-def image_data(data):
-    from modules import headless_ui as gr
-
-    try:
-        image = read(io.BytesIO(data))
-        textinfo, _ = read_info_from_image(image)
-        return textinfo, None
-    except Exception:
-        pass
-
-    try:
-        text = data.decode('utf8')
-        assert len(text) < 10000
-        return text, None
-
-    except Exception:
-        pass
-
-    return gr.update(), None
 
 
 def flatten(img, bgcolor):

@@ -36,5 +36,5 @@ def test_explicit_omp_num_threads_is_left_alone():
 
 def test_thread_pools_are_sized_right_after_torch_import():
     source = Path("modules/initialize.py").read_text(encoding="utf8")
-    imports = source[source.index("def imports():"):source.index("def check_versions():")]
+    imports = source[source.index("def imports():"):source.index("def initialize():")]
     assert imports.index("    import torch  # noqa: F401") < imports.index("initialize_util.configure_torch_threads()") < imports.index("    import pytorch_lightning")

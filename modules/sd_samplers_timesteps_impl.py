@@ -28,12 +28,16 @@ def _ddim_sigmas(eta, alphas, alphas_prev):
 
 
 @torch.no_grad()
-def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=0.0):
+def _ddim(model, x, timesteps, extra_args, callback, disable, eta, cfgpp):
     alphas_cumprod = model.inner_model.inner_model.alphas_cumprod
     alphas = alphas_cumprod[timesteps]
     alphas_prev = alphas_cumprod[torch.nn.functional.pad(timesteps[:-1], pad=(1, 0))].to(float64(x))
     sqrt_one_minus_alphas = torch.sqrt(1 - alphas)
     sigmas = _ddim_sigmas(eta, alphas, alphas_prev)
+
+    if cfgpp:
+        model.cond_scale_miltiplier = 1 / 12.5
+        model.need_last_noise_uncond = True
 
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones((x.shape[0]))
@@ -42,6 +46,7 @@ def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=
         index = len(timesteps) - 1 - i
 
         e_t = model(x, _model_timestep(timesteps, index, s_in), **extra_args)
+        noise_for_direction = model.last_noise_uncond if cfgpp else e_t
 
         a_t = _step_value(alphas, index, s_x)
         a_prev = _step_value(alphas_prev, index, s_x)
@@ -49,7 +54,7 @@ def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=
         sqrt_one_minus_at = _step_value(sqrt_one_minus_alphas, index, s_x)
 
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * e_t
+        dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * noise_for_direction
         noise = sigma_t * k_diffusion.sampling.torch.randn_like(x)
         x = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
@@ -59,44 +64,16 @@ def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=
     return x
 
 
-@torch.no_grad()
+def ddim(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=0.0):
+    return _ddim(model, x, timesteps, extra_args, callback, disable, eta, cfgpp=False)
+
+
 def ddim_cfgpp(model, x, timesteps, extra_args=None, callback=None, disable=None, eta=0.0):
     """ Implements CFG++: Manifold-constrained Classifier Free Guidance For Diffusion Models (2024).
     Uses the unconditional noise prediction instead of the conditional noise to guide the denoising direction.
     The CFG scale is divided by 12.5 to map CFG from [0.0, 12.5] to [0, 1.0].
     """
-    alphas_cumprod = model.inner_model.inner_model.alphas_cumprod
-    alphas = alphas_cumprod[timesteps]
-    alphas_prev = alphas_cumprod[torch.nn.functional.pad(timesteps[:-1], pad=(1, 0))].to(float64(x))
-    sqrt_one_minus_alphas = torch.sqrt(1 - alphas)
-    sigmas = _ddim_sigmas(eta, alphas, alphas_prev)
-
-    model.cond_scale_miltiplier = 1 / 12.5
-    model.need_last_noise_uncond = True
-
-    extra_args = {} if extra_args is None else extra_args
-    s_in = x.new_ones((x.shape[0]))
-    s_x = x.new_ones((x.shape[0], 1, 1, 1))
-    for i in tqdm.trange(len(timesteps) - 1, disable=disable):
-        index = len(timesteps) - 1 - i
-
-        e_t = model(x, _model_timestep(timesteps, index, s_in), **extra_args)
-        last_noise_uncond = model.last_noise_uncond
-
-        a_t = _step_value(alphas, index, s_x)
-        a_prev = _step_value(alphas_prev, index, s_x)
-        sigma_t = _step_value(sigmas, index, s_x)
-        sqrt_one_minus_at = _step_value(sqrt_one_minus_alphas, index, s_x)
-
-        pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * last_noise_uncond
-        noise = sigma_t * k_diffusion.sampling.torch.randn_like(x)
-        x = a_prev.sqrt() * pred_x0 + dir_xt + noise
-
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': 0, 'sigma_hat': 0, 'denoised': pred_x0})
-
-    return x
+    return _ddim(model, x, timesteps, extra_args, callback, disable, eta, cfgpp=True)
 
 
 @torch.no_grad()
@@ -193,7 +170,7 @@ def unipc(model, x, timesteps, extra_args=None, callback=None, disable=None, is_
     extra_args = {} if extra_args is None else extra_args
     ns = uni_pc.NoiseScheduleVP('discrete', alphas_cumprod=alphas_cumprod)
     t_start = timesteps[-1] / 1000 + 1 / 1000 if is_img2img else None  # this is likely off by a bit - if someone wants to fix it please by all means
-    unipc_sampler = UniPCCFG(model, extra_args, callback, ns, predict_x0=True, thresholding=False, variant=shared.opts.uni_pc_variant)
-    x = unipc_sampler.sample(x, steps=len(timesteps), t_start=t_start, skip_type=shared.opts.uni_pc_skip_type, method="multistep", order=shared.opts.uni_pc_order, lower_order_final=shared.opts.uni_pc_lower_order_final, disable=disable)
+    unipc_sampler = UniPCCFG(model, extra_args, callback, ns, predict_x0=True, variant=shared.opts.uni_pc_variant)
+    x = unipc_sampler.sample(x, steps=len(timesteps), t_start=t_start, skip_type=shared.opts.uni_pc_skip_type, order=shared.opts.uni_pc_order, lower_order_final=shared.opts.uni_pc_lower_order_final, disable=disable)
 
     return x

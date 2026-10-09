@@ -280,7 +280,6 @@ class StableDiffusionProcessing:
     uc: tuple = field(default=None, init=False)
 
     rng: rng.ImageRNG | None = field(default=None, init=False)
-    step_multiplier: int = field(default=1, init=False)
     color_corrections: list = field(default=None, init=False)
 
     all_prompts: list = field(default=None, init=False)
@@ -649,7 +648,6 @@ class StableDiffusionProcessing:
 
         sampler_config = sd_samplers.find_sampler_config(self.sampler_name)
         total_steps = sampler_config.total_steps(self.steps) if sampler_config else self.steps
-        self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
 
         self.uc = self.get_conds_with_caching("uc", prompt_parser.get_learned_conditioning, negative_prompts, total_steps, self.cached_uc, self.extra_network_data)
@@ -1655,9 +1653,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 save_intermediate(image, i)
 
                 image = images.resize_image(0, image, target_width, target_height, upscaler_name=self.hr_upscaler)
-                image = np.array(image).astype(np.float32) / 255.0
-                image = np.moveaxis(image, 2, 0)
-                batch_images.append(image)
+                batch_images.append(_image_to_chw_float32_array(image))
 
             decoded_samples = torch.from_numpy(np.array(batch_images))
             decoded_samples = decoded_samples.to(shared.device, dtype=devices.dtype_vae)

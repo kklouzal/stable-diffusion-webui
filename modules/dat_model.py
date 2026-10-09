@@ -1,5 +1,3 @@
-import os
-
 from modules import modelloader
 from modules.shared import cmd_opts, opts, hf_endpoint
 from modules.upscaler import Upscaler, UpscalerData
@@ -7,63 +5,30 @@ from modules.upscaler_utils import upscale_with_model
 
 
 class UpscalerDAT(Upscaler):
+    name = "DAT"
+
     def __init__(self, user_path):
-        self.name = "DAT"
         self.user_path = user_path
-        self.scalers = []
         super().__init__()
-
-        for file in self.find_models(ext_filter=[".pt", ".pth"]):
-            name = modelloader.friendly_name(file)
-            scaler_data = UpscalerData(name, file, upscaler=self, scale=None)
-            self.scalers.append(scaler_data)
-
-        for model in get_dat_models(self):
-            if model.name in opts.dat_enabled_models:
-                self.scalers.append(model)
+        self.scalers = self.scalers_from_files([".pt", ".pth"], scale=None)
+        self.scalers += [model for model in get_dat_models(self) if model.name in opts.dat_enabled_models]
 
     def do_upscale(self, img, path):
-        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
-        try:
-            info = self.load_model(path)
-            model_descriptor = modelloader.load_cached_spandrel_model(
-                info.local_data_path,
-                device=self.device,
-                prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
-                expected_architecture="DAT",
-            )
-        except Exception as e:
-            raise RuntimeError(f"Unable to load DAT model {path}: {e}") from e
         return upscale_with_model(
-            model_descriptor,
+            self.load_model_or_fail(path),
             img,
             tile_size=opts.DAT_tile,
             tile_overlap=opts.DAT_tile_overlap,
         )
 
     def load_model(self, path):
-        for scaler in self.scalers:
-            if scaler.data_path == path:
-                if scaler.local_data_path.startswith("http"):
-                    scaler.local_data_path = modelloader.load_file_from_url(
-                        scaler.data_path,
-                        model_dir=self.model_download_path,
-                        hash_prefix=scaler.sha256,
-                    )
-
-                    if os.path.getsize(scaler.local_data_path) < 200:
-                        # Re-download if the file is too small, probably an LFS pointer
-                        scaler.local_data_path = modelloader.load_file_from_url(
-                            scaler.data_path,
-                            model_dir=self.model_download_path,
-                            hash_prefix=scaler.sha256,
-                            re_download=True,
-                        )
-
-                if not os.path.exists(scaler.local_data_path):
-                    raise FileNotFoundError(f"DAT data missing: {scaler.local_data_path}")
-                return scaler
-        raise ValueError(f"Unable to find model info: {path}")
+        return modelloader.load_cached_spandrel_model(
+            # 200 bytes: a cached file that small is a Git LFS pointer, not the weights.
+            self.listed_model_file(path, redownload_below_bytes=200),
+            device=self.device,
+            prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
+            expected_architecture="DAT",
+        )
 
 
 def get_dat_models(scaler):

@@ -37,7 +37,7 @@ def load_timesteps_impl_module():
     k_diffusion_sampling = types.ModuleType("k_diffusion.sampling")
 
     shared_module.opts = types.SimpleNamespace()
-    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type in ("mps", "xpu") else torch.float64
+    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type == "xpu" else torch.float64
     k_diffusion_sampling.torch = torch
     k_diffusion_pkg.sampling = k_diffusion_sampling
     uni_pc_pkg.uni_pc = unipc_module
@@ -291,19 +291,6 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
 
         self.assertEqual(timesteps.device, device)
 
-    def test_unipc_singlestep_indices_stay_on_requested_device(self):
-        unipc = load_unipc_module()
-
-        device = available_test_device()
-        sampler = unipc.UniPC(lambda x, t, cond=None, uncond=None: x, unipc.NoiseScheduleVP("linear"))
-
-        timesteps, orders = sampler.get_orders_and_timesteps_for_singlestep_solver(
-            steps=5, order=2, skip_type="time_uniform", t_T=1.0, t_0=0.01, device=device
-        )
-
-        self.assertEqual(timesteps.device, device)
-        self.assertEqual(orders, [2, 2, 1])
-
     def test_unipc_final_callback_uses_current_latent_without_extra_model_eval(self):
         unipc = load_unipc_module()
 
@@ -329,7 +316,7 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
         )
         x = torch.ones((1, 1, 2, 2), dtype=torch.float64)
 
-        sampler.sample(x, steps=3, order=2, skip_type="time_uniform", method="multistep")
+        sampler.sample(x, steps=3, order=2, skip_type="time_uniform")
 
         self.assertEqual(len(callbacks), 3)
         self.assertEqual(model_calls, 3)

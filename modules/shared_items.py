@@ -30,12 +30,6 @@ def sd_vae_items():
     return ["Automatic", "None"] + list(modules.sd_vae.vae_dict)
 
 
-def sd_vae_dropdown_args(*prefix_items):
-    import modules.sd_vae
-
-    return {"choices": [*prefix_items, *modules.sd_vae.vae_dict]}
-
-
 def refresh_vae_list():
     import modules.sd_vae
 
@@ -63,10 +57,6 @@ def refresh_unet_list():
 def list_checkpoint_tiles(use_short=False):
     import modules.sd_models
     return modules.sd_models.checkpoint_tiles(use_short)
-
-
-def checkpoint_dropdown_args(*prefix_items, use_short=False):
-    return {"choices": [*prefix_items, *list_checkpoint_tiles(use_short)]}
 
 
 def refresh_checkpoints():
@@ -176,8 +166,6 @@ class Shared(sys.modules[__name__].__class__):
     this class is here to provide sd_model field as a property, so that it can be created and loaded on demand rather than
     at program startup.
     """
-
-    sd_model_val = None
 
     @property
     def sd_model(self):

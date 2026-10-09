@@ -61,3 +61,20 @@ def test_restricted_unpickler_accepts_numpy_scalars_and_arrays_from_numpy_1_and_
     assert unpickler.find_class("numpy.core.multiarray", "scalar") is numpy._core.multiarray.scalar
     with pytest.raises(Exception, match="is forbidden"):
         unpickler.find_class("numpy._core.multiarray", "frombuffer")
+
+
+def test_check_pt_reads_real_torch_storages(monkeypatch, tmp_path):
+    import torch
+
+    monkeypatch.setattr(torch, "load", torch.load)  # executing safe.py replaces torch.load; put it back afterwards
+    monkeypatch.setitem(sys.modules, "modules.errors", module("modules.errors", report=lambda *a, **k: None))
+    spec = importlib.util.spec_from_file_location("test_loaded_safe_real_torch", Path("modules/safe.py"))
+    safe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(safe)
+
+    path = tmp_path / "tensor.pt"
+    torch.save({"weight": torch.ones(2)}, path)
+    safe.check_pt(str(path), None)  # every storage reaches persistent_load, which returns a TypedStorage placeholder
+
+    storage = safe.RestrictedUnpickler(io.BytesIO()).persistent_load(("storage",))
+    assert type(storage) is torch.storage.TypedStorage

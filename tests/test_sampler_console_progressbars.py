@@ -23,6 +23,6 @@ def test_unipc_progress_bar_honors_disable(capsys, disable):
     alphas_cumprod = torch.cumprod(1 - torch.linspace(0.00085, 0.012, 1000, dtype=torch.float64), 0)
     sampler = uni_pc.UniPC(lambda x, t, cond, uncond: x * 0.5, uni_pc.NoiseScheduleVP("discrete", alphas_cumprod=alphas_cumprod))
 
-    sampler.sample(torch.ones(1, 4, 2, 2, dtype=torch.float64), steps=4, method="multistep", order=2, disable=disable)
+    sampler.sample(torch.ones(1, 4, 2, 2, dtype=torch.float64), steps=4, order=2, disable=disable)
 
     assert ("4/4" in capsys.readouterr().err) is not disable

@@ -432,20 +432,6 @@ def _publish_applied_state(new_networks, emb_db=None):
             return True
 
 
-def unload_networks():
-    """Restore/unhook weights and bundled TIs as one coherent empty state."""
-    changed = _publish_applied_state([])
-    model = getattr(shared, "sd_model", None)
-    restored = 0
-    if model is not None:
-        for backend in torchao_weight_quant.BACKENDS.values():
-            if getattr(devices, backend.name, False):
-                network_quant_capture_managed_base(backend, model)
-                restored += network_quant_restore_managed_base(backend, model)
-                network_quant_mark_model_unprepared(backend, model)
-    return changed or restored > 0
-
-
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
@@ -824,28 +810,12 @@ def network_merge_loaded_deltas(self, network_layer_name):
         module_q = net.modules.get(network_layer_name + "_q_proj", None)
         module_k = net.modules.get(network_layer_name + "_k_proj", None)
         module_v = net.modules.get(network_layer_name + "_v_proj", None)
-        if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v:
+        if isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)) and module_q and module_k and module_v:
             try:
-                # out_proj is applied exactly once through its separately
-                # mapped Linear module; MHA owns combined Q/K/V only.
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'in_proj_weight')
-                qw, kw, vw = weight.chunk(3, 0)
-                updown_q, _ = module_q.calc_updown(qw)
-                updown_k, _ = module_k.calc_updown(kw)
-                updown_v, _ = module_v.calc_updown(vw)
-                del qw, kw, vw
-                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
-
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
-            continue
-
-        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v:
-            try:
-                # Send "real" orig_weight into MHA's lora module
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+                # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
+                # separately mapped Linear module) or SD3 QkvLinear's weight.
+                field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
+                weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
                 qw, kw, vw = weight.chunk(3, 0)
                 updown_q, _ = module_q.calc_updown(qw)
                 updown_k, _ = module_k.calc_updown(kw)
@@ -1074,35 +1044,6 @@ def network_quant_capture_managed_base(backend, model, force=False):
             backend.capture_base(module)
             captured += 1
     return captured
-
-
-def network_quant_restore_managed_base(backend, model):
-    """Restore quant-managed LoRA modules to their immutable BF16 canonical base.
-
-    Normal LoRA unload goes through network_apply_weights(), but TorchAO-managed
-    Linear layers bypass that mutating path and are prepared model-wide from
-    immutable base tensors. Clearing LoRA state must therefore also clear the
-    physical quantized active config; otherwise a later same-signature activation
-    can incorrectly reuse stale prepared weights, and no-LoRA generations after
-    unload can still see the previous LoRA config.
-    """
-    base_weight_attr, base_bias_attr = f"network_{backend.name}_base_weight", f"network_{backend.name}_base_bias"
-    restored = 0
-    with torch.no_grad():
-        for _fqn, module in network_quant_managed_modules(backend, model):
-            base_weight = getattr(module, base_weight_attr, None)
-            if base_weight is None:
-                continue
-            module._parameters["weight"] = torch.nn.Parameter(base_weight.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
-            base_bias = getattr(module, base_bias_attr, None)
-            if base_bias is not None:
-                module._parameters["bias"] = torch.nn.Parameter(base_bias.to(device=devices.device, dtype=torch.bfloat16), requires_grad=False)
-            elif "bias" in module._parameters:
-                module._parameters["bias"] = None
-            module.network_current_names = ()
-            setattr(module, f"network_{backend.name}_merged_lora_applied", False)
-            restored += 1
-    return restored
 
 
 def prepare_quant_active_config(backend):

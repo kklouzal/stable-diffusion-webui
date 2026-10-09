@@ -38,7 +38,6 @@ __pycache__
 /extensions/sd-webui-controlnet/annotator/downloads/
 /extensions/**/*.pyc
 /cache.json*
-/config_states/
 /.coverage*
 /test/test_outputs
 /cache

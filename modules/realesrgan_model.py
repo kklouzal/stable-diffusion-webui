@@ -1,5 +1,3 @@
-import os
-
 from modules import modelloader
 from modules.shared import cmd_opts, opts
 from modules.upscaler import Upscaler, UpscalerData
@@ -7,11 +5,11 @@ from modules.upscaler_utils import upscale_with_model
 
 
 class UpscalerRealESRGAN(Upscaler):
+    name = "RealESRGAN"
+
     def __init__(self, path):
-        self.name = "RealESRGAN"
         self.user_path = path
         super().__init__()
-        self.enable = True
         self.scalers = []
         scalers = get_realesrgan_models(self)
 
@@ -27,22 +25,8 @@ class UpscalerRealESRGAN(Upscaler):
                 self.scalers.append(scaler)
 
     def do_upscale(self, img, path):
-        if not self.enable:
-            return img
-
-        # Fail the request: returning `img` would silently resize with LANCZOS while infotext names this model.
-        try:
-            info = self.load_model(path)
-            model_descriptor = modelloader.load_cached_spandrel_model(
-                info.local_data_path,
-                device=self.device,
-                prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
-                expected_architecture="ESRGAN",  # "RealESRGAN" isn't a specific thing for Spandrel
-            )
-        except Exception as e:
-            raise RuntimeError(f"Unable to load RealESRGAN model {path}: {e}") from e
         return upscale_with_model(
-            model_descriptor,
+            self.load_model_or_fail(path),
             img,
             tile_size=opts.ESRGAN_tile,
             tile_overlap=opts.ESRGAN_tile_overlap,
@@ -50,17 +34,12 @@ class UpscalerRealESRGAN(Upscaler):
         )
 
     def load_model(self, path):
-        for scaler in self.scalers:
-            if scaler.data_path == path:
-                if scaler.local_data_path.startswith("http"):
-                    scaler.local_data_path = modelloader.load_file_from_url(
-                        scaler.data_path,
-                        model_dir=self.model_download_path,
-                    )
-                if not os.path.exists(scaler.local_data_path):
-                    raise FileNotFoundError(f"RealESRGAN data missing: {scaler.local_data_path}")
-                return scaler
-        raise ValueError(f"Unable to find model info: {path}")
+        return modelloader.load_cached_spandrel_model(
+            self.listed_model_file(path),
+            device=self.device,
+            prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
+            expected_architecture="ESRGAN",  # "RealESRGAN" isn't a specific thing for Spandrel
+        )
 
 
 def get_realesrgan_models(scaler: UpscalerRealESRGAN):

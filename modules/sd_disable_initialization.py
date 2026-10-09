@@ -154,7 +154,7 @@ class DisableInitialization(ReplaceHelper):
             filename = args[0] if args else kwargs.get("filename")
 
             # this file is always 404, prevent making request
-            if url == f'{shared.hf_endpoint}/openai/clip-vit-large-patch14/resolve/main/added_tokens.json' or url == 'openai/clip-vit-large-patch14' and filename == 'added_tokens.json':
+            if url == 'openai/clip-vit-large-patch14' and filename == 'added_tokens.json':
                 return None
 
             try:

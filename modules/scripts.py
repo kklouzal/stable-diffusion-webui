@@ -85,14 +85,13 @@ class Script:
     """If False, for alwayson scripts, a group component will not be created."""
 
     infotext_fields = None
-    """if set in ui(), this is a list of pairs of UI component + text; the text will be used when
-    parsing infotext to set the value for the component; see ui.py's txt2img_paste_fields for an example
+    """if set in ui(), this is a list of (component, target) pairs or PasteFields; target is an infotext key, or a
+    function that takes the parsed infotext dict. A request's `infotext` uses them to fill this script's args
+    (Api.apply_infotext); see modules/processing_scripts/seed.py for an example
     """
 
     paste_field_names = None
-    """if set in ui(), this is a list of names of infotext fields; the fields will be sent through the
-    various "Send to <X>" buttons when clicked
-    """
+    """Accepted for extension compatibility (ControlNet, Incantations and soft-inpainting set it); nothing reads it."""
 
     api_info = None
     """Generated value of type modules.api.models.ScriptInfo with information about the script for API"""
@@ -324,10 +323,6 @@ class Script:
 
     def on_after_component(self, callback, *, elem_id):
         """Accepted for extension compatibility; never called. See on_before_component."""
-
-    def describe(self):
-        """unused"""
-        return ""
 
     def elem_id(self, item_id):
         """helper function to generate id for a HTML element, constructs final id out of script name, tab and user-supplied item_id"""
@@ -572,7 +567,6 @@ class ScriptRunner:
         self.titles = []
         self.title_map = {}
         self.infotext_fields = []
-        self.paste_field_names = []
         self.inputs = [None]
 
         self.callback_map = {}
@@ -649,9 +643,6 @@ class ScriptRunner:
 
         script.name = wrap_call(script.title, script.filename, "title", default=script.filename).lower()
 
-        for control in controls:
-            control.custom_script_source = os.path.basename(script.filename)
-
         script.api_info = api_models.ScriptInfo(
             name=script.name,
             is_img2img=script.is_img2img,
@@ -661,9 +652,6 @@ class ScriptRunner:
 
         if script.infotext_fields is not None:
             self.infotext_fields += script.infotext_fields
-
-        if script.paste_field_names is not None:
-            self.paste_field_names += script.paste_field_names
 
         self.inputs += controls
         script.args_to = len(self.inputs)
@@ -699,49 +687,7 @@ class ScriptRunner:
 
         self.setup_ui_for_section(None, self.selectable_scripts)
 
-        def select_script(script_index):
-            if script_index is None:
-                script_index = 0
-            selected_script = self.selectable_scripts[script_index - 1] if script_index>0 else None
-
-            return [gr.update(visible=selected_script == s) for s in self.selectable_scripts]
-
-        def init_field(title):
-            """called when an initial value is set from ui-config.json to show script's UI components"""
-
-            if title == 'None':
-                return
-
-            script_index = self.titles.index(title)
-            self.selectable_scripts[script_index].group.visible = True
-
-        dropdown.init_field = init_field
-
-        dropdown.change(
-            fn=select_script,
-            inputs=[dropdown],
-            outputs=[script.group for script in self.selectable_scripts]
-        )
-
-        self.script_load_ctr = 0
-
-        def onload_script_visibility(params):
-            title = params.get('Script', None)
-            if title:
-                try:
-                    title_index = self.titles.index(title)
-                    visibility = title_index == self.script_load_ctr
-                    self.script_load_ctr = (self.script_load_ctr + 1) % len(self.titles)
-                    return gr.update(visible=visibility)
-                except ValueError:
-                    params['Script'] = None
-                    massage = f'Cannot find Script: "{title}"'
-                    print(massage)
-                    gr.Warning(massage)
-            return gr.update(visible=False)
-
         self.infotext_fields.append((dropdown, lambda x: gr.update(value=x.get('Script', 'None'))))
-        self.infotext_fields.extend([(script.group, onload_script_visibility) for script in self.selectable_scripts])
 
         return self.inputs
 

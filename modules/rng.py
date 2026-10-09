@@ -9,14 +9,7 @@ def randn(seed, shape, generator=None):
     Uses the seed parameter to set the global torch seed; to generate more with that seed, use randn_like/randn_without_seed."""
 
     manual_seed(seed)
-
-    if shared.opts.randn_source == "NV":
-        return torch.asarray((generator or nv_rng).randn(shape), device=devices.device)
-
-    if shared.opts.randn_source == "CPU" or devices.device.type == 'mps':
-        return torch.randn(shape, device=devices.cpu, generator=generator).to(devices.device)
-
-    return torch.randn(shape, device=devices.device, generator=generator)
+    return randn_without_seed(shape, generator=generator)
 
 
 def randn_local(seed, shape):
@@ -28,7 +21,7 @@ def randn_local(seed, shape):
         rng = rng_philox.Generator(seed)
         return torch.asarray(rng.randn(shape), device=devices.device)
 
-    local_device = devices.cpu if shared.opts.randn_source == "CPU" or devices.device.type == 'mps' else devices.device
+    local_device = devices.cpu if shared.opts.randn_source == "CPU" else devices.device
     local_generator = torch.Generator(local_device).manual_seed(int(seed))
     return torch.randn(shape, device=local_device, generator=local_generator).to(devices.device)
 
@@ -41,7 +34,7 @@ def randn_like(x):
     if shared.opts.randn_source == "NV":
         return torch.asarray(nv_rng.randn(x.shape), device=x.device, dtype=x.dtype)
 
-    if shared.opts.randn_source == "CPU" or x.device.type == 'mps':
+    if shared.opts.randn_source == "CPU":
         return torch.randn_like(x, device=devices.cpu).to(x.device)
 
     return torch.randn_like(x)
@@ -55,7 +48,7 @@ def randn_without_seed(shape, generator=None):
     if shared.opts.randn_source == "NV":
         return torch.asarray((generator or nv_rng).randn(shape), device=devices.device)
 
-    if shared.opts.randn_source == "CPU" or devices.device.type == 'mps':
+    if shared.opts.randn_source == "CPU":
         return torch.randn(shape, device=devices.cpu, generator=generator).to(devices.device)
 
     return torch.randn(shape, device=devices.device, generator=generator)
@@ -76,7 +69,7 @@ def create_generator(seed):
     if shared.opts.randn_source == "NV":
         return rng_philox.Generator(seed)
 
-    device = devices.cpu if shared.opts.randn_source == "CPU" or devices.device.type == 'mps' else devices.device
+    device = devices.cpu if shared.opts.randn_source == "CPU" else devices.device
     generator = torch.Generator(device).manual_seed(int(seed))
     return generator
 
@@ -161,8 +154,4 @@ class ImageRNG:
         return torch.stack(xs).to(shared.device)
 
 
-devices.randn = randn
 devices.randn_local = randn_local
-devices.randn_like = randn_like
-devices.randn_without_seed = randn_without_seed
-devices.manual_seed = manual_seed

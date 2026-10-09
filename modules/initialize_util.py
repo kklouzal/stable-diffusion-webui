@@ -3,7 +3,6 @@ import json
 import os
 import signal
 import sys
-import re
 
 from starlette.middleware.gzip import GZipMiddleware, IdentityResponder
 
@@ -18,14 +17,6 @@ def server_name():
     else:
         return "0.0.0.0" if cmd_opts.listen else None
 
-
-def fix_torch_version():
-    import torch
-
-    # Truncate version number of nightly/local build of PyTorch to not cause exceptions with CodeFormer or Safetensors
-    if ".dev" in torch.__version__ or "+git" in torch.__version__:
-        torch.__long_version__ = torch.__version__
-        torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
 
 def configure_torch_threads():
     """
@@ -58,14 +49,7 @@ def fix_asyncio_event_loop_policy():
 
     import asyncio
 
-    if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-        # "Any thread" and "selector" should be orthogonal, but there's not a clean
-        # interface for composing policies so pick the right base.
-        _BasePolicy = asyncio.WindowsSelectorEventLoopPolicy  # type: ignore
-    else:
-        _BasePolicy = asyncio.DefaultEventLoopPolicy
-
-    class AnyThreadEventLoopPolicy(_BasePolicy):  # type: ignore
+    class AnyThreadEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
         """Event loop policy that allows loop creation on any thread.
         Usage::
 

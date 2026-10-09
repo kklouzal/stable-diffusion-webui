@@ -3,14 +3,13 @@ import glob
 import html
 import os
 import inspect
-from contextlib import closing
 
 import modules.textual_inversion.dataset
 import torch
 import tqdm
 from einops import rearrange, repeat
 from ldm.util import default
-from modules import devices, sd_models, shared, hashes, sd_hijack_checkpoint, errors
+from modules import devices, sd_models, shared, hashes, errors
 from modules.textual_inversion import textual_inversion, saving_settings
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
 from torch import einsum
@@ -95,7 +94,6 @@ class HypernetworkModule(torch.nn.Module):
                         zeros_(b)
                     else:
                         raise KeyError(f"Key {weight_init} is not defined as initialization!")
-        devices.torch_npu_set_device()
         self.to(devices.device)
 
     def fix_old_state_dict(self, state_dict):
@@ -354,10 +352,6 @@ def apply_single_hypernetwork(hypernetwork, context_k, context_v, layer=None):
     if hypernetwork_layers is None:
         return context_k, context_v
 
-    if layer is not None:
-        layer.hyper_k = hypernetwork_layers[0]
-        layer.hyper_v = hypernetwork_layers[1]
-
     context_k = devices.cond_cast_unet(hypernetwork_layers[0](devices.cond_cast_float(context_k)))
     context_v = devices.cond_cast_unet(hypernetwork_layers[1](devices.cond_cast_float(context_v)))
     return context_k, context_v
@@ -467,8 +461,6 @@ def create_hypernetwork(name, enable_sizes, overwrite_old, layer_structure=None,
 
 
 def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch_size: int, gradient_step: int, data_root: str, log_directory: str, training_width: int, training_height: int, varsize: bool, steps: int, clip_grad_mode: str, clip_grad_value: float, shuffle_tags: bool, tag_drop_out: bool, latent_sampling_method: str, use_weight: bool, create_image_every: int, save_hypernetwork_every: int, template_filename: str, preview_from_txt2img: bool, preview_prompt: str, preview_negative_prompt: str, preview_steps: int, preview_sampler_name: str, preview_cfg_scale: float, preview_seed: int, preview_width: int, preview_height: int):
-    from modules import images, processing
-
     save_hypernetwork_every = save_hypernetwork_every or 0
     create_image_every = create_image_every or 0
     template_file = textual_inversion.textual_inversion_templates.get(template_filename, None)
@@ -489,18 +481,8 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
 
     log_directory = os.path.join(log_directory, datetime.datetime.now().strftime("%Y-%m-%d"), hypernetwork_name)
     unload = shared.opts.unload_models_when_training
-
-    if save_hypernetwork_every > 0:
-        hypernetwork_dir = os.path.join(log_directory, "hypernetworks")
-        os.makedirs(hypernetwork_dir, exist_ok=True)
-    else:
-        hypernetwork_dir = None
-
-    if create_image_every > 0:
-        images_dir = os.path.join(log_directory, "images")
-        os.makedirs(images_dir, exist_ok=True)
-    else:
-        images_dir = None
+    hypernetwork_dir = textual_inversion.make_training_dir(log_directory, "hypernetworks", save_hypernetwork_every > 0)
+    images_dir = textual_inversion.make_training_dir(log_directory, "images", create_image_every > 0)
 
     checkpoint = sd_models.select_checkpoint()
 
@@ -510,13 +492,9 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
         return hypernetwork, filename
 
     scheduler = LearnRateScheduler(learn_rate, steps, initial_step)
+    clip_grad, clip_grad_sched = textual_inversion.make_grad_clipper(clip_grad_mode, clip_grad_value, steps, initial_step)
 
-    clip_grad = torch.nn.utils.clip_grad_value_ if clip_grad_mode == "value" else torch.nn.utils.clip_grad_norm_ if clip_grad_mode == "norm" else None
-    if clip_grad:
-        clip_grad_sched = LearnRateScheduler(clip_grad_value, steps, initial_step, verbose=False)
-
-    if shared.opts.training_enable_tensorboard:
-        tensorboard_writer = textual_inversion.tensorboard_setup(log_directory)
+    tensorboard_writer = textual_inversion.tensorboard_setup(log_directory) if shared.opts.training_enable_tensorboard else None
 
     # dataset loading may take a while, so input validations and early returns should be done before this
     shared.state.textinfo = f"Preparing dataset from {html.escape(data_root)}..."
@@ -536,70 +514,39 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
 
     dl = modules.textual_inversion.dataset.PersonalizedDataLoader(ds, latent_sampling_method=latent_sampling_method, batch_size=ds.batch_size, pin_memory=pin_memory)
 
-    old_parallel_processing_allowed = shared.parallel_processing_allowed
+    txt2img_preview = (preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height) if preview_from_txt2img else None
+    offloaded_models = [shared.sd_model.cond_stage_model, shared.sd_model.first_stage_model]
 
-    if unload:
-        shared.parallel_processing_allowed = False
-        shared.sd_model.cond_stage_model.to(devices.cpu)
-        shared.sd_model.first_stage_model.to(devices.cpu)
+    with textual_inversion.training_session("Exception in training hypernetwork", unload, offloaded_models, network=hypernetwork):
+        weights = hypernetwork.weights()
 
-    weights = hypernetwork.weights()
-    hypernetwork.train()
+        # Here we use optimizer from saved HN, or we can specify as UI option.
+        if hypernetwork.optimizer_name in optimizer_dict:
+            optimizer = optimizer_dict[hypernetwork.optimizer_name](params=weights, lr=scheduler.learn_rate)
+        else:
+            print(f"Optimizer type {hypernetwork.optimizer_name} is not defined!")
+            optimizer = torch.optim.AdamW(params=weights, lr=scheduler.learn_rate)
+            hypernetwork.optimizer_name = 'AdamW'
 
-    # Here we use optimizer from saved HN, or we can specify as UI option.
-    if hypernetwork.optimizer_name in optimizer_dict:
-        optimizer = optimizer_dict[hypernetwork.optimizer_name](params=weights, lr=scheduler.learn_rate)
-        optimizer_name = hypernetwork.optimizer_name
-    else:
-        print(f"Optimizer type {hypernetwork.optimizer_name} is not defined!")
-        optimizer = torch.optim.AdamW(params=weights, lr=scheduler.learn_rate)
-        optimizer_name = 'AdamW'
+        if hypernetwork.optimizer_state_dict:  # This line must be changed if Optimizer type can be different from saved optimizer.
+            try:
+                optimizer.load_state_dict(hypernetwork.optimizer_state_dict)
+            except RuntimeError as e:
+                print("Cannot resume from saved optimizer!")
+                print(e)
 
-    if hypernetwork.optimizer_state_dict:  # This line must be changed if Optimizer type can be different from saved optimizer.
-        try:
-            optimizer.load_state_dict(hypernetwork.optimizer_state_dict)
-        except RuntimeError as e:
-            print("Cannot resume from saved optimizer!")
-            print(e)
+        scaler = torch.amp.GradScaler("cuda")
 
-    scaler = torch.amp.GradScaler("cuda")
+        gradient_step, steps_per_epoch, batches_per_epoch = textual_inversion.epoch_geometry(ds)
+        loss_step = 0
+        _loss_step = 0 #internal
+        loss_logging = deque(maxlen=len(ds) * 3)  # this should be configurable parameter, this is 3 * epoch(dataset size)
 
-    batch_size = ds.batch_size
-    gradient_step = ds.gradient_step
-    # n steps = batch_size * gradient_step * n image processed
-    steps_per_epoch = len(ds) // batch_size // gradient_step
-    max_steps_per_epoch = len(ds) // batch_size - (len(ds) // batch_size) % gradient_step
-    loss_step = 0
-    _loss_step = 0 #internal
-    # size = len(ds.indexes)
-    loss_logging = deque(maxlen=len(ds) * 3)  # this should be configurable parameter, this is 3 * epoch(dataset size)
+        last_saved_file = "<none>"
+        last_saved_image = "<none>"
 
-    last_saved_file = "<none>"
-    last_saved_image = "<none>"
-    forced_filename = "<none>"
-
-    pbar = tqdm.tqdm(total=steps - initial_step)
-    try:
-        sd_hijack_checkpoint.add()
-
-        for _ in range((steps-initial_step) * gradient_step):
-            if scheduler.finished:
-                break
-            if shared.state.interrupted:
-                break
-            for j, batch in enumerate(dl):
-                # works as a drop_last=True for gradient accumulation
-                if j == max_steps_per_epoch:
-                    break
-                scheduler.apply(optimizer, hypernetwork.step)
-                if scheduler.finished:
-                    break
-                if shared.state.interrupted:
-                    break
-
-                if clip_grad:
-                    clip_grad_sched.step(hypernetwork.step)
-
+        with tqdm.tqdm(total=steps - initial_step, leave=False) as pbar:
+            for j, batch in textual_inversion.training_batches(dl, hypernetwork, optimizer, scheduler, clip_grad_sched, steps, initial_step, gradient_step, batches_per_epoch):
                 with devices.autocast():
                     x = batch.latent_sample.to(devices.device, non_blocking=pin_memory)
                     if use_weight:
@@ -647,15 +594,9 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
                     # Before saving, change name to match current checkpoint.
                     hypernetwork_name_every = f'{hypernetwork_name}-{steps_done}'
                     last_saved_file = os.path.join(hypernetwork_dir, f'{hypernetwork_name_every}.pt')
-                    hypernetwork.optimizer_name = optimizer_name
-                    if shared.opts.save_optimizer_state:
-                        hypernetwork.optimizer_state_dict = optimizer.state_dict()
-                    save_hypernetwork(hypernetwork, checkpoint, hypernetwork_name, last_saved_file)
-                    hypernetwork.optimizer_state_dict = None  # dereference it after saving, to save memory.
+                    save_hypernetwork(hypernetwork, optimizer, checkpoint, hypernetwork_name, last_saved_file)
 
-
-
-                if shared.opts.training_enable_tensorboard:
+                if tensorboard_writer is not None:
                     epoch_num = hypernetwork.step // len(ds)
                     epoch_step = hypernetwork.step - (epoch_num * len(ds)) + 1
                     mean_loss = sum(loss_logging) / len(loss_logging)
@@ -667,100 +608,27 @@ def train_hypernetwork(id_task, hypernetwork_name: str, learn_rate: float, batch
                 })
 
                 if images_dir is not None and steps_done % create_image_every == 0:
-                    forced_filename = f'{hypernetwork_name}-{steps_done}'
-                    last_saved_image = os.path.join(images_dir, forced_filename)
                     hypernetwork.eval()
-                    rng_state = torch.get_rng_state()
-                    cuda_rng_state = None
-                    if torch.cuda.is_available():
-                        cuda_rng_state = torch.cuda.get_rng_state_all()
-                    shared.sd_model.cond_stage_model.to(devices.device)
-                    shared.sd_model.first_stage_model.to(devices.device)
-
-                    p = processing.StableDiffusionProcessingTxt2Img(
-                        sd_model=shared.sd_model,
-                        do_not_save_grid=True,
-                        do_not_save_samples=True,
+                    _, last_saved_image = textual_inversion.render_training_preview(
+                        batch, p_kwargs={"disable_extra_networks": True}, txt2img_preview=txt2img_preview, training_width=training_width, training_height=training_height,
+                        unload=unload, offloaded_models=offloaded_models, images_dir=images_dir, forced_filename=f'{hypernetwork_name}-{steps_done}',
+                        tensorboard_writer=tensorboard_writer, epoch_num=epoch_num, step=hypernetwork.step,
                     )
-
-                    p.disable_extra_networks = True
-
-                    if preview_from_txt2img:
-                        textual_inversion.apply_txt2img_preview_params(p, preview_prompt, preview_negative_prompt, preview_steps, preview_sampler_name, preview_cfg_scale, preview_seed, preview_width, preview_height)
-                    else:
-                        p.prompt = batch.cond_text[0]
-                        p.steps = 20
-                        p.width = training_width
-                        p.height = training_height
-
-                    preview_text = p.prompt
-
-                    with closing(p):
-                        processed = processing.process_images(p)
-                        image = processed.images[0] if len(processed.images) > 0 else None
-
-                    if unload:
-                        shared.sd_model.cond_stage_model.to(devices.cpu)
-                        shared.sd_model.first_stage_model.to(devices.cpu)
-                    torch.set_rng_state(rng_state)
-                    if torch.cuda.is_available():
-                        torch.cuda.set_rng_state_all(cuda_rng_state)
                     hypernetwork.train()
-                    if image is not None:
-                        shared.state.assign_current_image(image)
-                        if shared.opts.training_enable_tensorboard and shared.opts.training_tensorboard_save_images:
-                            textual_inversion.tensorboard_add_image(tensorboard_writer,
-                                                                    f"Validation at epoch {epoch_num}", image,
-                                                                    hypernetwork.step)
-                        last_saved_image, last_text_info = images.save_image(image, images_dir, "", p.seed, p.prompt, shared.opts.samples_format, processed.infotexts[0], p=p, forced_filename=forced_filename, save_to_dirs=False)
-                        last_saved_image += f", prompt: {preview_text}"
 
                 shared.state.job_no = hypernetwork.step
+                shared.state.textinfo = textual_inversion.training_textinfo(loss_step, steps_done, batch.cond_text[0], "hypernetwork", last_saved_file, last_saved_image)
 
-                shared.state.textinfo = f"""
-<p>
-Loss: {loss_step:.7f}<br/>
-Step: {steps_done}<br/>
-Last prompt: {html.escape(batch.cond_text[0])}<br/>
-Last saved hypernetwork: {html.escape(last_saved_file)}<br/>
-Last saved image: {html.escape(last_saved_image)}<br/>
-</p>
-"""
-    except Exception:
-        errors.report("Exception in training hypernetwork", exc_info=True)
-    finally:
-        pbar.leave = False
-        pbar.close()
-        hypernetwork.eval()
-        sd_hijack_checkpoint.remove()
-
-
-
-    filename = os.path.join(shared.cmd_opts.hypernetwork_dir, f'{hypernetwork_name}.pt')
-    hypernetwork.optimizer_name = optimizer_name
-    if shared.opts.save_optimizer_state:
-        hypernetwork.optimizer_state_dict = optimizer.state_dict()
-    save_hypernetwork(hypernetwork, checkpoint, hypernetwork_name, filename)
-
-    del optimizer
-    hypernetwork.optimizer_state_dict = None  # dereference it after saving, to save memory.
-    shared.sd_model.cond_stage_model.to(devices.device)
-    shared.sd_model.first_stage_model.to(devices.device)
-    shared.parallel_processing_allowed = old_parallel_processing_allowed
+        save_hypernetwork(hypernetwork, optimizer, checkpoint, hypernetwork_name, filename)
+        del optimizer  # free its state before the session moves the offloaded models back
 
     return hypernetwork, filename
 
-def save_hypernetwork(hypernetwork, checkpoint, hypernetwork_name, filename):
-    old_hypernetwork_name = hypernetwork.name
-    old_sd_checkpoint = hypernetwork.sd_checkpoint if hasattr(hypernetwork, "sd_checkpoint") else None
-    old_sd_checkpoint_name = hypernetwork.sd_checkpoint_name if hasattr(hypernetwork, "sd_checkpoint_name") else None
+
+def save_hypernetwork(hypernetwork, optimizer, checkpoint, hypernetwork_name, filename):
+    if shared.opts.save_optimizer_state:
+        hypernetwork.optimizer_state_dict = optimizer.state_dict()
     try:
-        hypernetwork.sd_checkpoint = checkpoint.shorthash
-        hypernetwork.sd_checkpoint_name = checkpoint.model_name
-        hypernetwork.name = hypernetwork_name
-        hypernetwork.save(filename)
-    except:
-        hypernetwork.sd_checkpoint = old_sd_checkpoint
-        hypernetwork.sd_checkpoint_name = old_sd_checkpoint_name
-        hypernetwork.name = old_hypernetwork_name
-        raise
+        textual_inversion.save_with_identity(hypernetwork, checkpoint, hypernetwork_name, filename)
+    finally:
+        hypernetwork.optimizer_state_dict = None  # dereference it after saving, to save memory.

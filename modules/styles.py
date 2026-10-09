@@ -4,7 +4,6 @@ from modules import errors
 import csv
 import os
 import typing
-import shutil
 
 
 class PromptStyle(typing.NamedTuple):
@@ -92,12 +91,7 @@ class StyleDatabase:
         folder, file = os.path.split(self.paths[0])
         if '*' in file or '?' in file:
             # if the first path is a wildcard pattern, find the first match else use "folder/styles.csv" as the default path
-            self.default_path = next(Path(folder).glob(file), Path(os.path.join(folder, 'styles.csv')))
-            self.paths.insert(0, self.default_path)
-        else:
-            self.default_path = Path(self.paths[0])
-
-        self.prompt_fields = [field for field in PromptStyle._fields if field != "path"]
+            self.paths.insert(0, next(Path(folder).glob(file), Path(os.path.join(folder, 'styles.csv'))))
 
         self.reload()
 
@@ -116,7 +110,6 @@ class StyleDatabase:
                 found_files = Path(folder).glob(file)
                 [all_styles_files.append(file) for file in found_files]
             else:
-                # if os.path.exists(pattern):
                 all_styles_files.append(Path(pattern))
 
         # Remove any duplicate entries
@@ -150,25 +143,6 @@ class StyleDatabase:
         except Exception:
             errors.report(f'Error loading styles from {path}: ', exc_info=True)
 
-    def get_style_paths(self) -> set:
-        """Returns a set of all distinct paths of files that styles are loaded from."""
-        # Update any styles without a path to the default path
-        for style in list(self.styles.values()):
-            if not style.path:
-                self.styles[style.name] = style._replace(path=str(self.default_path))
-
-        # Create a list of all distinct paths, including the default path
-        style_paths = set()
-        style_paths.add(str(self.default_path))
-        for _, style in self.styles.items():
-            if style.path:
-                style_paths.add(style.path)
-
-        # Remove any paths for styles that are just list dividers
-        style_paths.discard("do_not_save")
-
-        return style_paths
-
     def get_style_prompts(self, styles):
         return [self.styles.get(x, self.no_style).prompt for x in styles]
 
@@ -181,31 +155,6 @@ class StyleDatabase:
         return apply_styles_to_prompt(
             prompt, [self.styles.get(x, self.no_style).negative_prompt for x in styles]
         )
-
-    def save_styles(self, path: str = None) -> None:
-        # The path argument is deprecated, but kept for backwards compatibility
-
-        style_paths = self.get_style_paths()
-
-        csv_names = [os.path.split(path)[1].lower() for path in style_paths]
-
-        for style_path in style_paths:
-            # Always keep a backup file around
-            if os.path.exists(style_path):
-                shutil.copy(style_path, f"{style_path}.bak")
-
-            # Write the styles to the CSV file
-            with open(style_path, "w", encoding="utf-8-sig", newline="") as file:
-                writer = csv.DictWriter(file, fieldnames=self.prompt_fields)
-                writer.writeheader()
-                for style in (s for s in self.styles.values() if s.path == style_path):
-                    # Skip style list dividers, e.g. "STYLES.CSV"
-                    if style.name.lower().strip("# ") in csv_names:
-                        continue
-                    # Write style fields, ignoring the path field
-                    writer.writerow(
-                        {k: v for k, v in style._asdict().items() if k != "path"}
-                    )
 
     def extract_styles_from_prompt(self, prompt, negative_prompt):
         extracted = []

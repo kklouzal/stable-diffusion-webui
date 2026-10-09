@@ -93,7 +93,7 @@ def test_git_revision_tracks_head_ref_content(monkeypatch, tmp_path):
         monkeypatch.setitem(sys.modules, f"modules.{name}", value if isinstance(value, types.ModuleType) else types.ModuleType(f"modules.{name}"))
     monkeypatch.setitem(sys.modules, "modules", modules)
     git = types.ModuleType("modules.gitpython_hack"); git.Repo = object
-    paths = types.ModuleType("modules.paths_internal"); paths.extensions_dir=str(tmp_path/"exts"); paths.extensions_builtin_dir=str(tmp_path/"builtin"); paths.script_path=str(tmp_path)
+    paths = types.ModuleType("modules.paths_internal"); paths.extensions_dir=str(tmp_path/"exts"); paths.extensions_builtin_dir=str(tmp_path/"builtin")
     monkeypatch.setitem(sys.modules, "modules.gitpython_hack", git); monkeypatch.setitem(sys.modules, "modules.paths_internal", paths)
     spec = importlib.util.spec_from_file_location("derived_extensions", ROOT / "modules/extensions.py")
     extension = importlib.util.module_from_spec(spec); monkeypatch.setitem(sys.modules, "derived_extensions", extension); spec.loader.exec_module(extension)

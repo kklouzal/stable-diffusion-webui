@@ -21,7 +21,6 @@ class State:
     current_latent = None
     current_image = None
     current_image_sampling_step = 0
-    id_live_preview = 0
     textinfo = None
     time_start = None
 
@@ -32,10 +31,6 @@ class State:
     def interrupt(self):
         self.interrupted = True
         log.info("Received interrupt request")
-
-    def stop_generating(self):
-        self.stopping_generation = True
-        log.info("Received stop generating request")
 
     def nextjob(self):
         if shared.opts.live_previews_enable and shared.opts.show_progress_every_n_steps == -1:
@@ -70,7 +65,6 @@ class State:
         self.current_latent = None
         self.current_image = None
         self.current_image_sampling_step = 0
-        self.id_live_preview = 0
         self.skipped = False
         self.interrupted = False
         self.stopping_generation = False
@@ -96,7 +90,7 @@ class State:
         devices.torch_gc()
 
     def set_current_image(self):
-        """if enough sampling steps have been made after the last call to this, sets self.current_image from self.current_latent, and modifies self.id_live_preview accordingly"""
+        """if enough sampling steps have been made after the last call to this, sets self.current_image from self.current_latent"""
         if not shared.parallel_processing_allowed:
             return
 
@@ -126,4 +120,3 @@ class State:
         if shared.opts.live_previews_image_format == 'jpeg' and image.mode in ('RGBA', 'P'):
             image = image.convert('RGB')
         self.current_image = image
-        self.id_live_preview += 1

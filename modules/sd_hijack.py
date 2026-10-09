@@ -5,7 +5,7 @@ from types import MethodType
 from modules import devices, sd_hijack_optimizations, shared, script_callbacks, errors, sd_unet, patches
 from modules.hypernetworks import hypernetwork
 from modules.shared import cmd_opts
-from modules import sd_hijack_clip, sd_hijack_open_clip, sd_hijack_unet, sd_hijack_xlmr, xlmr, xlmr_m18
+from modules import sd_hijack_clip, sd_hijack_open_clip, sd_hijack_unet
 
 import ldm.modules.attention
 import ldm.modules.diffusionmodules.model
@@ -24,11 +24,6 @@ attention_CrossAttention_forward = ldm.modules.attention.CrossAttention.forward
 diffusionmodules_model_nonlinearity = ldm.modules.diffusionmodules.model.nonlinearity
 diffusionmodules_model_AttnBlock_forward = ldm.modules.diffusionmodules.model.AttnBlock.forward
 
-# new memory efficient cross attention blocks do not support hypernets and we already
-# have memory efficient cross attention anyway, so this disables SD2.0's memory efficient cross attention
-ldm.modules.attention.MemoryEfficientCrossAttention = ldm.modules.attention.CrossAttention
-ldm.modules.attention.BasicTransformerBlock.ATTENTION_MODES["softmax-xformers"] = ldm.modules.attention.CrossAttention
-
 # silence new console spam from SD2
 ldm.modules.attention.print = shared.ldm_print
 ldm.modules.diffusionmodules.model.print = shared.ldm_print
@@ -39,10 +34,10 @@ optimizers = []
 current_optimizer: sd_hijack_optimizations.SdOptimization = None
 
 ldm_patched_forward = sd_unet.create_unet_forward(ldm.modules.diffusionmodules.openaimodel.UNetModel.forward)
-ldm_original_forward = patches.patch(__file__, ldm.modules.diffusionmodules.openaimodel.UNetModel, "forward", ldm_patched_forward)
+patches.patch(__file__, ldm.modules.diffusionmodules.openaimodel.UNetModel, "forward", ldm_patched_forward)
 
 sgm_patched_forward = sd_unet.create_unet_forward(sgm.modules.diffusionmodules.openaimodel.UNetModel.forward)
-sgm_original_forward = patches.patch(__file__, sgm.modules.diffusionmodules.openaimodel.UNetModel, "forward", sgm_patched_forward)
+patches.patch(__file__, sgm.modules.diffusionmodules.openaimodel.UNetModel, "forward", sgm_patched_forward)
 
 
 def list_optimizers():
@@ -210,12 +205,7 @@ class StableDiffusionModelHijack:
             else:
                 m.cond_stage_model = conditioner
 
-        if type(m.cond_stage_model) == xlmr.BertSeriesModelWithTransformation or type(m.cond_stage_model) == xlmr_m18.BertSeriesModelWithTransformation:
-            model_embeddings = m.cond_stage_model.roberta.embeddings
-            model_embeddings.token_embedding = EmbeddingsWithFixes(model_embeddings.word_embeddings, self)
-            m.cond_stage_model = sd_hijack_xlmr.FrozenXLMREmbedderWithCustomWords(m.cond_stage_model, self)
-
-        elif type(m.cond_stage_model) == ldm.modules.encoders.modules.FrozenCLIPEmbedder:
+        if type(m.cond_stage_model) == ldm.modules.encoders.modules.FrozenCLIPEmbedder:
             model_embeddings = sd_hijack_clip.clip_text_embeddings(m.cond_stage_model.transformer)
             model_embeddings.token_embedding = EmbeddingsWithFixes(model_embeddings.token_embedding, self)
             m.cond_stage_model = sd_hijack_clip.FrozenCLIPEmbedderWithCustomWords(m.cond_stage_model, self)
@@ -241,17 +231,6 @@ class StableDiffusionModelHijack:
 
         self.layers = flatten(m)
 
-        import modules.models.diffusion.ddpm_edit
-
-        if isinstance(m, ldm.models.diffusion.ddpm.LatentDiffusion):
-            sd_unet.original_forward = ldm_original_forward
-        elif isinstance(m, modules.models.diffusion.ddpm_edit.LatentDiffusion):
-            sd_unet.original_forward = ldm_original_forward
-        elif isinstance(m, sgm.models.diffusion.DiffusionEngine):
-            sd_unet.original_forward = sgm_original_forward
-        else:
-            sd_unet.original_forward = None
-
 
     def undo_hijack(self, m):
         conditioner = getattr(m, 'conditioner', None)
@@ -268,9 +247,6 @@ class StableDiffusionModelHijack:
 
             if hasattr(m, 'cond_stage_model'):
                 delattr(m, 'cond_stage_model')
-
-        elif type(m.cond_stage_model) == sd_hijack_xlmr.FrozenXLMREmbedderWithCustomWords:
-            m.cond_stage_model = m.cond_stage_model.wrapped
 
         elif type(m.cond_stage_model) == sd_hijack_clip.FrozenCLIPEmbedderWithCustomWords:
             m.cond_stage_model = m.cond_stage_model.wrapped
@@ -363,26 +339,17 @@ class TextualInversionEmbeddings(torch.nn.Embedding):
         return EmbeddingsWithFixes.forward(self, input_ids)
 
 
-def add_circular_option_to_conv_2d():
-    conv2d_constructor = torch.nn.Conv2d.__init__
-
-    def conv2d_constructor_circular(self, *args, **kwargs):
-        return conv2d_constructor(self, *args, padding_mode='circular', **kwargs)
-
-    torch.nn.Conv2d.__init__ = conv2d_constructor_circular
-
-
 model_hijack = StableDiffusionModelHijack()
 
 
 def register_buffer(self, name, attr):
     """
-    Fix register buffer bug for Mac OS.
+    Puts ldm DDIM/PLMS sampler buffers on devices.device instead of the sampler's own device argument (cuda by default).
     """
 
     if type(attr) == torch.Tensor:
         if attr.device != devices.device:
-            attr = attr.to(device=devices.device, dtype=(torch.float32 if devices.device.type == 'mps' else None))
+            attr = attr.to(device=devices.device)
 
     setattr(self, name, attr)
 

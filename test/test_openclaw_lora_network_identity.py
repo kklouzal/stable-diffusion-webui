@@ -332,9 +332,9 @@ def test_applied_identity_change_only_bumps(lora_networks, monkeypatch):
     assert _epoch(networks, "lora_applied_epoch") == first
     networks.load_networks(["alpha"], [0.75], [0.5], [4])
     assert _epoch(networks, "lora_applied_epoch") == first + 1
-    assert networks.unload_networks()
+    assert networks.load_networks([])
     assert _epoch(networks, "lora_applied_epoch") == first + 2
-    assert not networks.unload_networks()
+    assert not networks.load_networks([])
 
 
 def test_reorder_dyn_dim_checkpoint_precision_device_change_identity(lora_networks, monkeypatch):
@@ -418,7 +418,7 @@ def test_irrelevant_generation_inputs_not_in_applied_key(lora_networks):
 
 def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts():
     source = Path("extensions-builtin/Lora/networks.py").read_text()
-    publish = source[source.index("def _publish_applied_state"):source.index("def unload_networks")]
+    publish = source[source.index("def _publish_applied_state"):source.index("def load_network(")]
     assert publish.index("epoch_transaction") < publish.index("_network_application_lock")
     assert publish.count('bump_epoch("lora_applied_epoch"') == 2
     assert 'observe("E12", "reject"' in publish
@@ -450,39 +450,55 @@ def test_epoch_transaction_prevents_lifecycle_interleave_with_apply_publication(
 
 
 
-def test_quant_unload_restores_managed_base_and_invalidates_stale_active_config(lora_networks, monkeypatch):
+@pytest.mark.parametrize("backend, with_bias", [(MXFP8, True), (NVFP4, False)], ids=["mxfp8", "nvfp4-no-bias"])
+def test_quant_lora_clear_rebuilds_managed_base_and_replaces_stale_active_config(lora_networks, monkeypatch, backend, with_bias):
+    """Clearing LoRAs is load_networks([]) followed by the activation's prepare_quant_active_config: a stale prepared
+    config stays unusable until the managed modules are rebuilt from their BF16 base."""
+    import dataclasses
     import torch
     networks = lora_networks
-    linear = torch.nn.Linear(2, 2, bias=True, dtype=torch.bfloat16)
+    name = backend.name
+    linear = torch.nn.Linear(2, 2, bias=with_bias, dtype=torch.bfloat16)
     base_weight = linear.weight.detach().clone()
-    base_bias = linear.bias.detach().clone()
+    base_bias = linear.bias.detach().clone() if with_bias else None
     with torch.no_grad():
         linear.weight.add_(torch.ones_like(linear.weight))
-        linear.bias.add_(torch.ones_like(linear.bias))
+        if with_bias:
+            linear.bias.add_(torch.ones_like(linear.bias))
     linear.network_layer_name = "layer"
-    linear.network_mxfp8_base_weight = base_weight.detach().cpu().clone()
-    linear.network_mxfp8_base_bias = base_bias.detach().cpu().clone()
+    setattr(linear, f"network_{name}_base_weight", base_weight.detach().cpu().clone())
+    setattr(linear, f"network_{name}_base_bias", base_bias.detach().cpu().clone() if with_bias else None)
     linear.network_current_names = (("alpha",),)
-    linear.network_mxfp8_merged_lora_applied = True
-    model = SimpleNamespace(
-        network_layer_mapping={"layer": linear},
-        network_mxfp8_managed_modules=[("layer", linear)],
-        network_mxfp8_active_config_ready=True,
-        network_mxfp8_active_config_signature=("stale",),
-    )
+    setattr(linear, f"network_{name}_merged_lora_applied", True)
+    model = SimpleNamespace(**{
+        "network_layer_mapping": {"layer": linear},
+        f"network_{name}_managed_modules": [("layer", linear)],
+        f"network_{name}_active_config_ready": True,
+        f"network_{name}_active_config_signature": ("stale",),
+    })
     monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
-    monkeypatch.setattr(networks.devices, "mxfp8", True, raising=False)
-    monkeypatch.setattr(networks.devices, "nvfp4", False, raising=False)
+    monkeypatch.setattr(networks.shared.opts, f"{name}_linear_coverage", [], raising=False)
+    for each in (MXFP8, NVFP4):
+        monkeypatch.setattr(networks.devices, each.name, each is backend, raising=False)
     monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+    quantized = []
+    monkeypatch.setitem(sys.modules, "torchao.quantization", SimpleNamespace(quantize_=lambda module, config, filter_fn, device: quantized.append(module)))
+    backend = dataclasses.replace(backend, make_config=lambda: "config", validate_config=lambda _config: None, tensor_type=lambda: torch.nn.Parameter)
 
-    assert networks.unload_networks()
+    assert networks.load_networks([])
+    assert not networks.network_quant_is_model_prepared(backend, model)
 
+    assert networks.prepare_quant_active_config(backend)
+    assert quantized == [linear]
     assert torch.equal(linear.weight, base_weight)
-    assert torch.equal(linear.bias, base_bias)
+    if with_bias:
+        assert torch.equal(linear.bias, base_bias)
+    else:
+        assert linear.bias is None
     assert linear.network_current_names == ()
-    assert linear.network_mxfp8_merged_lora_applied is False
-    assert not getattr(model, "network_mxfp8_active_config_ready", False)
-    assert not networks.network_quant_is_model_prepared(MXFP8, model)
+    assert getattr(linear, f"network_{name}_merged_lora_applied") is False
+    assert getattr(model, f"network_{name}_active_config_signature") != ("stale",)
+    assert networks.network_quant_is_model_prepared(backend, model)
 
 
 def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora_networks, monkeypatch):
@@ -500,45 +516,10 @@ def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora
     networks.loaded_networks[:] = [net]
 
     assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
-    networks.network_quant_restore_managed_base(MXFP8, model)
-    assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
     assert torch.equal(linear.weight, linear.network_mxfp8_base_weight)
     assert not networks.network_quant_is_model_prepared(MXFP8, model)
     linear.network_current_names = networks.network_wanted_names()
     assert networks.network_quant_is_model_prepared(MXFP8, model)
-
-
-def test_nvfp4_unload_restores_managed_base_and_invalidates_stale_active_config(lora_networks, monkeypatch):
-    import torch
-    networks = lora_networks
-    linear = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
-    base_weight = linear.weight.detach().clone()
-    with torch.no_grad():
-        linear.weight.mul_(2)
-    linear.network_layer_name = "layer"
-    linear.network_nvfp4_base_weight = base_weight.detach().cpu().clone()
-    linear.network_nvfp4_base_bias = None
-    linear.network_current_names = (("alpha",),)
-    linear.network_nvfp4_merged_lora_applied = True
-    model = SimpleNamespace(
-        network_layer_mapping={"layer": linear},
-        network_nvfp4_managed_modules=[("layer", linear)],
-        network_nvfp4_active_config_ready=True,
-        network_nvfp4_active_config_signature=("stale",),
-    )
-    monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
-    monkeypatch.setattr(networks.devices, "mxfp8", False, raising=False)
-    monkeypatch.setattr(networks.devices, "nvfp4", True, raising=False)
-    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
-
-    assert networks.unload_networks()
-
-    assert torch.equal(linear.weight, base_weight)
-    assert linear.bias is None
-    assert linear.network_current_names == ()
-    assert linear.network_nvfp4_merged_lora_applied is False
-    assert not getattr(model, "network_nvfp4_active_config_ready", False)
-    assert not networks.network_quant_is_model_prepared(NVFP4, model)
 
 
 def test_quant_prepare_is_one_transaction_and_rolls_back_on_failure(lora_networks, monkeypatch):
@@ -656,7 +637,7 @@ def test_bundled_ti_load_noop_and_unload_are_atomic(lora_networks, monkeypatch):
     assert not networks._publish_applied_state([net], db)
     assert _epochs(networks) == loaded
     assert len(db.register_calls) == 1
-    assert networks.unload_networks()
+    assert networks._publish_applied_state([], db)
     unloaded = _epochs(networks)
     assert db.word_embeddings == {}
     assert all(unloaded[name] == loaded[name] + 1 for name in unloaded)
@@ -972,7 +953,7 @@ def test_identical_load_is_physical_noop_and_semantic_changes_invalidate(lora_ne
     assert len(physical) > first_physical
     assert networks.load_networks(["alpha", "alpha"], [0.6, 0.5], [0.5, 0.5], [None, None])
     assert networks.load_networks(["alpha"], [0.6], [0.5], [4])
-    assert networks.unload_networks()
+    assert networks.load_networks([])
     assert networks.load_networks(["alpha"], [0.5], [0.5], [None])
 
 

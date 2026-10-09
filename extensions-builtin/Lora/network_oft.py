@@ -17,7 +17,6 @@ class NetworkModuleOFT(network.NetworkModule):
 
         super().__init__(net, weights)
 
-        self.lin_module = None
         self.org_module: list[torch.Module] = [self.sd_module]
 
         self.scale = 1.0

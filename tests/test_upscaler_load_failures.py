@@ -92,7 +92,6 @@ def _instance(module, class_name, **attributes):
     upscaler = getattr(module, class_name).__new__(getattr(module, class_name))
     upscaler.scalers = []
     upscaler.device = "cpu"
-    upscaler.enable = True
     upscaler.model_download_path = None
     for key, value in attributes.items():
         setattr(upscaler, key, value)
@@ -156,3 +155,57 @@ def test_loaded_model_is_used_without_moving_the_shared_descriptor(upscalers, mo
     assert result.size == (32, 32)
     assert upscalers.upscaled == [upscalers.loader.descriptor]
     assert upscalers.loader.calls == [(str(model_path), expected_kwargs)]
+
+
+@pytest.mark.parametrize(("module_name", "class_name", "sha256", "expected_downloads"), [
+    # DAT checks its pinned sha256 and replaces a cached Git LFS pointer (< 200 bytes) with the weights.
+    ("dat_model", "UpscalerDAT", "7760aa96", [("7760aa96", False), ("7760aa96", True)]),
+    ("realesrgan_model", "UpscalerRealESRGAN", None, [(None, False)]),
+])
+def test_listed_url_model_is_downloaded_once(upscalers, module_name, class_name, sha256, expected_downloads):
+    upscaler = _instance(upscalers.modules[module_name], class_name, model_download_path=str(upscalers.tmp_path))
+    url = "https://example.invalid/model_x2.pth"
+    upscaler.scalers = [upscalers.modules["upscaler"].UpscalerData("model x2", url, upscaler, 2, sha256=sha256)]
+    downloaded = upscalers.tmp_path / "model_x2.pth"
+    downloads = []
+
+    def load_file_from_url(url_, *, model_dir, hash_prefix=None, re_download=False):
+        assert (url_, model_dir) == (url, str(upscalers.tmp_path))
+        downloads.append((hash_prefix, re_download))
+        downloaded.write_bytes(b"w" * (300 if re_download else 100))
+        return str(downloaded)
+
+    upscalers.modules["upscaler"].modelloader.load_file_from_url = load_file_from_url
+
+    upscaler.upscale(Image.new("RGB", (16, 16)), 2, url)
+    upscaler.upscale(Image.new("RGB", (16, 16)), 2, url)
+
+    assert downloads == expected_downloads
+    assert [path for path, _ in upscalers.loader.calls] == [str(downloaded)] * 2
+
+
+@pytest.mark.parametrize(("module_name", "class_name", "found", "expected"), [
+    # With no file in the model dir, load_models lists model_url, which is named model_name.
+    ("esrgan_model", "UpscalerESRGAN", ["https://example.invalid/ESRGAN.pth"], [("ESRGAN_4x", "https://example.invalid/ESRGAN.pth", 4)]),
+    ("esrgan_model", "UpscalerESRGAN", ["/m/4x_foo.pth"], [("4x_foo", "/m/4x_foo.pth", 4)]),
+    ("dat_model", "UpscalerDAT", ["/m/DAT_custom.pth"], [("DAT_custom", "/m/DAT_custom.pth", None)]),
+    ("hat_model", "UpscalerHAT", ["/m/HAT_x4.pth"], [("HAT_x4", "/m/HAT_x4.pth", 4)]),
+])
+def test_model_files_are_listed_as_scalers(upscalers, module_name, class_name, found, expected):
+    calls = []
+
+    def load_models(**kwargs):
+        calls.append(kwargs)
+        return found
+
+    upscalers.modules["upscaler"].modelloader.load_models = load_models
+    upscaler = getattr(upscalers.modules[module_name], class_name)("/user/models")
+
+    assert [(s.name, s.data_path, s.scale) for s in upscaler.scalers] == expected
+    assert all(s.scaler is upscaler for s in upscaler.scalers)
+    assert calls == [{
+        "model_path": str(upscalers.tmp_path / upscaler.name),
+        "model_url": upscaler.model_url,
+        "command_path": "/user/models",
+        "ext_filter": [".pt", ".pth"],
+    }]

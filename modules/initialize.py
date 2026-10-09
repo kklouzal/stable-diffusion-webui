@@ -14,7 +14,7 @@ def imports():
     from modules import initialize_util
     initialize_util.configure_torch_threads()
     import pytorch_lightning  # noqa: F401
-    startup_timer.record("import torch")
+    startup_timer.record("import pytorch_lightning")
     warnings.filterwarnings(action="ignore", category=DeprecationWarning, module="pytorch_lightning")
     warnings.filterwarnings(action="ignore", category=UserWarning, module="torchvision")
 
@@ -35,17 +35,8 @@ def imports():
     startup_timer.record("other imports")
 
 
-def check_versions():
-    from modules.shared_cmd_options import cmd_opts
-
-    if not cmd_opts.skip_version_check:
-        from modules import errors
-        errors.check_versions()
-
-
 def initialize():
     from modules import initialize_util
-    initialize_util.fix_torch_version()
     initialize_util.fix_asyncio_event_loop_policy()
     initialize_util.validate_tls_options()
     initialize_util.configure_sigint_handler()
@@ -148,7 +139,6 @@ def initialize_rest():
         by that time, so we apply optimization again.
         """
         from modules import devices
-        devices.torch_npu_set_device()
 
         shared.sd_model  # noqa: B018
 
