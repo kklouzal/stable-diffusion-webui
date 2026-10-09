@@ -58,10 +58,12 @@ contrast. The look follows SEG combined with the ancestral/SDE chain, not a code
 - Latent blend masks are float32 (soft inpaint masks were quantized to bf16).
 - ControlNet: inpaint/colorfix eps<->x0 post-processing in fp32; hires-pass detection by both dimensions; hires conds
   marked (hires rows were all read as cond); hires hint size follows the core's hires latent; IP-Adapter picks image
-  k/v per call row (uncond reused cond k/v); PuLID/plus-SDXL uncond follow their references.
+  k/v per call row (uncond reused cond k/v); PuLID/plus-SDXL uncond follow their references. (Update 2026-10-09: PuLID
+  and FaceID Plus IP-Adapter models now fail closed; the cleanup pass removed PuLID, 5152cdf3.)
 - SEG blurs exactly the uncond rows of the full CFG batch (AND prompts / batch>=2 cond-only calls blurred cond rows) and
   derives the attention grid from the UNet downsample chain (wrong for ~47% of sizes that are not multiples of 64).
 - Face restoration rounds; SwinIR/ScuNET/LDSR run fp32 outside hires autocast; upscalers hit their exact target size.
+  (Update 2026-10-09: the LDSR upscaler was removed, 9b18c895.)
 - Hypertile non-square row/column order.
 
 ## Crashes and latent defects fixed (no change on the production path)
@@ -122,3 +124,4 @@ when they are 'difference' models.
 
 1. Image A/B of the output-changing fixes against the operator's own references; LoRA merge time with fp32 math.
 2. IP-Adapter/PuLID/T2I/LLLite and reference/inpaint ControlNet units (no local checkpoints for the first group).
+   (Update 2026-10-09: PuLID is gone, see above.)

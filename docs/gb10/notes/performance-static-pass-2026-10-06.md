@@ -29,6 +29,8 @@ Full audit evidence (findings per area, ledger, test logs, GPU microbenchmarks):
   the cache entry owns the sampler wrapper and schedule tensors the graph reads; VAE graphs bypass Tiled VAE.
 - Races: the MXFP8 startup probe runs under `queue_lock` with local RNG and no process-wide SDPA monkeypatch;
   model-converter and conditioning-probe endpoints take the lock; blocking clear-cond-cache work leaves the event loop.
+  (Update 2026-10-09: the MXFP8 startup probe and the conditioning-probe extension were removed in the cleanup pass,
+  1e7c369d and 8e265eba.)
 
 ## Per-step (UNet/guidance) changes
 
@@ -89,7 +91,8 @@ hidden at ~95% GPU utilization.
 - CPU suites in the image (`tests test` and every `extensions/*/tests`, ControlNet web_api excluded): no new failures
   against the pre-change baseline; 8 previously failing extension tests now pass. The only new core entries are four
   LoRA identity tests that error from pre-existing `tests/test_teacache_extension.py` `sys.modules` stub pollution, like
-  every other test in that file; the file passes 38/38 on its own.
+  every other test in that file; the file passes 38/38 on its own. (Update 2026-10-09: 74813cb4 scoped those stubs to
+  the test that installs them, and be4f8e3b moved the file's tests to `extensions/sd-webui-teacache/tests/`.)
 - GPU unit tests (before the merge of the PAG workstream): UNet/attention/graph suites 127/127; full core and
   extension suites with `--gpus all` showed no new failures versus the same commit range on the pre-change tree.
   bf16 native norms were measured on GB10 (`test/benchmark_unet_norms.py`).

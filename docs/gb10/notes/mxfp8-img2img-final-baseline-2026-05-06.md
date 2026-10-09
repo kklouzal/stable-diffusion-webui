@@ -2,6 +2,10 @@
 
 This note records the final end-to-end GB10 A1111 img2img/MXFP8 baseline after the MXFP8 LoRA work and SEG/PAG stabilization pass.
 
+Update 2026-10-09:
+- The MXFP8 diagnostics probe and its routes (`/sdapi/v1/mxfp8-diagnostics`, `.../run`) were removed (1e7c369d).
+- `mxfp8_storage` defaults to `Disable`, and production runs with it disabled. This is a historical baseline.
+
 ## Scope
 
 Validated workflow:

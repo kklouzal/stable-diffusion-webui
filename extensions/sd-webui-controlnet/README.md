@@ -5,6 +5,29 @@ API-only ControlNet for this A1111 fork. It was vendored from
 upstream browser UI, batch/AnimateDiff/SparseCtrl/PuLID paths, movie2movie script, installer and offline converter
 CLIs were removed. `gb10/run.sh` mirrors this directory into the deployment's extensions directory.
 
+What the removals mean for requests:
+- `input_mode: "batch"` and `animatediff_batch: true` fail `ControlNetUnit` validation.
+- The other batch fields and `pulid_mode` do nothing. They stay so the API schema is unchanged.
+- SparseCtrl checkpoints raise an error, and PuLID and FaceID Plus IP-Adapter models fail closed.
+
+## Preprocessors
+Twelve preprocessors whose dependencies are not in the image were dropped on 2026-10-09, so `/controlnet/module_list`
+has 60 entries (it had 72). The dropped ones are:
+
+- `segmentation`, `oneformer_ade20k`, `oneformer_coco`
+- `normal_dsine`, `mediapipe_face`, `depth_hand_refiner`
+- `instant_id_face_embedding`, `instant_id_face_keypoints`
+- `ip-adapter_face_id`, `ip-adapter_face_id_plus`, `ip-adapter_pulid`, `facexlib`
+
+A request that names one of them fails unit validation. `control_types` no longer has `Instant-ID`, and the
+Segmentation type now defaults to `seg_anime_face`.
+
+The image installs the preprocessor packages from `docker/requirements-sd-webui-controlnet-image.txt`:
+- `controlnet_aux`, without MediaPipe
+- the Depth Anything v1/v2 wheels, pinned by URL and sha256
+
+The Dockerfile asserts their versions.
+
 ## API
 - Generation: `alwayson_scripts.ControlNet.args` is a list of `ControlNetUnit` objects
   (`internal_controlnet/args.py`; `/sdapi/v1/script-info` reports the default unit). Requests with more units than
