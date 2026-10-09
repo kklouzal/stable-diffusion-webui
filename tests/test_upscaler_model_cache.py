@@ -13,12 +13,21 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("spandrel")
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "modelloader.py"
-_STUBBED = ("modules", "modules.shared", "modules.upscaler", "modules.util", "modules.modelloader")
+MODULES_DIR = Path(__file__).resolve().parents[1] / "modules"
+MODULE_PATH = MODULES_DIR / "modelloader.py"
+_STUBBED = ("modules", "modules.cache", "modules.paths", "modules.shared", "modules.upscaler", "modules.util", "modules.modelloader")
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture()
-def modelloader():
+def modelloader(tmp_path):
     previous = {name: sys.modules.get(name) for name in _STUBBED}
     modules_pkg = types.ModuleType("modules")
     modules_pkg.__path__ = []
@@ -27,18 +36,18 @@ def modelloader():
         setattr(upscaler, name, type(name, (), {}))
     util = types.ModuleType("modules.util")
     util.load_file_from_url = lambda *args, **kwargs: None
+    paths = types.ModuleType("modules.paths")
+    paths.data_path = paths.script_path = str(tmp_path)
     sys.modules.update({
         "modules": modules_pkg,
+        "modules.paths": paths,
         "modules.shared": types.ModuleType("modules.shared"),
         "modules.upscaler": upscaler,
         "modules.util": util,
     })
     try:
-        spec = importlib.util.spec_from_file_location("modules.modelloader", MODULE_PATH)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["modules.modelloader"] = module
-        spec.loader.exec_module(module)
-        yield module
+        modules_pkg.cache = _load("modules.cache", MODULES_DIR / "cache.py")  # the real file identity helpers
+        yield _load("modules.modelloader", MODULE_PATH)
     finally:
         for name, value in previous.items():
             if value is None:
@@ -96,6 +105,29 @@ def test_replaced_file_reloads_and_drops_stale_entry(tmp_path, monkeypatch, mode
     _write_tiny_esrgan(path, seed=2)
     stat = os.stat(path)
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    second = modelloader.load_cached_spandrel_model(path, device="cpu")
+
+    assert second is not first
+    assert len(calls) == 2
+    assert len(modelloader._spandrel_model_cache) == 1
+    assert not torch.equal(next(first.model.parameters()), next(second.model.parameters()))
+
+
+def test_same_size_replacement_with_preserved_mtime_reloads(tmp_path, monkeypatch, modelloader):
+    # cp -p / rsync -t / tar x: equal size and mtime, but a new inode (and ctime).
+    path = tmp_path / "tiny.safetensors"
+    _write_tiny_esrgan(path, seed=1)
+    calls = _count_loads(monkeypatch, modelloader)
+    first = modelloader.load_cached_spandrel_model(path, device="cpu")
+
+    original = os.stat(path)
+    replacement = tmp_path / "replacement.safetensors"
+    _write_tiny_esrgan(replacement, seed=2)
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    os.replace(replacement, path)
+    replaced = os.stat(path)
+    assert (replaced.st_size, replaced.st_mtime_ns) == (original.st_size, original.st_mtime_ns)
+
     second = modelloader.load_cached_spandrel_model(path, device="cpu")
 
     assert second is not first
