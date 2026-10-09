@@ -557,3 +557,45 @@ def test_switching_lora_functional_republishes_the_same_networks(bf16_lora, monk
     assert torch.equal(layer.weight, merged)  # re-merged at publication, before any forward
     assert notes == [False, True, False]
     assert not networks._publish_applied_state([net])  # an unchanged mode is still a hit
+
+
+def test_lora_factors_keep_the_file_dtype_and_merge_closer_to_the_fp64_reference(bf16_lora):
+    """The factors were rounded to devices.dtype (bf16) at parse: 8 mantissa bits for fp16 files' 11."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(45)
+    layer = torch.nn.Linear(64, 64, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_layer"
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(64, 64, generator=g) * 0.03)
+    base = layer.weight.detach().clone()
+    up, down = (torch.randn(64, 8, generator=g) * 0.02).half(), (torch.randn(8, 64, generator=g) * 0.05).half()
+    net = _lora(networks, layer, "fp16", up, down, 4.0, 0.8)
+    module = net.modules[layer.network_layer_name]
+    assert module.up_model.weight.dtype == torch.float16 and torch.equal(module.up_model.weight, up)
+    assert module.down_model.weight.dtype == torch.float16 and torch.equal(module.down_model.weight, down)
+
+    networks._set_loaded_networks([net])
+    networks.network_apply_weights(layer)
+
+    scale = 0.8 * 4.0 / 8
+    reference = base.double() + scale * (up.double() @ down.double())
+    bf16_factors = (base.float() + scale * (up.bfloat16().float() @ down.bfloat16().float())).bfloat16()
+    error = (layer.weight.double() - reference).abs().sum()
+    assert error < (bf16_factors.double() - reference).abs().sum()
+    assert (layer.weight != reference.bfloat16()).sum() < (bf16_factors != reference.bfloat16()).sum()
+
+
+def test_functional_lora_forward_casts_file_dtype_factors_to_the_input(bf16_lora):
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(47)
+    layer = torch.nn.Conv2d(4, 4, 3, padding=1, bias=False, dtype=torch.bfloat16)
+    layer.network_layer_name = "diffusion_model_conv"
+    up, down = _grid((4, 2, 1, 1), g), _grid((2, 4, 3, 3), g)
+    module = _lora(networks, layer, "conv", up, down, 2.0, 1.0).modules[layer.network_layer_name]
+    x = torch.randn(1, 4, 5, 5, generator=g).bfloat16()
+    y = layer(x)
+
+    out = module.forward(x, y)
+
+    expected = y + torch.nn.functional.conv2d(torch.nn.functional.conv2d(x, down.bfloat16(), padding=1), up.bfloat16())
+    assert out.dtype == torch.bfloat16 and torch.equal(out, expected)
