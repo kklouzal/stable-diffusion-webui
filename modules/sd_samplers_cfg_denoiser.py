@@ -137,6 +137,8 @@ class CFGDenoiser(torch.nn.Module):
 
     def pad_cond_uncond(self, cond, uncond):
         empty = shared.sd_model.cond_stage_model_empty_prompt
+        if empty is None:  # sd_models._reload_model_weights: the recompute for the loaded text encoder failed
+            raise RuntimeError("The loaded checkpoint has no empty-prompt padding (computing it failed when the checkpoint was loaded); load the checkpoint again")
         num_repeats = (cond.shape[1] - uncond.shape[1]) // empty.shape[1]
 
         if num_repeats < 0:
