@@ -12,7 +12,7 @@ import torch
 
 from modules import shared
 from modules.upscaler import Upscaler, UpscalerLanczos, UpscalerNearest, UpscalerNone
-from modules.util import load_file_from_url  # noqa: F401 - backwards compatibility
+from modules.util import load_file_from_url
 
 if TYPE_CHECKING:
     import spandrel
