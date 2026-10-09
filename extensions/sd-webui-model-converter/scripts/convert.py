@@ -394,6 +394,9 @@ def scan_and_repair_nonfinite(
         # CPU isposinf/isneginf/nan_to_num have no float8 kernels; float8 -> float16 is exact (inf/NaN
         # included), so scan and repair a float16 copy and cast the repaired values back.
         values = tensor.to(torch.float16) if tensor.dtype in FLOAT8_DTYPES else tensor
+        # One pass for the common all-finite tensor; the three counting passes run only on affected tensors.
+        if bool(torch.isfinite(values).all()):
+            continue
         nan_count = int(torch.isnan(values).sum().item())
         posinf_count = int(torch.isposinf(values).sum().item())
         neginf_count = int(torch.isneginf(values).sum().item())

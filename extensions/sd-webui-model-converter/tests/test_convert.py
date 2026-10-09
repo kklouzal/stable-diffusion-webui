@@ -344,6 +344,41 @@ class ConversionCorrectnessTests(unittest.TestCase):
             with self.subTest(**case), self.assertRaises(ValueError):
                 self.convert.do_convert(info, **args)
 
+    def test_nonfinite_scan_matches_counting_reference_and_skips_counting_finite_tensors(self):
+        def reference(tensor):
+            values = tensor.to(torch.float16) if tensor.dtype in self.convert.FLOAT8_DTYPES else tensor
+            return (int(torch.isnan(values).sum()), int(torch.isposinf(values).sum()), int(torch.isneginf(values).sum()))
+
+        gen = torch.Generator().manual_seed(0)
+        model = {}
+        for i, dtype in enumerate((torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2)):
+            values = torch.randn(64, generator=gen)
+            model[f"finite{i}"] = values.to(dtype, copy=True)
+            values[[3, 9]] = float("nan")
+            if dtype != torch.float8_e4m3fn:
+                values[5], values[7] = float("inf"), float("-inf")
+            model[f"bad{i}"] = values.to(dtype)
+        model["ids"] = torch.arange(4)
+        expected = {key: reference(t) for key, t in model.items() if torch.is_floating_point(t)}
+        finite = {key: model[key] for key in model if key.startswith("finite")}
+
+        with mock.patch.object(self.convert.torch, "isnan", wraps=torch.isnan) as isnan:
+            report = self.convert.scan_and_repair_nonfinite(model, repair=True)
+
+        self.assertEqual(isnan.call_count, 5)  # the five affected tensors only
+        self.assertEqual(report["scanned_float_tensors"], 10)
+        self.assertEqual(report["affected_tensors"], 5)
+        self.assertEqual(
+            (report["nan_values"], report["posinf_values"], report["neginf_values"]),
+            tuple(sum(counts[i] for counts in expected.values()) for i in range(3)),
+        )
+        self.assertEqual(
+            {e["key"]: (e["nan"], e["+inf"], e["-inf"]) for e in report["examples"]},
+            {key: counts for key, counts in expected.items() if any(counts)},
+        )
+        for key, tensor in finite.items():
+            self.assertIs(model[key], tensor)
+
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outside = Path(tmpdir) / "outside.safetensors"
