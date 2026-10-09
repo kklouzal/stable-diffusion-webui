@@ -1,9 +1,9 @@
-from .teed import *
-from .pulid import *
-from .inpaint import *
-from .lama_inpaint import *
-from .ip_adapter_auto import *
-from .normal_dsine import *
-from .model_free_preprocessors import *
-from .legacy.legacy_preprocessors import *
-from .mobile_sam import *
+"""Importing this package registers every preprocessor (Preprocessor.add_supported_preprocessor). The import order
+is the registration order, which Preprocessor.unload_unused iterates."""
+from . import teed  # noqa: F401
+from . import inpaint  # noqa: F401
+from . import lama_inpaint  # noqa: F401
+from . import ip_adapter_auto  # noqa: F401
+from . import model_free_preprocessors  # noqa: F401
+from .legacy import legacy_preprocessors  # noqa: F401
+from . import mobile_sam  # noqa: F401

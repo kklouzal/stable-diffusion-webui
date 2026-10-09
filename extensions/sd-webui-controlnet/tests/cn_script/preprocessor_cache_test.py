@@ -18,8 +18,8 @@ class TestCacheablePreprocessors(unittest.TestCase):
                 self.assertTrue(Preprocessor.get_preprocessor(name).cacheable)
         # Random (shuffle), reads other settings (depth_leres++), a hit would be
         # slower than the work (none, invert), unaudited or tensor results.
-        for name in ("shuffle", "depth_leres++", "none", "invert", "depth_hand_refiner", "clip_vision",
-                     "ip-adapter_face_id", "reference_only", "tile_resample", "inpaint_only", "softedge_teed"):
+        for name in ("shuffle", "depth_leres++", "none", "invert", "clip_vision", "revision_clipvision",
+                     "reference_only", "tile_resample", "inpaint_only", "softedge_teed"):
             with self.subTest(name=name):
                 self.assertFalse(Preprocessor.get_preprocessor(name).cacheable)
 

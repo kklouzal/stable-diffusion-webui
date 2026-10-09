@@ -259,12 +259,8 @@ class ControlNetUnit(BaseModel):
     @property
     def uses_clip(self) -> bool:
         """Whether this unit uses clip preprocessor."""
-        return any(
-            (
-                ("ip-adapter" in self.module and "face_id" not in self.module),
-                self.module
-                in ("clip_vision", "revision_clipvision", "revision_ignore_prompt"),
-            )
+        return "ip-adapter" in self.module or self.module in (
+            "clip_vision", "revision_clipvision", "revision_ignore_prompt",
         )
 
     @property

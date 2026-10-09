@@ -1,15 +1,12 @@
-import os
 import cv2
 import numpy as np
 import torch
-import math
-from dataclasses import dataclass
-from transformers.models.clip.modeling_clip import CLIPVisionModelOutput
-from typing import Callable, Tuple, Union
+from typing import Callable, Tuple
 
 from modules.safe import Extra
 from modules import devices
 from annotator.util import HWC3
+from scripts import utils
 from scripts.logging import logger
 
 
@@ -22,49 +19,9 @@ def torch_handler(module: str, name: str):
         return getattr(torch._tensor, name)
 
 
-def pad64(x):
-    return int(np.ceil(float(x) / 64.0) * 64 - x)
-
-
-def safer_memory(x):
-    # Fix many MAC/AMD problems
-    return np.ascontiguousarray(x.copy()).copy()
-
-
-def resize_image_with_pad(input_image, resolution, skip_hwc3=False):
-    if skip_hwc3:
-        img = input_image
-    else:
-        img = HWC3(input_image)
-    H_raw, W_raw, _ = img.shape
-    k = float(resolution) / float(min(H_raw, W_raw))
-    interpolation = cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA
-    H_target = int(np.round(float(H_raw) * k))
-    W_target = int(np.round(float(W_raw) * k))
-    img = cv2.resize(img, (W_target, H_target), interpolation=interpolation)
-    H_pad, W_pad = pad64(H_target), pad64(W_target)
-    img_padded = np.pad(img, [[0, H_pad], [0, W_pad], [0, 0]], mode='edge')
-
-    def remove_pad(x):
-        return safer_memory(x[:H_target, :W_target])
-
-    return safer_memory(img_padded), remove_pad
-
-
-def canny(img, res=512, thr_a=100, thr_b=200, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    result = cv2.Canny(img, thr_a, thr_b)
-    return remove_pad(result), True
-
-
-def scribble_xdog(img, res=512, thr_a=32, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    g1 = cv2.GaussianBlur(img.astype(np.float32), (0, 0), 0.5)
-    g2 = cv2.GaussianBlur(img.astype(np.float32), (0, 0), 5.0)
-    dog = (255 - np.min(g2 - g1, axis=2)).clip(0, 255).astype(np.uint8)
-    result = np.zeros_like(img, dtype=np.uint8)
-    result[2 * (255 - dog) > thr_a] = 255
-    return remove_pad(result), True
+def resize_image_with_pad(img, res):
+    """scripts.utils.resize_image_with_pad on HWC3(img): 2-D, 1-channel and RGBA input become RGB first."""
+    return utils.resize_image_with_pad(HWC3(img), res)
 
 
 def tile_resample(img, res=512, thr_a=1.0, **kwargs):
@@ -89,30 +46,26 @@ def identity(img, **kwargs):
     return img, True
 
 
-def invert(img, res=512, **kwargs):
-    return 255 - HWC3(img), True
+def _scribble_from_edges(result):
+    """Thin a soft-edge map to a binary scribble (NMS, blur, threshold)."""
+    from annotator.util import nms
+    result = nms(result, 127, 3.0)
+    result = cv2.GaussianBlur(result, (0, 0), 3.0)
+    result[result > 4] = 255
+    result[result < 255] = 0
+    return result
 
 
 model_hed = None
 
 
-def hed(img, res=512, **kwargs):
+def hed(img, res=512, is_safe=False, **kwargs):
     img, remove_pad = resize_image_with_pad(img, res)
     global model_hed
     if model_hed is None:
         from annotator.hed import apply_hed
         model_hed = apply_hed
-    result = model_hed(img)
-    return remove_pad(result), True
-
-
-def hed_safe(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_hed
-    if model_hed is None:
-        from annotator.hed import apply_hed
-        model_hed = apply_hed
-    result = model_hed(img, is_safe=True)
+    result = model_hed(img, is_safe=is_safe)
     return remove_pad(result), True
 
 
@@ -125,28 +78,7 @@ def unload_hed():
 
 def scribble_hed(img, res=512, **kwargs):
     result, _ = hed(img, res)
-    import cv2
-    from annotator.util import nms
-    result = nms(result, 127, 3.0)
-    result = cv2.GaussianBlur(result, (0, 0), 3.0)
-    result[result > 4] = 255
-    result[result < 255] = 0
-    return result, True
-
-
-model_mediapipe_face = None
-
-
-def mediapipe_face(img, res=512, thr_a: int = 10, thr_b: float = 0.5, **kwargs):
-    max_faces = int(thr_a)
-    min_confidence = thr_b
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_mediapipe_face
-    if model_mediapipe_face is None:
-        from annotator.mediapipe_face import apply_mediapipe_face
-        model_mediapipe_face = apply_mediapipe_face
-    result = model_mediapipe_face(img, max_faces=max_faces, min_confidence=min_confidence)
-    return remove_pad(result), True
+    return _scribble_from_edges(result), True
 
 
 model_mlsd = None
@@ -307,68 +239,23 @@ class OpenposeModel(object):
 
 g_openpose_model = OpenposeModel()
 
-model_uniformer = None
-
-
-def uniformer(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_uniformer
-    if model_uniformer is None:
-        from annotator.uniformer import apply_uniformer
-        model_uniformer = apply_uniformer
-    result = model_uniformer(img)
-    return remove_pad(result), True
-
-
-def unload_uniformer():
-    global model_uniformer
-    if model_uniformer is not None:
-        from annotator.uniformer import unload_uniformer_model
-        unload_uniformer_model()
-
 
 model_pidinet = None
 
 
-def pidinet(img, res=512, **kwargs):
+def pidinet(img, res=512, is_safe=False, apply_fliter=False, **kwargs):
     img, remove_pad = resize_image_with_pad(img, res)
     global model_pidinet
     if model_pidinet is None:
         from annotator.pidinet import apply_pidinet
         model_pidinet = apply_pidinet
-    result = model_pidinet(img)
-    return remove_pad(result), True
-
-
-def pidinet_ts(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_pidinet
-    if model_pidinet is None:
-        from annotator.pidinet import apply_pidinet
-        model_pidinet = apply_pidinet
-    result = model_pidinet(img, apply_fliter=True)
-    return remove_pad(result), True
-
-
-def pidinet_safe(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_pidinet
-    if model_pidinet is None:
-        from annotator.pidinet import apply_pidinet
-        model_pidinet = apply_pidinet
-    result = model_pidinet(img, is_safe=True)
+    result = model_pidinet(img, is_safe=is_safe, apply_fliter=apply_fliter)
     return remove_pad(result), True
 
 
 def scribble_pidinet(img, res=512, **kwargs):
     result, _ = pidinet(img, res)
-    import cv2
-    from annotator.util import nms
-    result = nms(result, 127, 3.0)
-    result = cv2.GaussianBlur(result, (0, 0), 3.0)
-    result[result > 4] = 255
-    result[result < 255] = 0
-    return result, True
+    return _scribble_from_edges(result), True
 
 
 def unload_pidinet():
@@ -549,67 +436,21 @@ def unload_normal_bae():
         model_normal_bae.unload_model()
 
 
-model_oneformer_coco = None
-
-
-def oneformer_coco(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_oneformer_coco
-    if model_oneformer_coco is None:
-        from annotator.oneformer import OneformerDetector
-        model_oneformer_coco = OneformerDetector(OneformerDetector.configs["coco"])
-    result = model_oneformer_coco(img)
-    return remove_pad(result), True
-
-
-def unload_oneformer_coco():
-    global model_oneformer_coco
-    if model_oneformer_coco is not None:
-        model_oneformer_coco.unload_model()
-
-
-model_oneformer_ade20k = None
-
-
-def oneformer_ade20k(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    global model_oneformer_ade20k
-    if model_oneformer_ade20k is None:
-        from annotator.oneformer import OneformerDetector
-        model_oneformer_ade20k = OneformerDetector(OneformerDetector.configs["ade20k"])
-    result = model_oneformer_ade20k(img)
-    return remove_pad(result), True
-
-
-def unload_oneformer_ade20k():
-    global model_oneformer_ade20k
-    if model_oneformer_ade20k is not None:
-        model_oneformer_ade20k.unload_model()
+def _recolor(img, conversion, channel, gamma):
+    """One channel of the RGB input in another colour space, gamma-adjusted, as a grey RGB map."""
+    result = cv2.cvtColor(HWC3(img), conversion)[:, :, channel].astype(np.float32) / 255.0
+    result = result ** gamma
+    result = (result * 255.0).clip(0, 255).astype(np.uint8)
+    return cv2.cvtColor(result, cv2.COLOR_GRAY2RGB), True
 
 
 def recolor_luminance(img, res=512, thr_a=1.0, **kwargs):
-    result = cv2.cvtColor(HWC3(img), cv2.COLOR_BGR2LAB)
-    result = result[:, :, 0].astype(np.float32) / 255.0
-    result = result ** thr_a
-    result = (result * 255.0).clip(0, 255).astype(np.uint8)
-    result = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
-    return result, True
+    # LAB L of the RGB input: controlnet.py's post-processor writes it back through RGB2LAB/LAB2RGB.
+    return _recolor(img, cv2.COLOR_RGB2LAB, 0, thr_a)
 
 
 def recolor_intensity(img, res=512, thr_a=1.0, **kwargs):
-    result = cv2.cvtColor(HWC3(img), cv2.COLOR_BGR2HSV)
-    result = result[:, :, 2].astype(np.float32) / 255.0
-    result = result ** thr_a
-    result = (result * 255.0).clip(0, 255).astype(np.uint8)
-    result = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
-    return result, True
-
-
-def blur_gaussian(img, res=512, thr_a=1.0, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)
-    img = remove_pad(img)
-    result = cv2.GaussianBlur(img, (0, 0), float(thr_a))
-    return result, True
+    return _recolor(img, cv2.COLOR_RGB2HSV, 2, thr_a)
 
 
 model_anime_face_segment = None
@@ -643,165 +484,3 @@ def densepose(img, res=512, cmap="viridis", **kwargs):
 def unload_densepose():
     from annotator.densepose import unload_model
     unload_model()
-
-class InsightFaceModel:
-    def __init__(self, face_analysis_model_name: str = "buffalo_l"):
-        self.model = None
-        self.face_analysis_model_name = face_analysis_model_name
-        self.antelopev2_installed = False
-
-    @staticmethod
-    def pick_largest_face(faces):
-        if not faces:
-            raise Exception("Insightface: No face found in image.")
-        if len(faces) > 1:
-            logger.warning("Insightface: More than one face is detected in the image. "
-                        "Only the biggest one will be used.")
-        # only use the biggest face
-        face = sorted(faces, key=lambda x:(x['bbox'][2]-x['bbox'][0])*(x['bbox'][3]-x['bbox'][1]))[-1]
-        return face
-
-    def install_antelopev2(self):
-        """insightface's github release on antelopev2 model is down. Downloading
-        from huggingface mirror."""
-        from scripts.utils import load_file_from_url
-        from annotator.annotator_path import models_path
-        model_root = os.path.join(models_path, "insightface", "models", "antelopev2")
-        if not model_root:
-            os.makedirs(model_root, exist_ok=True)
-        for local_file, url in (
-            ("1k3d68.onnx", "https://huggingface.co/DIAMONIK7777/antelopev2/resolve/main/1k3d68.onnx"),
-            ("2d106det.onnx", "https://huggingface.co/DIAMONIK7777/antelopev2/resolve/main/2d106det.onnx"),
-            ("genderage.onnx", "https://huggingface.co/DIAMONIK7777/antelopev2/resolve/main/genderage.onnx"),
-            ("glintr100.onnx", "https://huggingface.co/DIAMONIK7777/antelopev2/resolve/main/glintr100.onnx"),
-            ("scrfd_10g_bnkps.onnx", "https://huggingface.co/DIAMONIK7777/antelopev2/resolve/main/scrfd_10g_bnkps.onnx"),
-        ):
-            local_path = os.path.join(model_root, local_file)
-            if not os.path.exists(local_path):
-                load_file_from_url(url, model_dir=model_root)
-        self.antelopev2_installed = True
-
-    def load_model(self):
-        if self.model is None:
-            from insightface.app import FaceAnalysis
-            from annotator.annotator_path import models_path
-            self.model = FaceAnalysis(
-                name=self.face_analysis_model_name,
-                providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
-                root=os.path.join(models_path, "insightface"),
-            )
-            self.model.prepare(ctx_id=0, det_size=(640, 640))
-
-    def run_model(self, img: np.ndarray, **kwargs) -> Tuple[torch.Tensor, bool]:
-        self.load_model()
-        img = img[:, :, :3]  # Drop alpha channel if there is one.
-        faces = self.model.get(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-        face = InsightFaceModel.pick_largest_face(faces)
-        return torch.from_numpy(face.normed_embedding).unsqueeze(0), False
-
-    def run_model_instant_id(
-        self,
-        img: np.ndarray,
-        res: int = 512,
-        return_keypoints: bool = False,
-        **kwargs
-    ) -> Tuple[Union[np.ndarray, torch.Tensor], bool]:
-        """Run the insightface model for instant_id.
-        Arguments:
-            - img: Input image in any size.
-            - res: Resolution used to resize image.
-            - return_keypoints: Whether to return keypoints image or face embedding.
-        """
-        def draw_kps(img: np.ndarray, kps, color_list=[(255,0,0), (0,255,0), (0,0,255), (255,255,0), (255,0,255)]):
-            stickwidth = 4
-            limbSeq = np.array([[0, 2], [1, 2], [3, 2], [4, 2]])
-            kps = np.array(kps)
-
-            h, w, _ = img.shape
-            out_img = np.zeros([h, w, 3])
-
-            for i in range(len(limbSeq)):
-                index = limbSeq[i]
-                color = color_list[index[0]]
-
-                x = kps[index][:, 0]
-                y = kps[index][:, 1]
-                length = ((x[0] - x[1]) ** 2 + (y[0] - y[1]) ** 2) ** 0.5
-                angle = math.degrees(math.atan2(y[0] - y[1], x[0] - x[1]))
-                polygon = cv2.ellipse2Poly((int(np.mean(x)), int(np.mean(y))), (int(length / 2), stickwidth), int(angle), 0, 360, 1)
-                out_img = cv2.fillConvexPoly(out_img.copy(), polygon, color)
-            out_img = (out_img * 0.6).astype(np.uint8)
-
-            for idx_kp, kp in enumerate(kps):
-                color = color_list[idx_kp]
-                x, y = kp
-                out_img = cv2.circle(out_img.copy(), (int(x), int(y)), 10, color, -1)
-
-            return out_img.astype(np.uint8)
-
-        if not self.antelopev2_installed:
-            self.install_antelopev2()
-        self.load_model()
-
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        img, remove_pad = resize_image_with_pad(img, res)
-        faces = self.model.get(img)
-        face_info = InsightFaceModel.pick_largest_face(faces)
-        if return_keypoints:
-            return remove_pad(draw_kps(img, face_info['kps'])), True
-        else:
-            return torch.from_numpy(face_info['embedding']), False
-
-
-g_insight_face_model = InsightFaceModel()
-g_insight_face_instant_id_model = InsightFaceModel(face_analysis_model_name="antelopev2")
-
-
-@dataclass
-class FaceIdPlusInput:
-    face_embed: torch.Tensor
-    clip_embed: CLIPVisionModelOutput
-
-
-def face_id_plus(img, low_vram=False, **kwargs):
-    """ FaceID plus uses both face_embeding from insightface and clip_embeding from clip. """
-    face_embed, _ = g_insight_face_model.run_model(img)
-    clip_embed, _ = clip(img, config='clip_h', low_vram=low_vram)
-    return FaceIdPlusInput(face_embed, clip_embed), False
-
-
-class HandRefinerModel:
-    def __init__(self):
-        self.model = None
-        self.device = devices.get_device_for("controlnet")
-
-    def load_model(self):
-        if self.model is None:
-            from annotator.annotator_path import models_path
-            from hand_refiner import MeshGraphormerDetector  # installed via hand_refiner_portable
-            with Extra(torch_handler):
-                self.model = MeshGraphormerDetector.from_pretrained(
-                    "hr16/ControlNet-HandRefiner-pruned",
-                    cache_dir=os.path.join(models_path, "hand_refiner"),
-                    device=self.device,
-                )
-        else:
-            self.model.to(self.device)
-
-    def unload(self):
-        if self.model is not None:
-            self.model.to("cpu")
-
-    def run_model(self, img, res=512, **kwargs):
-        img, remove_pad = resize_image_with_pad(img, res)
-        self.load_model()
-        with Extra(torch_handler):
-            depth_map, mask, info = self.model(
-                img, output_type="np",
-                detect_resolution=res,
-                mask_bbox_padding=30,
-            )
-        return remove_pad(depth_map), True
-
-
-g_hand_refiner_model = HandRefinerModel()

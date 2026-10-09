@@ -24,7 +24,7 @@ class PreprocessorParameter:
         maximum (float): The maximum value of the parameter. Default is 1.0.
         step (float): The step size for the parameter. Default is 0.01.
         value (float): The initial value of the parameter. Default is 0.5.
-        visible (bool): Whether the parameter is visible or not. Default is False.
+        visible (bool): Whether the parameter is visible or not. Default is True.
     """
 
     label: str = "EMPTY_LABEL"
@@ -33,17 +33,6 @@ class PreprocessorParameter:
     step: float = 0.01
     value: float = 0.5
     visible: bool = True
-
-    @property
-    def gradio_update_kwargs(self) -> dict:
-        return dict(
-            minimum=self.minimum,
-            maximum=self.maximum,
-            step=self.step,
-            label=self.label,
-            value=self.value,
-            visible=self.visible,
-        )
 
     @property
     def api_json(self) -> dict:
@@ -68,13 +57,8 @@ class Preprocessor(ABC):
         slider_1 (PreprocessorParameter): The first parameter of the slider.
         slider_2 (PreprocessorParameter): The second parameter of the slider.
         slider_3 (PreprocessorParameter): The third parameter of the slider.
-        show_control_mode (bool): Whether to show the control mode or not.
         do_not_need_model (bool): Whether the preprocessor needs a model or not.
         sorting_priority (int): The sorting priority of the preprocessor.
-        corp_image_with_a1111_mask_when_in_img2img_inpaint_tab (bool): Whether to crop the image with a1111 mask when in img2img inpaint tab or not.
-        fill_mask_with_one_when_resize_and_fill (bool): Whether to fill the mask with one when resizing and filling or not.
-        use_soft_projection_in_hr_fix (bool): Whether to use soft projection in hr fix or not.
-        expand_mask_when_resize_and_fill (bool): Whether to expand the mask when resizing and filling or not.
     """
 
     name: str
@@ -92,15 +76,10 @@ class Preprocessor(ABC):
     slider_2 = PreprocessorParameter(visible=False)
     slider_3 = PreprocessorParameter(visible=False)
     returns_image: bool = True
-    show_control_mode = True
     do_not_need_model = False
     sorting_priority = 0  # higher goes to top in the list
     accepts_mask: bool = False
     requires_mask: bool = False
-    corp_image_with_a1111_mask_when_in_img2img_inpaint_tab = True
-    fill_mask_with_one_when_resize_and_fill = False
-    use_soft_projection_in_hr_fix = False
-    expand_mask_when_resize_and_fill = False
     model: Optional[torch.nn.Module] = None
     device = devices.get_device_for("controlnet")
     preprocessor_deps: List[str] = field(default_factory=list)
@@ -155,8 +134,6 @@ class Preprocessor(ABC):
 
     @classmethod
     def get_filtered_preprocessors(cls, tag: str) -> List["Preprocessor"]:
-        if tag == "All":
-            return cls.all_processors
         return [
             p
             for p in cls.get_sorted_preprocessors()
@@ -178,7 +155,6 @@ class Preprocessor(ABC):
             "t2i-adapter": ["t2i_adapter", "t2iadapter", "t2ia"],
             "ip-adapter": ["ip_adapter", "ipadapter"],
             "openpose": ["openpose", "densepose"],
-            "instant-id": ["instant_id", "instantid"],
             "scribble": ["sketch"],
             "tile": ["blur"],
         }
@@ -186,11 +162,6 @@ class Preprocessor(ABC):
         tag = tag.lower()
         union_tags = ["union"] if tag in ControlNetUnionControlType.all_tags() else []
         return set([tag] + filters_aliases.get(tag, []) + union_tags)
-
-    @classmethod
-    def clear_all_caches(cls, reason="extension-reload"):
-        for processor in cls.all_processors.values():
-            processor.clear_cache(reason)
 
     @classmethod
     def unload_unused(cls, active_processors: Set["Preprocessor"]):
@@ -250,12 +221,6 @@ class Preprocessor(ABC):
         if self._result_cache is not None:
             self._result_cache.clear(reason)
 
-    def cache_info(self):
-        return self._result_cache.info() if self._result_cache is not None else {
-            "name": f"controlnet-preprocessor:{self.name}", "size": 0,
-            "max_size": CACHE_SIZE, "stats": {},
-        }
-
     def _cached_call(self, *args, **kwargs):
         """Cache only deterministic calls under complete input/runtime identity.
         Calls carrying a callable (e.g. openpose's json_pose_callback) always run:
@@ -275,7 +240,8 @@ class Preprocessor(ABC):
         return hash(self.name)
 
     def __eq__(self, other):
-        return self.__hash__() == other.__hash__()
+        # Preprocessors are registered once per name (add_supported_preprocessor asserts it).
+        return isinstance(other, Preprocessor) and self.name == other.name
 
     @abstractmethod
     def __call__(

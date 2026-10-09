@@ -26,9 +26,6 @@ class TransformerIDResult(NamedTuple):
     output_ids: List[TransformerID]
     middle_ids: List[TransformerID]
 
-    def get(self, idx: int) -> TransformerID:
-        return self.to_list()[idx]
-
     def to_list(self) -> List[TransformerID]:
         return sorted(
             self.input_ids + self.output_ids + self.middle_ids,
@@ -60,19 +57,6 @@ class StableDiffusionVersion(Enum):
 
         return StableDiffusionVersion.UNKNOWN
 
-    def encoder_block_num(self) -> int:
-        if self in (
-            StableDiffusionVersion.SD1x,
-            StableDiffusionVersion.SD2x,
-            StableDiffusionVersion.UNKNOWN,
-        ):
-            return 12
-        else:
-            return 9  # SDXL
-
-    def controlnet_layer_num(self) -> int:
-        return self.encoder_block_num() + 1
-
     @property
     def transformer_block_num(self) -> int:
         """Number of blocks that has cross attn transformers in unet."""
@@ -87,7 +71,7 @@ class StableDiffusionVersion(Enum):
 
     @property
     @lru_cache(maxsize=None)
-    def transformer_ids(self) -> List[TransformerID]:
+    def transformer_ids(self) -> TransformerIDResult:
         """id of blocks that have cross attention"""
         if self in (
             StableDiffusionVersion.SD1x,
@@ -105,7 +89,7 @@ class StableDiffusionVersion(Enum):
             transformer_index += 1
             output_ids = []
             for block_id in [3, 4, 5, 6, 7, 8, 9, 10, 11]:
-                input_ids.append(
+                output_ids.append(
                     TransformerID(UnetBlockType.OUTPUT, block_id, 0, transformer_index)
                 )
                 transformer_index += 1
@@ -162,18 +146,12 @@ class ControlModelType(Enum):
     ControlNet = "ControlNet, Lvmin Zhang"
     T2I_Adapter = "T2I_Adapter, Chong Mou"
     T2I_StyleAdapter = "T2I_StyleAdapter, Chong Mou"
-    T2I_CoAdapter = "T2I_CoAdapter, Chong Mou"
-    MasaCtrl = "MasaCtrl, Mingdeng Cao"
-    GLIGEN = "GLIGEN, Yuheng Li"
     AttentionInjection = "AttentionInjection, Lvmin Zhang"  # A simple attention injection written by Lvmin
-    StableSR = "StableSR, Jianyi Wang"
-    PromptDiffusion = "PromptDiffusion, Zhendong Wang"
     ControlLoRA = "ControlLoRA, Wu Hecong"
     ReVision = "ReVision, Stability"
     IPAdapter = "IPAdapter, Hu Ye"
     Controlllite = "Controlllite, Kohya"
     InstantID = "InstantID, Qixun Wang"
-    SparseCtrl = "SparseCtrl, Yuwei Guo"
     ControlNetUnion = "ControlNetUnion, xinsir6"
 
     @property
@@ -219,7 +197,6 @@ class AutoMachine(Enum):
 
     Read = "Read"
     Write = "Write"
-    StyleAlign = "StyleAlign"
 
 
 class HiResFixOption(Enum):
@@ -252,11 +229,6 @@ class ControlMode(Enum):
     BALANCED = "Balanced"
     PROMPT = "My prompt is more important"
     CONTROL = "ControlNet is more important"
-
-
-class BatchOption(Enum):
-    DEFAULT = "All ControlNet units for all images in a batch"
-    SEPARATE = "Each ControlNet unit for each image in a batch"
 
 
 class ResizeMode(Enum):
@@ -313,29 +285,6 @@ class ControlNetUnionControlType(Enum):
             "inpaint",
             "tile",
         ]
-
-    @staticmethod
-    def from_str(s: str) -> ControlNetUnionControlType:
-        s = s.lower()
-
-        if s == "openpose":
-            return ControlNetUnionControlType.OPENPOSE
-        elif s == "depth":
-            return ControlNetUnionControlType.DEPTH
-        elif s in ["scribble", "softedge"]:
-            return ControlNetUnionControlType.SOFT_EDGE
-        elif s in ["canny", "lineart", "mlsd"]:
-            return ControlNetUnionControlType.HARD_EDGE
-        elif s == "normalmap":
-            return ControlNetUnionControlType.NORMAL_MAP
-        elif s == "segmentation":
-            return ControlNetUnionControlType.SEGMENTATION
-        elif s in ["tile", "blur"]:
-            return ControlNetUnionControlType.TILE
-        elif s == "inpaint":
-            return ControlNetUnionControlType.INPAINT
-
-        return ControlNetUnionControlType.UNKNOWN
 
     def int_value(self) -> int:
         if self == ControlNetUnionControlType.UNKNOWN:
