@@ -137,3 +137,34 @@ def test_unchanged_reload_still_publishes_expected_shape(monkeypatch):
 
     assert not db.load_textual_inversion_embeddings(force_reload=True)  # no folders: same (empty) maps
     assert db.expected_shape == 2048
+
+
+def test_embedding_replaced_in_place_is_republished_without_hashes(monkeypatch, tmp_path):
+    # Under --no-hashing every embedding hash is '', so a same-shape replacement (equal size, mtime preserved) was
+    # only noticed through the file identity: without it the refresh kept the old vectors and the TI epoch.
+    import os
+    import safetensors.torch
+    from modules import hashes, openclaw_cache_epochs
+    from modules.textual_inversion import textual_inversion as ti
+
+    monkeypatch.setattr(hashes, "sha256", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ti.EmbeddingDatabase, "get_expected_shape", lambda self: 2048)  # 768-wide files are skipped
+    db = ti.EmbeddingDatabase()
+    db.add_embedding_dir(str(tmp_path))
+    path = tmp_path / "style.safetensors"
+    safetensors.torch.save_file({"emb_params": torch.zeros(1, 768)}, str(path))
+    assert db.load_textual_inversion_embeddings(force_reload=True)
+    assert torch.equal(db.skipped_embeddings["style"].vec.cpu(), torch.zeros(1, 768))
+
+    original = os.stat(path)
+    replacement = tmp_path / "replacement.tmp"
+    safetensors.torch.save_file({"emb_params": torch.ones(1, 768)}, str(replacement))
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    os.replace(replacement, path)
+    assert os.stat(path).st_size == original.st_size
+    epoch = openclaw_cache_epochs.epoch_subset(("textual_inversion_epoch",))
+
+    assert db.load_textual_inversion_embeddings(force_reload=True)
+    assert torch.equal(db.skipped_embeddings["style"].vec.cpu(), torch.ones(1, 768))
+    assert openclaw_cache_epochs.epoch_subset(("textual_inversion_epoch",)) != epoch
+    assert not db.load_textual_inversion_embeddings(force_reload=True)  # unchanged file: nothing to publish
