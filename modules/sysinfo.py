@@ -3,6 +3,7 @@ import os
 import sys
 import subprocess
 import platform
+import shlex
 import hashlib
 import re
 from pathlib import Path
@@ -12,23 +13,7 @@ from modules import paths_internal, timer, shared_cmd_options, errors, launch_ut
 checksum_token = "DontStealMyGamePlz__WINNERS_DONT_USE_DRUGS__DONT_COPY_THAT_FLOPPY"
 environment_whitelist = {
     "GIT",
-    "INDEX_URL",
-    "WEBUI_LAUNCH_LIVE_OUTPUT",
-    "GRADIO_ANALYTICS_ENABLED",
     "PYTHONPATH",
-    "TORCH_INDEX_URL",
-    "TORCH_COMMAND",
-    "REQS_FILE",
-    "CLIP_PACKAGE",
-    "OPENCLIP_PACKAGE",
-    "ASSETS_REPO",
-    "STABLE_DIFFUSION_REPO",
-    "K_DIFFUSION_REPO",
-    "BLIP_REPO",
-    "ASSETS_COMMIT_HASH",
-    "STABLE_DIFFUSION_COMMIT_HASH",
-    "K_DIFFUSION_COMMIT_HASH",
-    "BLIP_COMMIT_HASH",
     "COMMANDLINE_ARGS",
     "IGNORE_CMD_ARGS_ERRORS",
 }
@@ -110,7 +95,7 @@ def get_dict():
         "Data path": paths_internal.data_path,
         "Extensions dir": paths_internal.extensions_dir,
         "Checksum": checksum_token,
-        "Commandline": get_argv(),
+        "Commandline": launch_utils.redact_cmdline(sys.argv),
         "Torch env info": get_torch_sysinfo(),
         "Exceptions": errors.get_exceptions(),
         "CPU": get_cpu_info(),
@@ -127,24 +112,11 @@ def get_dict():
 
 
 def get_environment():
-    return {k: os.environ[k] for k in sorted(os.environ) if k in environment_whitelist}
+    env = {k: os.environ[k] for k in sorted(os.environ) if k in environment_whitelist}
+    if "COMMANDLINE_ARGS" in env:
+        env["COMMANDLINE_ARGS"] = shlex.join(launch_utils.redact_cmdline(shlex.split(env["COMMANDLINE_ARGS"])))
 
-
-def get_argv():
-    res = []
-
-    for v in sys.argv:
-        if shared_cmd_options.cmd_opts.gradio_auth and shared_cmd_options.cmd_opts.gradio_auth == v:
-            res.append("<hidden>")
-            continue
-
-        if shared_cmd_options.cmd_opts.api_auth and shared_cmd_options.cmd_opts.api_auth == v:
-            res.append("<hidden>")
-            continue
-
-        res.append(v)
-
-    return res
+    return env
 
 
 re_newline = re.compile(r"\r*\n")

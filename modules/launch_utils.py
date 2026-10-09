@@ -1,5 +1,5 @@
 # launch.py's runtime half: launch arguments, source version info, the extension list shared_cmd_options needs before
-# its parser exists, the sysinfo dump and the server start.
+# its parser exists, command-line redaction, the sysinfo dump and the server start.
 import os
 import subprocess
 import sys
@@ -82,9 +82,48 @@ def list_extensions(settings_file):
     return [x for x in os.listdir(extensions_dir) if x not in disabled_extensions]
 
 
+# Destinations of the flags whose values are credentials: "user:password" lists and the ngrok authtoken and options.
+credential_flag_dests = frozenset({"api_auth", "gradio_auth", "ngrok", "ngrok_options"})
+
+
+def _is_credential_flag(flag):
+    actions = cmd_args.parser._option_string_actions
+    if flag in actions:
+        return actions[flag].dest in credential_flag_dests
+
+    # argparse also accepts any unambiguous prefix of a '--' flag
+    return flag.startswith("--") and len(flag) > 2 and any(option.startswith(flag) and action.dest in credential_flag_dests for option, action in actions.items())
+
+
+def redact_cmdline(tokens):
+    """Returns a copy of the command-line tokens with the value of every credential flag replaced by "<hidden>".
+
+    Covers the '--flag value' and '--flag=value' forms and argparse's '--fl' abbreviations. On a command line that
+    argparse would reject it may hide more than a value, never less.
+    """
+    res = []
+    hide_value = False
+    for token in tokens:
+        if hide_value:
+            res.append("<hidden>")
+            hide_value = False
+            continue
+
+        flag, has_value, _ = token.partition("=")
+        if _is_credential_flag(flag):
+            if has_value:
+                token = f"{flag}=<hidden>"
+            else:
+                hide_value = True
+
+        res.append(token)
+
+    return res
+
+
 def start():
     startup_timer.record("initial startup")
-    print(f"Launching {'API server' if '--nowebui' in sys.argv else 'Web UI'} with arguments: {shlex.join(sys.argv[1:])}")
+    print(f"Launching {'API server' if '--nowebui' in sys.argv else 'Web UI'} with arguments: {shlex.join(redact_cmdline(sys.argv[1:]))}")
     import webui
     if '--nowebui' in sys.argv:
         webui.api_only()
