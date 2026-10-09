@@ -165,7 +165,8 @@ def _record_cache_stats_miss(stats, started_at):
     stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
 
 
-_IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to")
+# color_corrections is cached separately: only when the request computed it (a caller's preset value is its own).
+_IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "paste_to")
 
 
 def _image_to_chw_float32_array(image, scale_to_signed=False):
@@ -1953,7 +1954,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             str(shared.device),
         )
 
-    def _restore_img2img_init_cache(self, cache_key):
+    def _restore_img2img_init_cache(self, cache_key, add_color_corrections):
+        """add_color_corrections is part of cache_key: an entry stored with it holds the computed color corrections; an
+        entry stored without it holds none and the caller's color_corrections (e.g. Loopback's) stay as they are."""
         if cache_key is None:
             return False
 
@@ -1968,13 +1971,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             for attr in _IMG2IMG_INIT_CACHE_ATTRS:
                 setattr(self, attr, _clone_cache_value(payload.get(attr)))
+            if add_color_corrections:
+                self.color_corrections = _clone_cache_value(payload["color_corrections"])
 
             self.is_using_inpainting_conditioning = is_using_inpainting_conditioning
             self.extra_generation_params.update(generation_params)
             self._record_img2img_init_cache_hit()
             return True
 
-    def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params):
+    def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params, add_color_corrections):
         if cache_key is None:
             return
 
@@ -1982,6 +1987,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             StableDiffusionProcessing.cached_img2img_init = [cache_key, {
                 attr: _clone_cache_value(getattr(self, attr, None)) for attr in _IMG2IMG_INIT_CACHE_ATTRS
             } | {
+                "color_corrections": _clone_cache_value(self.color_corrections) if add_color_corrections else None,
                 "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
                 "extra_generation_params": _clone_cache_value(extra_generation_params),
             }]
@@ -2119,7 +2125,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             for key in ("VAE Encoder", "Masked content")
             if key in self.extra_generation_params
         }
-        if self._restore_img2img_init_cache(init_cache_key):
+        if self._restore_img2img_init_cache(init_cache_key, add_color_corrections):
             return
 
         if key_raw_images:
@@ -2160,7 +2166,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 self.init_latent = self.init_latent * self.mask
 
         self.image_conditioning = self.img2img_image_conditioning(image * 2 - 1, self.init_latent, image_mask, self.mask_round)
-        self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params)
+        self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params, add_color_corrections)
 
     def close(self):
         super().close()

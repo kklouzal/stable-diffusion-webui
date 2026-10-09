@@ -67,15 +67,16 @@ def harness(monkeypatch):
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init", [None, None])
     monkeypatch.setattr(StableDiffusionProcessing, "cached_img2img_init_stats", processing._cache_stats(last_hit=False, cached=False, bypass_reason=None))
 
-    def make(init_images, *, width=64, height=48, resize_mode=0, batch_size=1, tiling=False, image_mask=None, mask_round=True):
+    def make(init_images, *, width=64, height=48, resize_mode=0, batch_size=1, tiling=False, image_mask=None, mask_round=True, **fields):
         p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
         p.__dict__.update(
             extra_generation_params={}, denoising_strength=0.5, image_cfg_scale=None, sampler_name="Euler", sd_model=model,
             image_mask=image_mask, latent_mask=None, color_corrections=None, overlay_images=None, init_images=init_images,
             resize_mode=resize_mode, width=width, height=height, batch_size=batch_size, inpainting_fill=0, mask_round=mask_round,
             sd_model_name="m", sd_model_hash="h", inpainting_mask_invert=False, inpaint_full_res=False,
-            inpaint_full_res_padding=0, mask_blur_x=0, mask_blur_y=0, tiling=tiling,
+            inpaint_full_res_padding=0, mask_blur_x=0, mask_blur_y=0, tiling=tiling, latent_noise_fill=None,
         )
+        p.__dict__.update(fields)
         p.init([""], [1], [1])
         return p
 
@@ -146,6 +147,31 @@ def test_color_corrections_are_computed_on_miss_and_restored_on_hit(harness, mon
     assert second.openclaw_img2img_init_cache_stats["last_hit"] is True
     assert len(second.color_corrections) == 3
     assert all(np.array_equal(item, expected) for item in second.color_corrections)
+
+
+def test_caller_color_corrections_are_neither_cached_nor_replaced(harness, monkeypatch):
+    # Loopback presets p.color_corrections; the option alone does not compute any then. Neither request may see the
+    # other's corrections through the init cache.
+    monkeypatch.setattr(processing.opts, "img2img_color_correction", True, raising=False)
+    raw = _random_image("RGB", (64, 48), 10)
+    preset = [processing.setup_color_correction(_random_image("RGB", (64, 48), 11))]
+
+    def same(actual, expected):
+        return len(actual) == len(expected) and all(np.array_equal(a, b) for a, b in zip(actual, expected))
+
+    first = harness.make([raw], color_corrections=preset)
+    assert same(first.color_corrections, preset)
+
+    monkeypatch.setattr(processing.opts, "img2img_color_correction", False, raising=False)
+    second = harness.make([raw.copy()])  # same key: the option is off and nothing is computed either way
+    assert second.openclaw_img2img_init_cache_stats["last_hit"] is True
+    assert second.color_corrections is None
+
+    other = [processing.setup_color_correction(_random_image("RGB", (64, 48), 12))]
+    third = harness.make([raw.copy()], color_corrections=other)
+    assert third.openclaw_img2img_init_cache_stats["last_hit"] is True
+    assert same(third.color_corrections, other)
+    assert len(harness.encoded) == 1
 
 
 def test_tiling_is_part_of_the_init_cache_key(harness):
