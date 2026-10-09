@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from modules import paths, persistent_artifact_cache, shared
+from modules import paths, persistent_artifact_cache, scripts, shared
 
 
 SCHEMA_VERSION = 3
@@ -147,7 +147,9 @@ def _is_controlnet_unit(value: Any) -> bool:
     return type(value).__name__ == "ControlNetUnit"
 
 
-_PNG_FAST_LEVEL = 1  # lossless; ~5x faster than level 6 for ~18% more bytes
+# zlib level of the PNGs the API returns (api.encode_pil_to_base64) and snapshots retain: lossless like the default
+# level 6 but ~5x faster on large images for ~18% more bytes.
+API_PNG_COMPRESS_LEVEL = 1
 _PNG_DEFAULT_LEVEL = -1  # Pillow/zlib default (level 6), the historical encoding
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # Chunks that define decoded pixels/mode/transparency, plus the ICC profile that
@@ -220,19 +222,17 @@ def _decode_inline_image(value: str, keep_png: bool = True):
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict | None):
+def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict):
     """_decode_inline_image memoized in decoded_inline, which lives for one snapshot (a pure function of its
     arguments; a decoded image it returns is only read). An init image's request data and a ControlNet unit image are
     often the same string, decoded once per use before (~28 ms at 1280x1280). Failures are not memoized."""
-    if decoded_inline is None:
-        return _decode_inline_image(value, keep_png)
     key = (value, keep_png)
     if key not in decoded_inline:
         decoded_inline[key] = _decode_inline_image(value, keep_png)
     return decoded_inline[key]
 
 
-def _encode_api_png(value: Any, source: str | None = None, compress_level: int = _PNG_FAST_LEVEL, keep_inline_png: bool = True, decoded_inline: dict | None = None) -> str:
+def _encode_api_png(value: Any, source: str | None, compress_level: int, keep_inline_png: bool, decoded_inline: dict) -> str:
     """Return PNG base64 for a PIL/numpy/inline-base64 input.
 
     source is the API request's inline data that decoded to the PIL image value.
@@ -284,7 +284,7 @@ def _image_to_api_base64(value: Any, limitations: list[str], path: str, budget: 
     # The kept inline PNG or a zlib level 1 re-encode comes first; only when that
     # does not fit the remaining budget is the historical encoding (RGBA re-encode
     # at the default level) tried, so nothing it retained is newly omitted.
-    for compress_level, keep_inline_png in ((_PNG_FAST_LEVEL, True), (_PNG_DEFAULT_LEVEL, False)):
+    for compress_level, keep_inline_png in ((API_PNG_COMPRESS_LEVEL, True), (_PNG_DEFAULT_LEVEL, False)):
         if (key, compress_level) not in encoded_inputs:
             try:
                 encoded_inputs[key, compress_level] = (value, _encode_api_png(value, source, compress_level, keep_inline_png, decoded_inline))
@@ -364,7 +364,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
     alwayson = {}
     for script in getattr(runner, "alwayson_scripts", []) or []:
         title = script.title()
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = scripts.script_arg_range(p, script)
         raw_values = list(script_args[start:end])
         if title.casefold() == "controlnet":
             values = [
@@ -389,7 +389,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
             _limitation(limitations, "The selected script index is no longer available for replay.")
             return
         script = selectable[selected - 1]
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = scripts.script_arg_range(p, script)
         values = _safe_json(list(script_args[start:end]), limitations, f"script.{script.title()}.args")
         if values is _OMIT:
             return
@@ -410,13 +410,6 @@ def _checkpoint_identity(p) -> dict[str, Any]:
         "vae_name": getattr(p, "sd_vae_name", None),
         "vae_hash": getattr(p, "sd_vae_hash", None),
     }
-
-
-def _controlnet_limitations(parameters: dict[str, Any], limitations: list[str]) -> None:
-    for suffix in ("", "2", "3"):
-        enabled = parameters.get(f"control_net_enabled{suffix}")
-        if enabled and f"control_net_image{suffix}" not in parameters:
-            _limitation(limitations, f"ControlNet unit {suffix or '1'} requires parameters.control_net_image{suffix} before replay.")
 
 
 def _capture_img2img_assets(p: Any, parameters: dict[str, Any], limitations: list[str], budget: dict[str, int]) -> None:
@@ -453,7 +446,7 @@ def _build_parameters(p, processed, *, retain_assets: bool):
     limitations: list[str] = []
     generation_type = "img2img" if p.__class__.__name__.endswith("Img2Img") else "txt2img"
     parameters: dict[str, Any] = {}
-    budget = {"images": 0, "encoded": {}}
+    budget = {"images": 0}
 
     common_fields = (
         "styles", "subseed_strength", "seed_resize_from_h", "seed_resize_from_w",
@@ -492,8 +485,6 @@ def _build_parameters(p, processed, *, retain_assets: bool):
                 _limitation(limitations, f"ControlNet unit {suffix or '1'} requires parameters.{image_name} before replay.")
             else:
                 parameters[image_name] = image
-    if retain_assets:
-        _controlnet_limitations(parameters, limitations)
 
     override_settings = _safe_json(dict(getattr(p, "override_settings", {}) or {}), limitations, "parameters.override_settings")
     if override_settings is _OMIT:
@@ -647,6 +638,16 @@ def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None
     if len(payload.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
         raise ValueError(f"last-generation snapshot exceeds the {_MAX_SNAPSHOT_BYTES}-byte retention limit")
     persistent_artifact_cache.atomic_write(path, payload.encode("utf-8"))
+
+
+def capture_or_report(p, processed) -> None:
+    """capture_completed_generation for a generation path: a snapshot that cannot be persisted is reported and never
+    fails the generation it describes."""
+    try:
+        capture_completed_generation(p, processed)
+    except Exception:
+        from modules import errors  # not at the top: the tests load this module without the webui runtime
+        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:

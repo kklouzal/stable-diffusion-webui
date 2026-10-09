@@ -3,6 +3,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from modules import persistent_artifact_cache
 
 
@@ -40,3 +42,26 @@ def test_quota_order_bounds_dry_run_and_active_lease(tmp_path):
         applied = persistent_artifact_cache.enforce_quota(paths, max_bytes=100, dry_run=False)
         assert applied["within_quota"]
         assert paths[0].exists() and not paths[1].exists() and not paths[2].exists()
+
+
+def test_atomic_write_with_failing_writer_keeps_the_old_file_and_no_partial(tmp_path):
+    path = tmp_path / "artifact.pt"
+    path.write_bytes(b"old")
+
+    def fail(stream):
+        stream.write(b"partial")
+        raise RuntimeError("writer failed")
+
+    with pytest.raises(RuntimeError, match="writer failed"):
+        persistent_artifact_cache.atomic_write_with(path, fail)
+    assert path.read_bytes() == b"old"
+    assert not list(tmp_path.glob(".partial-*"))
+
+
+def test_sha256_file_matches_hashlib(tmp_path):
+    import hashlib
+
+    path = tmp_path / "data.bin"
+    data = os.urandom(3 * 1024 * 1024 + 17)
+    path.write_bytes(data)
+    assert persistent_artifact_cache.sha256_file(path) == hashlib.sha256(data).hexdigest()

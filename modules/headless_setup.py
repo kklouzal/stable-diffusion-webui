@@ -76,7 +76,6 @@ def _img2img_paste_fields():
 
 
 def _setup_script_runner(runner, is_img2img):
-    scripts.scripts_current = runner
     runner.initialize_scripts(is_img2img=is_img2img)
     runner.prepare_ui()
     for category in ordered_ui_categories():
@@ -96,7 +95,6 @@ def initialize_script_ui_state():
     img2img_fields = _img2img_paste_fields()
     infotext_utils.add_paste_fields("img2img", None, img2img_fields)
     infotext_utils.add_paste_fields("inpaint", None, img2img_fields)
-    scripts.scripts_current = None
 
     scripts.scripts_postproc.setup_ui()
     infotext_utils.add_paste_fields("extras", None, None)

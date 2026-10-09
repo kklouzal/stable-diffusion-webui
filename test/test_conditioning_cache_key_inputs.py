@@ -63,14 +63,13 @@ def test_key_covers_negative_flag_and_refiner_aesthetic_scores(p, monkeypatch):
     monkeypatch.setattr(processing.opts, "sdxl_refiner_low_aesthetic_score", 3.0, raising=False)
     changed = p.cached_params("uc", negative, 20, None)
     assert changed != base
-    assert p._conditioning_cache_miss_reason(base, changed) == "changed:refiner_aesthetic_score"
 
 
-def test_miss_reason_names_prompt_dimensions(p):
+def test_key_covers_prompt_dimensions(p):
     small = p.cached_params("hr_c", prompt_parser.SdConditioning(["a"], width=1536, height=1536), 20, None, 10)
     large = p.cached_params("hr_c", prompt_parser.SdConditioning(["a"], width=2048, height=2048), 20, None, 10)
 
-    assert p._conditioning_cache_miss_reason(small, large) == "changed:prompt_dimensions"
+    assert small != large
 
 
 def _encoder_writes(hashes, emphasis=None):

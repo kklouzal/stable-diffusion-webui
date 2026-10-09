@@ -45,13 +45,10 @@ def test_c_uc_namespaces_and_bounded_atomic_cache_contract_are_explicit():
     assert 'get_conds_with_caching("c"' in source
     assert "conditioning_cache_lock = threading.RLock()" in source
     assert "with openclaw_cache_epochs.epoch_transaction():" in source
-    assert "capacity=4" in source
+    assert "capacity=len(slots)" in source and source.count("self._publish_cond_cache_occupancy()") == 3
     assert "cache[:] = [cached_params, computed, infotext]" in source
 
 
 def test_miss_telemetry_reports_dependency_class_without_hot_path_tensor_work():
     source = PROCESSING.read_text()
-    assert "_conditioning_cache_miss_reason" in source
-    assert '"network_state"' in source
-    assert '"comma_padding_backtrack"' in source
-    assert 'reason = self._conditioning_cache_miss_reason(cache[0], cached_params)' in source
+    assert 'reason="cache_miss" if cache[0] is None else "dependency_changed"' in source

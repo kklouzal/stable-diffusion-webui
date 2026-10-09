@@ -11,22 +11,13 @@ from modules import devices, images, shared, torch_utils
 logger = logging.getLogger(__name__)
 
 
-def pil_image_to_torch_bgr(img: Image.Image) -> torch.Tensor:
-    img = np.array(img.convert("RGB"))
-    img = img[:, :, ::-1]  # flip RGB to BGR
-    img = np.transpose(img, (2, 0, 1))  # HWC to CHW
-    img = np.ascontiguousarray(img) / 255  # Rescale to [0, 1]
-    return torch.from_numpy(img)
-
-
 _unit_lut_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 
 def _unit_lut(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """`v / 255` for every uint8 `v`, converted exactly as `pil_image_to_torch_bgr(img).to(device, dtype)` does.
-
-    That path divides in float64 with numpy and casts float64 -> dtype on the CPU (a CPU -> CUDA `to`
-    converts on the source side), so the table is built the same way and only then moved to `device`.
+    """`v / 255` for every uint8 `v`: divided in float64 and rounded once to `dtype` on the CPU, then moved to
+    `device`. Bitwise equal to the former numpy path (float64 `/ 255`, then `.to(device, dtype)`, which converts on the
+    CPU side); see tests/test_upscaler_device_conversions.py.
     """
     key = (device, dtype)
     lut = _unit_lut_cache.get(key)
@@ -37,8 +28,8 @@ def _unit_lut(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
 
 
 def pil_image_to_device_bgr(img: Image.Image, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Bitwise the same 1xCxHxW tensor as `pil_image_to_torch_bgr(img).unsqueeze(0).to(device, dtype)`,
-    but only the uint8 pixels are copied to `device` and converted there through `_unit_lut`."""
+    """1xCxHxW BGR tensor of `img` in [0, 1]: only the uint8 pixels are copied to `device` and converted there
+    through `_unit_lut`, with the canonical contiguous strides of the former CPU numpy path."""
     pixels = torch.from_numpy(np.array(img.convert("RGB"))).to(device=device)
     bgr = _unit_lut(device, dtype)[pixels.flip(2).long()]
     # HWC to CHW with the canonical contiguous strides of the CPU path, also for size-1 dims.

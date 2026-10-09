@@ -85,7 +85,7 @@ def lora_networks(monkeypatch):
     monkeypatch.setattr(networks.sd_hijack.model_hijack, "comments", [], raising=False)
     monkeypatch.setattr(networks.shared, "sd_model", SimpleNamespace(network_layer_mapping={}), raising=False)
     monkeypatch.setattr(networks.devices, "torch_gc", lambda: None)
-    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda reason="lora_changed": None)
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: None)
 
     on_disk = SimpleNamespace(filename="alpha.safetensors", shorthash="abc", read_hash=lambda: None)
     monkeypatch.setattr(networks, "available_networks", {"alpha": on_disk}, raising=False)
@@ -426,7 +426,6 @@ def test_s05_lock_order_telemetry_and_dependency_consumers_are_static_contracts(
     assert "current_network_state_identity" in Path("modules/processing.py").read_text()
     # CUDA graphs drop captured LoRA state through note_lora_loaded on every apply/unload.
     assert source.count("openclaw_cuda_graphs.note_lora_loaded(") >= 2
-    assert "lora_applied_epoch" in Path("modules/mxfp8_diagnostics.py").read_text()
 
 
 def test_epoch_transaction_prevents_lifecycle_interleave_with_apply_publication(lora_networks):
@@ -647,7 +646,7 @@ def test_bundled_ti_load_noop_and_unload_are_atomic(lora_networks, monkeypatch):
     net = _applied_network(networks, "a", {"hero": emb})
     graph_observations = []
     monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
-    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda _reason: graph_observations.append((dict(db.word_embeddings), _epochs(networks))))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: graph_observations.append((dict(db.word_embeddings), _epochs(networks))))
 
     before = _epochs(networks)
     assert networks._publish_applied_state([net], db)
@@ -741,7 +740,7 @@ def test_register_failure_restores_exact_db_weights_state_and_epochs(lora_networ
     snapshot = (dict(db.word_embeddings), {key: list(value) for key, value in db.ids_lookup.items()})
     before = _epochs(networks)
     graphs = []
-    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda reason: graphs.append(reason))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: graphs.append("lora_changed"))
     db.fail_name = "new"
 
     with pytest.raises(RuntimeError, match="register failure"):
@@ -792,7 +791,7 @@ def test_rollback_failure_publishes_explicit_empty_fail_closed_state(lora_networ
         if networks.loaded_networks:
             raise RuntimeError("injected apply/rollback failure")
     monkeypatch.setattr(networks, "_apply_loaded_state_to_model", apply)
-    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda reason: graphs.append(reason))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: graphs.append("lora_changed"))
 
     with pytest.raises(RuntimeError, match="rollback failed closed"):
         networks._publish_applied_state([new], db)

@@ -76,14 +76,6 @@ class VectorInnerModel:
         return t / 10.0
 
 
-class ScalarOnlyInnerModel(VectorInnerModel):
-    def t_to_sigma(self, t):
-        self.t_to_sigma_shapes.append(tuple(t.shape))
-        if t.ndim > 0:
-            raise TypeError("vector timesteps unsupported")
-        return t / 10.0
-
-
 class OpenClawSchedulerTests(unittest.TestCase):
     def test_normal_scheduler_uses_vector_timestep_conversion_when_available(self):
         schedulers = load_scheduler_module()
@@ -92,15 +84,6 @@ class OpenClawSchedulerTests(unittest.TestCase):
         sigmas = schedulers.normal_scheduler(5, 0.1, 10.0, inner_model, torch.device("cpu"))
 
         self.assertEqual(inner_model.t_to_sigma_shapes, [(5,)])
-        self.assertTrue(torch.allclose(sigmas, torch.tensor([10.0, 7.525, 5.05, 2.575, 0.1, 0.0])))
-
-    def test_timestep_conversion_falls_back_for_scalar_only_inner_models(self):
-        schedulers = load_scheduler_module()
-        inner_model = ScalarOnlyInnerModel()
-
-        sigmas = schedulers.normal_scheduler(5, 0.1, 10.0, inner_model, torch.device("cpu"))
-
-        self.assertEqual(inner_model.t_to_sigma_shapes, [(5,), (), (), (), (), ()])
         self.assertTrue(torch.allclose(sigmas, torch.tensor([10.0, 7.525, 5.05, 2.575, 0.1, 0.0])))
 
     def test_simple_and_ddim_schedulers_preserve_existing_index_sequences(self):

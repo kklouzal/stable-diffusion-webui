@@ -88,7 +88,6 @@ def _patch_minimal_init_globals(monkeypatch, api_class, *, api_server_stop=False
         ExtrasBatchImagesResponse=object,
         PNGInfoResponse=object,
         ProgressResponse=object,
-        OptionsModel=object,
         FlagsModel=object,
         SamplerItem=object,
         SchedulerItem=object,
@@ -113,7 +112,7 @@ def _patch_minimal_init_globals(monkeypatch, api_class, *, api_server_stop=False
     monkeypatch.setitem(api_class.__init__.__globals__, "shared", shared_stub)
     monkeypatch.setitem(api_class.__init__.__globals__, "scripts", scripts_stub)
     monkeypatch.setitem(api_class.__init__.__globals__, "models", models_stub)
-    monkeypatch.setitem(api_class.__init__.__globals__, "ui", SimpleNamespace(create_ui=lambda: None))
+    monkeypatch.setitem(api_class.__init__.__globals__, "headless_setup", SimpleNamespace(initialize_script_ui_state=lambda: None))
     monkeypatch.setattr(api_class, "init_default_script_args", lambda self, runner: [], raising=False)
     monkeypatch.setattr(api_class, "apply_openclaw_runtime_defaults", lambda self: None, raising=False)
 
@@ -300,16 +299,8 @@ def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(mon
             calls.append("diagnostics")
             return cls.current
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        if name == "modules" and "openclaw_generation_diagnostics" in fromlist:
-            return SimpleNamespace(openclaw_generation_diagnostics=Diagnostics)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__, "openclaw_cuda_graphs", CudaGraphs)
+    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__, "openclaw_generation_diagnostics", Diagnostics)
 
     api = api_class.__new__(api_class)
     lock_events = []
@@ -331,44 +322,32 @@ def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(mon
     ]
 
 
-def test_openclaw_runtime_defaults_apply_env_values_without_raising(monkeypatch):
+def test_openclaw_runtime_defaults_apply_the_sdpa_env_value_without_raising(monkeypatch):
     api_class = load_api_control_class()
     calls = []
 
-    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "math")
-    monkeypatch.setenv("OPENCLAW_CUDA_GRAPHS", "true")
-
     sdpa_stub = SimpleNamespace(set_sdpa_backend=lambda value: calls.append(("sdpa", value)))
-    errors_stub = SimpleNamespace(report=lambda *args, **kwargs: calls.append(("error", args, kwargs)))
-
-    class CudaGraphs:
-        @staticmethod
-        def set_enabled(enabled, clear=False):
-            calls.append(("graphs", enabled, clear))
-
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        return real_import(name, globals, locals, fromlist, level)
-
+    errors_stub = SimpleNamespace(report=lambda *args, **kwargs: calls.append(("error", args[0])))
     monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__, "sd_hijack_optimizations", sdpa_stub)
     monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__, "errors", errors_stub)
-    monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__["__builtins__"], "__import__", fake_import)
 
     api = api_class.__new__(api_class)
+    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "math")
     api.apply_openclaw_runtime_defaults()
+    assert calls == [("sdpa", "math")]
 
-    assert calls == [("sdpa", "math"), ("graphs", True, True)]
-    monkeypatch.setenv("OPENCLAW_CUDA_GRAPHS", "off")
     calls.clear()
+    monkeypatch.delenv("OPENCLAW_SDPA_BACKEND")
     api.apply_openclaw_runtime_defaults()
-    assert calls == [("sdpa", "math"), ("graphs", False, True)]
-    monkeypatch.delenv("OPENCLAW_CUDA_GRAPHS")
-    calls.clear()
+    assert calls == []  # unset leaves the attention backend untouched
+
+    def failing(value):
+        raise ValueError(value)
+
+    sdpa_stub.set_sdpa_backend = failing
+    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "bogus")
     api.apply_openclaw_runtime_defaults()
-    assert calls == [("sdpa", "math")]  # unset leaves the graph runtime untouched
+    assert calls == [("error", "Failed to apply OpenClaw SDPA backend default from environment")]
 
 
 def test_get_memory_preserves_ram_and_cuda_response_shape(monkeypatch):
@@ -457,16 +436,8 @@ def test_runtime_switch_booleans_follow_the_env_grammar(monkeypatch):
             calls.append(("vae", enabled, clear_cache))
             return {}
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        if name == "modules" and "openclaw_vae_decode_graphs" in fromlist:
-            return SimpleNamespace(openclaw_vae_decode_graphs=VaeGraphs)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__, "openclaw_cuda_graphs", CudaGraphs)
+    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__, "openclaw_vae_decode_graphs", VaeGraphs)
     api = api_class.__new__(api_class)
     api.queue_lock = DummyLock([])
     api.set_vae_decode_graphs({"clear": True})  # no "enabled": reset the cache, keep the current state
@@ -504,14 +475,7 @@ def test_nhwc_groupnorm_switch_validates_and_applies_between_generations(monkeyp
         def status():
             return {"scopes": ["unet"]}
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_nhwc_groupnorm" in fromlist:
-            return SimpleNamespace(openclaw_nhwc_groupnorm=Switch)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.set_nhwc_groupnorm.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.set_nhwc_groupnorm.__globals__, "openclaw_nhwc_groupnorm", Switch)
     api = api_class.__new__(api_class)
     api.queue_lock = DummyLock(events)
     assert api.get_nhwc_groupnorm() == {"scopes": ["unet"]}

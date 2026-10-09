@@ -20,6 +20,7 @@ def load_encode_pil_to_base64(samples_format="png"):
         "PngImagePlugin": PngImagePlugin,
         "opts": types.SimpleNamespace(samples_format=samples_format, jpeg_quality=80, webp_lossless=False),
         "images": types.SimpleNamespace(geninfo_to_exif_bytes=lambda parameters: b""),
+        "generation_last": types.SimpleNamespace(API_PNG_COMPRESS_LEVEL=1),
         "HTTPException": RuntimeError,
     }
     exec(compile(module, str(API_PATH), "exec"), namespace)

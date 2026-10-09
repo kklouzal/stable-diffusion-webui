@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import time
 import uuid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Iterable
+from typing import BinaryIO, Callable, Iterable
 
 SCHEMA_VERSION = 1
 
 
-def atomic_write(path: str | os.PathLike[str], data: bytes) -> None:
+def sha256_file(filename: str | os.PathLike[str]) -> str:
+    """Hex SHA-256 of a file's bytes, streamed."""
+    with open(filename, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def atomic_write_with(path: str | os.PathLike[str], write: Callable[[BinaryIO], object]) -> None:
+    """Publish what `write(stream)` writes as `path`, atomically and durably.
+
+    The bytes go to a unique temporary in the same directory, which is fsynced, renamed over `path`, and then the
+    directory is fsynced: readers see the old file or the complete new one, never a partial one. The temporary is
+    removed when `write` or any step fails, and the failure propagates.
+    """
     path = os.fspath(path)
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
@@ -19,7 +32,7 @@ def atomic_write(path: str | os.PathLike[str], data: bytes) -> None:
     try:
         with NamedTemporaryFile("wb", delete=False, dir=parent, prefix=".partial-", suffix="-" + uuid.uuid4().hex) as stream:
             temporary = stream.name
-            stream.write(data)
+            write(stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -32,6 +45,10 @@ def atomic_write(path: str | os.PathLike[str], data: bytes) -> None:
         if temporary:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
+
+
+def atomic_write(path: str | os.PathLike[str], data: bytes) -> None:
+    atomic_write_with(path, lambda stream: stream.write(data))
 
 
 @contextlib.contextmanager

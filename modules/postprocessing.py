@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 from PIL import Image
 
@@ -28,94 +26,31 @@ def to_postprocessing_mode(image):
     return image.convert("RGB")
 
 
-def combine_caption(existing_caption, new_caption, action):
-    existing_caption = (existing_caption or '').strip()
-    new_caption = (new_caption or '').strip()
-
-    if action == 'Prepend' and existing_caption:
-        caption = f"{new_caption} {existing_caption}"
-    elif action == 'Append' and existing_caption:
-        caption = f"{existing_caption} {new_caption}"
-    elif action == 'Keep' and existing_caption:
-        caption = existing_caption
-    else:
-        caption = new_caption
-
-    return caption.strip()
-
-
-def save_caption_sidecar(image_filename, caption, action):
-    caption_filename = os.path.splitext(image_filename)[0] + ".txt"
-    existing_caption = ""
-    try:
-        with open(caption_filename, encoding="utf8") as file:
-            existing_caption = file.read().strip()
-    except FileNotFoundError:
-        pass
-
-    caption = combine_caption(existing_caption, caption, action)
-    if caption:
-        with open(caption_filename, "w", encoding="utf8") as file:
-            file.write(caption)
-
-
-def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output: bool = True, scripts_order=None):
+def run_postprocessing(extras_mode, image, image_folder, *args, scripts_order=None):
+    """The API extras run: mode 1 processes the decoded PIL images of image_folder, any other mode the single image.
+    Returns (output images, infotext HTML, ''); nothing is saved to disk."""
     # State.begin and State.end release cached device memory (devices.torch_gc) themselves.
     shared.state.begin(job="extras")
     try:
         outputs = []
 
-        def get_images(extras_mode, image, image_folder, input_dir):
-            if extras_mode == 1:
-                for img in image_folder:
-                    if isinstance(img, Image.Image):
-                        image = images.fix_image(img)
-                        fn = ''
-                    else:
-                        try:
-                            image = images.read(os.path.abspath(img.name))
-                        except Exception:
-                            continue
-                        fn = os.path.splitext(img.orig_name)[0]
-                    yield image, fn
-            elif extras_mode == 2:
-                assert not shared.cmd_opts.hide_ui_dir_config, '--hide-ui-dir-config option must be disabled'
-                assert input_dir, 'input directory not selected'
-
-                image_list = shared.listfiles(input_dir)
-                for filename in image_list:
-                    yield filename, filename
-            else:
-                assert image, 'image not selected'
-                yield image, None
-
-        if extras_mode == 2 and output_dir != '':
-            outpath = output_dir
+        if extras_mode == 1:
+            data_to_process = [(images.fix_image(img), '') for img in image_folder]
         else:
-            outpath = opts.outdir_samples or opts.outdir_extras_samples
+            assert image, 'image not selected'
+            data_to_process = [(image, None)]
 
         infotext = ''
 
-        data_to_process = list(get_images(extras_mode, image, image_folder, input_dir))
         shared.state.job_count = len(data_to_process)
 
-        for image_placeholder, name in data_to_process:
-            image_data: Image.Image
-
+        for image_data, name in data_to_process:
             shared.state.nextjob()
             shared.state.textinfo = name
             shared.state.skipped = False
 
             if shared.state.interrupted or shared.state.stopping_generation:
                 break
-
-            if isinstance(image_placeholder, str):
-                try:
-                    image_data = images.read(image_placeholder)
-                except Exception:
-                    continue
-            else:
-                image_data = image_placeholder
 
             image_data = to_postprocessing_mode(image_data)
 
@@ -130,19 +65,9 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
             if shared.state.skipped:
                 continue
 
-            used_suffixes = {}
             for pp in [initial_pp, *initial_pp.extra_images]:
                 if shared.state.skipped:
                     break
-
-                suffix = pp.get_suffix(used_suffixes)
-
-                if opts.use_original_name_batch and name is not None:
-                    basename = os.path.splitext(os.path.basename(name))[0]
-                    forced_filename = basename + suffix
-                else:
-                    basename = ''
-                    forced_filename = None
 
                 infotext = ", ".join([k if k == v else f'{k}: {infotext_utils.quote(v)}' for k, v in pp.info.items() if v is not None])
 
@@ -151,15 +76,7 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
                     pp.image.info = {**existing_pnginfo, "postprocessing": infotext}
 
                 shared.state.assign_current_image(pp.image)
-
-                if save_output:
-                    fullfn, _ = images.save_image(pp.image, path=outpath, basename=basename, extension=opts.samples_format, info=infotext, short_filename=True, no_prompt=True, grid=False, pnginfo_section_name="extras", existing_info=pp.image.info if opts.enable_pnginfo else existing_pnginfo, forced_filename=forced_filename, suffix=suffix)
-
-                    if pp.caption:
-                        save_caption_sidecar(fullfn, pp.caption, shared.opts.postprocessing_existing_caption_action)
-
-                if extras_mode != 2 or show_extras_results:
-                    outputs.append(pp.image)
+                outputs.append(pp.image)
 
         return outputs, ui_common.plaintext_to_html(infotext), ''
     finally:
@@ -167,8 +84,8 @@ def run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, 
         shared.state.end()
 
 
-def run_extras(extras_mode, resize_mode, image, image_folder, input_dir, output_dir, show_extras_results, gfpgan_visibility, codeformer_visibility, codeformer_weight, upscaling_resize, upscaling_resize_w, upscaling_resize_h, upscaling_crop, extras_upscaler_1, extras_upscaler_2, extras_upscaler_2_visibility, upscale_first: bool, save_output: bool = True, max_side_length: int = 0):
-    """old handler for API"""
+def run_extras(extras_mode, resize_mode, image, image_folder, gfpgan_visibility, codeformer_visibility, codeformer_weight, upscaling_resize, upscaling_resize_w, upscaling_resize_h, upscaling_crop, extras_upscaler_1, extras_upscaler_2, extras_upscaler_2_visibility, upscale_first: bool, max_side_length: int = 0):
+    """The /extra-single-image and /extra-batch-images handler: maps the request fields onto the postprocessing scripts."""
 
     scripts_order = ["Upscale", "GFPGAN", "CodeFormer"] if upscale_first else ["GFPGAN", "CodeFormer", "Upscale"]
 
@@ -196,4 +113,4 @@ def run_extras(extras_mode, resize_mode, image, image_folder, input_dir, output_
         },
     }, scripts_order=scripts_order)
 
-    return run_postprocessing(extras_mode, image, image_folder, input_dir, output_dir, show_extras_results, *args, save_output=save_output, scripts_order=scripts_order)
+    return run_postprocessing(extras_mode, image, image_folder, *args, scripts_order=scripts_order)

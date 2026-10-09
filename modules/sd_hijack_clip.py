@@ -189,11 +189,11 @@ class TextConditionalModel(torch.nn.Module):
     def process_texts(self, texts):
         """Tokenize texts with an intentionally request-local memo."""
         cache = {}
-        tokenizer_epoch = openclaw_cache_epochs.epoch_snapshot()["epochs"]["tokenizer_epoch"]
+        tokenizer_epoch = openclaw_cache_epochs.epoch_subset(("tokenizer_epoch",))
         batch_chunks = []
         token_count = 0
         for line in texts:
-            semantic_key = openclaw_cache_epochs.registry.digest((tokenizer_epoch, line))
+            semantic_key = (tokenizer_epoch, line)
             if line in cache:
                 chunks = cache[line]
                 openclaw_cache_epochs.observe("E06", "hit", reason="cache_hit", semantic_key=semantic_key)

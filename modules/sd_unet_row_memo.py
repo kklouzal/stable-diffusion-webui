@@ -68,7 +68,7 @@ class CallRecord:
         The model's own in-place input edits (dtype casts of the cond dict, ControlNet Revision writing
         ``y``) happen during the call and are part of the snapshot.
         """
-        self._sealed = [(tensor, _version(tensor)) for tensor in self._input_tensors()]
+        self._sealed = [(tensor, tensor_version(tensor)) for tensor in self._input_tensors()]
 
     def inputs_unchanged(self) -> bool:
         """True when no input was replaced, or modified in place where detectable, since ``seal``.
@@ -82,12 +82,12 @@ class CallRecord:
             return False
         current = self._input_tensors()
         return len(current) == len(self._sealed) and all(
-            tensor is sealed and _version(tensor) == version
+            tensor is sealed and tensor_version(tensor) == version
             for tensor, (sealed, version) in zip(current, self._sealed)
         )
 
 
-def _version(tensor: torch.Tensor):
+def tensor_version(tensor: torch.Tensor):
     """In-place version counter, or None for inference tensors (they have none; reading it raises)."""
     return None if tensor.is_inference() else tensor._version
 

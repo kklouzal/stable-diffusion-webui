@@ -159,11 +159,14 @@ def load_kdiffusion_module():
                 sys.modules[name] = original
 
 
-def make_sampler(module, model_sigmas=None):
+def make_sampler(module, model_sigmas=None, quantize=False):
     sampler = object.__new__(module.KDiffusionSampler)
     sampler.config = types.SimpleNamespace(name="DPM++ SDE", options={})
     sampler.funcname = "sample_euler"
-    sampler.model_wrap = types.SimpleNamespace(sigmas=model_sigmas if model_sigmas is not None else torch.tensor([0.1, 1.0, 10.0]))
+    sampler.model_wrap = types.SimpleNamespace(
+        sigmas=model_sigmas if model_sigmas is not None else torch.tensor([0.1, 1.0, 10.0]),
+        quantize=quantize,
+    )
     return sampler
 
 
@@ -238,6 +241,20 @@ class KDiffusionSigmasCacheTests(unittest.TestCase):
         self.assertAlmostEqual(float(option_sigmas[2]), 0.2, places=6)
         self.assertEqual(float(sdxl_sigmas[0]), 2.0)
         self.assertEqual(profile.status()["misses"], 3)
+
+    def test_sigmas_cache_key_includes_the_wrapper_quantize_flag(self):
+        # sigma_to_t snaps to table indices when the wrapper quantizes (opts.enable_quantization), so sgm_uniform,
+        # normal and beta schedules differ; toggling the option must not serve the other setting's sigmas.
+        module, _shared, profile = load_kdiffusion_module()
+
+        plain_sigmas = make_sampler(module, quantize=False).get_sigmas(make_processing(), 20)
+        quantized_sigmas = make_sampler(module, quantize=True).get_sigmas(make_processing(), 20)
+        make_sampler(module, quantize=True).get_sigmas(make_processing(), 20)
+
+        torch.testing.assert_close(quantized_sigmas, plain_sigmas)
+        status = profile.status()
+        self.assertEqual(status["misses"], 2)
+        self.assertEqual(status["hits"], 1)
 
     def test_generation_profile_cache_preserves_dtype_device_values_and_rng_state(self):
         _module, _shared, profile = load_kdiffusion_module()

@@ -50,7 +50,7 @@ def test_static_commit_sites_follow_final_commit_points():
     assert models.index("model_data.set_sd_model(sd_model)", models.index("def reload_model_weights")) < models.index("publish_checkpoint_commit", models.index("def reload_model_weights"))
     assert models.index("Model loaded in", models.index("def load_model(")) < models.index("publish_checkpoint_commit", models.index("def load_model("))
     assert vae.index("finally:", vae.index("def reload_vae_weights")) < vae.index("publish=True", vae.index("def reload_vae_weights"))
-    assert "Precision, attention, and compile epochs are intentionally deferred" in open("modules/openclaw_lifecycle_epochs.py", encoding="utf-8").read()
+    assert "Nothing bumps the precision, attention or compile epochs" in open("modules/openclaw_lifecycle_epochs.py", encoding="utf-8").read()
 
 def test_lifecycle_reason_literals_are_validated_epoch_reasons():
     source = open("modules/openclaw_lifecycle_epochs.py", encoding="utf-8").read()

@@ -363,18 +363,8 @@ def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
 
 
 def _body_flag(data: Any, key: str, default: bool = False) -> bool:
-    """A boolean field of a JSON body: missing -> default; true/false, 0/1, null (False), or openclaw_env's text grammar
-    ("false" is False); anything else raises ValueError. bool() made every non-empty string, "false" included, True."""
-    if not isinstance(data, dict) or key not in data:
-        return default
-    value = data[key]
-    if value is None or isinstance(value, bool):
-        return bool(value)
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        return openclaw_env.parse_bool(value, key)
-    raise ValueError(f"{key}={value!r} is not a boolean")
+    """A boolean field of a JSON body (openclaw_env.json_bool); a value that is not a boolean raises ValueError."""
+    return openclaw_env.json_bool(data, key, default)
 
 
 def _model_merge_config_source_value(value: Any) -> str:

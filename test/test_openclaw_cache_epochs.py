@@ -48,20 +48,20 @@ def test_epoch_bumps_are_monotonic_and_reasons_are_validated():
     with pytest.raises(ValueError, match="invalid epoch bump reason"):
         openclaw_cache_epochs.bump_epoch(dimension, reason="private/raw/reason")
 
-    assert openclaw_cache_epochs.epoch_snapshot()["epochs"][dimension] == 2
+    assert openclaw_cache_epochs.epoch_subset((dimension,)) == ((dimension, 2),)
 
 
-def test_epoch_snapshot_is_atomic_with_stable_opaque_digest():
+def test_public_summary_digest_is_stable_and_opaque():
     openclaw_cache_epochs.bump_epoch("vae_object_epoch", reason="vae_loaded")
-    first = openclaw_cache_epochs.epoch_snapshot()
-    second = openclaw_cache_epochs.epoch_snapshot()
+    first = openclaw_cache_epochs.epoch_public_summary()
+    second = openclaw_cache_epochs.epoch_public_summary()
 
     assert first == second
     assert HEX_DIGEST.fullmatch(first["digest"])
     assert first["digest"] == digest(first["epochs"])
 
     openclaw_cache_epochs.bump_epoch("vae_object_epoch", reason="vae_unloaded")
-    third = openclaw_cache_epochs.epoch_snapshot()
+    third = openclaw_cache_epochs.epoch_public_summary()
     assert third["digest"] == digest(third["epochs"])
     assert third["digest"] != first["digest"]
 
@@ -75,7 +75,7 @@ def test_concurrent_epoch_bumps_are_not_lost_and_snapshots_are_consistent():
 
     def sample_snapshots():
         while not stop.is_set():
-            observed.append(openclaw_cache_epochs.epoch_snapshot())
+            observed.append(openclaw_cache_epochs.epoch_public_summary())
 
     sampler = threading.Thread(target=sample_snapshots)
     sampler.start()
@@ -94,7 +94,7 @@ def test_concurrent_epoch_bumps_are_not_lost_and_snapshots_are_consistent():
         stop.set()
         sampler.join()
 
-    final = openclaw_cache_epochs.epoch_snapshot()
+    final = openclaw_cache_epochs.epoch_public_summary()
     assert final["epochs"][dimension] == workers * bumps_per_worker
     assert observed
     assert all(item["digest"] == digest(item["epochs"]) for item in observed)
@@ -285,35 +285,37 @@ def test_api_generation_regions_lock_queue_before_opaque_owner():
         for item in node.items
         if with_name(item) == "openclaw_cache_epochs.generation_owner"
     ]
-    assert len(owner_contexts) == 2
+    assert len(owner_contexts) == 1
 
-    for method_name, processing_class in (
-        ("text2imgapi", "StableDiffusionProcessingTxt2Img"),
-        ("img2imgapi", "StableDiffusionProcessingImg2Img"),
-    ):
-        method = next(
-            node
-            for node in api.body
-            if isinstance(node, ast.FunctionDef) and node.name == method_name
+    methods = {node.name: node for node in api.body if isinstance(node, ast.FunctionDef)}
+    run_task = methods["_run_generation_task"]
+    queue_contexts = [
+        node
+        for node in ast.walk(run_task)
+        if isinstance(node, ast.With)
+        and any(with_name(item) == "self.queue_lock" for item in node.items)
+    ]
+    assert len(queue_contexts) == 1
+    owner_context = next(
+        node
+        for node in queue_contexts[0].body
+        if isinstance(node, ast.With)
+        and any(
+            with_name(item) == "openclaw_cache_epochs.generation_owner"
+            for item in node.items
         )
-        queue_contexts = [
+    )
+    assert any(
+        isinstance(node, ast.Name) and node.id == "processing_class"
+        for node in ast.walk(owner_context)
+    )
+    names = {node.id for node in ast.walk(run_task) if isinstance(node, ast.Name)}
+    assert {"StableDiffusionProcessingTxt2Img", "StableDiffusionProcessingImg2Img"} <= names
+
+    for method_name in ("text2imgapi", "img2imgapi"):
+        calls = [
             node
-            for node in ast.walk(method)
-            if isinstance(node, ast.With)
-            and any(with_name(item) == "self.queue_lock" for item in node.items)
+            for node in ast.walk(methods[method_name])
+            if isinstance(node, ast.Call) and attribute_name(node.func) == "self._run_generation_task"
         ]
-        assert len(queue_contexts) == 1
-        queue_context = queue_contexts[0]
-        owner_context = next(
-            node
-            for node in queue_context.body
-            if isinstance(node, ast.With)
-            and any(
-                with_name(item) == "openclaw_cache_epochs.generation_owner"
-                for item in node.items
-            )
-        )
-        assert any(
-            isinstance(node, ast.Name) and node.id == processing_class
-            for node in ast.walk(owner_context)
-        )
+        assert len(calls) == 1

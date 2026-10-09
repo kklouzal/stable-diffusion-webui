@@ -101,8 +101,7 @@ def create_binary_mask(image, round=True):
 
 
 def _resize_latent_mask(image, size, round=True):
-    resampling = Image.Resampling.BOX if hasattr(Image, "Resampling") else Image.BOX
-    latmask = image.convert('L').resize(size, resample=resampling)
+    latmask = image.convert('L').resize(size, resample=Image.Resampling.BOX)
     latmask = np.asarray(latmask, dtype=np.float32) / 255.0
 
     if round:
@@ -117,20 +116,6 @@ def _latent_blend_masks(latmask, channels):
     16-bit model dtype a soft mask is quantized and mask + nmask misses 1 by up to 2**-9 (bfloat16)."""
     nmask = torch.from_numpy(latmask).to(device=shared.device, dtype=torch.float32).unsqueeze(0).expand(channels, -1, -1)
     return 1.0 - nmask, nmask
-
-
-def _image_cache_fingerprint(image):
-    """Identify a PIL image by everything its pixel conversions read: mode, size, palette, transparency and raw bytes."""
-    if image is None:
-        return None
-    palette = image.getpalette() if image.mode in ("P", "PA") else None
-    return (
-        image.mode,
-        image.size,
-        tuple(palette) if palette is not None else None,
-        image.info.get("transparency"),
-        hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest(),
-    )
 
 
 def _clone_cache_value(value):
@@ -523,7 +508,13 @@ class StableDiffusionProcessing:
             StableDiffusionProcessing.cached_uc = [None, None]
             if cleared:
                 openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_disabled", count=cleared)
-            openclaw_cache_epochs.set_size("E05", current_size=0, capacity=4)
+            self._publish_cond_cache_occupancy()
+
+    @staticmethod
+    def _publish_cond_cache_occupancy():
+        """E05 telemetry size: the filled slots of the four process-wide conditioning caches."""
+        slots = (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc)
+        openclaw_cache_epochs.set_size("E05", current_size=sum(1 for item in slots if item[0] is not None), capacity=len(slots))
 
     def get_token_merging_ratio(self, for_hr=False):
         if for_hr:
@@ -569,7 +560,7 @@ class StableDiffusionProcessing:
         """Return the complete semantic conditioning key and atomic dependency snapshot."""
         relevant_epochs = openclaw_cache_epochs.epoch_subset((
             "checkpoint_object_epoch", "conditioner_epoch", "textual_inversion_epoch",
-            "tokenizer_epoch", "conditioning_hook_epoch", "precision_epoch", "device_epoch",
+            "tokenizer_epoch", "conditioning_hook_epoch", "device_epoch",
         ))
         effective_network_state = self.active_lora_cond_signature()
         openclaw_cache_epochs.observe_dependency("E05", dict(relevant_epochs))
@@ -606,21 +597,6 @@ class StableDiffusionProcessing:
             opts.textual_inversion_add_hashes_to_infotext,
         )
 
-    @staticmethod
-    def _conditioning_cache_miss_reason(previous_key, current_key):
-        if previous_key is None:
-            return "cold"
-        labels = (
-            "namespace", "dependency_epoch", "prompt", "steps", "hires_steps", "scheduling",
-            "clip_skip", "sdxl_clip_skip", "checkpoint", "network_state", "extra_network_data",
-            "sdxl_crop", "sdxl_crop", "dimensions", "dimensions", "fp8_storage",
-            "fp16_weight_cache", "emphasis", "old_emphasis", "comma_padding_backtrack",
-            "prompt_dimensions", "prompt_dimensions", "negative_prompt", "refiner_aesthetic_score", "refiner_aesthetic_score",
-            "ti_hashes_infotext",
-        )
-        changed = [label for label, before, after in zip(labels, previous_key, current_key) if before != after]
-        return "changed:" + ",".join(dict.fromkeys(changed)) if changed else "evicted"
-
     def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):
         """Return conditioning from one namespace-owned, atomically published cache slot."""
         if shared.opts.use_old_scheduling:
@@ -637,7 +613,7 @@ class StableDiffusionProcessing:
             stats = getattr(self, "openclaw_cond_cache_stats", None)
             if stats is None:
                 stats = self.openclaw_cond_cache_stats = _cache_stats()
-            semantic_key = openclaw_cache_epochs.registry.digest(cached_params)
+            semantic_key = cached_params  # observe() digests it (opaquely) itself
 
             with StableDiffusionProcessing.conditioning_cache_lock:
                 if cache[0] is not None and cached_params == cache[0]:
@@ -646,8 +622,8 @@ class StableDiffusionProcessing:
                     _replay_conditioning_infotext(model_hijack.extra_generation_params, cache[2])
                     return cache[1]
 
-                reason = self._conditioning_cache_miss_reason(cache[0], cached_params)
-                openclaw_cache_epochs.observe("E05", "miss", reason=reason, semantic_key=semantic_key)
+                # An occupied slot with a different key: some key input (prompt, settings or a dependency epoch) changed.
+                openclaw_cache_epochs.observe("E05", "miss", reason="cache_miss" if cache[0] is None else "dependency_changed", semantic_key=semantic_key)
                 started = time.perf_counter()
                 infotext = model_hijack.extra_generation_params
                 model_hijack.extra_generation_params = {}
@@ -664,11 +640,7 @@ class StableDiffusionProcessing:
                 cache[:] = [cached_params, computed, infotext]
                 _record_cache_stats_miss(stats, started)
                 openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
-                openclaw_cache_epochs.set_size(
-                    "E05",
-                    current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
-                    capacity=4,
-                )
+                self._publish_cond_cache_occupancy()
                 return computed
 
     def setup_conds(self):
@@ -830,40 +802,32 @@ def decoded_images_device():
     return devices.cpu if lowvram.is_enabled(shared.sd_model) else shared.device
 
 
-def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
+def decode_latent_batch(model, batch):
+    """Decode a latent batch with the VAE onto decoded_images_device(), checking the UNet output and the decode for
+    NaNs (a NaN decode retries once in the auto_vae_precision dtype; an OOM decodes one sample at a time)."""
+    target_device = decoded_images_device()
+
     def decode_single_samples(current_batch):
         samples = DecodedSamples()
 
         for i in range(current_batch.shape[0]):
             sample = decode_first_stage(model, current_batch[i:i + 1])[0]
-
-            if check_for_nans:
-                devices.test_for_nans(sample, "vae")
-
-            if target_device is not None:
-                sample = sample.to(target_device)
-
-            samples.append(sample)
+            devices.test_for_nans(sample, "vae")
+            samples.append(sample.to(target_device))
 
         return samples
 
-    if check_for_nans:
-        devices.test_for_nans(batch, "unet")
+    devices.test_for_nans(batch, "unet")
 
     try:
         decoded = decode_first_stage(model, batch)
-
-        if check_for_nans:
-            devices.test_for_nans(decoded, "vae")
+        devices.test_for_nans(decoded, "vae")
 
     except torch.cuda.OutOfMemoryError:
         devices.torch_gc()
         return decode_single_samples(batch)
 
     except devices.NansException as e:
-        if not check_for_nans:
-            raise e
-
         if shared.opts.auto_vae_precision_bfloat16 and devices.dtype_vae != torch.bfloat16:
             autofix_dtype = torch.bfloat16
             autofix_dtype_text = "bfloat16"
@@ -890,14 +854,9 @@ def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
         model.first_stage_model.to(devices.dtype_vae)
         batch = batch.to(devices.dtype_vae)
         decoded = decode_first_stage(model, batch)
+        devices.test_for_nans(decoded, "vae")
 
-        if check_for_nans:
-            devices.test_for_nans(decoded, "vae")
-
-    if target_device is not None:
-        decoded = decoded.to(target_device)
-
-    return DecodedSamples(decoded)
+    return DecodedSamples(decoded.to(target_device))
 
 
 def get_fixed_seed(seed):
@@ -1284,7 +1243,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
                 if opts.sd_vae_decode_method != 'Full':
                     p.extra_generation_params['VAE Decoder'] = opts.sd_vae_decode_method
-                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim, target_device=decoded_images_device(), check_for_nans=True)
+                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim)
 
             x_samples_ddim = torch.stack(x_samples_ddim).float()
             x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
@@ -1432,10 +1391,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     # The snapshot helper ignores interrupted/cancelled and empty results, so those
     # cannot replace the last completed generation.
     from modules import generation_last
-    try:
-        generation_last.capture_completed_generation(p, res)
-    except Exception:
-        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+    generation_last.capture_or_report(p, res)
 
     return res
 
@@ -1641,7 +1597,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 return samples
 
             if self.latent_scale_mode is None:
-                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)).to(dtype=torch.float32)
+                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples)).to(dtype=torch.float32)
             else:
                 decoded_samples = None
 
@@ -1749,7 +1705,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         self.sampler = None
 
-        decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)
+        decoded_samples = decode_latent_batch(self.sd_model, samples)
 
         self.is_hr_pass = False
         return decoded_samples
@@ -1761,6 +1717,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         if not opts.persistent_cond_cache:
             StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
             StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
+            self._publish_cond_cache_occupancy()
 
     def setup_prompts(self):
         super().setup_prompts()
@@ -1940,17 +1897,17 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self._snapshot_img2img_init_cache_stats(last_hit=False, cached=True)
 
     def _img2img_init_cache_bypass_reason(self):
-        if not getattr(opts, "persistent_img2img_init_cache", True):
+        if not opts.persistent_img2img_init_cache:
             return "disabled"
         if not self.init_images:
             return "no_init_images"
-        if getattr(self, "image_mask", None) is not None or getattr(self, "latent_mask", None) is not None:
+        # Masked content, mask blur/rounding/inversion and "only masked" crops act only through a mask, so the key
+        # below holds none of them.
+        if self.image_mask is not None or self.latent_mask is not None:
             return "masked_request"
-        if self.inpainting_fill == 2:
-            return "latent_noise_fill_uses_seeded_random"
         return None
 
-    def _img2img_init_cache_key(self, key_images, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections):
+    def _img2img_init_cache_key(self, key_images, key_raw_images, repeat_init_latent, add_color_corrections):
         """key_images are the raw init images when key_raw_images, else the prepared (flattened/resized) ones."""
         reason = self._img2img_init_cache_bypass_reason()
         if reason is not None:
@@ -1964,13 +1921,16 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             getattr(checkpoint_info, "sha256", None),
         )
 
-        effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", getattr(opts, "inpainting_mask_weight", None))
+        effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", opts.inpainting_mask_weight)
 
         return (
             "raw" if key_raw_images else "prepared",
-            tuple(_image_cache_fingerprint(image) for image in key_images),
-            _image_cache_fingerprint(image_mask),
-            _image_cache_fingerprint(latent_mask),
+            # Every committed checkpoint or VAE load bumps these, so a file replaced in place and reloaded under the
+            # same name misses (under --no-hashing the hashes below are None). The names stay: switching to an
+            # already-loaded checkpoint (sd_checkpoints_limit > 1) bumps no epoch. One atomic snapshot is enough:
+            # epochs only grow, so a bump while this request encodes leaves an entry no later key can match.
+            openclaw_cache_epochs.epoch_subset(("checkpoint_object_epoch", "vae_object_epoch", "vae_bytes_epoch")),
+            tuple(images.pixel_fingerprint(image) for image in key_images),
             checkpoint_key,
             self.sd_model_name,
             self.sd_model_hash,
@@ -1989,16 +1949,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.batch_size,
             bool(repeat_init_latent),
             bool(add_color_corrections),
-            self.mask_round,
-            self.inpainting_fill,
-            self.inpainting_mask_invert,
-            self.inpaint_full_res,
-            self.inpaint_full_res_padding,
-            self.mask_blur_x,
-            self.mask_blur_y,
-            getattr(opts, "sd_vae_encode_method", None),
+            opts.sd_vae_encode_method,
             effective_inpainting_mask_weight,
-            getattr(opts, "img2img_background_color", None),
+            opts.img2img_background_color,
             str(devices.dtype),
             str(devices.dtype_vae),
             str(shared.device),
@@ -2099,8 +2052,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         latent_mask = self.latent_mask if self.latent_mask is not None else image_mask
 
         add_color_corrections = opts.img2img_color_correction and self.color_corrections is None
-        if add_color_corrections:
-            self.color_corrections = []
 
         # Without a mask, and when resize_image cannot run an upscaler, the prepared image is a
         # pure function of the raw init image and fields already in the init cache key, so the
@@ -2165,7 +2116,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if image_mask is not None and self.inpainting_fill == 3:
             self.extra_generation_params["Masked content"] = 'latent nothing'
 
-        init_cache_key = self._img2img_init_cache_key(imgs, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections)
+        init_cache_key = self._img2img_init_cache_key(imgs, key_raw_images, repeat_init_latent, add_color_corrections)
         init_cache_started = time.perf_counter()
         cache_extra_generation_params = {
             key: self.extra_generation_params[key]
@@ -2217,7 +2168,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def close(self):
         super().close()
-        if not getattr(opts, "persistent_img2img_init_cache", True):
+        if not opts.persistent_img2img_init_cache:
             self.clear_img2img_init_cache()
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):

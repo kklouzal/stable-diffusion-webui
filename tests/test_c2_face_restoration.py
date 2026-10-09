@@ -1,6 +1,6 @@
 """Face restoration: restored faces are quantized like the reference GFPGAN/CodeFormer pipeline (basicsr
-`tensor2img`, which rounds), and a restorer whose model cannot be loaded fails instead of silently returning
-the unrestored image."""
+`tensor2img`, which rounds), and a restorer whose model cannot be loaded or whose inference fails fails the request
+instead of silently returning the unrestored image."""
 
 from __future__ import annotations
 
@@ -29,14 +29,12 @@ def fr_utils():
     devices = types.ModuleType("modules.devices")
     devices.torch_gc = lambda: None
     devices.cpu = torch.device("cpu")
-    errors = types.ModuleType("modules.errors")
-    errors.report = lambda *args, **kwargs: pytest.fail("face-restoration inference must not fail here")
-    stubs = {"modules": pkg, "modules.shared": shared, "modules.devices": devices, "modules.errors": errors,
+    stubs = {"modules": pkg, "modules.shared": shared, "modules.devices": devices,
              "modules.face_restoration": None, "modules.face_restoration_utils": None}
     previous = {name: sys.modules.get(name) for name in stubs}
     sys.modules.update(stubs)
     try:
-        for name in ("shared", "devices", "errors"):
+        for name in ("shared", "devices"):
             setattr(pkg, name, stubs[f"modules.{name}"])
         for name in ("face_restoration", "face_restoration_utils"):
             spec = importlib.util.spec_from_file_location(f"modules.{name}", ROOT / "modules" / f"{name}.py")
@@ -59,7 +57,7 @@ class _FakeFaceHelper:
         self.restored = []
 
     def clean_all(self):
-        pass
+        self.cleaned = getattr(self, "cleaned", 0) + 1
 
     def read_image(self, img):
         self.input_img = np.ascontiguousarray(img)
@@ -118,3 +116,15 @@ def test_unloadable_restorer_fails_instead_of_returning_unrestored(fr_utils, tmp
     image = np.zeros((8, 8, 3), dtype=np.uint8)
     with pytest.raises(RuntimeError, match="Unable to load Broken face-restoration model: missing weights"):
         Broken(str(tmp_path)).restore_with_helper(image, lambda face: face)
+
+
+def test_failed_face_inference_fails_instead_of_pasting_the_unrestored_crop(fr_utils):
+    helper = _FakeFaceHelper([np.zeros((8, 8, 3), dtype=np.uint8)])
+
+    def broken(face):
+        raise RuntimeError("inference failed")
+
+    with pytest.raises(RuntimeError, match="inference failed"):
+        fr_utils.restore_with_face_helper(np.zeros((8, 8, 3), dtype=np.uint8), helper, broken, torch.device("cpu"))
+    assert helper.restored == []
+    assert helper.cleaned == 2  # before detection and in the finally block

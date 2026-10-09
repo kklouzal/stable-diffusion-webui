@@ -128,9 +128,6 @@ class DiagonalGaussianMode(torch.nn.Module):
     float32 noise promoted it; the unused KL term and std/var exponentials are not computed.
     """
 
-    def get_trainable_parameters(self):
-        yield from ()
-
     def forward(self, z):
         mean, _logvar = torch.chunk(z, 2, dim=1)
         return mean.float(), {}

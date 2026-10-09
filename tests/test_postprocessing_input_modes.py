@@ -9,7 +9,7 @@ from PIL import Image
 
 
 def _load_to_postprocessing_mode():
-    # postprocessing imports the UI stack; compile the one function in isolation like the caption contract tests.
+    # postprocessing imports the webui runtime; compile the one function in isolation.
     module = ast.parse(Path("modules/postprocessing.py").read_text(encoding="utf-8"))
     functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "to_postprocessing_mode"]
     namespace = {"np": np, "Image": Image}

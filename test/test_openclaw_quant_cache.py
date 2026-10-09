@@ -115,12 +115,12 @@ def test_torchao_sidecar_corruption_or_missing_contract_forces_regeneration(monk
     Path = __import__("pathlib").Path
     Path(str(cache) + suffix).write_text(__import__("json").dumps(sidecar))
     monkeypatch.setattr(torchao_model_cache, "runtime_compatibility", lambda: {"torch": "test"})
-    assert not torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+    assert torchao_model_cache.verified_sidecar(str(source), str(cache), 9, "mxfp8", suffix) is None
     sidecar["contract"] = torchao_model_cache.artifact_contract("mxfp8")
     Path(str(cache) + suffix).write_text(__import__("json").dumps(sidecar))
-    assert torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+    assert torchao_model_cache.verified_sidecar(str(source), str(cache), 9, "mxfp8", suffix) is not None
     cache.write_bytes(b"broken")
-    assert not torchao_model_cache.sidecar_matches(str(source), str(cache), 9, "mxfp8", suffix)
+    assert torchao_model_cache.verified_sidecar(str(source), str(cache), 9, "mxfp8", suffix) is None
 
 
 def test_artifact_contract_survives_weights_only_load(tmp_path):
@@ -229,5 +229,31 @@ def test_torchao_cache_rejects_a_payload_built_from_other_bytes(tmp_path):
     with open(torchao_model_cache.sidecar_path(cache_path, backend.sidecar_suffix), "w", encoding="utf8") as f:
         json.dump(sidecar, f)
 
-    assert torchao_model_cache.sidecar_matches(str(source), cache_path, backend.cache_version, backend.config_name, backend.sidecar_suffix)
+    assert torchao_model_cache.verified_sidecar(str(source), cache_path, backend.cache_version, backend.config_name, backend.sidecar_suffix) is not None
     assert not torchao_model_cache.load_into_model(backend, _linear_model(), str(source), _only_linear, "cpu", None)
+
+
+def test_torchao_cache_quota_covers_every_artifact_of_the_backend(monkeypatch, tmp_path):
+    # A checkpoint in a subdirectory must be budgeted with the rest of the backend's artifacts, not on its own.
+    from types import SimpleNamespace
+
+    from modules import persistent_artifact_cache
+
+    roots = []
+
+    def record_quota(root, **_kwargs):
+        roots.append(os.fspath(root))
+        return {"evicted": [], "within_quota": True}
+
+    monkeypatch.setattr(persistent_artifact_cache, "enforce_directory_quota", record_quota)
+    backend = SimpleNamespace(
+        cache_dir_name="mxfp8", cache_version=1, config_name="cfg", sidecar_suffix=".mxfp8-cache.json", label="test",
+        is_quant_tensor=torch.is_tensor,
+    )
+    checkpoints = tmp_path / "Stable-diffusion"
+    for source in (checkpoints / "top.safetensors", checkpoints / "sub" / "dir" / "nested.safetensors"):
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"checkpoint bytes")
+        cache_path = torchao_model_cache.save_from_model(backend, _linear_model(), str(source), _only_linear, 1, 0, {})
+        assert cache_path and os.path.isfile(cache_path)
+    assert roots == [str(checkpoints / "mxfp8")] * 2

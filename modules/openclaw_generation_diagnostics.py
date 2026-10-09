@@ -5,6 +5,8 @@ import hashlib
 import time
 from typing import Any
 
+from modules import openclaw_cuda_graphs, openclaw_generation_profile
+
 _LAST_GENERATION_DIAGNOSTICS: dict[str, Any] | None = None
 
 _CUDA_GRAPH_COUNTERS = ("captures", "replays", "fallbacks", "bypasses", "failures")
@@ -12,7 +14,6 @@ _OPENCLAW_PARAM_PREFIXES = (
     "PAG ",
     "SEG ",
     "CFG Interval ",
-    "Multi-Sampler ",
     "Dynamic thresholding",
     "Mimic ",
     "CFG mode",
@@ -32,24 +33,6 @@ def _json_safe(value: Any) -> Any:
     return repr(value)
 
 
-def _cuda_graph_status() -> dict[str, Any] | None:
-    try:
-        from modules import openclaw_cuda_graphs
-
-        return openclaw_cuda_graphs.status()
-    except Exception as exc:
-        return {"available": False, "error": repr(exc)}
-
-
-def _generation_profile_status() -> dict[str, Any] | None:
-    try:
-        from modules import openclaw_generation_profile
-
-        return openclaw_generation_profile.status()
-    except Exception as exc:
-        return {"available": False, "error": repr(exc)}
-
-
 def _summarize_graph_key(raw_key: Any) -> dict[str, Any] | None:
     if raw_key in (None, ""):
         return None
@@ -62,10 +45,7 @@ def _summarize_graph_key(raw_key: Any) -> dict[str, Any] | None:
     }
 
 
-def _summarize_cuda_graph_status(status: dict[str, Any] | None) -> dict[str, Any] | None:
-    if status is None:
-        return None
-
+def _summarize_cuda_graph_status(status: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "enabled": bool(status.get("enabled", False)),
         "cache_size": int(status.get("cache_size") or 0),
@@ -129,19 +109,16 @@ def before_sample(p: Any, batch_index: int) -> dict[str, Any]:
     return {
         "started_at": time.time(),
         "request": _request_summary(p, batch_index),
-        "cuda_graphs_before": _summarize_cuda_graph_status(_cuda_graph_status()),
-        "generation_profile_cache_before": _generation_profile_status(),
+        "cuda_graphs_before": _summarize_cuda_graph_status(openclaw_cuda_graphs.status()),
+        "generation_profile_cache_before": openclaw_generation_profile.status(),
     }
 
 
-def after_sample(p: Any, capture: dict[str, Any] | None, batch_index: int) -> dict[str, Any] | None:
+def after_sample(p: Any, capture: dict[str, Any], batch_index: int) -> dict[str, Any]:
     global _LAST_GENERATION_DIAGNOSTICS
 
-    if capture is None:
-        return None
-
     finished_at = time.time()
-    after = _summarize_cuda_graph_status(_cuda_graph_status())
+    after = _summarize_cuda_graph_status(openclaw_cuda_graphs.status())
     diagnostics = {
         **capture,
         "finished_at": finished_at,
@@ -149,7 +126,7 @@ def after_sample(p: Any, capture: dict[str, Any] | None, batch_index: int) -> di
         "request": _request_summary(p, batch_index),
         "cuda_graphs_after": after,
         "cuda_graphs_delta": _counter_delta(capture.get("cuda_graphs_before"), after),
-        "generation_profile_cache_after": _generation_profile_status(),
+        "generation_profile_cache_after": openclaw_generation_profile.status(),
     }
     diagnostics = _json_safe(diagnostics)
     p.openclaw_generation_diagnostics = diagnostics

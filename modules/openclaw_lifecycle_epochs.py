@@ -2,8 +2,10 @@
 
 Markers are private, bounded categories or opaque object tokens. They must never be
 included in telemetry: only the fixed reason codes below reach the epoch registry.
-Precision, attention, and compile epochs are intentionally deferred because this
-repository has no single committed old-to-new transition setter for those states.
+Nothing bumps the precision, attention or compile epochs: every cache that depends on
+those facts keys them directly (a precision change needs a checkpoint reload, which
+bumps checkpoint_object_epoch; the graph caches key the SDPA backend, the attention
+forward and parameter dtypes), so those epochs stay 0 and no cache key reads them.
 """
 
 from __future__ import annotations

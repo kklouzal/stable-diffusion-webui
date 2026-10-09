@@ -35,12 +35,8 @@ def uniform(n, sigma_min, sigma_max, inner_model, device):
     return inner_model.get_sigmas(n).to(device)
 
 
-def _as_sigma(value, device, dtype=torch.float32):
-    return torch.as_tensor(value, device=device, dtype=dtype).reshape(())
-
-
-def _stack_sigmas(sigmas, device, dtype=torch.float32):
-    return torch.stack([_as_sigma(sigma, device, dtype) for sigma in sigmas])
+def _as_sigma(value, device):
+    return torch.as_tensor(value, device=device, dtype=torch.float32).reshape(())
 
 
 def _append_zero(sigmas):
@@ -59,16 +55,9 @@ def _validate_step_count(n):
     return n
 
 
-def _sigmas_from_timesteps(inner_model, timesteps, device, dtype=torch.float32):
-    try:
-        sigmas = inner_model.t_to_sigma(timesteps)
-    except Exception:
-        sigmas = None
-
-    if torch.is_tensor(sigmas) and sigmas.ndim > 0:
-        return sigmas.to(device=device, dtype=dtype).reshape(-1)
-
-    return _stack_sigmas((inner_model.t_to_sigma(ts) for ts in timesteps), device, dtype)
+def _sigmas_from_timesteps(inner_model, timesteps, device):
+    # Every model wrapper is a k_diffusion DiscreteSchedule, whose t_to_sigma takes a timestep vector.
+    return inner_model.t_to_sigma(timesteps).to(device=device, dtype=torch.float32).reshape(-1)
 
 
 def sgm_uniform(n, sigma_min, sigma_max, inner_model, device):

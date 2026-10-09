@@ -22,9 +22,10 @@ def load_plumbing():
     api = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "Api")
     methods = [node for node in api.body if isinstance(node, ast.FunctionDef) and node.name in (
         "init_script_args", "persist_openclaw_denoise_ramp_args")]
-    helpers = [node for node in source.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in (
-        "ScriptArgsList", "_set_script_arg", "_assign_script_args")]
+    helpers = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in (
+        "_set_script_arg", "_assign_script_args")]
     scripts = ast.parse((ROOT / "modules/scripts.py").read_text())
+    helpers += [node for node in scripts.body if isinstance(node, ast.FunctionDef) and node.name == "script_arg_range"]
     runner = next(node for node in scripts.body if isinstance(node, ast.ClassDef) and node.name == "ScriptRunner")
     hooks = [node for node in runner.body if isinstance(node, ast.FunctionDef) and node.name in ("_script_args_for", "run")]
     tree = ast.Module(body=helpers + [
@@ -50,10 +51,10 @@ class ScriptArgumentRangeTests(unittest.TestCase):
 
     def prepare(self, requested, selected=None, selected_args=None, defaults=None):
         defaults = [0, "default-A", "default-B"] if defaults is None else defaults
-        args = self.api.init_script_args(
+        args, ranges = self.api.init_script_args(
             SimpleNamespace(alwayson_scripts=requested, script_args=selected_args),
             defaults, selected, 0, None)
-        return SimpleNamespace(script_args=args, openclaw_script_arg_ranges=args.openclaw_script_arg_ranges)
+        return SimpleNamespace(script_args=args, openclaw_script_arg_ranges=ranges)
 
     def test_overflow_is_independent_of_request_order_and_keeps_fixed_prefix(self):
         for names in (("A", "B"), ("B", "A")):

@@ -5,7 +5,7 @@ import shlex
 import modules.scripts as scripts
 from modules import headless_ui as gr
 
-from modules import sd_samplers, errors, sd_models
+from modules import sd_samplers, errors, sd_models, openclaw_env
 from modules.processing import Processed, process_images
 from modules.shared import state
 
@@ -29,13 +29,10 @@ def process_float_tag(tag):
 
 
 def process_boolean_tag(tag):
-    value = tag.lower()
-    if value in {"true", "1", "yes", "on"}:
-        return True
-    if value in {"false", "0", "no", "off"}:
-        return False
-
-    raise ValueError(f"invalid boolean value: {tag}")
+    value = openclaw_env.bool_token(tag)
+    if value is None:
+        raise ValueError(f"invalid boolean value: {tag}")
+    return value
 
 
 prompt_tags = {

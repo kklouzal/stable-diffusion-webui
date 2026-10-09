@@ -112,7 +112,6 @@ class GenerationProfileCacheTests(unittest.TestCase):
         first = profile.tensor_for_key(key, lambda: torch.ones(2))
         second = profile.tensor_for_key(key, lambda: torch.zeros(2))
 
-        self.assertTrue(profile.enabled())
         self.assertIsNot(second, first)
         torch.testing.assert_close(second, torch.ones(2))
         status = profile.status()

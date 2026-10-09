@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import re
 
-from modules import shared
+from modules import persistent_artifact_cache, shared
 from modules.paths_internal import cwd
 
 
@@ -273,11 +273,4 @@ def load_file_from_url(
 
 def compare_sha256(file_path: str, hash_prefix: str) -> bool:
     """Check if the SHA256 hash of the file matches the given prefix."""
-    import hashlib
-    hash_sha256 = hashlib.sha256()
-    blksize = 1024 * 1024
-
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(blksize), b""):
-            hash_sha256.update(chunk)
-    return hash_sha256.hexdigest().startswith(hash_prefix.strip().lower())
+    return persistent_artifact_cache.sha256_file(file_path).startswith(hash_prefix.strip().lower())

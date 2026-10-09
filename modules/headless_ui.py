@@ -20,24 +20,15 @@ class _FallbackUpdate(dict):
 
 
 class _FallbackComponent:
+    # Keeps only what API script metadata reads (scripts.script_control_api_arg, script defaults, elem_id).
     def __init__(self, *args: Any, **kwargs: Any):
-        self.args = args
-        self.kwargs = kwargs
         self.value = kwargs.get("value", args[0] if args else None)
         self.label = kwargs.get("label")
         self.elem_id = kwargs.get("elem_id")
-        self.visible = kwargs.get("visible", True)
         self.choices = kwargs.get("choices") or []
-        self.elem_classes = kwargs.get("elem_classes") or []
-        self.children = kwargs.get("children") or []
-        self.id = kwargs.get("id", self.elem_id)
-        self.selected = kwargs.get("selected")
         self.minimum = kwargs.get("minimum")
         self.maximum = kwargs.get("maximum")
         self.step = kwargs.get("step")
-        self.multiselect = kwargs.get("multiselect", False)
-        self.open = kwargs.get("open", self.value)
-        self.do_not_save_to_config = kwargs.get("do_not_save_to_config", False)
 
     def __enter__(self):
         return self
@@ -55,6 +46,7 @@ class _FallbackComponent:
     def upload(self, *args: Any, **kwargs: Any): return self
     def load(self, *args: Any, **kwargs: Any): return self
     def render(self, *args: Any, **kwargs: Any): return self
+    # Read (not called) by vendored ControlNet, which wraps it: image.preprocess = partial(svg_preprocess, preprocess=...).
     def preprocess(self, value: Any): return value
 
     @staticmethod
@@ -79,11 +71,9 @@ def Warning(message: str):
 
 
 _COMPONENT_NAMES = {
-    "Accordion", "Audio", "Box", "Button", "Checkbox", "CheckboxGroup", "Code",
-    "ColorPicker", "Column", "Dropdown", "File",
-    "Files", "Gallery", "Group", "HTML", "HighlightedText", "Image", "Info", "Label",
-    "Markdown", "Number", "Plot", "Radio", "Row", "SelectData", "Slider", "State", "Tab", "TabItem", "Tabs",
-    "Text", "TextArea", "Textbox", "UploadButton", "Video",
+    "Accordion", "Button", "Checkbox", "CheckboxGroup", "Code", "ColorPicker", "Column", "Dropdown", "File",
+    "Gallery", "Group", "HTML", "Image", "Info", "Markdown", "Number", "Plot", "Radio", "Row", "Slider", "State",
+    "Tab", "TabItem", "Tabs", "Text", "Textbox", "UploadButton", "Video",
 }
 
 

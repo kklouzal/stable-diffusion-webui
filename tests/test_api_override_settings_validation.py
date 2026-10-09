@@ -17,13 +17,14 @@ def load_function(path, name, namespace):
     return namespace[name]
 
 
-def load_same_type():
+def load_options_methods(*names):
+    """Options methods compiled as plain functions (self passed explicitly)."""
     tree = ast.parse(OPTIONS_PATH.read_text(encoding="utf8"))
     options_cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Options")
-    body = [node for node in options_cls.body if isinstance(node, ast.FunctionDef) and node.name == "same_type"]
+    body = [node for node in options_cls.body if isinstance(node, ast.FunctionDef) and node.name in names]
     namespace = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(OPTIONS_PATH), "exec"), namespace)
-    return namespace["same_type"]
+    return [namespace[name] for name in names]
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ def validate():
 
 @pytest.fixture
 def opts():
-    same_type = load_same_type()
+    same_type, api_type_mismatch = load_options_methods("same_type", "api_type_mismatch")
     labels = {
         "CLIP_stop_at_last_layers": types.SimpleNamespace(default=1),
         "eta_noise_seed_delta": types.SimpleNamespace(default=0),
@@ -43,6 +44,7 @@ def opts():
     }
     namespace = types.SimpleNamespace(data={"legacy_key": 5}, data_labels=labels, typemap={int: float})
     namespace.same_type = lambda x, y: same_type(namespace, x, y)
+    namespace.api_type_mismatch = lambda key, value: api_type_mismatch(namespace, key, value)
     return namespace
 
 
@@ -57,6 +59,12 @@ def test_a_value_of_another_type_is_a_422(validate, opts, override):
         validate(override, opts)
     assert exc.value.status_code == 422
     assert next(iter(override)) in exc.value.detail
+
+
+def test_type_error_detail_text_is_unchanged(validate, opts):
+    with pytest.raises(HTTPException) as exc:
+        validate({"upcast_attn": "false"}, opts)
+    assert exc.value.detail == "override_settings: option 'upcast_attn' expects a value of type bool, got str 'false'"
 
 
 def test_unknown_option_is_a_422_unless_unchanged(validate, opts):

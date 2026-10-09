@@ -1,18 +1,15 @@
 import time
 
-from collections import OrderedDict
 import string
 import random
 
 current_task = None
-pending_tasks = OrderedDict()
 
 
 def start_task(id_task):
     global current_task
 
     current_task = id_task
-    pending_tasks.pop(id_task, None)
 
 
 def finish_task(id_task):
@@ -26,9 +23,6 @@ def create_task_id(task_type):
     res = ''.join(random.choices(string.ascii_uppercase +
     string.digits, k=N))
     return f"task({task_type}-{res})"
-
-def add_task_to_queue(id_job):
-    pending_tasks[id_job] = time.time()
 
 
 def calculate_progress_and_eta(job_count, job_no, sampling_steps, sampling_step, time_start, *, base_progress=0):

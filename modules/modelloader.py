@@ -10,9 +10,9 @@ from urllib.parse import urlparse
 
 import torch
 
-from modules import shared
+from modules import cache, shared
 from modules.upscaler import Upscaler, UpscalerLanczos, UpscalerNearest, UpscalerNone
-from modules.util import load_file_from_url  # noqa: F401 - backwards compatibility
+from modules.util import load_file_from_url  # re-exported: callers use modelloader.load_file_from_url
 
 if TYPE_CHECKING:
     import spandrel
@@ -187,7 +187,6 @@ def load_cached_spandrel_model(
     device: str | torch.device,
     load_device: str | torch.device | None = None,
     prefer_half: bool = False,
-    dtype: str | torch.dtype | None = None,
     expected_architecture: str | None = None,
 ) -> spandrel.ModelDescriptor:
     """
@@ -196,14 +195,18 @@ def load_cached_spandrel_model(
 
     The returned descriptor is shared between calls: run it only through its `__call__` (spandrel
     runs that under `torch.inference_mode`) and never move, cast or train it. Entries are keyed by
-    the file identity (real path, mtime, size) and every load argument, so a replaced file is
-    reloaded; a failed load raises and is not cached.
+    `cache.file_cache_key` of the real path (device, inode, size, mtime, ctime) and every load
+    argument, so a replaced file is reloaded even when its size and mtime are preserved; a failed
+    load raises and is not cached.
     """
     real_path = os.path.realpath(path)
-    stat = os.stat(real_path)
     device = torch.device(device)
     load_device = device if load_device is None else torch.device(load_device)
-    key = (real_path, stat.st_mtime_ns, stat.st_size, str(load_device), str(device), bool(prefer_half), str(dtype) if dtype else None, expected_architecture)
+    key = cache.file_cache_key(real_path, str(load_device), str(device), bool(prefer_half), expected_architecture)
+    if key[1] is None:
+        # Missing or unreadable: raise its OSError here. The loader would report it as an unrelated error (modules.safe
+        # turns a failed torch.load into a None state dict).
+        os.stat(real_path)
     with _spandrel_model_cache_lock:
         model_descriptor = _spandrel_model_cache.get(key)
         if model_descriptor is not None:
@@ -213,14 +216,13 @@ def load_cached_spandrel_model(
             real_path,
             device=load_device,
             prefer_half=prefer_half,
-            dtype=dtype,
             expected_architecture=expected_architecture,
         )
         model_descriptor.to(device)
-        stat_after = os.stat(real_path)
-        if (stat_after.st_mtime_ns, stat_after.st_size) != (stat.st_mtime_ns, stat.st_size):
+        if cache.file_cache_key(real_path)[1] != key[1]:
             return model_descriptor  # replaced while loading; do not file it under the old identity
-        for stale_key in [k for k in _spandrel_model_cache if k[0] == real_path and k[1:3] != key[1:3]]:
+        # Entries for other load arguments of this file revision stay; other revisions of the file are stale.
+        for stale_key in [k for k in _spandrel_model_cache if k[0] == key[0] and k[1] != key[1]]:
             del _spandrel_model_cache[stale_key]
         _spandrel_model_cache[key] = model_descriptor
         while len(_spandrel_model_cache) > _SPANDREL_MODEL_CACHE_SIZE:

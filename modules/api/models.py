@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from typing import Any, Optional, Literal
 from inflection import underscore
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
-from modules.shared import sd_upscalers, opts, parser
+from modules.shared import sd_upscalers, parser
 
 API_NOT_ALLOWED = [
     "self",
@@ -71,7 +71,7 @@ def control_net_api_fields():
     ControlNet's legacy remote-call adapter reads these attributes from the
     StableDiffusionProcessing object. The dynamic Pydantic request models drop
     unknown keys, so list the compatibility fields explicitly to preserve them
-    through request.copy()/vars(populate) into processing construction.
+    through request.model_copy()/vars(populate) into processing construction.
     """
     fields = []
     for suffix in ("", "2", "3"):
@@ -149,19 +149,25 @@ class PydanticModelGenerator:
         }
         return create_model(self._model_name, __config__=ConfigDict(populate_by_name=True, frozen=False), **fields)
 
+# The request fields both generation endpoints add after their own; their order is the /openapi.json property order
+# and the key order of the parameters echoed in every response.
+_GENERATION_API_TAIL_FIELDS = [
+    {"key": "script_name", "type": str, "default": None},
+    {"key": "script_args", "type": list, "default": []},
+    {"key": "send_images", "type": bool, "default": True, "description": "Include generated images as base64 strings in the API response. Does not affect generation."},
+    {"key": "save_images", "type": bool, "default": False, "description": "Save generated images to disk using the WebUI save path. Does not affect generation."},
+    {"key": "alwayson_scripts", "type": dict, "default": {}},
+    {"key": "force_task_id", "type": str, "default": None},
+    {"key": "infotext", "type": str, "default": None},
+    *control_net_api_fields(),
+]
+
 StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
     "StableDiffusionProcessingTxt2Img",
     StableDiffusionProcessingTxt2Img,
     [
         {"key": "sampler_index", "type": str, "default": "Euler"},
-        {"key": "script_name", "type": str, "default": None},
-        {"key": "script_args", "type": list, "default": []},
-        {"key": "send_images", "type": bool, "default": True, "description": "Include generated images as base64 strings in the API response. Does not affect generation."},
-        {"key": "save_images", "type": bool, "default": False, "description": "Save generated images to disk using the WebUI save path. Does not affect generation."},
-        {"key": "alwayson_scripts", "type": dict, "default": {}},
-        {"key": "force_task_id", "type": str, "default": None},
-        {"key": "infotext", "type": str, "default": None},
-        *control_net_api_fields(),
+        *_GENERATION_API_TAIL_FIELDS,
     ]
 ).generate_model()
 
@@ -174,14 +180,7 @@ StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
         {"key": "denoising_strength", "type": float, "default": 0.75},
         {"key": "mask", "type": str, "default": None, "description": "Optional inpaint mask as a base64 string or data URI."},
         {"key": "include_init_images", "type": bool, "default": False, "exclude" : True, "description": "Echo init_images and mask in response parameters when true. Does not affect generation."},
-        {"key": "script_name", "type": str, "default": None},
-        {"key": "script_args", "type": list, "default": []},
-        {"key": "send_images", "type": bool, "default": True, "description": "Include generated images as base64 strings in the API response. Does not affect generation."},
-        {"key": "save_images", "type": bool, "default": False, "description": "Save generated images to disk using the WebUI save path. Does not affect generation."},
-        {"key": "alwayson_scripts", "type": dict, "default": {}},
-        {"key": "force_task_id", "type": str, "default": None},
-        {"key": "infotext", "type": str, "default": None},
-        *control_net_api_fields(),
+        *_GENERATION_API_TAIL_FIELDS,
     ]
 ).generate_model()
 
@@ -264,13 +263,6 @@ class TrainResponse(BaseModel):
 
 class CreateResponse(BaseModel):
     info: str = Field(title="Create info", description="Response string from create embedding or hypernetwork task.")
-
-fields = {}
-for key, metadata in opts.data_labels.items():
-    optType = opts.typemap.get(type(metadata.default), type(metadata.default)) if metadata.default else Any
-    fields.update({key: (Optional[optType], Field(default=metadata.default, description=metadata.label))})
-
-OptionsModel = create_model("Options", **fields)
 
 flags = {}
 _options = vars(parser)['_option_string_actions']

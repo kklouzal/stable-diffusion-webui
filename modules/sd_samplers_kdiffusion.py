@@ -64,10 +64,18 @@ def _checkpoint_cache_key(checkpoint_info):
 
 
 def _sigmas_cache_key(sigmas):
+    """Value key of a schedule tensor. Samplers and wrappers mutate schedule tensors in place, so object identity or a
+    partial (first/last) value is not a safe key: every value can change the pixels."""
     if not torch.is_tensor(sigmas) or sigmas.numel() == 0:
         return None
 
-    return sd_samplers_common.semantic_tensor_cache_key(sigmas)
+    detached = sigmas.detach()
+    return (
+        tuple(detached.shape),
+        str(detached.dtype),
+        str(detached.device),
+        tuple(detached.to(device=devices.cpu).contiguous().reshape(-1).tolist()),
+    )
 
 
 def _model_schedule_cache_signature(sd_model, model_wrap):
@@ -79,6 +87,9 @@ def _model_schedule_cache_signature(sd_model, model_wrap):
         bool(getattr(sd_model, "is_sd2", False)),
         getattr(sd_model, "parameterization", None),
         _sigmas_cache_key(getattr(model_wrap, "sigmas", None)),
+        # DiscreteSchedule.sigma_to_t snaps to table indices when quantize is set (opts.enable_quantization when the
+        # wrapper was built); sgm_uniform, normal and beta start from sigma_to_t.
+        bool(model_wrap.quantize),
     )
 
 
@@ -188,8 +199,8 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
                 float(opts.sigma_min),
                 float(opts.sigma_max),
                 float(opts.rho),
-                float(getattr(opts, "beta_dist_alpha", 0)),
-                float(getattr(opts, "beta_dist_beta", 0)),
+                float(opts.beta_dist_alpha),
+                float(opts.beta_dist_beta),
                 bool(getattr(p, "is_hr_pass", False)),
                 _model_schedule_cache_signature(shared.sd_model, self.model_wrap),
             ),

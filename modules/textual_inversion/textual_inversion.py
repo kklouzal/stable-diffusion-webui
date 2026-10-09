@@ -49,6 +49,7 @@ class Embedding:
         self.sd_checkpoint_name = None
         self.optimizer_state_dict = None
         self.filename = None
+        self.file_revision = None  # cache.file_cache_key revision of `filename` when it was loaded
         self.hash = None
         self.shorthash = None
 
@@ -156,7 +157,7 @@ class EmbeddingDatabase:
     def read_embedding_from_image(self, path, name):
         try:
             ondisk_mtime = os.path.getmtime(path)
-            semantic_key = openclaw_cache_epochs.registry.digest((os.path.realpath(path), ondisk_mtime))
+            semantic_key = (os.path.realpath(path), ondisk_mtime)
 
             if (cache_embedding := self.image_embedding_cache.get(path)) and ondisk_mtime == cache_embedding.get('mtime', 0):
                 openclaw_cache_epochs.observe("E07", "hit", reason="cache_hit", semantic_key=semantic_key)
@@ -184,6 +185,8 @@ class EmbeddingDatabase:
     def load_from_file(self, path, filename):
         name, ext = os.path.splitext(filename)
         ext = ext.upper()
+        # Taken before the data is read, so a replacement during the read shows as a new revision on the next refresh.
+        revision = cache.file_cache_key(path)[1]
 
         if ext in ['.PNG', '.WEBP', '.JXL', '.AVIF']:
             _, second_ext = os.path.splitext(name)
@@ -203,6 +206,7 @@ class EmbeddingDatabase:
 
         if data is not None:
             embedding = create_embedding_from_data(data, name, filename=filename, filepath=path)
+            embedding.file_revision = revision
 
             if self.expected_shape == -1 or self.expected_shape == embedding.shape:
                 self.register_embedding(embedding, shared.sd_model)
@@ -230,8 +234,12 @@ class EmbeddingDatabase:
 
     @staticmethod
     def _snapshot_signature(word_embeddings, skipped_embeddings):
+        # The file identity matters under --no-hashing, where every hash is '': a file replaced in place by one with
+        # the same shape, vector count and step must still publish (and bump textual_inversion_epoch).
         def item(embedding):
             return (
+                getattr(embedding, "filename", None),
+                getattr(embedding, "file_revision", None),
                 getattr(embedding, "hash", None),
                 getattr(embedding, "shape", None),
                 getattr(embedding, "vectors", None),

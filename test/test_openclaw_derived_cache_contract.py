@@ -112,9 +112,12 @@ def test_static_cache_reload_and_upscale_contracts():
     hypertile = (ROOT / "extensions-builtin/hypertile/hypertile.py").read_text()
     ast.parse(sampler); ast.parse(multi); ast.parse(upscale); ast.parse(imgalt); ast.parse(hypertile)
     assert "_resolve_sampler_and_scheduler.cache_clear()" in sampler
+    # The resolver is keyed by request strings, so its cache must be bounded.
+    assert "@functools.lru_cache(maxsize=256)\ndef _resolve_sampler_and_scheduler(" in sampler
+    assert "@functools.cache" not in sampler
     register = multi[multi.index("def _register_definitions"):multi.index("def _upsert_custom")]
     assert "_SAMPLER_FUNC_CACHE.clear()" in register and "_SIGNATURE_PARAM_CACHE.clear()" in register
-    assert "hashlib.sha256(image.tobytes()).digest()" in upscale
+    assert "images.pixel_fingerprint(image)" in upscale
     assert "id(scaler)" in upscale
     assert "cached_image.copy()" in upscale and "image.copy()" in upscale
     assert "upscale_cache_lock" in upscale and "popitem(last=False)" in upscale

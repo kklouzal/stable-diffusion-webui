@@ -1,30 +1,27 @@
 from __future__ import annotations
 
-import os
 import sys
 import threading
 import traceback
-import weakref
 from collections import OrderedDict
 from typing import Any
 
 import torch
 
 from modules import openclaw_cache_epochs, openclaw_env
-from modules.openclaw_cuda_graphs import instance_overrides, on_default_stream
+from modules.openclaw_cuda_graphs import instance_overrides, on_default_stream, publish_graph_cache_size
+from modules.sd_unet_row_memo import tensor_version
 
-_ENABLED = False
+# Read once at import (T2): an invalid value fails startup instead of being logged and ignored.
+_ENABLED = openclaw_env.env_bool("OPENCLAW_VAE_DECODE_GRAPHS", False)
 _GRAPH_CONTRACT_VERSION = 3
-# lora_applied_epoch is added only while LoRA can reach the VAE; see _lora_reaches_vae().
+# lora_applied_epoch is added only while LoRA can reach the VAE; see _lora_reaches_vae(). Hooks, precision and the
+# attention backend are keyed directly (_module_revision, _runtime_identity, _attention_identity).
 _EPOCH_DIMENSIONS = (
     "checkpoint_object_epoch",
     "model_movement_epoch",
     "vae_object_epoch",
-    "forward_hook_epoch",
-    "precision_epoch",
     "device_epoch",
-    "attention_epoch",
-    "compile_epoch",
 )
 
 
@@ -35,7 +32,6 @@ _LOCK = threading.RLock()
 # whole family prevents teardown/replacement racing an in-flight replay or capture.
 _EXECUTION_LOCK = threading.RLock()
 _CACHE: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
-_KEY_LOCKS: weakref.WeakValueDictionary[tuple[Any, ...], threading.RLock] = weakref.WeakValueDictionary()
 _FAILED_KEYS: OrderedDict[tuple[Any, ...], None] = OrderedDict()
 _COUNTERS = {"captures": 0, "replays": 0, "bypasses": 0, "failures": 0, "invalidations": 0, "evictions": 0}
 _BYPASS_REASONS: dict[str, int] = {}
@@ -58,9 +54,8 @@ def _observe_bypass(reason: str) -> None:
 
 def _clear_cache_locked() -> bool:
     global _GRAPH_POOL
-    had_state = bool(_CACHE or _KEY_LOCKS or _FAILED_KEYS)
+    had_state = bool(_CACHE or _FAILED_KEYS)
     _CACHE.clear()
-    _KEY_LOCKS.clear()
     _FAILED_KEYS.clear()
     _GRAPH_POOL = None
     return had_state
@@ -71,15 +66,6 @@ def _graph_pool() -> Any:
     if _GRAPH_POOL is None:
         _GRAPH_POOL = torch.cuda.graph_pool_handle()
     return _GRAPH_POOL
-
-
-def _key_lock(key: tuple[Any, ...]) -> threading.RLock:
-    with _LOCK:
-        key_lock = _KEY_LOCKS.get(key)
-        if key_lock is None:
-            key_lock = threading.RLock()
-            _KEY_LOCKS[key] = key_lock
-        return key_lock
 
 
 def status() -> dict[str, Any]:
@@ -114,17 +100,17 @@ def set_enabled(enabled: bool | None = None, clear_cache: bool = False) -> dict[
             _LAST_KEY = None
             _COUNTERS["invalidations"] += 1
             _INVALIDATION_REASONS["manual_reset"] = _INVALIDATION_REASONS.get("manual_reset", 0) + 1
-            openclaw_cache_epochs.observe("E10", "invalidate", reason="manual_reset")
+            openclaw_cache_epochs.observe("E11", "invalidate", reason="manual")
+            publish_graph_cache_size()
         return status()
 
-def invalidate(reason: str, details: Any | None = None) -> dict[str, Any]:
-    del details  # Details may contain paths or object reprs and never enter telemetry.
+def invalidate(reason: str) -> dict[str, Any]:
     with _EXECUTION_LOCK, _LOCK:
         if _clear_cache_locked():
             _COUNTERS["invalidations"] += 1
             _INVALIDATION_REASONS[reason] = _INVALIDATION_REASONS.get(reason, 0) + 1
             openclaw_cache_epochs.observe("E11", "invalidate", reason="dependency_changed")
-            openclaw_cache_epochs.set_size("E11", current_size=0, capacity=_CACHE_MAX)
+            publish_graph_cache_size()
     return status()
 
 
@@ -135,79 +121,45 @@ def _callable_identity(value: Any) -> tuple[Any, ...] | None:
     return (id(function), getattr(function, "__module__", None), getattr(function, "__qualname__", None))
 
 
-def _file_revision(path: Any) -> tuple[Any, ...] | None:
-    if not isinstance(path, (str, os.PathLike)) or not path:
-        return None
-    canonical = os.path.realpath(os.fspath(path))
-    try:
-        stat = os.stat(canonical)
-        return (canonical, stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        return (canonical, None, None)
-
-
-def _module_revision(module: Any) -> tuple[Any, ...] | None:
-    if module is None:
-        return None
-    tensors = []
-    try:
-        named_tensors = list(module.named_parameters(recurse=True)) + list(module.named_buffers(recurse=True))
-    except Exception:
-        named_tensors = []
-    for name, tensor in named_tensors:
-        if torch.is_tensor(tensor):
-            tensors.append(
-                (
-                    name,
-                    id(tensor),
-                    getattr(tensor, "_version", None),
-                    tuple(tensor.shape),
-                    tuple(tensor.stride()),
-                    str(tensor.dtype),
-                    str(tensor.device),
-                    tensor.data_ptr() if tensor.device.type != "meta" else None,
-                )
-            )
+def _module_revision(module: Any) -> tuple[Any, ...]:
+    """Identity of the VAE module's parameters, buffers and hooks; in-place weight loads bump the version counters."""
+    named_tensors = list(module.named_parameters(recurse=True)) + list(module.named_buffers(recurse=True))
+    tensors = tuple(
+        (
+            name,
+            id(tensor),
+            tensor_version(tensor),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            str(tensor.dtype),
+            str(tensor.device),
+            tensor.data_ptr() if tensor.device.type != "meta" else None,
+        )
+        for name, tensor in named_tensors
+    )
     hooks = []
     for attribute in ("_forward_pre_hooks", "_forward_hooks", "_backward_hooks"):
         values = getattr(module, attribute, None)
         if values:
             hooks.append((attribute, tuple((key, _callable_identity(value)) for key, value in values.items())))
-    return (id(module), type(module).__module__, type(module).__qualname__, bool(getattr(module, "training", False)), tuple(tensors), tuple(hooks))
+    return (id(module), type(module).__module__, type(module).__qualname__, bool(getattr(module, "training", False)), tensors, tuple(hooks))
 
 
 def _tensor_key(x: torch.Tensor) -> tuple[Any, ...]:
+    # The capture reads a contiguous clone and replay copies into it, so the input's own layout never matters.
+    return (tuple(x.shape), str(x.dtype), str(x.device))
+
+
+def _option_identity() -> tuple[Any, ...]:
+    """Options a capture freezes. Decode method, approximation and VAE hypertile are bypassed in _bypass_reason."""
+    from modules import shared
+
     return (
-        tuple(x.shape),
-        tuple(x.stride()),
-        x.storage_offset(),
-        str(x.dtype),
-        str(x.device),
-        bool(x.is_contiguous()),
-        bool(x.is_contiguous(memory_format=torch.channels_last)) if x.ndim == 4 else False,
+        # sdp_attnblock_forward reads it per call; a capture freezes the branch taken.
+        bool(getattr(shared.opts, "upcast_attn", False)),
+        # The NHWC GroupNorm switch picks the VAE GroupNorm kernel (and fused swish) a capture freezes.
+        _nhwc_group_norm_state(),
     )
-
-
-def _option_identity(approximation: int) -> tuple[Any, ...]:
-    try:
-        from modules import shared
-
-        opts = getattr(shared, "opts", None)
-        cmd_opts = getattr(shared, "cmd_opts", None)
-        return (
-            approximation,
-            getattr(opts, "sd_vae_decode_method", None),
-            bool(getattr(opts, "hypertile_enable_vae", False)),
-            # sdp_attnblock_forward reads it per call; a capture freezes the branch taken.
-            bool(getattr(opts, "upcast_attn", False)),
-            bool(getattr(cmd_opts, "no_half_vae", False)),
-            bool(getattr(cmd_opts, "upcast_sampling", False)),
-            bool(getattr(cmd_opts, "precision", None) == "full"),
-            # The NHWC GroupNorm switch picks the VAE GroupNorm kernel (and fused swish) a capture freezes.
-            _nhwc_group_norm_state(),
-        )
-    except Exception:
-        return (approximation, None, None, None, None, None, None, None)
 
 
 def _nhwc_group_norm_state() -> tuple[str, ...] | None:
@@ -229,49 +181,26 @@ def _attention_identity(vae: Any) -> tuple[Any, ...]:
 
 
 def _runtime_identity(model: Any) -> tuple[Any, ...]:
-    try:
-        from modules import shared
-
-        try:
-            from modules import devices
-        except Exception:
-            devices = None
-
-        active_model = model if model is not None else getattr(shared, "sd_model", None)
-        vae = getattr(active_model, "first_stage_model", None)
-        info = getattr(active_model, "sd_checkpoint_info", None)
-        model_identity = (
-            id(active_model),
-            getattr(info, "filename", None),
-            getattr(info, "shorthash", None),
-            getattr(info, "sha256", None),
-            getattr(active_model, "sd_model_hash", None),
-        )
-        vae_identity = (
-            _module_revision(vae),
-            _file_revision(getattr(active_model, "loaded_vae_file", None)),
-            _callable_identity(getattr(active_model, "decode_first_stage", None)),
-            _callable_identity(getattr(active_model, "encode_first_stage", None)),
-            _callable_identity(getattr(active_model, "get_first_stage_encoding", None)),
-        )
-        device_identity = (
-            str(getattr(devices, "dtype_vae", None)),
-            str(getattr(devices, "dtype", None)),
-            str(getattr(devices, "device", None)),
-        )
-        return (model_identity, vae_identity, device_identity)
-    except Exception:
-        return (None, None, None)
-
-
-def _graph_runtime_identity() -> tuple[Any, ...]:
-    return (
-        _GRAPH_CONTRACT_VERSION,
-        torch.__version__,
-        getattr(torch.version, "cuda", None),
-        id(torch.cuda.CUDAGraph),
-        os.environ.get("OPENCLAW_VAE_DECODE_GRAPHS"),
+    info = getattr(model, "sd_checkpoint_info", None)
+    model_identity = (
+        id(model),
+        getattr(info, "filename", None),
+        getattr(info, "shorthash", None),
+        getattr(info, "sha256", None),
+        getattr(model, "sd_model_hash", None),
     )
+    vae_identity = (
+        _module_revision(model.first_stage_model),
+        _callable_identity(getattr(model, "decode_first_stage", None)),
+    )
+    # modules.devices is loaded long before any decode; the lookup only keeps this module importable without it.
+    devices = sys.modules.get("modules.devices")
+    device_identity = (
+        str(getattr(devices, "dtype_vae", None)),
+        str(getattr(devices, "dtype", None)),
+        str(getattr(devices, "device", None)),
+    )
+    return (model_identity, vae_identity, device_identity)
 
 
 def _lora_reaches_vae() -> bool:
@@ -335,15 +264,14 @@ def _bypass_reason(model: Any, x: Any, approximation: int) -> str | None:
     return None
 
 
-def _key(model: Any, x: torch.Tensor, approximation: int) -> tuple[Any, ...]:
+def _key(model: Any, x: torch.Tensor) -> tuple[Any, ...]:
     return (
         "vae_cuda_graph",
         _runtime_identity(model),
         _tensor_key(x),
-        _option_identity(approximation),
-        _attention_identity(getattr(model, "first_stage_model", None)),
+        _option_identity(),
+        _attention_identity(model.first_stage_model),
         _mutation_epochs(),
-        _graph_runtime_identity(),
     )
 
 
@@ -365,7 +293,6 @@ def _remember_failed_key_locked(key: tuple[Any, ...]) -> None:
 def _evict_locked() -> None:
     while len(_CACHE) > _CACHE_MAX:
         evicted_key, _ = _CACHE.popitem(last=False)
-        _KEY_LOCKS.pop(evicted_key, None)
         _COUNTERS["evictions"] += 1
         openclaw_cache_epochs.observe("E11", "eviction", reason="capacity", semantic_key=evicted_key)
 
@@ -383,79 +310,80 @@ def run(model: Any, x: Any, approximation: int = 0) -> torch.Tensor | None:
                 _observe_bypass("cache_disabled")
             return None
 
-        key = _key(model, x, approximation)
+        try:
+            key = _key(model, x)
+        except Exception as exc:
+            # Fail closed: an identity that cannot be read must never fall back to one shared by other models or
+            # VAEs (a replay would run against another graph's captured parameter addresses). Decode eagerly.
+            with _LOCK:
+                _LAST_ERROR = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+                _observe_bypass("key_probe_failed")
+            return None
         with _LOCK:
             _LAST_KEY = key
-        key_lock = _key_lock(key)
-        with key_lock:
+            entry = _CACHE.get(key)
+            failed_before = key in _FAILED_KEYS
+        if entry is not None:
+            openclaw_cache_epochs.observe("E11", "hit", reason="cache_hit", semantic_key=key)
+            entry["input"].copy_(x, non_blocking=True)
+            entry["graph"].replay()
+            output = entry["output"].clone()
             with _LOCK:
-                entry = _CACHE.get(key)
-                failed_before = key in _FAILED_KEYS
-            if entry is not None:
-                openclaw_cache_epochs.observe("E11", "hit", reason="cache_hit", semantic_key=key)
-                entry["input"].copy_(x, non_blocking=True)
-                entry["graph"].replay()
-                output = entry["output"].clone()
-                with _LOCK:
-                    if key in _CACHE:
-                        _CACHE.move_to_end(key)
-                    _COUNTERS["replays"] += 1
-                return output
-            if failed_before:
-                with _LOCK:
-                    _observe_bypass("failed_key")
-                return None
-
-            openclaw_cache_epochs.observe("E11", "miss", reason="cache_miss", semantic_key=key)
-            graph = None
-            static_input = None
-            static_output = None
-            try:
-                static_input = x.detach().contiguous().clone()
-                stream = torch.cuda.Stream(device=x.device)
-                stream.wait_stream(torch.cuda.current_stream(x.device))
-                with torch.cuda.stream(stream):
-                    _execute(model, static_input)
-                torch.cuda.current_stream(x.device).wait_stream(stream)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, pool=_graph_pool()):
-                    static_output = _execute(model, static_input)
-                # CUDA graph capture completes asynchronously. Synchronize before
-                # publishing or replaying a first-use entry so capture work cannot
-                # race the request stream and seed a process-local output basin.
-                torch.cuda.synchronize()
-                entry = {"graph": graph, "input": static_input, "output": static_output}
-                with _LOCK:
-                    # Publish only the fully captured entry. Invalidation cannot
-                    # interleave because it shares _EXECUTION_LOCK.
-                    _CACHE[key] = entry
+                if key in _CACHE:
                     _CACHE.move_to_end(key)
-                    _FAILED_KEYS.pop(key, None)
-                    _evict_locked()
-                    _COUNTERS["captures"] += 1
-                    _LAST_ERROR = None
-                    openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
-                    openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_CACHE_MAX)
-                # The capture execution can include one-time backend/autotune
-                # transitions. Replay once with the same static input and return that
-                # output so misses and hits have identical graph-replay semantics.
-                graph.replay()
-                # Replay and clone are enqueued on the caller's current stream; the
-                # returned tensor carries the normal CUDA stream dependency without
-                # a device-wide barrier that can perturb later request scheduling.
-                return static_output.clone()
-            except Exception as exc:
-                # Locals are deliberately not published; dropping all references
-                # releases partial graph/static allocations after this frame exits.
-                graph = static_input = static_output = None
-                with _LOCK:
-                    _remember_failed_key_locked(key)
-                    _COUNTERS["failures"] += 1
-                    _LAST_ERROR = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-                    openclaw_cache_epochs.observe("E11", "reject", reason="capture_failed", semantic_key=key)
-                    _observe_bypass("capture_failed")
-                    openclaw_cache_epochs.set_size("E11", current_size=len(_CACHE), capacity=_CACHE_MAX)
-                return None
+                _COUNTERS["replays"] += 1
+            return output
+        if failed_before:
+            with _LOCK:
+                _observe_bypass("failed_key")
+            return None
+
+        openclaw_cache_epochs.observe("E11", "miss", reason="cache_miss", semantic_key=key)
+        try:
+            static_input = x.detach().contiguous().clone()
+            stream = torch.cuda.Stream(device=x.device)
+            stream.wait_stream(torch.cuda.current_stream(x.device))
+            with torch.cuda.stream(stream):
+                _execute(model, static_input)
+            torch.cuda.current_stream(x.device).wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=_graph_pool()):
+                static_output = _execute(model, static_input)
+            # Defensive device barrier before the first-use entry is published and replayed (the UNet graph cache
+            # has none); kept until a GPU eager/capture/replay check shows it is unnecessary.
+            torch.cuda.synchronize()
+            entry = {"graph": graph, "input": static_input, "output": static_output}
+            with _LOCK:
+                # Publish only the fully captured entry. Invalidation cannot
+                # interleave because it shares _EXECUTION_LOCK.
+                _CACHE[key] = entry
+                _CACHE.move_to_end(key)
+                _FAILED_KEYS.pop(key, None)
+                _evict_locked()
+                _COUNTERS["captures"] += 1
+                _LAST_ERROR = None
+                openclaw_cache_epochs.observe("E11", "publish", reason="published", semantic_key=key)
+                publish_graph_cache_size()
+            # The capture execution can include one-time backend/autotune
+            # transitions. Replay once with the same static input and return that
+            # output so misses and hits have identical graph-replay semantics.
+            graph.replay()
+            # Replay and clone are enqueued on the caller's current stream; the
+            # returned tensor carries the normal CUDA stream dependency without
+            # a device-wide barrier that can perturb later request scheduling.
+            return static_output.clone()
+        except Exception as exc:
+            # Locals are deliberately not published; dropping all references
+            # releases partial graph/static allocations after this frame exits.
+            graph = static_input = static_output = None
+            with _LOCK:
+                _remember_failed_key_locked(key)
+                _COUNTERS["failures"] += 1
+                _LAST_ERROR = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+                openclaw_cache_epochs.observe("E11", "reject", reason="capture_failed", semantic_key=key)
+                _observe_bypass("capture_failed")
+                publish_graph_cache_size()
+            return None
 
 
-set_enabled(openclaw_env.env_bool("OPENCLAW_VAE_DECODE_GRAPHS", False), clear_cache=True)
+publish_graph_cache_size()

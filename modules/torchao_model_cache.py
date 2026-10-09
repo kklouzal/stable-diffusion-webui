@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
 import sys
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Callable, Optional
 
 import torch
 
-from modules import cache, openclaw_env, persistent_artifact_cache
+from modules import cache, openclaw_env, persistent_artifact_cache, safe
 
 SUPPORTED_ROOT_NAMES = ("Stable-diffusion",)
 ARTIFACT_SCHEMA_VERSION = 2
@@ -62,12 +60,7 @@ def is_safetensors(filename: str) -> bool:
     return os.path.splitext(filename)[1].lower() == ".safetensors"
 
 
-def sha256_file(filename: str) -> str:
-    h = hashlib.sha256()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+sha256_file = persistent_artifact_cache.sha256_file  # called through this module global, which tests patch
 
 
 def file_identity(filename: str) -> dict:
@@ -134,21 +127,12 @@ def device_matches(actual, expected) -> bool:
     return actual_device == expected_device
 
 
-def metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
+def metadata_matches(tensor, metadata: dict | None, expected_device, keys=("shape", "dtype", "tensor_type")) -> bool:
+    """`tensor` is on `expected_device` and agrees with the recorded `metadata` (when there is any) on `keys`."""
     if metadata:
         actual = tensor_meta(tensor)
-        for key in ("shape", "dtype", "tensor_type"):
-            if actual.get(key) != metadata.get(key):
-                return False
-    return device_matches(getattr(tensor, "device", None), expected_device)
-
-
-def bias_metadata_matches(tensor, metadata: dict | None, expected_device) -> bool:
-    if metadata:
-        actual = tensor_meta(tensor)
-        for key in ("shape", "dtype"):
-            if actual.get(key) != metadata.get(key):
-                return False
+        if any(actual.get(key) != metadata.get(key) for key in keys):
+            return False
     return device_matches(getattr(tensor, "device", None), expected_device)
 
 
@@ -157,7 +141,8 @@ def cached_bias_matches(bias, bias_meta: dict | None, module, expected_device) -
         return module.bias is None
     if module.bias is None or list(bias.shape) != list(module.bias.shape):
         return False
-    return bias_metadata_matches(bias, bias_meta, expected_device)
+    # Biases are compared without tensor_type: older artifacts recorded them as torch.nn.Parameter.
+    return metadata_matches(bias, bias_meta, expected_device, keys=("shape", "dtype"))
 
 
 def parameter_on_device(tensor, device: torch.device | str) -> torch.nn.Parameter:
@@ -249,10 +234,6 @@ def verified_sidecar(filename: str, cache_path: str, cache_version: int, config_
     return sidecar if matches else None
 
 
-def sidecar_matches(filename: str, cache_path: str, cache_version: int, config_name: str, sidecar_suffix: str, coverage=None) -> bool:
-    return verified_sidecar(filename, cache_path, cache_version, config_name, sidecar_suffix, coverage) is not None
-
-
 def payload_source_matches(payload_source, verified_source: dict) -> bool:
     """True when the payload was built from the bytes `verified_source` (a sidecar source just verified) describes.
 
@@ -273,14 +254,8 @@ def torch_load_cache(cache_path: str, device: torch.device | str, register_safe_
     # unpickler gets a chance to apply add_safe_globals(). Bypass only that
     # outer A1111 pre-check for our own sidecar-validated cache while keeping
     # weights_only=True.
-    try:
-        from modules import safe
-        torch_load = safe.unsafe_torch_load
-    except Exception:
-        torch_load = torch.load
-
     register_safe_globals()
-    return torch_load(cache_path, map_location=device, weights_only=True)
+    return safe.unsafe_torch_load(cache_path, map_location=device, weights_only=True)
 
 
 def iter_eligible_linear_modules(model, filter_fn: Callable):
@@ -426,24 +401,10 @@ def save_from_model(
         "tensors": tensors,
     }
 
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with persistent_artifact_cache.exclusive_lock(cache_path):
-        # A unique same-filesystem temporary plus fsync+replace prevents readers
-        # from observing a partially serialized artifact. The sidecar is the
-        # commit record: a crash before it is published leaves an artifact that
-        # validation rejects. Writers are serialized per destination.
-        with NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(cache_path), prefix=".partial-", suffix=".pt") as stream:
-            tmp_path = stream.name
-        try:
-            torch.save(payload, tmp_path)
-            with open(tmp_path, "rb") as stream:
-                os.fsync(stream.fileno())
-            os.replace(tmp_path, cache_path)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
+        # Readers never observe a partially serialized artifact (atomic replace). The sidecar is the commit record: a
+        # crash before it is published leaves an artifact that validation rejects. Writers are serialized per destination.
+        persistent_artifact_cache.atomic_write_with(cache_path, lambda stream: torch.save(payload, stream))
 
         sidecar = {
             "cache_version": cache_version,
@@ -456,11 +417,12 @@ def save_from_model(
             "skipped_linear": skipped_linear,
             "skipped_reasons": skipped_reasons,
         }
-        # Same directory as the artifact, so its directory fsync also makes the artifact rename durable.
         persistent_artifact_cache.atomic_write(sidecar_path(cache_path, sidecar_suffix), json.dumps(sidecar, indent=2, sort_keys=True).encode("utf8"))
-    quota = persistent_artifact_cache.enforce_directory_quota(
-        os.path.dirname(cache_path), max_bytes=_CACHE_QUOTA_BYTES, dry_run=_CACHE_QUOTA_DRY_RUN
-    )
+    # One quota over every artifact of this backend (cache_path_for puts cache_dir_name exactly once in the path), not
+    # just the subdirectory of this checkpoint.
+    parts = Path(cache_path).parts
+    quota_root = Path(*parts[:parts.index(cache_dir_name) + 1])
+    quota = persistent_artifact_cache.enforce_directory_quota(quota_root, max_bytes=_CACHE_QUOTA_BYTES, dry_run=_CACHE_QUOTA_DRY_RUN)
     if quota["evicted"] or not quota["within_quota"]:
         print(f"{label} cache quota: {json.dumps(quota, sort_keys=True)}", flush=True)
     print(f"Created {label} cache for {source_path} -> {cache_path}")

@@ -55,7 +55,9 @@ def load_options_casting_helpers():
     ]
     module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {}
+    from modules import openclaw_env
+
+    namespace = {"openclaw_env": openclaw_env}
     exec(compile(module, "modules/options.py", "exec"), namespace)
     return namespace["OptionInfo"], namespace["Options"]
 

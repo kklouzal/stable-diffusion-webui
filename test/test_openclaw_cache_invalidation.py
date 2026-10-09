@@ -10,12 +10,12 @@ from modules import shared, shared_init
 if getattr(shared, "opts", None) is None:
     shared_init.initialize()
 
-from modules import cache as cache_module, hashes, processing, sd_models, sd_vae
+from modules import cache as cache_module, hashes, openclaw_lifecycle_epochs, processing, sd_models, sd_vae
 from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingImg2Img
 
 
-def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(monkeypatch):
-    checkpoint = SimpleNamespace(filename="model.safetensors", hash="abcd", sha256="sha256")
+def _init_cache_key_processing(monkeypatch, checkpoint_hash="abcd", checkpoint_sha256="sha256", vae_hash="vae-hash"):
+    checkpoint = SimpleNamespace(filename="model.safetensors", hash=checkpoint_hash, sha256=checkpoint_sha256)
     sd_model = SimpleNamespace(
         sd_checkpoint_info=checkpoint,
         cond_stage_key="concat",
@@ -23,7 +23,7 @@ def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(mo
     )
     monkeypatch.setattr(processing.shared, "sd_model", sd_model, raising=False)
     monkeypatch.setattr(processing.sd_vae, "get_loaded_vae_name", lambda: "vae", raising=False)
-    monkeypatch.setattr(processing.sd_vae, "get_loaded_vae_hash", lambda: "vae-hash", raising=False)
+    monkeypatch.setattr(processing.sd_vae, "get_loaded_vae_hash", lambda: vae_hash, raising=False)
     monkeypatch.setattr(processing.opts, "persistent_img2img_init_cache", True, raising=False)
     monkeypatch.setattr(processing.opts, "sd_vae_encode_method", "Full", raising=False)
     monkeypatch.setattr(processing.opts, "inpainting_mask_weight", 1.0, raising=False)
@@ -31,32 +31,46 @@ def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(mo
 
     p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
     p.init_images = [object()]
-    p.inpainting_fill = 0
     p.sd_model_name = "model"
-    p.sd_model_hash = "hash"
+    p.sd_model_hash = checkpoint_hash
     p.sampler = SimpleNamespace(conditioning_key="concat")
     p.width = 64
     p.height = 64
     p.resize_mode = 1
     p.batch_size = 1
-    p.mask_round = True
-    p.inpainting_mask_invert = False
-    p.inpaint_full_res = False
-    p.inpaint_full_res_padding = 0
-    p.mask_blur_x = 0
-    p.mask_blur_y = 0
     p._record_img2img_init_cache_bypass = lambda reason: None
     p.image_mask = None
     p.latent_mask = None
+    return p
 
+
+def test_img2img_init_cache_key_uses_effective_request_inpainting_mask_weight(monkeypatch):
+    p = _init_cache_key_processing(monkeypatch)
     key_images = [Image.new("RGB", (8, 8))]
 
     p.inpainting_mask_weight = 0.25
-    key_low = p._img2img_init_cache_key(key_images, True, None, None, False, False)
+    key_low = p._img2img_init_cache_key(key_images, True, False, False)
     p.inpainting_mask_weight = 0.75
-    key_high = p._img2img_init_cache_key(key_images, True, None, None, False, False)
+    key_high = p._img2img_init_cache_key(key_images, True, False, False)
 
     assert key_low != key_high
+
+
+def test_img2img_init_cache_key_changes_when_checkpoint_or_vae_reloads_under_the_same_name(monkeypatch):
+    # --no-hashing: every hash is None, so a checkpoint or VAE file replaced in place and reloaded keeps every name
+    # field of the key. The lifecycle epochs the reload commits are what make the next identical request miss.
+    p = _init_cache_key_processing(monkeypatch, checkpoint_hash=None, checkpoint_sha256=None, vae_hash=None)
+    key_images = [Image.new("RGB", (8, 8))]
+    first = p._img2img_init_cache_key(key_images, True, False, False)
+    assert p._img2img_init_cache_key(key_images, True, False, False) == first
+
+    openclaw_lifecycle_epochs.publish_checkpoint_commit(changed=True)
+    after_checkpoint_reload = p._img2img_init_cache_key(key_images, True, False, False)
+    assert after_checkpoint_reload != first
+
+    vae_owner = SimpleNamespace()
+    openclaw_lifecycle_epochs.note_vae_commit(vae_owner, bytes_changed=True, object_changed=True, publish=True)
+    assert p._img2img_init_cache_key(key_images, True, False, False) != after_checkpoint_reload
 
 
 def test_img2img_init_cache_bypasses_masked_requests(monkeypatch):
@@ -72,7 +86,7 @@ def test_img2img_init_cache_bypasses_masked_requests(monkeypatch):
 
     key_images = [Image.new("RGB", (8, 8))]
 
-    assert p._img2img_init_cache_key(key_images, True, None, None, False, False) is None
+    assert p._img2img_init_cache_key(key_images, True, False, False) is None
     assert bypasses == ["masked_request"]
 
 
