@@ -181,6 +181,18 @@ def manual_cast(target_dtype):
                     delattr(module_type, "org_forward")
 
 
+@lru_cache
+def _autocast_needs_manual_cast() -> bool:
+    """
+    Whether autocast() has to use manual_cast instead of torch.autocast: an IPEX XPU, or a GTX 16xx card.
+
+    Resolved once, on the first autocast() that gets this far: --use-ipex and the XPU probe are fixed at import and the
+    CUDA device at startup (nothing switches the current device later). A failed probe (no CUDA device) raises and is
+    not cached.
+    """
+    return has_xpu() or cuda_no_autocast()
+
+
 def autocast(disable=False):
     if disable:
         return contextlib.nullcontext()
@@ -199,7 +211,7 @@ def autocast(disable=False):
     if dtype == torch.float32 or dtype_inference == torch.float32:
         return contextlib.nullcontext()
 
-    if has_xpu() or cuda_no_autocast():
+    if _autocast_needs_manual_cast():
         return manual_cast(dtype)
 
     return torch.autocast("cuda", dtype=dtype)
