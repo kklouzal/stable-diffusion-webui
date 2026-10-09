@@ -1275,6 +1275,8 @@ class Api:
         init_images = img2imgreq.init_images
         if init_images is None:
             raise HTTPException(status_code=404, detail="Init image not found")
+        if not init_images:
+            raise HTTPException(status_code=422, detail="init_images must contain at least one image")
 
         mask = img2imgreq.mask
         if mask:

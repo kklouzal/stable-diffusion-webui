@@ -78,6 +78,14 @@ def test_img2img_missing_init_images_returns_404(url_img2img, simple_img2img_req
     assert response.json()["detail"] == "Init image not found"
 
 
+def test_img2img_empty_init_images_returns_422(url_img2img, simple_img2img_request):
+    simple_img2img_request["init_images"] = []
+
+    response = requests.post(url_img2img, json=simple_img2img_request)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "init_images must contain at least one image"
+
+
 def test_img2img_invalid_init_image_is_rejected(url_img2img, simple_img2img_request):
     task_id = "task(img2img-invalid-init-test)"
     simple_img2img_request["force_task_id"] = task_id
