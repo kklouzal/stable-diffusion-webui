@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from PIL import Image
 import numpy as np
 
@@ -9,15 +11,16 @@ utils = importlib.import_module("extensions.sd-webui-controlnet.tests.utils", "u
 
 from scripts.enums import ResizeMode
 from scripts.controlnet import prepare_mask, Script, set_numpy_seed
+from internal_controlnet import external_code
 from internal_controlnet.external_code import ControlNetUnit
-from modules import processing
+from modules import processing, shared
 
 
 class TestPrepareMask(unittest.TestCase):
     def test_prepare_mask(self):
         p = processing.StableDiffusionProcessing()
         p.inpainting_mask_invert = True
-        p.mask_blur = 5
+        p.mask_blur_x = p.mask_blur_y = 5
 
         mask = Image.new("RGB", (10, 10), color="white")
 
@@ -39,7 +42,7 @@ class TestPrepareMask(unittest.TestCase):
             processed_mask.getpixel((0, 0)), 255
         )  # white should remain white
 
-        p.mask_blur = 0
+        p.mask_blur_x = p.mask_blur_y = 0
         mask = Image.new("RGB", (10, 10), color="black")
         processed_mask = prepare_mask(mask, p)
 
@@ -126,7 +129,6 @@ class TestScript(unittest.TestCase):
                 Script.choose_input_image(
                     p=processing.StableDiffusionProcessing(),
                     unit=ControlNetUnit(),
-                    idx=0,
                 )
 
         with self.subTest(name="control net input"):
@@ -140,7 +142,6 @@ class TestScript(unittest.TestCase):
                     module="none",
                     resize_mode=ResizeMode.INNER_FIT,
                 ),
-                idx=0,
             )
             self.assertEqual(resize_mode, ResizeMode.INNER_FIT)
 
@@ -154,9 +155,58 @@ class TestScript(unittest.TestCase):
                     module="none",
                     resize_mode=ResizeMode.INNER_FIT,
                 ),
-                idx=0,
             )
             self.assertEqual(resize_mode, ResizeMode.OUTER_FIT)
+
+
+def _processing_with_controlnet_args(script_args, **attributes):
+    """A processing stand-in whose ControlNet script owns script_args[0:3] (control_net_unit_count == 3)."""
+    cn_script = SimpleNamespace(title=lambda: "ControlNet", args_from=0, args_to=3)
+    p = SimpleNamespace(
+        scripts=SimpleNamespace(alwayson_scripts=[cn_script]),
+        script_args=script_args,
+        extra_generation_params={},
+        **attributes,
+    )
+    return p, cn_script
+
+
+class TestControlNetUnitSources(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(shared.opts.data, {"control_net_allow_script_control": True, "control_net_unit_count": 3})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_legacy_remote_fields_do_not_mutate_the_shared_default_units(self):
+        # The API passes the same default ControlNetUnit objects to every request that sends no alwayson ControlNet
+        # args; the legacy control_net_* fields must configure copies of them, not the defaults.
+        defaults = [ControlNetUnit(), ControlNetUnit(), ControlNetUnit()]
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        remote, _ = _processing_with_controlnet_args(
+            list(defaults), control_net_enabled=True, control_net_module="canny", control_net_image=image,
+            control_net_weight=0.66,
+        )
+        units = Script.get_enabled_units(remote)
+        self.assertEqual([(u.enabled, u.module, u.weight) for u in units], [(True, "canny", 0.66)])
+        self.assertIs(units[0].image, image)
+        for default in defaults:
+            self.assertEqual((default.enabled, default.module, default.weight, default.image), (False, "none", 1.0, None))
+
+        plain, _ = _processing_with_controlnet_args(list(defaults))
+        self.assertEqual(Script.get_enabled_units(plain), [])
+        self.assertEqual(plain.extra_generation_params, {})
+
+    def test_units_beyond_the_fixed_slots_are_read_from_the_recorded_range(self):
+        # modules/api/api.py _assign_script_args: a request with more units than slots fills the slots with the first
+        # units, appends the full list and records its range in p.openclaw_script_arg_ranges.
+        requested = [ControlNetUnit(enabled=True, module="none", weight=w) for w in (0.1, 0.2, 0.3, 0.4)]
+        p, cn_script = _processing_with_controlnet_args(requested[:3] + requested)
+        p.openclaw_script_arg_ranges = {id(cn_script): (3, 7)}
+        self.assertEqual([u.weight for u in external_code.get_all_units_in_processing(p)], [0.1, 0.2, 0.3, 0.4])
+        self.assertEqual([u.weight for u in Script.get_enabled_units(p)], [0.1, 0.2, 0.3, 0.4])
+
+        del p.openclaw_script_arg_ranges
+        self.assertEqual([u.weight for u in external_code.get_all_units_in_processing(p)], [0.1, 0.2, 0.3])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ cn_models_names = {}  # "my_lora" -> "My_Lora(abcd1234)"
 
 
 default_detectedmap_dir = os.path.join("detected_maps")
-script_dir = scripts.basedir()
 
 os.makedirs(cn_models_dir, exist_ok=True)
 
@@ -38,20 +37,10 @@ def traverse_all_files(curr_path, model_list):
     return model_list
 
 
-def get_all_models(sort_by, filter_by, path):
+def get_all_models(path):
+    """Models under `path`, sorted by file name."""
     res = OrderedDict()
-    fileinfos = traverse_all_files(path, [])
-    filter_by = filter_by.strip(" ")
-    if len(filter_by) != 0:
-        fileinfos = [x for x in fileinfos if filter_by.lower()
-                     in os.path.basename(x[0]).lower()]
-    if sort_by == "name":
-        fileinfos = sorted(fileinfos, key=lambda x: os.path.basename(x[0]))
-    elif sort_by == "date":
-        fileinfos = sorted(fileinfos, key=lambda x: -x[1].st_mtime)
-    elif sort_by == "path name":
-        fileinfos = sorted(fileinfos)
-
+    fileinfos = sorted(traverse_all_files(path, []), key=lambda x: os.path.basename(x[0]))
     for finfo in fileinfos:
         filename = finfo[0]
         name = os.path.splitext(os.path.basename(filename))[0]
@@ -70,16 +59,13 @@ def update_cn_models():
     paths = [cn_models_dir, cn_models_dir_old, *extra_lora_paths]
 
     for path in paths:
-        sort_by = shared.opts.data.get(
-            "control_net_models_sort_models_by", "name")
-        filter_by = shared.opts.data.get("control_net_models_name_filter", "")
-        found = get_all_models(sort_by, filter_by, path)
+        found = get_all_models(path)
         cn_models.update({**found, **cn_models})
 
     # insert "None" at the beginning of `cn_models` in-place
     cn_models_copy = OrderedDict(cn_models)
     cn_models.clear()
-    cn_models.update({**{"None": None}, **cn_models_copy})
+    cn_models.update({"None": None, **cn_models_copy})
 
     cn_models_names.clear()
     for name_and_hash, filename in cn_models.items():
@@ -90,25 +76,16 @@ def update_cn_models():
 
 
 def get_sd_version() -> StableDiffusionVersion:
-    if hasattr(shared.sd_model, 'is_sdxl'):
-        if shared.sd_model.is_sdxl:
-            return StableDiffusionVersion.SDXL
-        elif shared.sd_model.is_sd2:
-            return StableDiffusionVersion.SD2x
-        elif shared.sd_model.is_sd1:
-            return StableDiffusionVersion.SD1x
-        else:
-            return StableDiffusionVersion.UNKNOWN
-
-    # backward compability for webui < 1.5.0
+    # sd_models.set_model_type sets is_sdxl/is_sd2/is_sd1 on every loaded model.
+    sd_model = shared.sd_model
+    if sd_model.is_sdxl:
+        return StableDiffusionVersion.SDXL
+    elif sd_model.is_sd2:
+        return StableDiffusionVersion.SD2x
+    elif sd_model.is_sd1:
+        return StableDiffusionVersion.SD1x
     else:
-        if hasattr(shared.sd_model, 'conditioner'):
-            return StableDiffusionVersion.SDXL
-        elif hasattr(shared.sd_model.cond_stage_model, 'model'):
-            return StableDiffusionVersion.SD2x
-        else:
-            return StableDiffusionVersion.SD1x
-
+        return StableDiffusionVersion.UNKNOWN
 
 
 def select_control_type(
