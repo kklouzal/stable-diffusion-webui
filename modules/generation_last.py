@@ -634,10 +634,18 @@ def _completed_successfully(p, processed) -> bool:
 def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None:
     path = path or snapshot_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    if len(payload.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+    # ASCII output parses to the same value as UTF-8 output and is ~6x faster to produce for the multi-megabyte base64
+    # image strings (the C encoder's non-ASCII-preserving path is slower).
+    payload = json.dumps(snapshot, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if "\\ud" in payload:
+        # Escaped surrogates: astral characters, which are fine, or lone surrogates, which UTF-8 cannot encode (the
+        # API answers with UTF-8 JSON). Reject the latter as the UTF-8 encoding always did.
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    data = payload.encode("ascii")
+    # The limit bounds the stored file: non-ASCII text counts as its escapes.
+    if len(data) > _MAX_SNAPSHOT_BYTES:
         raise ValueError(f"last-generation snapshot exceeds the {_MAX_SNAPSHOT_BYTES}-byte retention limit")
-    persistent_artifact_cache.atomic_write(path, payload.encode("utf-8"))
+    persistent_artifact_cache.atomic_write(path, data)
 
 
 def capture_or_report(p, processed) -> None:

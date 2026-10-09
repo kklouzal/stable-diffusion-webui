@@ -567,6 +567,28 @@ class GenerationLastTests(unittest.TestCase):
         self.assertTrue(snapshot["replayable"])
         self.assertEqual(snapshot["parameters"], {"steps": 20})
 
+    def test_snapshot_file_is_ascii_json_of_the_same_value(self):
+        import json
+        snapshot = {"schema_version": 3, "parameters": {"sampler_name": "Eüler ☃ \U0001F600 \\ud800", "steps": 20}}
+        self.module.persist_snapshot(snapshot)
+        stored = self.module.snapshot_path().read_bytes()
+        self.assertTrue(stored.isascii())
+        self.assertEqual(json.loads(stored), snapshot)
+        self.assertEqual(self.module.get_last_snapshot(), snapshot)
+
+        # A lone surrogate has no UTF-8 encoding: rejected as before, and the stored snapshot stays.
+        with self.assertRaises(UnicodeEncodeError):
+            self.module.persist_snapshot({"schema_version": 3, "parameters": {"sampler_name": "\ud800"}})
+        self.assertEqual(self.module.get_last_snapshot(), snapshot)
+
+        # The retention limit bounds the stored bytes, escapes included.
+        limit = len(stored)
+        with patch.object(self.module, "_MAX_SNAPSHOT_BYTES", limit):
+            self.module.persist_snapshot(snapshot)
+            with self.assertRaises(ValueError):
+                self.module.persist_snapshot({**snapshot, "x": "é"})
+        self.assertEqual(self.module.get_last_snapshot(), snapshot)
+
     def test_missing_snapshot_returns_none(self):
         self.assertIsNone(self.module.get_last_snapshot())
 
