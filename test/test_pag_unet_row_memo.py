@@ -249,7 +249,8 @@ class Harness:
         self.row_memo = load_source("modules.sd_unet_row_memo", "modules/sd_unet_row_memo.py")
 
         self.modules = {
-            "modules": stub("modules", package=True, sd_unet_row_memo=self.row_memo, shared=self.shared, script_callbacks=self.script_callbacks),
+            # sd_unet uses openclaw_cuda_graphs only in apply_unet, which the harness never calls.
+            "modules": stub("modules", package=True, sd_unet_row_memo=self.row_memo, shared=self.shared, script_callbacks=self.script_callbacks, openclaw_cuda_graphs=stub("modules.openclaw_cuda_graphs")),
             "modules.prompt_parser": stub(
                 "modules.prompt_parser",
                 reconstruct_multicond_batch=lambda cond, step: cond,
