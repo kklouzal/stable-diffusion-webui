@@ -4,8 +4,8 @@ from collections import defaultdict
 def patch(key, obj, field, replacement):
     """Replaces a function in a module or a class.
 
-    Also stores the original function in this module, possible to be retrieved via original(key, obj, field).
-    If the function is already replaced by this caller (key), an exception is raised -- use undo() before that.
+    Also records the original function in originals[key]. If this caller (key) already replaced the function,
+    a RuntimeError is raised.
 
     Arguments:
         key: identifying information for who is doing the replacement. You can use __name__.

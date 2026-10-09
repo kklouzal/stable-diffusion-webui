@@ -50,13 +50,18 @@ def unquote(text):
 
 
 def add_paste_fields(tabname, init_img, fields, override_settings_component=None):
+    """Registers a tab's infotext fields; plain (component, target) pairs are converted to PasteField in place.
+
+    init_img and override_settings_component are accepted for extension compatibility and ignored: only the removed
+    browser UI's paste button used them.
+    """
 
     if fields:
         for i in range(len(fields)):
             if not isinstance(fields[i], PasteField):
                 fields[i] = PasteField(*fields[i])
 
-    paste_fields[tabname] = {"init_img": init_img, "fields": fields, "override_settings_component": override_settings_component}
+    paste_fields[tabname] = {"fields": fields}
 
 
 def restore_old_hires_fix_params(res):

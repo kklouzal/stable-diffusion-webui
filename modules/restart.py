@@ -12,7 +12,12 @@ def is_restartable() -> bool:
 
 
 def restart_program() -> None:
-    """creates file tmp/restart and immediately stops the process, which webui.bat/webui.sh interpret as a command to start webui again"""
+    """Creates tmp/restart and exits the process immediately.
+
+    The /server-restart route calls this only when is_restartable(): whatever started the server with
+    SD_WEBUI_RESTART set is expected to read tmp/restart as a request to start it again. The GB10 launch scripts
+    do not set it.
+    """
 
     tmpdir = Path(script_path) / "tmp"
     tmpdir.mkdir(parents=True, exist_ok=True)

@@ -85,14 +85,13 @@ class Script:
     """If False, for alwayson scripts, a group component will not be created."""
 
     infotext_fields = None
-    """if set in ui(), this is a list of pairs of UI component + text; the text will be used when
-    parsing infotext to set the value for the component; see ui.py's txt2img_paste_fields for an example
+    """if set in ui(), this is a list of (component, target) pairs or PasteFields; target is an infotext key, or a
+    function that takes the parsed infotext dict. A request's `infotext` uses them to fill this script's args
+    (Api.apply_infotext); see modules/processing_scripts/seed.py for an example
     """
 
     paste_field_names = None
-    """if set in ui(), this is a list of names of infotext fields; the fields will be sent through the
-    various "Send to <X>" buttons when clicked
-    """
+    """Accepted for extension compatibility (ControlNet, Incantations and soft-inpainting set it); nothing reads it."""
 
     api_info = None
     """Generated value of type modules.api.models.ScriptInfo with information about the script for API"""
@@ -542,10 +541,10 @@ def script_control_api_arg(control):
 
     arg_info = api_models.ScriptArg(label=control.label or "")
 
-    for field in ("value", "minimum", "maximum", "step"):
-        v = getattr(control, field, None)
+    for attr in ("value", "minimum", "maximum", "step"):
+        v = getattr(control, attr, None)
         if v is not None:
-            setattr(arg_info, field, v)
+            setattr(arg_info, attr, v)
 
     choices = getattr(control, 'choices', None)  # legacy component choices may be strings or tuples where the first item is the string
     if choices is not None:
