@@ -291,8 +291,8 @@ def test_api_progress_reports_live_current_task_reference():
         def dict(self):
             return {"job_count": self.job_count}
 
-        def set_current_image(self):
-            pass
+        def request_current_image(self):
+            raise AssertionError("skip_current_image requests no preview")
 
     progress_module = SimpleNamespace(
         current_task="task(txt2img-LIVE)",

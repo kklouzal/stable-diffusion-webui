@@ -1375,11 +1375,12 @@ class Api:
             base_progress=0.01,
         )
 
-        shared.state.set_current_image()
-
+        # The preview is decoded on the sampler thread (State.current_latent); this returns the one it produced last.
         current_image = None
-        if shared.state.current_image and not req.skip_current_image:
-            current_image = encode_pil_to_base64(shared.state.current_image)
+        if not req.skip_current_image:
+            shared.state.request_current_image()
+            if shared.state.current_image:
+                current_image = encode_pil_to_base64(shared.state.current_image)
 
         return models.ProgressResponse(progress=progress, eta_relative=eta_relative, state=shared.state.dict(), current_image=current_image, textinfo=shared.state.textinfo, current_task=progress_module.current_task)
 
