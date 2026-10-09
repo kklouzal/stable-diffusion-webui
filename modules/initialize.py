@@ -6,11 +6,25 @@ from threading import Thread
 from modules.timer import startup_timer
 
 
+def require_torch_device(args):
+    """Fails startup when torch cannot use CUDA, unless the command line chose another device: --use-cpu all,
+    --use-ipex, or --skip-torch-cuda-test. Without a usable GPU (a container started without --gpus, a driver the
+    CUDA runtime rejects) every model would otherwise load and run on the CPU."""
+    import torch
+
+    if torch.cuda.is_available() or args.skip_torch_cuda_test or args.use_ipex or "all" in args.use_cpu:
+        return
+
+    raise RuntimeError("Torch cannot use a CUDA device (torch.cuda.is_available() is False). Start with --use-cpu all to run on the CPU, or --skip-torch-cuda-test to skip this check.")
+
+
 def imports():
     logging.getLogger("torch.distributed.nn").setLevel(logging.ERROR)  # sshh...
 
     import torch  # noqa: F401
     startup_timer.record("import torch")
+    from modules import launch_utils
+    require_torch_device(launch_utils.args)
     from modules import initialize_util
     initialize_util.configure_torch_threads()
     import pytorch_lightning  # noqa: F401
