@@ -74,9 +74,21 @@ def test_storage_gating_and_policy_signature_layout(monkeypatch):
 
 def test_backend_status_hooks_target_live_functions():
     # The status hooks name these core functions by string; a rename fails the extension's install at startup.
+    import ast
+
+    from modules import sd_vae
+
     root = Path(__file__).resolve().parents[1]
-    source = (root / "extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py").read_text()
-    assert '_wrap_backend_function(sd_models, "apply_weight_quantization"' in source
-    assert callable(sd_models.apply_weight_quantization)
-    assert '_wrap_backend_function(_lora_networks, "prepare_quant_active_config"' in source
-    assert "\ndef prepare_quant_active_config(backend):" in (root / "extensions-builtin/Lora/networks.py").read_text().replace("\r\n", "\n")
+    hooks = ast.parse((root / "extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py").read_text())
+    targets = {}
+    for node in ast.walk(hooks):
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "_wrap_backend_function" and isinstance(node.args[0], ast.Name):
+            targets.setdefault(node.args[0].id, set()).add(ast.literal_eval(node.args[1]))
+    assert set(targets) == {"sd_models", "_sd_vae", "_lora_networks"}
+    assert "apply_weight_quantization" in targets["sd_models"] and "prepare_quant_active_config" in targets["_lora_networks"]
+
+    for module, names in ((sd_models, targets["sd_models"]), (sd_vae, targets["_sd_vae"])):
+        assert all(callable(getattr(module, name, None)) for name in names), names
+    # networks (the built-in Lora extension) is imported only once the webui runs; its top-level functions are read here.
+    networks = ast.parse((root / "extensions-builtin/Lora/networks.py").read_text())
+    assert targets["_lora_networks"] <= {node.name for node in networks.body if isinstance(node, ast.FunctionDef)}

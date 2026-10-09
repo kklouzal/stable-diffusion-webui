@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 PROBE = """
 import json, os, sys
@@ -34,7 +33,34 @@ def test_explicit_omp_num_threads_is_left_alone():
     assert result["configured"][0] == 3
 
 
+IMPORT_ORDER_PROBE = """
+import json, sys
+events = []
+
+class StopAtLightning(Exception):
+    pass
+
+class LightningImportProbe:
+    def find_spec(self, name, path=None, target=None):
+        if name == "pytorch_lightning":
+            events.append("import pytorch_lightning")
+            raise StopAtLightning
+        return None
+
+sys.meta_path.insert(0, LightningImportProbe())
+from modules import initialize, initialize_util
+initialize_util.configure_torch_threads = lambda: events.append(["configure_torch_threads", "torch" in sys.modules])
+try:
+    initialize.imports()
+except StopAtLightning:
+    pass
+print(json.dumps(events))
+"""
+
+
 def test_thread_pools_are_sized_right_after_torch_import():
-    source = Path("modules/initialize.py").read_text(encoding="utf8")
-    imports = source[source.index("def imports():"):source.index("def initialize():")]
-    assert imports.index("    import torch  # noqa: F401") < imports.index("initialize_util.configure_torch_threads()") < imports.index("    import pytorch_lightning")
+    # Fresh interpreter: initialize.imports() up to the pytorch_lightning import, which the probe stops.
+    result = subprocess.run([sys.executable, "-c", IMPORT_ORDER_PROBE], capture_output=True, text=True, check=True, timeout=300)
+    events = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert events == [["configure_torch_threads", True], "import pytorch_lightning"]

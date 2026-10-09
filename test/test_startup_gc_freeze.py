@@ -29,21 +29,48 @@ def _fake_model_data(monkeypatch, loaded_sd_models):
     monkeypatch.setattr(modules, "sd_models", fake, raising=False)
 
 
-def _initialize_rest_calls():
+def _initialize_rest_module_imports():
     tree = ast.parse(Path("modules/initialize.py").read_text(encoding="utf8"))
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "initialize_rest")
-    return [ast.unparse(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)]
+    return {alias.name for node in ast.walk(function) if isinstance(node, ast.ImportFrom) and node.module == "modules" for alias in node.names}
 
 
-def test_heap_is_frozen_after_scripts_and_upscalers_but_before_the_startup_model_load():
-    source = Path("modules/initialize.py").read_text(encoding="utf8")
-    body = source[source.index("def initialize_rest():"):]
+class _Recorder:
+    """Stands in for a module initialize_rest imports: records every call made through it, by dotted name."""
 
-    freeze = body.index("    freeze_startup_heap()")
-    assert body.index("        scripts.load_scripts()\n", body.index("startup_timer.subcategory")) < freeze
-    assert body.index("    modelloader.load_upscalers()") < freeze
-    assert freeze < body.index("Thread(target=load_model).start()")
-    assert _initialize_rest_calls().count("freeze_startup_heap") == 1
+    def __init__(self, calls, name):
+        self._calls, self._name = calls, name
+
+    def __getattr__(self, attr):
+        return _Recorder(self._calls, f"{self._name}.{attr}")
+
+    def __call__(self, *args, **kwargs):
+        self._calls.append(self._name)
+        return _Recorder(self._calls, f"{self._name}()")
+
+
+def test_heap_is_frozen_after_scripts_and_upscalers_but_before_the_startup_model_load(monkeypatch):
+    import contextlib
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "modules", modules)
+    for name in _initialize_rest_module_imports():
+        monkeypatch.setattr(modules, name, _Recorder(calls, name), raising=False)
+    monkeypatch.setattr(modules, "shared", types.SimpleNamespace(cmd_opts=types.SimpleNamespace(skip_load_model_at_start=False)), raising=False)
+    cmd_options = types.ModuleType("modules.shared_cmd_options")
+    cmd_options.cmd_opts = types.SimpleNamespace(ui_debug_mode=False)
+    monkeypatch.setitem(sys.modules, "modules.shared_cmd_options", cmd_options)
+    monkeypatch.setattr(initialize, "startup_timer", types.SimpleNamespace(record=lambda label: None, subcategory=lambda label: contextlib.nullcontext()))
+    monkeypatch.setattr(initialize, "freeze_startup_heap", lambda: calls.append("freeze_startup_heap"))
+    monkeypatch.setattr(initialize, "Thread", lambda target: types.SimpleNamespace(start=lambda: calls.append("start startup model load")))
+
+    initialize.initialize_rest()
+
+    assert calls.count("freeze_startup_heap") == 1
+    freeze = calls.index("freeze_startup_heap")
+    assert calls.index("scripts.load_scripts") < freeze
+    assert calls.index("modelloader.load_upscalers") < freeze
+    assert freeze < calls.index("start startup model load")
 
 
 def test_freeze_keeps_cycles_created_afterwards_collectable(monkeypatch, frozen_before):

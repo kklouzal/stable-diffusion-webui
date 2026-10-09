@@ -250,20 +250,16 @@ def test_api_field_value_type_unwraps_pydantic_v2_annotations():
     assert field_type(int | str) is type(None)
 
 
-def test_apply_infotext_uses_pydantic_v2_field_metadata():
-    source = Path("modules/api/api.py").read_text()
-    assert ".type_" not in source
-    assert "request.__fields__" not in source
-
-
 def test_apply_infotext_keeps_componentless_builtin_fields_off_script_arg_zero():
     # Built-in paste fields carry no UI component, and script_runner.inputs[0] is None (the selectable-script index).
     # Loaded from source so the test does not depend on other tests' modules-package stubs.
     import types
     import typing
+    import warnings
     from types import SimpleNamespace
 
     import pydantic
+    from pydantic.warnings import PydanticDeprecatedSince20
 
     tree = ast.parse(Path("modules/api/api.py").read_text())
     api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
@@ -292,7 +288,10 @@ def test_apply_infotext_keeps_componentless_builtin_fields_off_script_arg_zero()
 
     request = Request(infotext="a cat")
     mentioned = {}
-    namespace["apply_infotext"](None, request, "txt2img", script_runner=SimpleNamespace(inputs=[None, script_component]), mentioned_script_args=mentioned)
+    with warnings.catch_warnings():
+        # pydantic 2 field metadata only: v1's request.__fields__ warns and its ModelField.type_ no longer exists.
+        warnings.simplefilter("error", PydanticDeprecatedSince20)
+        namespace["apply_infotext"](None, request, "txt2img", script_runner=SimpleNamespace(inputs=[None, script_component]), mentioned_script_args=mentioned)
 
     assert request.steps == 7
     assert mentioned == {1: 0.25}
