@@ -2,22 +2,11 @@ import hashlib
 import os
 import os.path
 
-from modules import shared, errors
+from modules import shared, errors, persistent_artifact_cache
 import modules.cache
 
 dump_cache = modules.cache.dump_cache
 cache = modules.cache.cache
-
-
-def calculate_sha256(filename):
-    hash_sha256 = hashlib.sha256()
-    blksize = 1024 * 1024
-
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(blksize), b""):
-            hash_sha256.update(chunk)
-
-    return hash_sha256.hexdigest()
 
 
 def sha256_from_cache(filename, title, use_addnet_hash=False):
@@ -58,7 +47,7 @@ def sha256(filename, title, use_addnet_hash=False):
             with open(filename, "rb") as file:
                 sha256_value = addnet_hash_safetensors(file)
         else:
-            sha256_value = calculate_sha256(filename)
+            sha256_value = persistent_artifact_cache.sha256_file(filename)
         after = modules.cache.file_revision(os.stat(filename))
         if before != after:
             return None
