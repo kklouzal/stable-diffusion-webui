@@ -38,11 +38,13 @@ def api_only():
 
     app = FastAPI()
     initialize_util.setup_middleware(app)
-    api = create_api(app)
 
+    # before_ui callbacks extend the X/Y/Z axis list (Hypertile, Incantations PAG/SEG/DynThres); they must run before
+    # create_api(), whose headless script setup snapshots that list into each X/Y/Z runner (xyz_grid Script.ui).
     from modules import script_callbacks
     script_callbacks.before_ui_callback()
 
+    api = create_api(app)
     script_callbacks.app_started_callback(None, app)
 
     print(f"Startup time: {startup_timer.summary()}.")
