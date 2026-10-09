@@ -1,4 +1,3 @@
-from collections import namedtuple
 from copy import copy
 from itertools import permutations, chain
 import random
@@ -21,8 +20,6 @@ import modules.sd_vae
 import re
 
 from modules.ui_components import InputAccordion
-
-AxisInfo = namedtuple('AxisInfo', ['axis', 'values'])
 
 
 def apply_field(field):
@@ -613,10 +610,6 @@ class Script(scripts.Script):
         plural_s = 's' if len(zs) > 1 else ''
         print(f"X/Y/Z plot will create {len(xs) * len(ys) * len(zs) * image_cell_count} images on {len(zs)} {len(xs)}x{len(ys)} grid{plural_s}{cell_console_text}. (Total steps to process: {total_steps})")
         shared.total_tqdm.updateTotal(total_steps)
-
-        state.xyz_plot_x = AxisInfo(x_opt, xs)
-        state.xyz_plot_y = AxisInfo(y_opt, ys)
-        state.xyz_plot_z = AxisInfo(z_opt, zs)
 
         # If one of the axes is very slow to change between (like SD model
         # checkpoint), then make sure it is in the outer iteration of the nested

@@ -282,35 +282,6 @@ def infotext_setting_name_mapping():
     return [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext] + infotext_to_setting_name_mapping
 
 
-def create_override_settings_dict(text_pairs):
-    """creates processing's override_settings parameters from a UI multiselect
-
-    Example input:
-        ['Clip skip: 2', 'Model hash: e6e99610c4', 'ENSD: 31337']
-
-    Example output:
-        {'CLIP_stop_at_last_layers': 2, 'sd_model_checkpoint': 'e6e99610c4', 'eta_noise_seed_delta': 31337}
-    """
-
-    res = {}
-
-    params = {}
-    for pair in text_pairs:
-        k, v = pair.split(":", maxsplit=1)
-
-        params[k] = v.strip()
-
-    for param_name, setting_name in infotext_setting_name_mapping():
-        value = params.get(param_name, None)
-
-        if value is None:
-            continue
-
-        res[setting_name] = shared.opts.cast_value(setting_name, value)
-
-    return res
-
-
 def get_override_settings(params, *, skip_fields=None):
     """Returns a list of settings overrides from the infotext parameters dictionary.
 

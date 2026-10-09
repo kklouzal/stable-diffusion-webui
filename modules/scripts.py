@@ -325,10 +325,6 @@ class Script:
     def on_after_component(self, callback, *, elem_id):
         """Accepted for extension compatibility; never called. See on_before_component."""
 
-    def describe(self):
-        """unused"""
-        return ""
-
     def elem_id(self, item_id):
         """helper function to generate id for a HTML element, constructs final id out of script name, tab and user-supplied item_id"""
 
