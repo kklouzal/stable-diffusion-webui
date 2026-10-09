@@ -622,13 +622,18 @@ def load_network(name, network_on_disk):
 
 
 def purge_networks_from_memory():
+    evicted = False
     while len(networks_in_memory) > shared.opts.lora_in_memory_limit and len(networks_in_memory) > 0:
         name = next(iter(networks_in_memory))
         networks_in_memory.pop(name, None)
         openclaw_cache_epochs.observe("E12", "eviction", reason="capacity", semantic_key=name)
+        evicted = True
 
     openclaw_cache_epochs.set_size("E12", current_size=len(networks_in_memory), capacity=shared.opts.lora_in_memory_limit)
-    devices.torch_gc()
+    # Only an evicted network can free device memory (functional forwards move LoRA factors to the device); an
+    # unconditional empty_cache on every activation released the allocator's cached blocks mid-request.
+    if evicted:
+        devices.torch_gc()
 
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):

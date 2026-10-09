@@ -185,11 +185,14 @@ def test_in_memory_cache_evicts_least_recently_requested(lora_networks, monkeypa
     monkeypatch.setattr(networks, "load_network", lambda name, on_disk: parsed.append(name) or SimpleNamespace(network_on_disk=on_disk, modules={}, bundle_embeddings={}))
     monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
     monkeypatch.setattr(networks.shared.opts, "lora_in_memory_limit", 2, raising=False)
+    gcs = []
+    monkeypatch.setattr(networks.devices, "torch_gc", lambda: gcs.append(len(networks.networks_in_memory)))
 
     for names in (["a"], ["b"], ["a"], ["c"], ["a"]):  # "a" stays in use; "b" is the stale entry
         networks.load_networks(names)
 
     assert parsed == ["a", "b", "c"]
+    assert gcs == [2]  # the device cache is released only after the eviction of "b", not on every activation
     assert [key[0].rsplit("/", 1)[-1] for key in networks.networks_in_memory] == ["c.safetensors", "a.safetensors"]
 
 
