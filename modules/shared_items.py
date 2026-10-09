@@ -65,10 +65,6 @@ def list_checkpoint_tiles(use_short=False):
     return modules.sd_models.checkpoint_tiles(use_short)
 
 
-def checkpoint_dropdown_args(*prefix_items, use_short=False):
-    return {"choices": [*prefix_items, *list_checkpoint_tiles(use_short)]}
-
-
 def refresh_checkpoints():
     import modules.sd_models
     return modules.sd_models.list_models()
