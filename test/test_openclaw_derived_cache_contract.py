@@ -265,5 +265,5 @@ def test_img2imgalt_reuses_noise_inversion_only_within_a_request_for_the_same_la
 
 def test_hypertile_geometry_caches_are_bounded():
     hypertile = load_source("hypertile_cache_bounds", "extensions-builtin/hypertile/hypertile.py")
-    for function in (hypertile.get_divisors, hypertile.largest_tile_size_available, hypertile.find_hw_candidates):
+    for function in (hypertile.get_divisors, hypertile.find_hw_candidates):
         assert function.cache_info().maxsize == 256, function.__name__

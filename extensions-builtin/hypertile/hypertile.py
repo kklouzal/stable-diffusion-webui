@@ -218,19 +218,6 @@ def set_hypertile_seed(seed: int) -> None:
     RNG_INSTANCE.seed(seed)
 
 
-@lru_cache(maxsize=256)
-def largest_tile_size_available(width: int, height: int) -> int:
-    """
-    Calculates the largest tile size available for a given width and height
-    Tile size is always a power of 2
-    """
-    gcd = math.gcd(width, height)
-    largest_tile_size_available = 1
-    while gcd % (largest_tile_size_available * 2) == 0:
-        largest_tile_size_available *= 2
-    return largest_tile_size_available
-
-
 def iterative_closest_divisors(hw:int, aspect_ratio:float) -> tuple[int, int]:
     """
     Finds h and w such that h*w = hw and w/h = aspect_ratio (width / height)
@@ -343,7 +330,12 @@ def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_
         model.__webui_hypertile_layers = hypertile_layers
 
     aspect_ratio = width / height
-    tile_size = min(largest_tile_size_available(width, height), tile_size_max)
+    # The tile size is the minimum tile edge; random_divisor picks a divisor of each layer's actual token rows/columns
+    # at or above it, so any value splits validly. Upstream clamped it to the largest power of two dividing
+    # gcd(width, height), which shrank the configured size for every size pair whose gcd is not a multiple of it
+    # (576 of the 625 pairs in 512..2048 step 64 at the default 256; 1152x1024: 128, a 4x finer tiling than
+    # 1024x1024) and never made a split valid that was not already.
+    tile_size = tile_size_max
     any_enabled = False
 
     for layer_name, module in model.named_modules():
