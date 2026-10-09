@@ -85,7 +85,7 @@ suffix_conversion = {
 }
 
 
-def convert_diffusers_name_to_compvis(key, is_sd2):
+def convert_diffusers_name_to_compvis(key, is_sd2, layer_mapping):
     def match(match_list, regex_text):
         regex = re_compiled.get(regex_text)
         if regex is None:
@@ -127,7 +127,11 @@ def convert_diffusers_name_to_compvis(key, is_sd2):
         return f"diffusion_model_input_blocks_{3 + m[0] * 3}_0_op"
 
     if match(m, r"lora_unet_up_blocks_(\d+)_upsamplers_0_conv"):
-        return f"diffusion_model_output_blocks_{2 + m[0] * 3}_{2 if m[0]>0 else 1}_conv"
+        # The upsampler follows the up block's last resnet and, when the block has them, its attentions: index 1 in the
+        # attention-free first up block of SD1/SD2, index 2 in every other block (SDXL's first two up blocks have
+        # attentions, so its first upsampler is output_blocks_2_2, as ComfyUI and diffusers map it).
+        block = f"diffusion_model_output_blocks_{2 + m[0] * 3}"
+        return f"{block}_1_conv" if f"{block}_1_conv" in layer_mapping else f"{block}_2_conv"
 
     if match(m, r"lora_te_text_model_encoder_layers_(\d+)_(.+)"):
         if is_sd2:
@@ -480,7 +484,7 @@ def load_network(name, network_on_disk):
         if diffusers_weight_map:
             key = diffusers_weight_map.get(key_network_without_network_parts, key_network_without_network_parts)
         else:
-            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2)
+            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2, shared.sd_model.network_layer_mapping)
 
         sd_module = shared.sd_model.network_layer_mapping.get(key, None)
 
