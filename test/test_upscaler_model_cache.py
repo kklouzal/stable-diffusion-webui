@@ -158,3 +158,19 @@ def test_missing_file_raises(tmp_path, modelloader):
     with pytest.raises(FileNotFoundError):
         modelloader.load_cached_spandrel_model(tmp_path / "missing.pth", device="cpu")
     assert not modelloader._spandrel_model_cache
+
+
+def test_compiled_model_is_its_own_entry(tmp_path, monkeypatch, modelloader):
+    # SwinIR's SWIN_torch_compile: compiled once per file revision, never compiling the plain entry other callers share.
+    path = tmp_path / "tiny.safetensors"
+    _write_tiny_esrgan(path, seed=1)
+    calls = _count_loads(monkeypatch, modelloader)
+
+    plain = modelloader.load_cached_spandrel_model(path, device="cpu")
+    compiled = modelloader.load_cached_spandrel_model(path, device="cpu", compile_model=True)
+
+    assert compiled is not plain
+    assert modelloader.load_cached_spandrel_model(path, device="cpu", compile_model=True) is compiled
+    assert len(calls) == 2
+    assert compiled.model._compiled_call_impl is not None  # torch.nn.Module.compile's in-place wrapper
+    assert plain.model._compiled_call_impl is None

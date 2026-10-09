@@ -284,6 +284,22 @@ def test_scunet_uses_the_shared_model_cache(env):
     assert env.loader_calls[-1][1]["expected_architecture"] == "SCUNet"
 
 
+@pytest.mark.parametrize("compile_option", [False, True])
+def test_swinir_uses_the_shared_model_cache(env, compile_option):
+    # Its former private cache was keyed by the path string: a model file replaced in place was never reloaded.
+    module = _load_script(env, "extensions-builtin/SwinIR/scripts/swinir_model.py")
+    descriptor = object()
+    env.modelloader.load_cached_spandrel_model = lambda path, **kwargs: (env.loader_calls.append((path, kwargs)), descriptor)[1]
+    env.shared.opts.SWIN_torch_compile = compile_option
+    model_path = env.tmp_path / "swinir.pth"
+    model_path.write_bytes(b"x")
+
+    assert module.UpscalerSwinIR(str(env.tmp_path)).load_model(str(model_path)) is descriptor
+    path, kwargs = env.loader_calls[-1]
+    assert path == str(model_path)
+    assert kwargs["expected_architecture"] == "SwinIR" and kwargs["compile_model"] is compile_option
+
+
 def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
     # modules.util.load_file_from_url contract: saved as `file_name` if given, else as the URL's basename.
     downloads = []

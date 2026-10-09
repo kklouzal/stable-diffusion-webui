@@ -188,21 +188,23 @@ def load_cached_spandrel_model(
     load_device: str | torch.device | None = None,
     prefer_half: bool = False,
     expected_architecture: str | None = None,
+    compile_model: bool = False,
 ) -> spandrel.ModelDescriptor:
     """
-    `load_spandrel_model` on `load_device` (default: `device`), then moved to `device`, reusing the
-    last `_SPANDREL_MODEL_CACHE_SIZE` results.
+    `load_spandrel_model` on `load_device` (default: `device`), then moved to `device` and, with
+    `compile_model`, its module compiled in place (`torch.nn.Module.compile`, which compiles lazily on
+    the first call), reusing the last `_SPANDREL_MODEL_CACHE_SIZE` results.
 
     The returned descriptor is shared between calls: run it only through its `__call__` (spandrel
-    runs that under `torch.inference_mode`) and never move, cast or train it. Entries are keyed by
-    `cache.file_cache_key` of the real path (device, inode, size, mtime, ctime) and every load
-    argument, so a replaced file is reloaded even when its size and mtime are preserved; a failed
-    load raises and is not cached.
+    runs that under `torch.inference_mode`) and never move, cast, compile or train it. Entries are
+    keyed by `cache.file_cache_key` of the real path (device, inode, size, mtime, ctime) and every
+    load argument, so a replaced file is reloaded even when its size and mtime are preserved; a
+    failed load raises and is not cached.
     """
     real_path = os.path.realpath(path)
     device = torch.device(device)
     load_device = device if load_device is None else torch.device(load_device)
-    key = cache.file_cache_key(real_path, str(load_device), str(device), bool(prefer_half), expected_architecture)
+    key = cache.file_cache_key(real_path, str(load_device), str(device), bool(prefer_half), expected_architecture, bool(compile_model))
     if key[1] is None:
         # Missing or unreadable: raise its OSError here. The loader would report it as an unrelated error (modules.safe
         # turns a failed torch.load into a None state dict).
@@ -219,6 +221,8 @@ def load_cached_spandrel_model(
             expected_architecture=expected_architecture,
         )
         model_descriptor.to(device)
+        if compile_model:
+            model_descriptor.model.compile()
         if cache.file_cache_key(real_path)[1] != key[1]:
             return model_descriptor  # replaced while loading; do not file it under the old identity
         # Entries for other load arguments of this file revision stay; other revisions of the file are stale.
