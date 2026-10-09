@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -118,3 +119,24 @@ def test_latent_noise_fill_uses_each_batch_seeds(harness):  # noqa: F811
     assert torch.equal(seen[-1], expected((7,)))
     assert torch.equal(p.init_latent, seen[-1])
     assert not torch.equal(seen[-1], first)
+
+
+def test_init_mask_is_prepare_image_mask(harness):  # noqa: F811
+    """img2img init prepares its mask with processing.prepare_image_mask (ControlNet's prepare_mask uses it too):
+    a mask of another size is stretched onto the init image, then inverted and blurred."""
+    init = _random_image("RGB", (128, 96), 25)
+    mask = np.zeros((48, 64), dtype=np.uint8)
+    mask[12:24, 16:32] = 255
+    mask = Image.fromarray(mask, "L")
+    p = harness.make([init], width=32, height=24, image_mask=mask, inpaint_full_res=True, inpaint_full_res_padding=2,
+                     inpainting_mask_invert=True, mask_blur_x=3, mask_blur_y=1)
+
+    expected = processing.prepare_image_mask(mask, (128, 96), mask_round=True, invert=True, blur_x=3, blur_y=1)
+    assert np.array_equal(np.asarray(p.mask_for_overlay), np.asarray(expected))
+    # independent oracle: binary, bilinear stretch, invert, horizontal then vertical Gaussian blur
+    oracle = 255 - np.asarray(mask.resize((128, 96), resample=Image.Resampling.BILINEAR))
+    oracle = cv2.GaussianBlur(oracle, (2 * int(2.5 * 3 + 0.5) + 1, 1), 3)
+    oracle = cv2.GaussianBlur(oracle, (1, 2 * int(2.5 * 1 + 0.5) + 1), 1)
+    assert np.array_equal(np.asarray(expected), oracle)
+    assert p.extra_generation_params["Mask mode"] == "Inpaint not masked"
+    assert "Mask blur" in p.extra_generation_params

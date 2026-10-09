@@ -104,6 +104,32 @@ def create_binary_mask(image, round=True):
     return image
 
 
+def prepare_image_mask(image_mask, init_size, *, mask_round, invert, blur_x, blur_y):
+    """The img2img inpaint mask as StableDiffusionProcessingImg2Img.init uses it, and ControlNet with it: binary
+    (create_binary_mask, thresholded when mask_round), stretched onto the init image (init_size) when its size differs,
+    inverted when invert, then the separable Gaussian blur (blur_x horizontally, blur_y vertically; 0 disables an
+    axis). Returns a mode "L" image of init_size.
+
+    The mask covers the init image: "only masked" crops in its coordinates and the other paths resize both the same
+    way, so a mask of another size is stretched onto the image first. Bilinear does not ring, so the masked area (and
+    the crop around it) grows by at most a pixel."""
+    image_mask = create_binary_mask(image_mask, round=mask_round)
+    if image_mask.size != init_size:
+        image_mask = image_mask.resize(init_size, resample=Image.Resampling.BILINEAR)
+    if invert:
+        image_mask = ImageOps.invert(image_mask)
+    if blur_x > 0 or blur_y > 0:
+        np_mask = np.asarray(image_mask)
+        if blur_x > 0:
+            kernel_size = 2 * int(2.5 * blur_x + 0.5) + 1
+            np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), blur_x)
+        if blur_y > 0:
+            kernel_size = 2 * int(2.5 * blur_y + 0.5) + 1
+            np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), blur_y)
+        image_mask = Image.fromarray(np_mask)
+    return image_mask
+
+
 def _resize_latent_mask(image, size, round=True):
     latmask = image.convert('L').resize(size, resample=Image.Resampling.BOX)
     latmask = np.asarray(latmask, dtype=np.float32) / 255.0
@@ -2023,28 +2049,12 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if image_mask is not None:
             # image_mask is passed in as RGBA by the legacy UI layer to support alpha masks,
             # but we still want to support binary masks.
-            image_mask = create_binary_mask(image_mask, round=self.mask_round)
-
-            # The mask covers the init image: "only masked" crops in its coordinates and the other paths resize both the
-            # same way, so a mask of another size is stretched onto the image first. Bilinear does not ring, so the
-            # masked area (and the crop around it) grows by at most a pixel.
-            init_size = self.init_images[0].size
-            if image_mask.size != init_size:
-                image_mask = image_mask.resize(init_size, resample=Image.Resampling.BILINEAR)
-
+            image_mask = prepare_image_mask(
+                image_mask, self.init_images[0].size, mask_round=self.mask_round, invert=self.inpainting_mask_invert,
+                blur_x=self.mask_blur_x, blur_y=self.mask_blur_y)
             if self.inpainting_mask_invert:
-                image_mask = ImageOps.invert(image_mask)
                 self.extra_generation_params["Mask mode"] = "Inpaint not masked"
-
             if self.mask_blur_x > 0 or self.mask_blur_y > 0:
-                np_mask = np.asarray(image_mask)
-                if self.mask_blur_x > 0:
-                    kernel_size = 2 * int(2.5 * self.mask_blur_x + 0.5) + 1
-                    np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur_x)
-                if self.mask_blur_y > 0:
-                    kernel_size = 2 * int(2.5 * self.mask_blur_y + 0.5) + 1
-                    np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur_y)
-                image_mask = Image.fromarray(np_mask)
                 self.extra_generation_params["Mask blur"] = self.mask_blur
 
             if self.inpaint_full_res:
