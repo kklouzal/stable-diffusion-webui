@@ -32,6 +32,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 - Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
 - Removed PAG's CFG Scheduler ("CFG Interval": noise-interval CFG and CFG weight schedules). Its four script args stay as placeholders, see below.
 - PAG's perturbed pass replaces the middle-block self-attention map with the identity, so the layer outputs `to_out(to_v(x))` as in the paper, diffusers' `PAGIdentitySelfAttnProcessor` and ComfyUI. Upstream Incantations (and this tree until 2026-10-09) returned `to_v(x)` and skipped the output projection; the fix changes PAG images.
+- PAG and SEG Start/End Step compare the sampler step of the denoiser call in progress (`ui_wrapper.sampler_step`: the denoiser's call count over its `total_steps`, as the core measures progress). They read `state.sampling_step` before, which lags one step behind the model call, so every interval started and ended one step late. The default 0-150 interval is unaffected.
 
 
 ## A1111 API argument order

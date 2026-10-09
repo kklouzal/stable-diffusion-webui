@@ -786,9 +786,10 @@ class PAGBatchingTests(unittest.TestCase):
                 return x * 0
 
         denoiser = Denoiser()
+        denoiser.step, denoiser.steps, denoiser.total_steps = 1, 20, 20
         x_in = torch.randn(2, 4, 2, 2)
         cond = {"crossattn": torch.randn(1, 77, 8), "vector": torch.randn(1, 4)}
-        params = types.SimpleNamespace(sampling_step=1, denoiser=denoiser, text_cond=cond)
+        params = types.SimpleNamespace(denoiser=denoiser, text_cond=cond)
         script.on_cfg_denoiser_callback(params, pag_params)
         denoiser.run_inner_model(x_in, torch.ones(2), {"crossattn": torch.randn(2, 77, 8)})
 
@@ -798,7 +799,7 @@ class PAGBatchingTests(unittest.TestCase):
             seen["state"] = (attn.pag_enable, to_q.seg_enable, x.shape[0])
             return x - 1
 
-        script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=inner_model), pag_params)
+        script.on_cfg_denoised_callback(types.SimpleNamespace(inner_model=inner_model), pag_params)
         self.assertEqual(seen["state"], (True, False, 1))
         torch.testing.assert_close(pag_params.pag_x_out, x_in[:1] - 1)
         self.assertFalse(attn.pag_enable)
@@ -813,17 +814,44 @@ class PAGBatchingTests(unittest.TestCase):
             raise ValueError("unet failed")
 
         with self.assertRaisesRegex(ValueError, "unet failed"):
-            script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=failing_inner_model), pag_params)
+            script.on_cfg_denoised_callback(types.SimpleNamespace(inner_model=failing_inner_model), pag_params)
         self.assertFalse(attn.pag_enable)
         self.assertTrue(to_q.seg_enable)
         self.assertIsNone(self.row_memo.disarm(denoiser))
 
         # Outside the PAG interval nothing is recorded and the recorder passes through.
-        script.on_cfg_denoiser_callback(types.SimpleNamespace(sampling_step=20, denoiser=denoiser, text_cond=cond), pag_params)
+        denoiser.step = 20
+        script.on_cfg_denoiser_callback(params, pag_params)
         self.assertIsNone(self.row_memo.disarm(denoiser))
 
         script.postprocess_batch(types.SimpleNamespace(incant_cfg_params={"pag_params": None}))
         self.assertNotIn("run_inner_model", denoiser.__dict__)
+
+    def test_pag_interval_uses_the_step_of_the_denoiser_call(self):
+        # state.sampling_step reads 0 during both step 0 and step 1; a [1, 1] interval must run PAG on step 1 only.
+        script = self.pag.PAGExtensionScript()
+        pag_params = self.pag.PAGStateParams()
+        pag_params.pag_active, pag_params.pag_scale = True, 3.0
+        pag_params.pag_start_step = pag_params.pag_end_step = 1
+        pag_params.crossattn_modules = [types.SimpleNamespace(pag_enable=False)]
+        pag_params.seg_q_modules = []
+
+        class Denoiser(torch.nn.Module):
+            def run_inner_model(self, x, sigma, cond):
+                return x
+
+        denoiser = Denoiser()
+        denoiser.steps = denoiser.total_steps = 3
+        cond = {"crossattn": torch.randn(1, 77, 8)}
+        ran = []
+        for call in range(3):
+            denoiser.step = call
+            script.on_cfg_denoiser_callback(types.SimpleNamespace(sampling_step=max(0, call - 1), denoiser=denoiser, text_cond=cond), pag_params)
+            denoiser.run_inner_model(torch.randn(2, 4, 2, 2), torch.ones(2), {"crossattn": torch.randn(2, 77, 8)})
+            script.on_cfg_denoised_callback(types.SimpleNamespace(inner_model=lambda x, sigma, cond: x), pag_params)
+            ran.append(pag_params.pag_x_out is not None)
+        self.assertEqual(ran, [False, True, False])
+        script.remove_main_pass_recorder()
 
     def test_pag_denoised_callback_fails_fast_without_recorded_main_pass(self):
         script = self.pag.PAGExtensionScript()
@@ -831,7 +859,7 @@ class PAGBatchingTests(unittest.TestCase):
         pag_params.pag_active = True
         pag_params.pag_scale = 3.0
         with self.assertRaisesRegex(RuntimeError, "not recorded"):
-            script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=None), pag_params)
+            script.on_cfg_denoised_callback(types.SimpleNamespace(inner_model=None), pag_params)
 
     @staticmethod
     def attention_module(attn_mask=None):
@@ -1215,7 +1243,7 @@ class SEGBlurTests(unittest.TestCase):
         shared.opts.batch_cond_uncond = True
         try:
             step = types.SimpleNamespace(
-                sampling_step=0,
+                denoiser=types.SimpleNamespace(step=0, steps=20, total_steps=20),
                 text_cond={"crossattn": torch.zeros(n_cond, 77, 8), "vector": torch.zeros(n_cond, 4)},
                 text_uncond={"crossattn": torch.zeros(n_uncond, 77, 8), "vector": torch.zeros(n_uncond, 4)},
             )
@@ -1271,6 +1299,61 @@ class SEGBlurTests(unittest.TestCase):
                 x = torch.randn(rows, 6 * 5, 6)
                 with self.subTest(rows=rows):
                     self.assertTrue(torch.equal(attn.to_q(x), torch.nn.functional.linear(x, attn.to_q.weight)))
+
+
+class SamplerStepTests(unittest.TestCase):
+    """sampler_step against the real k-diffusion samplers: every model call maps to the step that makes it."""
+
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.ui_wrapper = importlib.import_module("scripts.ui_wrapper")
+        sys.path.insert(0, str(REPO_ROOT / "repositories" / "k-diffusion"))
+        try:
+            cls.k_sampling = importlib.import_module("k_diffusion.sampling")
+        finally:
+            sys.path.remove(str(REPO_ROOT / "repositories" / "k-diffusion"))
+
+    def run_sampler(self, func, steps, calls_per_step):
+        """Run ``func`` with a CFG-denoiser-like model; returns (sampler_step, state.sampling_step, sigma) per call."""
+        denoiser = types.SimpleNamespace(step=0, steps=steps, total_steps=steps * calls_per_step)
+        state = {"sampling_step": 0}
+        calls = []
+
+        def model(x, sigma, **kwargs):
+            calls.append((self.ui_wrapper.sampler_step(denoiser), state["sampling_step"], float(sigma[0])))
+            denoiser.step += 1
+            return x * 0.5
+
+        def callback(d):
+            state["sampling_step"] = d["i"]
+
+        sigmas = torch.cat([torch.linspace(10.0, 0.5, steps), torch.zeros(1)])
+        torch.manual_seed(0)
+        func(model, torch.ones(1, 1, 2, 2), sigmas, callback=callback, disable=True)
+        return calls, sigmas
+
+    def test_first_order_samplers_map_each_call_to_its_step(self):
+        for name in ("sample_euler", "sample_euler_ancestral", "sample_dpmpp_2m", "sample_dpmpp_2m_sde", "sample_lms"):
+            calls, sigmas = self.run_sampler(getattr(self.k_sampling, name), 7, 1)
+            with self.subTest(sampler=name):
+                self.assertEqual([step for step, _, _ in calls], list(range(7)))
+                self.assertEqual([sigma for _, _, sigma in calls], sigmas[:7].tolist())
+                # The lag this replaces: state.sampling_step reads 0 during steps 0 and 1, then i - 1.
+                self.assertEqual([lagged for _, lagged, _ in calls], [0] + list(range(6)))
+
+    def test_second_order_samplers_map_both_calls_of_a_step_to_it(self):
+        for name in ("sample_heun", "sample_dpm_2", "sample_dpmpp_2s_ancestral", "sample_dpmpp_sde"):
+            calls, sigmas = self.run_sampler(getattr(self.k_sampling, name), 6, 2)
+            with self.subTest(sampler=name):
+                # Two calls per step; the final step to sigma 0 makes one.
+                self.assertEqual([step for step, _, _ in calls], [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5])
+                # Each step's first call evaluates at that step's sigma.
+                self.assertEqual([sigma for _, _, sigma in calls[::2]], sigmas[:6].tolist())
+
+    def test_missing_step_counts_fail(self):
+        with self.assertRaisesRegex(RuntimeError, "no step count"):
+            self.ui_wrapper.sampler_step(types.SimpleNamespace(step=0, steps=None, total_steps=None))
 
 
 class SharedHelperTests(unittest.TestCase):

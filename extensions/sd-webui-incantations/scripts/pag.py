@@ -3,7 +3,7 @@ import weakref
 from contextlib import suppress
 from os import environ
 from modules import headless_ui as gr
-from scripts.ui_wrapper import UIWrapper, cond_crossattn, xyz_field_setter
+from scripts.ui_wrapper import UIWrapper, cond_crossattn, sampler_step, xyz_field_setter
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
@@ -51,7 +51,7 @@ class PAGStateParams:
                 self.pag_scale: float = -1      # PAG guidance scale
                 self.pag_start_step: int = 0
                 self.pag_end_step: int = 150
-                self.step : int = 0
+                self.step: int = 0  # sampler step of the denoiser call in progress (set by the cfg_denoiser callback)
                 self.crossattn_modules = [] # the hooked middle-block self-attention modules
                 self.pag_x_out = None
                 self.openclaw_extension_timings = {}
@@ -342,20 +342,21 @@ class PAGExtensionScript(UIWrapper):
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
                 # mutable state. Removing hooks here disables the extra PAG pass.
-                pag_params.step = params.sampling_step
                 pag_params.pag_x_out = None
 
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
+                denoiser = getattr(params, 'denoiser', None)
+                if denoiser is None:
+                        raise RuntimeError("PAG needs CFGDenoiserParams.denoiser for its step and to record the main denoiser pass")
+                # The cfg_denoised callback of this denoiser call reads the same step.
+                pag_params.step = sampler_step(denoiser)
+                if not pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step:
                         self._drop_main_pass_memo()
                         return
 
                 # Record this step's main-pass UNet calls; the PAG pass replays their cond rows.
-                denoiser = getattr(params, 'denoiser', None)
-                if denoiser is None:
-                        raise RuntimeError("PAG needs CFGDenoiserParams.denoiser to record the main denoiser pass")
                 if self.recorded_denoiser() is not denoiser:
                         self.remove_main_pass_recorder()
                         # Weak: a request that fails mid-step must not keep its denoiser and memo alive.
@@ -375,7 +376,7 @@ class PAGExtensionScript(UIWrapper):
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
+                if not pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step:
                         return
 
                 memo = sd_unet_row_memo.disarm(self.recorded_denoiser())

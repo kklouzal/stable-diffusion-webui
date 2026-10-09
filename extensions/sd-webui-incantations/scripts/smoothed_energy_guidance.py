@@ -9,7 +9,7 @@ from modules import script_callbacks, shared
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
 
-from scripts.ui_wrapper import UIWrapper, cond_crossattn, xyz_field_setter
+from scripts.ui_wrapper import UIWrapper, cond_crossattn, sampler_step, xyz_field_setter
 from scripts.incant_utils import module_hooks, timing
 
 import torch
@@ -285,7 +285,7 @@ class SEGExtensionScript(UIWrapper):
                 if not seg_params.seg_active:
                         return
 
-                in_interval = seg_params.seg_start_step <= params.sampling_step <= seg_params.seg_end_step
+                in_interval = seg_params.seg_start_step <= sampler_step(params.denoiser) <= seg_params.seg_end_step
                 should_enable = in_interval and getattr(shared.opts, 'batch_cond_uncond', False)
                 seg_params.cfg_rows = cfg_row_counts(params.text_cond, params.text_uncond) if should_enable else None
                 if not should_enable:
