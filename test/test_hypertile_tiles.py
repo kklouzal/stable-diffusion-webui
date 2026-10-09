@@ -1,26 +1,14 @@
 """Hypertile U-Net tiling geometry (extensions-builtin/hypertile/hypertile.py). CPU-only."""
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
-HYPERTILE_PATH = Path(__file__).resolve().parents[1] / "extensions-builtin" / "hypertile" / "hypertile.py"
+from test.helpers import load_source
 
 
 @pytest.fixture(scope="module")
 def hypertile():
-    name = "hypertile_under_test"
-    spec = importlib.util.spec_from_file_location(name, HYPERTILE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module  # @dataclass resolves the defining module through sys.modules
-    try:
-        spec.loader.exec_module(module)
-        yield module
-    finally:
-        sys.modules.pop(name, None)
+    return load_source("hypertile_under_test", "extensions-builtin/hypertile/hypertile.py")
 
 
 @pytest.mark.parametrize(

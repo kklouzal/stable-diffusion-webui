@@ -1,18 +1,9 @@
-import importlib.util
 import random
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageOps
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "masking.py"
-
-
-def load_masking():
-    spec = importlib.util.spec_from_file_location("masking_under_test", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from modules import masking
 
 
 def serial_fill(image, mask):
@@ -36,7 +27,6 @@ def random_case(rng, width, height, image_mode, mask_mode):
 
 
 def test_parallel_fill_matches_serial_oracle_bitwise():
-    masking = load_masking()
     rng = random.Random(1234)
     for width, height, image_mode, mask_mode in ((257, 131, "RGB", "L"), (64, 64, "RGBA", "L"), (96, 200, "RGB", "1"), (128, 72, "RGB", "RGB")):
         image, mask = random_case(rng, width, height, image_mode, mask_mode)
@@ -47,7 +37,6 @@ def test_parallel_fill_matches_serial_oracle_bitwise():
 
 
 def test_concurrent_fill_calls_stay_exact():
-    masking = load_masking()
     rng = random.Random(99)
     cases = [random_case(rng, 160, 112, "RGB", "L") for _ in range(4)]
     expected = [serial_fill(image, mask).tobytes() for image, mask in cases]

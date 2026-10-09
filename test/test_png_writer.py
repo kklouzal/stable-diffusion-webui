@@ -1,27 +1,21 @@
 """modules/png_writer.py against Pillow's PNG writer on the same images: same chunks and filtered scanlines, same
 pixels for Pillow and for an independent decoder (OpenCV/libpng), output independent of the thread count."""
 
-import importlib.util
 import io
 import random
 import zlib
-from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image, PngImagePlugin
 
+from modules import png_writer
 from test.helpers import TEST_FILES
 
 try:
     import cv2  # OpenCV's libpng decoder: an implementation independent of Pillow and zlib's Python binding
 except ImportError:
     cv2 = None
-
-ROOT = Path(__file__).resolve().parents[1]
-_spec = importlib.util.spec_from_file_location("png_writer_under_test", ROOT / "modules" / "png_writer.py")
-png_writer = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(png_writer)
 
 
 def parse(data):

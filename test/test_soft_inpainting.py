@@ -1,14 +1,11 @@
-import importlib.util
-import sys
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 
-SOFT_INPAINTING = Path(__file__).resolve().parents[1] / "extensions-builtin" / "soft-inpainting" / "scripts" / "soft_inpainting.py"
+from test.helpers import load_source, module, stub_modules
 
 
 def _uncrop(image, dest_size, paste_loc):
@@ -19,45 +16,25 @@ def _uncrop(image, dest_size, paste_loc):
 
 
 @pytest.fixture()
-def soft_inpainting(monkeypatch):
-    modules = ModuleType("modules")
-    modules.__path__ = []
-    headless_ui = ModuleType("modules.headless_ui")
-    ui_components = ModuleType("modules.ui_components")
-    ui_components.InputAccordion = object
-    scripts = ModuleType("modules.scripts")
-    scripts.Script = object
-    scripts.AlwaysVisible = object()
-    scripts.MaskBlendArgs = scripts.PostSampleArgs = scripts.PostProcessMaskOverlayArgs = object
-    torch_utils = ModuleType("modules.torch_utils")
-    torch_utils.float64 = lambda _tensor: torch.float64
-    processing = ModuleType("modules.processing")
-    processing.uncrop = _uncrop
-    processing.create_binary_mask = lambda image, round=True: image.convert('L')
-    images = ModuleType("modules.images")
-    images.resize_image = lambda _mode, image, width, height: image.resize((width, height))
-    images.flatten = lambda image, _color: image.convert('RGB')
-    shared = ModuleType("modules.shared")
-    shared.opts = SimpleNamespace(img2img_background_color="#ffffff")
-    for name, module in {
-        "modules": modules,
-        "modules.headless_ui": headless_ui,
-        "modules.ui_components": ui_components,
-        "modules.scripts": scripts,
-        "modules.torch_utils": torch_utils,
-        "modules.processing": processing,
-        "modules.images": images,
-        "modules.shared": shared,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
-        if "." in name:
-            setattr(modules, name.split(".", 1)[1], module)
-
-    spec = importlib.util.spec_from_file_location("soft_inpainting_under_test", SOFT_INPAINTING)
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    return module
+def soft_inpainting():
+    # The script imports modules.processing/images/shared inside its methods: the stubs stay installed for the test.
+    with stub_modules({
+        "modules": module("modules", package=True),
+        "modules.headless_ui": module("modules.headless_ui"),
+        "modules.ui_components": module("modules.ui_components", InputAccordion=object),
+        "modules.scripts": module(
+            "modules.scripts", Script=object, AlwaysVisible=object(),
+            MaskBlendArgs=object, PostSampleArgs=object, PostProcessMaskOverlayArgs=object,
+        ),
+        "modules.torch_utils": module("modules.torch_utils", float64=lambda _tensor: torch.float64),
+        "modules.processing": module("modules.processing", uncrop=_uncrop, create_binary_mask=lambda image, round=True: image.convert('L')),
+        "modules.images": module(
+            "modules.images", resize_image=lambda _mode, image, width, height: image.resize((width, height)),
+            flatten=lambda image, _color: image.convert('RGB'),
+        ),
+        "modules.shared": module("modules.shared", opts=SimpleNamespace(img2img_background_color="#ffffff")),
+    }):
+        yield load_source("soft_inpainting_under_test", "extensions-builtin/soft-inpainting/scripts/soft_inpainting.py")
 
 
 def reference_weighted_histogram_filter(img, kernel, kernel_center, percentile_min=0.0, percentile_max=1.0, min_width=1.0):
