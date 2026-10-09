@@ -1,47 +1,16 @@
 # Tests
-There are 2 types of tests:
-- unittest: backend based tests that directly import A1111 shared modules
-- api test: test functionality through A1111 web API
 
-# Run tests locally
-Make sure the current working directory is A1111 root.
+Backend tests that import the A1111 modules in-process (no server, no GPU). `tests/utils.py` initializes A1111
+(without the startup model load) when a test module imports it, so every test module imports it first.
 
-## Install test dependencies
-`pip install -r requirements-test.txt`
+- `cn_script/`: the ControlNet script, hooks, preprocessor cache and model loading.
+- `annotator_tests/`: annotator output and pre/post-processing fixes.
+- `external_code_api/`: the `internal_controlnet.external_code` helpers.
+- `../unit_tests/`: `ControlNetUnit` validation, run by the repository test
+  `tests/test_controlnet_legacy_api_fields.py`.
 
-## Start test server
+Run them from the A1111 root inside the deploy image (CPU only), for example:
+
 ```shell
-python -m coverage run
-          --data-file=.coverage.server
-          launch.py
-          --skip-prepare-environment
-          --skip-torch-cuda-test
-          --test-server
-          --do-not-download-clip
-          --no-half
-          --disable-opt-split-attention
-          --use-cpu all
-          --api-server-stop
-```
-
-## Setting environment variables
-Setting `CONTROLNET_TEST_SD_VERSION` for stable diffusion model family used during testing.
-- 1 for SD1.x
-- 2 for SD2.x
-- 3 for SDXL
-
-## Run test
-```shell
-python -m pytest -vv --junitxml=test/results.xml --cov ./extensions/sd-webui-controlnet --cov-report=xml --verify-base-url ./extensions/sd-webui-controlnet/tests
-```
-
-## Check code coverage
-Text report
-```shell
-python -m coverage report -i
-```
-
-HTML report
-```shell
-python -m coverage html -i
+python -m pytest -q -p no:cacheprovider extensions/sd-webui-controlnet/tests
 ```
