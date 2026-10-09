@@ -82,3 +82,103 @@ def test_disabled_wrapper_passes_through(hypertile):
     params.enabled = False
     assert hypertile.self_attn_forward(params)("x", context=None) == "out"
     assert calls == [(("x",), {"context": None})]
+
+
+def _hooked_depth0_layer(hypertile, width, height, tile_size_max):
+    """A U-Net with one SD1.5 depth-0 attention layer, configured by the real hypertile_hook_model; returns a function
+    that runs that layer on a (rows, cols) row-major token grid and returns the token tiles its attention saw."""
+    seen = []
+
+    class Attention(torch.nn.Module):
+        def forward(self, tokens):
+            seen.append(tokens.clone())
+            return tokens
+
+    model = torch.nn.Module()
+    parent = model
+    for part in "input_blocks.1.1.transformer_blocks.0".split("."):
+        parent.add_module(part, torch.nn.Module())
+        parent = getattr(parent, part)
+    parent.add_module("attn1", Attention())
+    hypertile.hypertile_hook_model(model, width, height, enable=True, tile_size_max=tile_size_max, swap_size=1, max_depth=0)
+
+    def run(rows, cols):
+        r, c = torch.meshgrid(torch.arange(rows), torch.arange(cols), indexing="ij")
+        x = torch.stack([r.reshape(-1), c.reshape(-1)], dim=-1)[None]
+        seen.clear()
+        assert torch.equal(parent.attn1(x), x)  # tiling round-trips the token order
+        return seen[0]
+
+    return parent.attn1.__webui_hypertile_params, run
+
+
+def _smallest_divisor_at_least(value, minimum):
+    return next(d for d in range(min(minimum, value), value + 1) if value % d == 0)
+
+
+# Every multiple of 64 from 512 to 2048 on both axes, plus multiples of 8 that are not multiples of 64.
+SIZES = list(range(512, 2049, 64)) + [520, 776, 832, 1000, 1080, 1216, 1352, 1544]
+
+
+@pytest.mark.parametrize("tile_size_max", [0, 128, 256, 384, 512])
+def test_hook_keeps_the_configured_tile_size_and_splits_each_axis_by_it(hypertile, tile_size_max):
+    latent_tile = max(128, tile_size_max) // 8
+    for width in SIZES:
+        for height in SIZES[::3]:
+            params, run = _hooked_depth0_layer(hypertile, width, height, tile_size_max)
+            assert params.tile_size == tile_size_max, (width, height)
+            rows, cols = height // 8, width // 8
+            tiles = run(rows, cols)
+            tile_rows = _smallest_divisor_at_least(rows, latent_tile)
+            tile_cols = _smallest_divisor_at_least(cols, latent_tile)
+            # Each tile edge depends only on its own axis: the other axis (squareness, gcd) never shrinks it.
+            assert tiles.shape == ((rows // tile_rows) * (cols // tile_cols), tile_rows * tile_cols, 2), (width, height)
+            for tile in tiles:
+                assert int(tile[:, 0].max() - tile[:, 0].min()) + 1 == tile_rows
+                assert int(tile[:, 1].max() - tile[:, 1].min()) + 1 == tile_cols
+
+
+def test_non_square_image_tiles_like_the_square_one_on_the_shared_axis(hypertile):
+    # 1024x1152 used to get tile size 128 (largest power of two dividing gcd 128) instead of the configured 256:
+    # 16-row tiles, 8x9 of them, where 1024x1024 gets 32-row tiles.
+    _, run_square = _hooked_depth0_layer(hypertile, 1024, 1024, 256)
+    _, run_wide = _hooked_depth0_layer(hypertile, 1152, 1024, 256)
+    square, wide = run_square(128, 128), run_wide(128, 144)
+    assert square.shape[0] == 4 * 4
+    assert wide.shape[0] == 4 * 4
+    assert int(wide[0][:, 0].max()) + 1 == int(square[0][:, 0].max()) + 1 == 32
+
+
+def test_sdxl_depth_table_tiles_only_its_depth0_layers_at_1024(hypertile):
+    """Pins the upstream SD-XL table (see the note on DEPTH_LAYERS_XL): every wrapped layer of an SD-XL ldm U-Net,
+    run on its real token grid at 1024x1024 with the defaults, and the set of layers that actually tile."""
+    level1 = [f"input_blocks.{i}.1.transformer_blocks.{t}.attn1" for i in (4, 5) for t in range(2)]
+    level1 += [f"output_blocks.{i}.1.transformer_blocks.{t}.attn1" for i in (3, 4, 5) for t in range(2)]
+    level2 = [f"{block}.1.transformer_blocks.{t}.attn1" for block in ("input_blocks.7", "input_blocks.8", "output_blocks.0",
+                                                                     "output_blocks.1", "output_blocks.2") for t in range(10)]
+    level2 += [f"middle_block.1.transformer_blocks.{t}.attn1" for t in range(10)]
+    grids = dict.fromkeys(level1, 64) | dict.fromkeys(level2, 32)  # 1024 px: latent 128, /2 and /4
+
+    unet = torch.nn.Module()
+    seen = {}
+    for name in grids:
+        parent = unet
+        *path, leaf = name.split(".")
+        for part in path:
+            if not hasattr(parent, part):
+                parent.add_module(part, torch.nn.Module())
+            parent = getattr(parent, part)
+
+        class Attention(torch.nn.Module):
+            def forward(self, tokens, _name=name):
+                seen[_name] = tokens.shape[0]
+                return tokens
+
+        parent.add_module(leaf, Attention())
+    hypertile.hypertile_hook_model(unet, 1024, 1024, enable=True, tile_size_max=256, swap_size=1, max_depth=3, is_sdxl=True)
+
+    assert len(getattr(unet, "__webui_hypertile_layers")) == 70
+    for name, side in grids.items():
+        unet.get_submodule(name)(torch.zeros(1, side * side, 1))
+    assert sorted(name for name, batch in seen.items() if batch > 1) == sorted(
+        name for name in level1 if name.endswith("transformer_blocks.0.attn1"))

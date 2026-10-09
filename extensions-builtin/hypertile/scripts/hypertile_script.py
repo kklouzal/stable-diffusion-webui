@@ -1,5 +1,6 @@
 import hypertile
 from modules import scripts, script_callbacks, shared
+from modules.processing import opt_f
 
 
 class ScriptHypertile(scripts.Script):
@@ -26,7 +27,9 @@ class ScriptHypertile(scripts.Script):
         if enable:
             hypertile.set_hypertile_seed(p.all_seeds[0])
 
-        configure_hypertile(p.hr_upscale_to_x, p.hr_upscale_to_y, enable_unet=enable)
+        # hr_resize_x/y crop truncate_x/y latent columns/rows off the upscaled latent when they change the aspect
+        # ratio: configure for the size the second pass denoises, not the pre-crop upscale target.
+        configure_hypertile(p.hr_upscale_to_x - p.truncate_x * opt_f, p.hr_upscale_to_y - p.truncate_y * opt_f, enable_unet=enable)
 
         if enable and not shared.opts.hypertile_enable_unet:
             p.extra_generation_params["Hypertile U-Net second pass"] = True

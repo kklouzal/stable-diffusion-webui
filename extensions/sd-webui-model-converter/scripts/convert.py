@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import time
 import traceback
@@ -54,6 +55,11 @@ KNOWN_JUNK_PREFIXES = (
 # In a LoRA file the lora_*/lycoris_* keys are the payload, not junk: only the training/runtime residue is.
 LORA_JUNK_PREFIXES = tuple(prefix for prefix in KNOWN_JUNK_PREFIXES if not prefix.startswith(("lora_", "lycoris_")))
 KNOWN_JUNK_EXACT = {"global_step", "pytorch-lightning_version"}
+# Top-level keys whose presence A1111 reads as model configuration: "v_pred" selects the SDXL v-prediction config
+# (sd_models_config.guess_model_config_from_state_dict) and "ztsnr" the zero-terminal-SNR schedule
+# (sd_models.load_model_weights). They classify as "other" weights; "other: delete" copies them instead, so a
+# conversion never turns a v-pred/ZTSNR model into an eps one.
+MODEL_MARKER_KEYS = {"v_pred", "ztsnr"}
 
 
 class MockModelInfo:
@@ -63,24 +69,63 @@ class MockModelInfo:
         self.model_name = os.path.splitext(self.filename)[0]
 
 
+def overflow_limit(dtype: torch.dtype) -> tuple[float, bool]:
+    """(threshold, tie_overflows) for round-to-nearest-even into ``dtype``: a finite value whose magnitude is above
+    the threshold, or equal to it when tie_overflows, does not round to a finite ``dtype`` value. The threshold is
+    the midpoint between the largest finite value and the next step; a tie rounds away from the largest value when
+    its significand is odd (all-ones in the IEEE-style formats; float8_e4m3fn's 448 = 1.110b x 2^8 is even)."""
+    finfo = torch.finfo(dtype)
+    ulp = 2.0 ** math.floor(math.log2(finfo.max)) * finfo.eps
+    return finfo.max + ulp / 2, int(finfo.max / ulp) % 2 == 1
+
+
+def cast_checked(t: Tensor, dtype: torch.dtype) -> Tensor:
+    """``t.to(dtype)``, raising OverflowError when a finite value of ``t`` is outside ``dtype``'s range.
+
+    torch turns such values into Inf for fp16, bf16, fp32 and float8_e5m2 (and the output NaN/Inf repair would then
+    zero them) and saturates them to 448 for float8_e4m3fn, which has no Inf. The upstream converter cast without a
+    check; here a weight the target format cannot hold is rejected so the caller can pick a wider precision. Casts
+    into a dtype whose range covers the source's need no check.
+    """
+    if torch.finfo(dtype).max >= torch.finfo(t.dtype).max or t.numel() == 0:
+        return t.to(dtype)
+    low, high = torch.aminmax(t)
+    peak = max(-float(low), float(high))
+    if not math.isfinite(peak):
+        # NaN/Inf in the source are not overflow; they are repaired by the NaN/Inf scan.
+        finite = torch.isfinite(t)
+        if not bool(finite.any()):
+            return t.to(dtype)
+        low, high = torch.aminmax(t[finite])
+        peak = max(-float(low), float(high))
+    threshold, tie_overflows = overflow_limit(dtype)
+    if peak > threshold or (tie_overflows and peak == threshold):
+        target = str(dtype).removeprefix("torch.")
+        raise OverflowError(
+            f"{target} cannot hold a weight of magnitude {peak:g} (largest finite {target} value "
+            f"{torch.finfo(dtype).max:g}); choose a wider precision"
+        )
+    return t.to(dtype)
+
+
 def conv_fp32(t: Tensor) -> Tensor:
-    return t.float() if torch.is_floating_point(t) and t.dtype != torch.float32 else t
+    return cast_checked(t, torch.float32) if torch.is_floating_point(t) and t.dtype != torch.float32 else t
 
 
 def conv_fp16(t: Tensor) -> Tensor:
-    return t.half() if t.dtype in DTYPES_TO_FP16 else t
+    return cast_checked(t, torch.float16) if t.dtype in DTYPES_TO_FP16 else t
 
 
 def conv_bf16(t: Tensor) -> Tensor:
-    return t.bfloat16() if t.dtype in DTYPES_TO_BF16 else t
+    return cast_checked(t, torch.bfloat16) if t.dtype in DTYPES_TO_BF16 else t
 
 
 def conv_float8_e4m3fn(t: Tensor) -> Tensor:
-    return t.to(torch.float8_e4m3fn) if t.dtype in DTYPES_TO_FLOAT8 else t
+    return cast_checked(t, torch.float8_e4m3fn) if t.dtype in DTYPES_TO_FLOAT8 else t
 
 
 def conv_float8_e5m2(t: Tensor) -> Tensor:
-    return t.to(torch.float8_e5m2) if t.dtype in DTYPES_TO_FLOAT8 else t
+    return cast_checked(t, torch.float8_e5m2) if t.dtype in DTYPES_TO_FLOAT8 else t
 
 
 PRECISION_FUNCS = {
@@ -154,24 +199,30 @@ def save_atomically(save_path: str, write: Callable[[str], None]) -> None:
     """Publish ``save_path`` only after ``write`` has fully written and flushed it.
 
     ``write`` serializes to a uniquely named hidden ``.partial`` sibling (ignored by the checkpoint and LoRA
-    listings), which is fsynced and renamed onto ``save_path``; a failed or interrupted save never leaves a
-    truncated checkpoint under the final name, and the temporary file is removed on failure. The no-overwrite
-    contract of safe_output_path is re-checked just before the rename (conversions run under queue_lock).
+    listings), which is fsynced and then hard-linked to ``save_path``. The link fails atomically when
+    ``save_path`` exists, so a file another process created after safe_output_path checked is never replaced; a
+    failed or interrupted save never leaves a truncated checkpoint under the final name. The temporary name is
+    always removed, and the directory is fsynced so the published name is durable. On a filesystem without
+    hard links the save fails.
     """
-    tmp_path = os.path.join(
-        os.path.dirname(save_path), f".openclaw-convert-{uuid.uuid4().hex}.partial"
-    )
+    directory = os.path.dirname(save_path)
+    tmp_path = os.path.join(directory, f".openclaw-convert-{uuid.uuid4().hex}.partial")
     try:
         write(tmp_path)
         with open(tmp_path, "rb") as f:
             os.fsync(f.fileno())
-        if os.path.exists(save_path):
-            raise FileExistsError(f"refusing to overwrite existing file: {save_path}")
-        os.replace(tmp_path, save_path)
-    except BaseException:
+        try:
+            os.link(tmp_path, save_path)
+        except FileExistsError:
+            raise FileExistsError(f"refusing to overwrite existing file: {save_path}") from None
+    finally:
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp_path)
-        raise
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def require_choice(kind: str, value: Any, allowed: set[str]) -> str:
@@ -373,7 +424,7 @@ def checkpoint_doctor(
         "shape_issue_examples": shape_issues[:25],
         "huge_tensor_examples": huge_tensors[:10],
         "warnings": warnings,
-        "content_scan": "metadata-only; NaN/Inf full tensor scan intentionally skipped during conversion for speed",
+        "content_scan": "every floating-point tensor is scanned for NaN/Inf, which are repaired to 0; see nonfinite",
     }
 
 
@@ -394,6 +445,9 @@ def scan_and_repair_nonfinite(
         # CPU isposinf/isneginf/nan_to_num have no float8 kernels; float8 -> float16 is exact (inf/NaN
         # included), so scan and repair a float16 copy and cast the repaired values back.
         values = tensor.to(torch.float16) if tensor.dtype in FLOAT8_DTYPES else tensor
+        # One pass for the common all-finite tensor; the three counting passes run only on affected tensors.
+        if bool(torch.isfinite(values).all()):
+            continue
         nan_count = int(torch.isnan(values).sum().item())
         posinf_count = int(torch.isposinf(values).sum().item())
         neginf_count = int(torch.isneginf(values).sum().item())
@@ -636,7 +690,10 @@ def convert_lora(payload: dict[str, Any]) -> str:
             if cleanup and is_known_lora_junk_key(str(key)):
                 continue
             if torch.is_floating_point(tensor):
-                ok[key] = PRECISION_FUNCS[precision](tensor)
+                try:
+                    ok[key] = PRECISION_FUNCS[precision](tensor)
+                except OverflowError as exc:
+                    raise OverflowError(f"{key}: {exc}") from exc
             else:
                 ok[key] = tensor
         output_nonfinite = scan_and_repair_nonfinite(ok, repair=True)
@@ -730,6 +787,21 @@ def resolve_model_info(model: str) -> MockModelInfo | None:
     return None
 
 
+def resolve_bake_in_vae(bake_in_vae: str, vae_action: str) -> str | None:
+    """The file of the VAE to bake in, or None for "None"/"". The VAE list is re-read first (the options route
+    lists it the same way), and a name it does not hold, or a bake under "vae: delete" (which would drop every baked
+    weight), raises instead of writing a checkpoint without the requested VAE."""
+    if bake_in_vae in ("None", ""):
+        return None
+    if vae_action == "delete":
+        raise ValueError(f"cannot bake in VAE {bake_in_vae!r} while the VAE action is 'delete'")
+    sd_vae.refresh_vae_list()
+    filename = sd_vae.vae_dict.get(bake_in_vae)
+    if filename is None:
+        raise ValueError(f"VAE to bake in was not found: {bake_in_vae!r}")
+    return filename
+
+
 def conversion_metadata(
     model_info: MockModelInfo,
     *,
@@ -819,6 +891,7 @@ def do_convert(
             "other-weights precision", other_precision, COMPONENT_PRECISIONS
         ),
     }
+    bake_in_vae_filename = resolve_bake_in_vae(bake_in_vae, extra_opt["vae"])
     float8_components = {
         component
         for component in ("unet", "clip", "vae", "other")
@@ -858,12 +931,17 @@ def do_convert(
                 return tensor.to(torch.int64) if force_position_id else tensor
             if not torch.is_floating_point(tensor):
                 return tensor
-            return PRECISION_FUNCS[precision_for(weight_key)](tensor)
+            try:
+                return PRECISION_FUNCS[precision_for(weight_key)](tensor)
+            except OverflowError as exc:
+                raise OverflowError(f"{weight_key}: {exc}") from exc
 
         def handle_weight(weight_key: str, tensor: Tensor) -> None:
             if not isinstance(tensor, Tensor):
                 return
             action = extra_opt[check_weight_type(weight_key)]
+            if action == "delete" and weight_key in MODEL_MARKER_KEYS:
+                action = "copy"
             if action == "convert":
                 ok[weight_key] = convert_tensor(weight_key, tensor)
             elif action == "copy":
@@ -898,7 +976,6 @@ def do_convert(
             for key in [k for k in ok if is_known_junk_key(str(k))]:
                 removed_junk.append(str(key))
                 del ok[key]
-        bake_in_vae_filename = sd_vae.vae_dict.get(bake_in_vae)
         if bake_in_vae_filename is not None:
             print(
                 f"[OpenClaw Model Converter] Baking in VAE from {bake_in_vae_filename}"

@@ -356,22 +356,12 @@ def slice_cond_rows(cond, rows: int, m: int):
     return _slice_rows(cond, rows, m)
 
 
-# Attribute names set by extensions-builtin/hypertile on the diffusion wrapper and on each wrapped layer.
-_HYPERTILE_LAYERS = "__webui_hypertile_layers"
-_HYPERTILE_PARAMS = "__webui_hypertile_params"
-
-
 def hypertile_unet_enabled(diffusion_wrapper) -> bool:
     """True when a hypertile-wrapped U-Net attention layer under ``diffusion_wrapper`` is enabled.
 
     Hypertile draws its tile layout from a private RNG on every wrapped attention call, so adding or
-    skipping UNet calls (or encoder layers) while it is enabled shifts every later tile choice.
+    skipping UNet calls (or encoder layers) while it is enabled shifts every later tile choice. Reads the
+    O(1) summary ``extensions-builtin/hypertile`` publishes on the wrapper each time it sets the per-layer
+    flags (the OR of every wrapped layer's ``enabled``; absent until hypertile first hooks the model).
     """
-    layers = getattr(diffusion_wrapper, _HYPERTILE_LAYERS, None)
-    if not layers:
-        return False
-    for name in layers:
-        params = getattr(diffusion_wrapper.get_submodule(name), _HYPERTILE_PARAMS, None)
-        if params is not None and params.enabled:
-            return True
-    return False
+    return bool(getattr(diffusion_wrapper, "__webui_hypertile_enabled", False))

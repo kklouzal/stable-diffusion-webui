@@ -461,6 +461,7 @@ class Harness:
                 layers[name] = 1
         assert layers
         setattr(self.sd_model.model, "__webui_hypertile_layers", layers)
+        setattr(self.sd_model.model, "__webui_hypertile_enabled", True)
 
     def run(self, x, sigma, conds_list, cond, uncond, image_cond, s_min_uncond=0.0):
         self.captured.clear()

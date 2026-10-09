@@ -3,7 +3,7 @@ import weakref
 from contextlib import suppress
 from os import environ
 from modules import headless_ui as gr
-from scripts.ui_wrapper import UIWrapper, cond_crossattn, xyz_field_setter
+from scripts.ui_wrapper import UIWrapper, cond_crossattn, sampler_step, xyz_field_setter
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams, CFGDenoisedParams
 from modules.processing import StableDiffusionProcessing
@@ -51,7 +51,7 @@ class PAGStateParams:
                 self.pag_scale: float = -1      # PAG guidance scale
                 self.pag_start_step: int = 0
                 self.pag_end_step: int = 150
-                self.step : int = 0
+                self.step: int = 0  # sampler step of the denoiser call in progress (set by the cfg_denoiser callback)
                 self.crossattn_modules = [] # the hooked middle-block self-attention modules
                 self.pag_x_out = None
                 self.openclaw_extension_timings = {}
@@ -283,7 +283,8 @@ class PAGExtensionScript(UIWrapper):
         def ready_hijack_forward(self, crossattn_modules):
                 """ Create hooks in the forward pass of the cross attention modules
                 Copies the output of the to_v module to the parent module
-                Then applies the PAG perturbation to the output of the cross attention module (multiplication by identity)
+                Then applies the PAG perturbation to the output of the cross attention module: with the identity
+                attention map the output is to_out(to_v(x))
                 """
 
                 # add field for last_to_v
@@ -304,15 +305,21 @@ class PAGExtensionScript(UIWrapper):
                         if not module.pag_enable:
                                 return
 
-                        # get the last to_v output and save it
                         last_to_v = module.pag_last_to_v
-
-                        _, seq_len, _ = output.shape
-                        if last_to_v is not None:
-                                # Multiplication by an expanded identity matrix is exactly this slice.
-                                # Avoid allocating the identity tensor and launching an einsum per attention call.
-                                return last_to_v[:, :seq_len, :]
-                        return output
+                        if last_to_v is None:
+                                raise RuntimeError("PAG: the perturbed attention call ran without a to_v output")
+                        batch, seq_len, _ = output.shape
+                        if last_to_v.shape[0] != batch or last_to_v.shape[1] < seq_len:
+                                # Hypertile tiling this layer calls to_v on (batch * tiles) tile rows.
+                                raise RuntimeError(
+                                        f"PAG: the attention input was split into {last_to_v.shape[0]} rows of {last_to_v.shape[1]} tokens, "
+                                        f"not the {batch} rows of {seq_len} tokens of its output (hypertile tiling the middle block?)"
+                                )
+                        # The identity attention map makes the attention output the values themselves, which then go
+                        # through the output projection like any attention output (Ahn et al. 2024; diffusers
+                        # PAGIdentitySelfAttnProcessor): to_out(to_v(x)). A context longer than x (ControlNet
+                        # reference banks) keeps the values of the layer's own tokens, the leading seq_len.
+                        return module.to_out(last_to_v[:, :seq_len, :])
 
                 # Keep RemovableHandles so cleanup does not need to rewrite PyTorch hook tables globally.
                 for module in crossattn_modules:
@@ -335,20 +342,21 @@ class PAGExtensionScript(UIWrapper):
         def _on_cfg_denoiser_callback(self, params: CFGDenoiserParams, pag_params: PAGStateParams):
                 # Keep PAG hooks installed for the batch; per-step work only updates
                 # mutable state. Removing hooks here disables the extra PAG pass.
-                pag_params.step = params.sampling_step
                 pag_params.pag_x_out = None
 
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
+                denoiser = getattr(params, 'denoiser', None)
+                if denoiser is None:
+                        raise RuntimeError("PAG needs CFGDenoiserParams.denoiser for its step and to record the main denoiser pass")
+                # The cfg_denoised callback of this denoiser call reads the same step.
+                pag_params.step = sampler_step(denoiser)
+                if not pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step:
                         self._drop_main_pass_memo()
                         return
 
                 # Record this step's main-pass UNet calls; the PAG pass replays their cond rows.
-                denoiser = getattr(params, 'denoiser', None)
-                if denoiser is None:
-                        raise RuntimeError("PAG needs CFGDenoiserParams.denoiser to record the main denoiser pass")
                 if self.recorded_denoiser() is not denoiser:
                         self.remove_main_pass_recorder()
                         # Weak: a request that fails mid-step must not keep its denoiser and memo alive.
@@ -368,7 +376,7 @@ class PAGExtensionScript(UIWrapper):
                 # Run PAG only if active and within interval
                 if not pag_params.pag_active or pag_params.pag_scale <= 0:
                         return
-                if not pag_params.pag_start_step <= params.sampling_step <= pag_params.pag_end_step:
+                if not pag_params.pag_start_step <= pag_params.step <= pag_params.pag_end_step:
                         return
 
                 memo = sd_unet_row_memo.disarm(self.recorded_denoiser())

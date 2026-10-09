@@ -85,6 +85,13 @@ DEPTH_LAYERS = {
     ],
 }
 # XL layers, thanks for GitHub@gel-crabs for the help
+# Upstream behaviour, kept as is: unlike DEPTH_LAYERS (one depth per resolution level, tfernd's design), this table
+# mixes levels. Depth 0 is transformer_blocks.0 of the 1/2-resolution level (input_blocks.4-5, output_blocks.3-5),
+# depth 1 holds that level's transformer_blocks.1 together with all ten blocks of the 1/4-resolution level, and
+# depth 2 the middle block, also at 1/4 resolution. The 2**depth tile factor therefore differs between layers at the
+# same resolution; at 1024x1024 with the default tile size 256 only the 5 depth-0 layers of the 70 tile. Neither
+# upstream states an intended per-resolution layout for SD-XL (tfernd never covered it; A1111 shipped this table
+# with its first commit), so it is not changed here.
 DEPTH_LAYERS_XL = {
     0: [
         # SD 1.5 U-Net (diffusers)
@@ -218,19 +225,6 @@ def set_hypertile_seed(seed: int) -> None:
     RNG_INSTANCE.seed(seed)
 
 
-@lru_cache(maxsize=256)
-def largest_tile_size_available(width: int, height: int) -> int:
-    """
-    Calculates the largest tile size available for a given width and height
-    Tile size is always a power of 2
-    """
-    gcd = math.gcd(width, height)
-    largest_tile_size_available = 1
-    while gcd % (largest_tile_size_available * 2) == 0:
-        largest_tile_size_available *= 2
-    return largest_tile_size_available
-
-
 def iterative_closest_divisors(hw:int, aspect_ratio:float) -> tuple[int, int]:
     """
     Finds h and w such that h*w = hw and w/h = aspect_ratio (width / height)
@@ -343,7 +337,12 @@ def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_
         model.__webui_hypertile_layers = hypertile_layers
 
     aspect_ratio = width / height
-    tile_size = min(largest_tile_size_available(width, height), tile_size_max)
+    # The tile size is the minimum tile edge; random_divisor picks a divisor of each layer's actual token rows/columns
+    # at or above it, so any value splits validly. Upstream clamped it to the largest power of two dividing
+    # gcd(width, height), which shrank the configured size for every size pair whose gcd is not a multiple of it
+    # (576 of the 625 pairs in 512..2048 step 64 at the default 256; 1152x1024: 128, a 4x finer tiling than
+    # 1024x1024) and never made a split valid that was not already.
+    tile_size = tile_size_max
     any_enabled = False
 
     for layer_name, module in model.named_modules():

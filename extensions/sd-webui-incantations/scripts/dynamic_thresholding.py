@@ -10,7 +10,7 @@ import logging
 
 from modules import headless_ui as gr
 import dynthres_core
-from modules import scripts, script_callbacks, sd_samplers, sd_samplers_common, sd_samplers_timesteps
+from modules import scripts, script_callbacks, sd_samplers, sd_samplers_timesteps
 from modules.sd_samplers_kdiffusion import CFGDenoiserKDiffusion as cfgdenoisekdiff
 from scripts.ui_wrapper import add_xyz_axis_options, cond_crossattn
 
@@ -83,6 +83,9 @@ class Script(scripts.Script):
         if not hasattr(p, 'orig_sampler_name'):
             return
         p.sampler_name = p.orig_sampler_name
+        if hasattr(p, 'orig_hr_sampler_name'):
+            p.hr_sampler_name = p.orig_hr_sampler_name
+            del p.orig_hr_sampler_name
         self._unregister_samplers(p.fixed_samplers)
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)
@@ -96,8 +99,11 @@ class Script(scripts.Script):
         if not enabled:
             return
         orig_sampler_name = p.sampler_name
-        if orig_sampler_name in UNSUPPORTED_SAMPLERS:
-            raise RuntimeError(f"Cannot use sampler {orig_sampler_name} with Dynamic Thresholding")
+        # The hires pass samples with hr_sampler_name when it is set (txt2img; None means the first pass's sampler).
+        orig_hr_sampler_name = getattr(p, 'hr_sampler_name', None)
+        for name in (orig_sampler_name, orig_hr_sampler_name):
+            if name in UNSUPPORTED_SAMPLERS:
+                raise RuntimeError(f"Cannot use sampler {name} with Dynamic Thresholding")
         mimic_scale = getattr(p, 'dynthres_mimic_scale', mimic_scale)
         separate_feature_channels = getattr(p, 'dynthres_separate_feature_channels', separate_feature_channels)
         scaling_startpoint = getattr(p, 'dynthres_scaling_startpoint', scaling_startpoint)
@@ -142,15 +148,20 @@ class Script(scripts.Script):
                 cfg = CustomCFGDenoiser(result, dt_data)
                 result.model_wrap_cfg = cfg
                 return result
-            new_sampler = sd_samplers_common.SamplerData(fixed_sampler_name, new_constructor, sampler.aliases, sampler.options)
-            return fixed_sampler_name, new_sampler
+            # _replace keeps the SamplerData subclass (MultiSamplerData: a chain's total_steps) and its other fields.
+            new_sampler = sampler._replace(name=fixed_sampler_name, constructor=new_constructor)
+            sd_samplers.all_samplers_map[fixed_sampler_name] = new_sampler
+            Script.registered_samplers.add(fixed_sampler_name)
+            p.fixed_samplers.append(fixed_sampler_name)
+            return fixed_sampler_name
 
         # Apply for usage
         p.orig_sampler_name = orig_sampler_name
-        p.sampler_name, new_sampler = make_sampler(orig_sampler_name)
-        sd_samplers.all_samplers_map[p.sampler_name] = new_sampler
-        Script.registered_samplers.add(p.sampler_name)
-        p.fixed_samplers = [p.sampler_name]
+        p.fixed_samplers = []
+        p.sampler_name = make_sampler(orig_sampler_name)
+        if orig_hr_sampler_name is not None:
+            p.orig_hr_sampler_name = orig_hr_sampler_name
+            p.hr_sampler_name = p.sampler_name if orig_hr_sampler_name == orig_sampler_name else make_sampler(orig_hr_sampler_name)
 
         if p.sampler is not None:
             p.sampler = sd_samplers.create_sampler(p.sampler_name, p.sd_model)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import types
 import unittest
 
 import torch
@@ -228,19 +227,36 @@ class RowMemoTests(unittest.TestCase):
         memo.clear()
         self.assertEqual(memo.calls, [])
 
-    def test_hypertile_unet_enabled_reads_wrapped_layer_state(self):
+    def test_hypertile_unet_enabled_matches_every_wrapped_layer_flag(self):
+        hypertile = load_source("hypertile_for_row_memo", "extensions-builtin/hypertile/hypertile.py")
         wrapper = torch.nn.Module()
-        wrapper.diffusion_model = torch.nn.Module()
-        wrapper.diffusion_model.attn = torch.nn.Linear(1, 1)
-        self.assertFalse(self.memo.hypertile_unet_enabled(wrapper))
-        self.assertFalse(self.memo.hypertile_unet_enabled(None))
+        names = [
+            "diffusion_model.input_blocks.4.1.transformer_blocks.0.attn1",  # SDXL depth 0
+            "diffusion_model.input_blocks.7.1.transformer_blocks.3.attn1",  # SDXL depth 1
+            "diffusion_model.middle_block.1.transformer_blocks.9.attn1",  # SDXL depth 2
+        ]
+        for name in names:
+            parent = wrapper
+            *path, leaf = name.split(".")
+            for part in path:
+                if not hasattr(parent, part):
+                    parent.add_module(part, torch.nn.Module())
+                parent = getattr(parent, part)
+            parent.add_module(leaf, torch.nn.Linear(1, 1))
 
-        params = types.SimpleNamespace(enabled=False)
-        setattr(wrapper.diffusion_model.attn, "__webui_hypertile_params", params)
-        setattr(wrapper, "__webui_hypertile_layers", {"diffusion_model.attn": 1})
-        self.assertFalse(self.memo.hypertile_unet_enabled(wrapper))
-        params.enabled = True
-        self.assertTrue(self.memo.hypertile_unet_enabled(wrapper))
+        def walk_oracle():
+            # The per-layer state the summary flag stands for.
+            layers = getattr(wrapper, "__webui_hypertile_layers", None) or {}
+            return any(getattr(wrapper.get_submodule(name), "__webui_hypertile_params").enabled for name in layers)
+
+        self.assertFalse(self.memo.hypertile_unet_enabled(None))
+        hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=False)
+        self.assertFalse(self.memo.hypertile_unet_enabled(wrapper))  # never hooked: no layers, no summary
+        for enable, max_depth in [(True, 3), (True, 0), (True, -1), (False, 3), (True, 2), (True, 1), (False, -1)]:
+            hypertile.hypertile_hook_model(wrapper, 1024, 1024, enable=enable, max_depth=max_depth, is_sdxl=True)
+            self.assertEqual(len(getattr(wrapper, "__webui_hypertile_layers")), len(names))
+            self.assertIs(self.memo.hypertile_unet_enabled(wrapper), walk_oracle(), (enable, max_depth))
+            self.assertIs(walk_oracle(), enable and max_depth >= 0)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,10 @@ class UIWrapper:
         """Install ``fn(module, args, kwargs, output)`` as a forward hook of ``module`` until remove_hook_handles()."""
         self._hook_handles.append(module.register_forward_hook(fn, with_kwargs=True))
 
+    def add_forward_pre_hook(self, module, fn):
+        """Install ``fn(module, args, kwargs)`` as a forward pre-hook of ``module`` until remove_hook_handles()."""
+        self._hook_handles.append(module.register_forward_pre_hook(fn, with_kwargs=True))
+
     def remove_hook_handles(self):
         for handle in self._hook_handles:
             handle.remove()
@@ -66,6 +70,25 @@ class UIWrapper:
 def cond_crossattn(cond):
     """Return the cross-attention tensor of plain or SDXL dict conditioning (None if a dict has none)."""
     return cond.get('crossattn') if isinstance(cond, dict) else cond
+
+
+def sampler_step(denoiser):
+    """The 0-based sampler step of the CFG denoiser call in progress, in the units of the start/end step inputs.
+
+    ``CFGDenoiserParams.sampling_step`` is ``state.sampling_step``, which the sampler callback sets after a step's
+    model call: during step i's call it still reads i - 1, so steps 0 and 1 both read 0 and every interval started
+    and ended one step late. ``denoiser.step`` counts this pass's denoiser calls and ``total_steps`` is the number
+    of calls its ``steps`` sampler steps make (two per step for second-order samplers); the core measures sampling
+    progress the same way (refiner switch, skip-early-CFG, prompt-schedule steps). The result is exact for every
+    sampler that calls the model at a fixed rate per step, first-order "Multi" chains included; for the others
+    (PLMS's first step, Restart, DPM fast/adaptive, chains mixing first- and second-order samplers) it follows that
+    progress measure.
+    """
+    steps = getattr(denoiser, 'steps', None)
+    total_steps = getattr(denoiser, 'total_steps', None)
+    if not steps or not total_steps:
+        raise RuntimeError(f"the CFG denoiser has no step count for this pass (steps={steps!r}, total_steps={total_steps!r})")
+    return denoiser.step * steps // total_steps
 
 
 def xyz_field_setter(field, active_field, *, boolean=False):

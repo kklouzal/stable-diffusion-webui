@@ -23,7 +23,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 
 ## Source map
 
-- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (the timestep samplers DDIM, DDIM CFG++, PLMS and UniPC are rejected with an error). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
+- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (the timestep samplers DDIM, DDIM CFG++, PLMS and UniPC are rejected with an error). It wraps the hires pass's `hr_sampler_name` as well (it used to run without Dynamic Thresholding when one was set), and its renamed sampler is a `_replace` copy that keeps the sampler data's class and fields (a Multi chain's `MultiSamplerData.total_steps`). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
 - `scripts/pag.py` and `scripts/smoothed_energy_guidance.py`: Incantations guidance source with GB10 lifecycle fixes.
 - `scripts/cfg_combiner.py`: GB10-owned CFG composition glue for PAG and CFG-Fix coexistence.
 - `scripts/incantation_base.py`: GB10-trimmed A1111 entrypoint that exposes only the supported combined guidance stack.
@@ -31,6 +31,11 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 - `tests/`: CPU unit tests with A1111 stubbed; run them in their own pytest process.
 - Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
 - Removed PAG's CFG Scheduler ("CFG Interval": noise-interval CFG and CFG weight schedules). Its four script args stay as placeholders, see below.
+- PAG's perturbed pass replaces the middle-block self-attention map with the identity, so the layer outputs `to_out(to_v(x))` as in the paper, diffusers' `PAGIdentitySelfAttnProcessor` and ComfyUI. Upstream Incantations (and this tree until 2026-10-09) returned `to_v(x)` and skipped the output projection; the fix changes PAG images.
+- PAG and SEG Start/End Step compare the sampler step of the denoiser call in progress (`ui_wrapper.sampler_step`: the denoiser's call count over its `total_steps`, as the core measures progress). They read `state.sampling_step` before, which lags one step behind the model call, so every interval started and ended one step late. The default 0-150 interval is unaffected.
+- SEG blurs the uncond rows of every UNet call of the CFG batch, located by the call's row offset in the batch: one call, `batch_cond_uncond` off, and prompt/negative prompt of different token lengths (separate cond and uncond calls) all blur the same rows. Before, SEG switched itself off for the whole request when `batch_cond_uncond` was off and skipped the steps whose batch was split, silently. A cond-only call (skip-uncond: NGMS, skip early CFG) has no uncond rows to blur.
+- SEG's attention grid comes from the shape of the latent being denoised, not `p.height`/`p.width`, so a cropped hires pass blurs on its real grid (it could be transposed); first passes are bit-identical.
+- SEG fails the request instead of blurring wrong rows when: an extension replaces the CFG denoiser's or inner model's forward or `sd_model.apply_model` (Tiled Diffusion: MultiDiffusion, DemoFusion, Mixture of Diffusers; the CUDA-graph bypass uses the same test); a UNet call is not a row slice of the CFG batch; hypertile tiles the middle block; the CFG batch is not [cond, uncond] (InstructPix2Pix image CFG).
 
 
 ## A1111 API argument order

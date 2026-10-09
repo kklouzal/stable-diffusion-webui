@@ -125,3 +125,29 @@ when they are 'difference' models.
 1. Image A/B of the output-changing fixes against the operator's own references; LoRA merge time with fp32 math.
 2. IP-Adapter/PuLID/T2I/LLLite and reference/inpaint ControlNet units (no local checkpoints for the first group).
    (Update 2026-10-09: PuLID is gone, see above.)
+
+## Follow-up fixes (2026-10-09)
+
+A second audit of Incantations, Hypertile and the model converter. Details are in each extension's README and the
+commit messages. All verification was on the CPU.
+
+- **Output-changing on the production path:** PAG's perturbed pass is `to_out(to_v(x))` (the paper, diffusers and
+  ComfyUI). It returned raw `to_v(x)`, skipping the output projection.
+- **Output-changing elsewhere:**
+  - PAG/SEG Start/End Step use the step of the denoiser call; `state.sampling_step` lagged one step. The default
+    0-150 interval is bit-exact.
+  - SEG blurs the uncond rows of split CFG batches (`batch_cond_uncond` off; prompt and negative of different token
+    lengths without padding). It used to skip those steps silently.
+  - SEG takes its grid from the latent's shape, which fixes cropped hires passes.
+  - Dynamic Thresholding wraps an explicit `hr_sampler_name`, and keeps a Multi chain's `total_steps`.
+  - Hypertile keeps the configured tile size (no gcd clamp) and configures cropped hires passes for the cropped
+    latent.
+  - The model converter keeps the `v_pred`/`ztsnr` markers under `other: delete`.
+- **Fail closed:**
+  - SEG under Tiled Diffusion, on UNet calls that are not row slices of the CFG batch, with hypertile tiling the
+    middle block, and on non-[cond, uncond] batches.
+  - PAG with a split `to_v`.
+  - The converter: an unknown or conflicting `bake_in_vae`, and weights that overflow the target precision.
+- **GPU verification owed:**
+  - A fixed-seed A/B of the production request (PAG 6 + SEG) for the PAG `to_out` change.
+  - A SEG A/B with a long prompt and short negative (now blurred).
