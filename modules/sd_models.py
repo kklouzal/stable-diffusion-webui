@@ -82,7 +82,7 @@ class CheckpointInfo:
 
         def read_metadata():
             metadata = read_metadata_from_safetensors(filename)
-            self.modelspec_thumbnail = metadata.pop('modelspec.thumbnail', None)
+            metadata.pop('modelspec.thumbnail', None)
 
             return metadata
 
