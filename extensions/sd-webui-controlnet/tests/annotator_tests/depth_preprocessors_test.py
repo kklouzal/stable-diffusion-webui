@@ -104,7 +104,7 @@ class TestDepthPreprocessorsSkipPadding(unittest.TestCase):
             with self.subTest(name=name):
                 seen = []
 
-                def model(x, **kwargs):
+                def model(x, seen=seen, **kwargs):
                     seen.append(x)
                     return np.full(x.shape[:2], 7, np.uint8)
 
