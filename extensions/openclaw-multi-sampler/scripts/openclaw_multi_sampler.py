@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
 from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, sd_schedulers, shared
-from modules.shared import opts, state
+from modules.shared import state
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EXT_ROOT / "data"
@@ -400,20 +400,8 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
 
     def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, stage_steps: int) -> dict[str, Any]:
         params = _signature_param_names(func)
-        kwargs: dict[str, Any] = {}
-        for param_name in _stage_extra_params(funcname):
-            if param_name not in params:
-                continue
-            value = getattr(p, param_name, None)
-            if param_name == "s_churn":
-                value = getattr(opts, "s_churn", getattr(p, "s_churn", 0.0))
-            elif param_name == "s_tmin":
-                value = getattr(opts, "s_tmin", getattr(p, "s_tmin", 0.0))
-            elif param_name == "s_tmax":
-                value = getattr(opts, "s_tmax", getattr(p, "s_tmax", float("inf"))) or float("inf")
-            elif param_name == "s_noise":
-                value = getattr(opts, "s_noise", getattr(p, "s_noise", 1.0))
-            kwargs[param_name] = value
+        # The request's s_* over the settings', passed and recorded like a single sampler's (Sampler.initialize).
+        kwargs: dict[str, Any] = sd_samplers_common.sigma_params_kwargs(p, [name for name in _stage_extra_params(funcname) if name in params])
         if "eta" in params:
             kwargs["eta"] = self.eta
         if "n" in params:

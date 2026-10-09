@@ -17,6 +17,21 @@ REPO_ROOT = EXT_ROOT.parents[1]
 SCRIPT_PATH = EXT_ROOT / "scripts" / "openclaw_multi_sampler.py"
 
 
+def _core_source(names, namespace):
+    """Top-level definitions `names` of modules/sd_samplers_common.py, compiled alone into `namespace` (the harness
+    stubs that module, but the chain must run the core's own code for these)."""
+    path = REPO_ROOT / "modules" / "sd_samplers_common.py"
+    tree = ast.parse(path.read_text(encoding="utf8"))
+    body = [
+        node for node in tree.body
+        if (isinstance(node, ast.FunctionDef) and node.name in names)
+        or (isinstance(node, ast.Assign) and any(getattr(target, "id", None) in names for target in node.targets))
+    ]
+    assert len(body) == len(names)
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace
+
+
 def _install_a1111_stubs(monkeypatch) -> None:
     """Minimal A1111/k-diffusion surface the script imports; monkeypatch restores sys.modules after each test."""
 
@@ -82,8 +97,11 @@ def _install_a1111_stubs(monkeypatch) -> None:
     module("modules.script_callbacks", on_app_started=lambda _callback: None)
     module("modules.script_loading", loaded_scripts={})
     module("modules.scripts", Script=object, AlwaysVisible=object())
+    opts = types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=0.0, s_noise=1.0, sgm_noise_multiplier=False)
+    core = _core_source(("sigma_params_defaults", "sigma_params_infotext", "sigma_params_kwargs"), {"opts": opts})
     module(
         "modules.sd_samplers_common",
+        sigma_params_kwargs=core["sigma_params_kwargs"],
         SamplerData=SamplerData,
         InterruptedException=type("InterruptedException", (Exception,), {}),
         setup_img2img_steps=lambda p, steps=None: (steps or p.steps, getattr(p, "t_enc", steps or p.steps)),
@@ -97,7 +115,7 @@ def _install_a1111_stubs(monkeypatch) -> None:
     )
     module(
         "modules.shared",
-        opts=types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, sgm_noise_multiplier=False),
+        opts=opts,
         cmd_opts=types.SimpleNamespace(disable_console_progressbars=True),
         state=types.SimpleNamespace(sampling_step=0, sampling_steps=0),
         total_tqdm=types.SimpleNamespace(update=lambda: None),
@@ -114,7 +132,7 @@ def _install_a1111_stubs(monkeypatch) -> None:
         k_diffusion_samplers_map=sampler_configs,
         sampler_extra_params={
             "sample_euler": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
-            "sample_dpmpp_2m_sde": [],
+            "sample_dpmpp_2m_sde": ["s_noise"],
             "sample_heun": [],
             "sample_dpm_2": [],
         },
@@ -314,12 +332,7 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
 
 def _float_images_to_uint8():
     """modules.sd_samplers_common.float_images_to_uint8, compiled alone (the harness stubs that module)."""
-    path = REPO_ROOT / "modules" / "sd_samplers_common.py"
-    tree = ast.parse(path.read_text(encoding="utf8"))
-    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "float_images_to_uint8"]
-    namespace = {"torch": torch}
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
-    return namespace["float_images_to_uint8"]
+    return _core_source(("float_images_to_uint8",), {"torch": torch})["float_images_to_uint8"]
 
 
 def test_snapshots_round_to_uint8_like_generated_images(multi, monkeypatch, tmp_path):
@@ -440,3 +453,34 @@ def test_stage_schedule_calls_keep_schedule_keys_but_not_the_stage_label(multi, 
     assert first.extra_generation_params == {"Seed": 1, "Schedule rho": 5.0}
     assert hires.extra_generation_params == {"Schedule type": "Karras", "Hires schedule type": None, "Seed": 1, "Schedule rho": 5.0}
     assert list(hires.extra_generation_params) == ["Schedule type", "Hires schedule type", "Seed", "Schedule rho"]
+
+
+def _stage_kwargs(multi, p, funcname, func):
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.eta = 1.0
+    return sampler._build_stage_kwargs(p=p, func=func, funcname=funcname, config=types.SimpleNamespace(options={}),
+                                       x=torch.zeros(1), sigmas=torch.tensor([2.0, 1.0, 0.0]), stage_steps=2)
+
+
+def test_stage_sigma_params_take_the_request_over_the_settings_and_are_recorded(multi, monkeypatch):
+    monkeypatch.setattr(multi.shared.opts, "s_churn", 0.3)
+    monkeypatch.setattr(multi.shared.opts, "s_noise", 0.8)
+    p = types.SimpleNamespace(s_churn=0.5, s_tmin=0.0, s_tmax=float("inf"), s_noise=0.9, extra_generation_params={})
+
+    euler = _stage_kwargs(multi, p, "sample_euler", lambda model, x, sigmas=None, s_churn=0., s_tmin=0., s_tmax=float("inf"), s_noise=1.: x)
+    sde = _stage_kwargs(multi, p, "sample_dpmpp_2m_sde", lambda model, x, sigmas=None, eta=1., s_noise=1., noise_sampler=None: x)
+
+    assert {key: euler[key] for key in ("s_churn", "s_noise")} == {"s_churn": 0.5, "s_noise": 0.9}
+    assert "s_tmin" not in euler and "s_tmax" not in euler
+    assert sde["s_noise"] == 0.9
+    assert p.extra_generation_params == {"Sigma churn": 0.5, "Sigma noise": 0.9}
+
+
+def test_stage_sigma_params_at_the_defaults_pass_nothing(multi):
+    """Production settings (s_noise 1, s_churn/s_tmin/s_tmax 0): the stage functions run on their own defaults."""
+    p = types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, extra_generation_params={})
+
+    kwargs = _stage_kwargs(multi, p, "sample_euler", lambda model, x, sigmas=None, s_churn=0., s_tmin=0., s_tmax=float("inf"), s_noise=1.: x)
+
+    assert not {"s_churn", "s_tmin", "s_tmax", "s_noise"} & set(kwargs)
+    assert p.extra_generation_params == {}
