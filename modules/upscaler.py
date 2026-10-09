@@ -44,10 +44,16 @@ class Upscaler:
     def do_upscale(self, img: PIL.Image, selected_model: str):
         return img
 
-    def upscale(self, img: PIL.Image, scale, selected_model: str = None):
+    def upscale(self, img: PIL.Image, scale, selected_model: str = None, *, target_size: tuple[int, int] = None):
+        """`img` upscaled by `scale` to `target_size` (width, height) if given, else to its scaled size floored to a
+        multiple of 8. The model output is resampled once, straight to that size: a caller with an exact target passes
+        it rather than resizing the floored result again."""
         self.scale = scale
-        dest_w = scaled_size(img.width, scale) // 8 * 8
-        dest_h = scaled_size(img.height, scale) // 8 * 8
+        if target_size is None:
+            dest_w = scaled_size(img.width, scale) // 8 * 8
+            dest_h = scaled_size(img.height, scale) // 8 * 8
+        else:
+            dest_w, dest_h = target_size
 
         for i in range(3):
             if img.width >= dest_w and img.height >= dest_h and (i > 0 or scale != 1):

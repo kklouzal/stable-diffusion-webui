@@ -138,6 +138,53 @@ def test_lanczos_upscaler_reaches_target_in_one_resample(env):
     assert np.array_equal(np.asarray(result), np.asarray(expected))
 
 
+def _model_upscaler(env, factor=2):
+    """An Upscaler whose `do_upscale` is a fixed `factor`x model (nearest), so its output is known exactly."""
+    class ModelUpscaler(env.upscaler.Upscaler):
+        name = "model"
+
+        def __init__(self):
+            super().__init__()
+            self.scalers = [env.upscaler.UpscalerData("model", None, self)]
+
+        def do_upscale(self, img, selected_model):
+            return img.resize((img.width * factor, img.height * factor), resample=Image.Resampling.NEAREST)
+
+        def load_model(self, path):
+            pass
+
+    return ModelUpscaler()
+
+
+@pytest.mark.parametrize("target", [(1331, 1331), (1164, 1000), (1597, 1203)])
+def test_resize_image_resamples_the_model_output_once(env, target):
+    upscaler = _model_upscaler(env, factor=4)
+    env.shared.sd_upscalers = upscaler.scalers
+    img = _random_image(400, 350, seed=4)
+
+    result = env.images.resize_image(0, img, *target, upscaler_name="model")
+
+    # Formerly 4x -> floored to a multiple of 8 (1328x1328, 1160x1000) -> target: two LANCZOS passes.
+    expected = img.resize((1600, 1400), resample=Image.Resampling.NEAREST).resize(target, resample=LANCZOS)
+    assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+def test_resize_image_with_lanczos_upscaler_equals_a_direct_resize(env):
+    env.shared.sd_upscalers = env.upscaler.UpscalerLanczos().scalers
+    img = _random_image(1024, 1024, seed=6)
+
+    result = env.images.resize_image(0, img, 1331, 1331, upscaler_name="Lanczos")
+
+    assert np.array_equal(np.asarray(result), np.asarray(img.resize((1331, 1331), resample=LANCZOS)))
+
+
+def test_upscale_without_target_size_keeps_the_multiple_of_8_floor(env):
+    # The extras "Scale by" output size and sd_upscale's tile grid rely on it.
+    result = _model_upscaler(env).upscale(_random_image(333, 101, seed=0), 1.5)
+
+    assert result.size == (496, 144)
+
+
 # --- upscale_with_model tiling ----------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("size", [(70, 45), (192, 100), (37, 191)])
@@ -349,6 +396,19 @@ def test_crop_to_fit_fills_the_whole_target(env, pp_upscale, source, target):
     assert result.size == target
     assert np.asarray(result).min() > 50
     assert info["Postprocess crop to"] == f"{target[0]}x{target[1]}"
+
+
+def test_crop_to_fit_resamples_the_model_output_once(env, pp_upscale):
+    upscaler = _model_upscaler(env, factor=4)
+    upscaler_data = upscaler.scalers[0]
+    img = _random_image(300, 200, seed=9)
+
+    result = pp_upscale.ScriptPostprocessingUpscale().upscale(img, {}, upscaler_data, 1, 2.0, 0, 1001, 601, True)
+
+    # by = max(1001/300, 601/200) = 3.3367: the 1200x800 model output is resized once to 1001x667 and center-cropped
+    # (formerly 4x -> 1000x664, short of 1001 wide -> stretched again to 1001x668).
+    covering = img.resize((1200, 800), resample=Image.Resampling.NEAREST).resize((1001, 667), resample=LANCZOS)
+    assert np.array_equal(np.asarray(result), np.asarray(covering)[33:634])
 
 
 def test_scale_by_target_is_not_a_pixel_short(env, pp_upscale):

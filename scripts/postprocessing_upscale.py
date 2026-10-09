@@ -88,15 +88,15 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 upscale_by = max(upscale_to_width/image.width, upscale_to_height/image.height)
                 info["Max side length"] = max_side_length
 
-        image = self.cached_upscale(image, upscaler, (upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop), lambda: upscaler.scaler.upscale(image, upscale_by, upscaler.data_path))
+        target_size = None
+        if upscale_mode == 1 and upscale_crop:
+            # Exactly the scaled size that covers the crop box: the default size, floored to a multiple of 8, falls
+            # short of other targets and would need a second resample to cover them.
+            target_size = (max(upscale_to_width, scaled_size(image.width, upscale_by)), max(upscale_to_height, scaled_size(image.height, upscale_by)))
+
+        image = self.cached_upscale(image, upscaler, (upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop), lambda: upscaler.scaler.upscale(image, upscale_by, upscaler.data_path, target_size=target_size))
 
         if upscale_mode == 1 and upscale_crop:
-            if image.width < upscale_to_width or image.height < upscale_to_height:
-                # Upscalers floor their output to a multiple of 8, which falls short of other target sizes;
-                # stretch to cover the target instead of leaving black bars around the pasted image.
-                fill = max(upscale_to_width / image.width, upscale_to_height / image.height)
-                image = image.resize((max(upscale_to_width, round(image.width * fill)), max(upscale_to_height, round(image.height * fill))), resample=Image.Resampling.LANCZOS)
-
             cropped = Image.new("RGB", (upscale_to_width, upscale_to_height))
             cropped.paste(image, box=(upscale_to_width // 2 - image.width // 2, upscale_to_height // 2 - image.height // 2))
             image = cropped

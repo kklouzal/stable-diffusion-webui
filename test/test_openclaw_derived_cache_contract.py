@@ -188,7 +188,7 @@ def test_upscale_cache_keys_on_pixels_and_scaler_instance_returns_copies_and_evi
     class Scaler:
         calls = 0
 
-        def upscale(self, image, scale, data_path):
+        def upscale(self, image, scale, data_path, *, target_size):
             Scaler.calls += 1
             return image.resize((image.width * scale, image.height * scale))
 
@@ -232,7 +232,7 @@ def test_upscale_cache_keys_on_pixels_and_scaler_instance_returns_copies_and_evi
     opts.upscaling_max_images_in_cache = 0
     fingerprints.clear()
     results = []
-    upscaler.scaler.upscale = lambda image, scale, data_path: results.append(image.resize((8, 8))) or results[-1]
+    upscaler.scaler.upscale = lambda image, scale, data_path, target_size: results.append(image.resize((8, 8))) or results[-1]
     assert upscale(solid(red)) is results[-1]
     assert not fingerprints and not cache
 
