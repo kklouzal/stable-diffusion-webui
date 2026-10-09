@@ -57,7 +57,7 @@ def _shared():
     shared = types.ModuleType("modules.shared")
     shared.opts = SimpleNamespace(
         ESRGAN_tile=192, ESRGAN_tile_overlap=8, enable_upscale_progressbar=False, upscaling_max_images_in_cache=5,
-        SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8, ldsr_steps=1, ldsr_cached=False,
+        SWIN_tile=192, SWIN_tile_overlap=8, SCUNET_tile=256, SCUNET_tile_overlap=8,
         font="", n_rows=-1,
     )
     shared.cmd_opts = SimpleNamespace(no_half=False, upcast_sampling=False, unix_filenames_sanitization=False, filenames_max_length=128)
@@ -348,59 +348,6 @@ def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
     assert downloads == [(upscaler.model_url, str(env.tmp_path), None)]
     # spandrel dispatches on the extension: a name without .pth raises "Unsupported model file extension".
     assert env.loader_calls[-1][0] == str(env.tmp_path / "scunet_color_real_gan.pth")
-
-
-def test_unloadable_ldsr_fails_instead_of_lanczos(env):
-    ldsr_arch = types.ModuleType("ldsr_model_arch")
-    ldsr_arch.LDSR = lambda model, yaml: pytest.fail("LDSR must not be constructed without a model")
-    stubs = {"ldsr_model_arch": ldsr_arch, "sd_hijack_autoencoder": types.ModuleType("x"), "sd_hijack_ddpm_v1": types.ModuleType("y")}
-    with _modules(stubs):
-        module = _load_script(env, "extensions-builtin/LDSR/scripts/ldsr_model.py")
-        upscaler = module.UpscalerLDSR(str(env.tmp_path))
-        upscaler.model_path = str(env.tmp_path)
-
-        with pytest.raises(RuntimeError, match="Unable to load LDSR model"):
-            upscaler.upscale(_random_image(16, 16, seed=0), 2, None)
-
-
-# --- LDSR decodes once ------------------------------------------------------------------------------------------
-
-def test_ldsr_decodes_the_sample_once(env, monkeypatch):
-    ddim = types.ModuleType("ldm.models.diffusion.ddim")
-    ddim.DDIMSampler = object
-    util = types.ModuleType("ldm.util")
-    util.instantiate_from_config = util.ismap = None
-    stubs = {
-        "ldm": _package("ldm"), "ldm.models": _package("ldm.models"), "ldm.models.diffusion": _package("ldm.models.diffusion"),
-        "ldm.models.diffusion.ddim": ddim, "ldm.util": util, "modules.sd_hijack": types.ModuleType("modules.sd_hijack"),
-    }
-    with _modules(stubs):
-        sys.modules["modules"].sd_hijack = stubs["modules.sd_hijack"]
-        arch = _load_private("_c2_ldsr_model_arch", ROOT / "extensions-builtin/LDSR/ldsr_model_arch.py")
-
-    decodes = []
-    sample = torch.full((1, 3, 4, 4), 0.25)
-
-    class Model:
-        first_stage_key = "image"
-        cond_stage_key = "LR_image"
-
-        def get_input(self, batch, key, return_first_stage_outputs=False, force_c_encode=False, return_original_cond=False):
-            assert not return_first_stage_outputs  # that would decode the 4x input just to log it
-            return [torch.zeros(1, 3, 4, 4), "cond"]
-
-        def decode_first_stage(self, z, **kwargs):
-            decodes.append(kwargs)
-            return z * 2
-
-        def ema_scope(self, _context):
-            return contextlib.nullcontext()
-
-    monkeypatch.setattr(arch, "convsample_ddim", lambda model, cond, **kwargs: (sample, {}))
-    log = arch.make_convolutional_sample({"image": None}, Model(), custom_steps=1)
-
-    assert decodes == [{}]
-    assert torch.equal(log["sample"], sample * 2)
 
 
 # --- extras "Upscale" script -------------------------------------------------------------------------------------
