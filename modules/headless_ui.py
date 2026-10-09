@@ -84,6 +84,7 @@ for _component_name in _COMPONENT_NAMES:
 # surface instead of requiring the real browser UI dependency.
 components = ModuleType("gradio.components")
 components.Component = _FallbackComponent
+components.IOComponent = _FallbackComponent  # named in vendored ControlNet annotations
 for _component_name in _COMPONENT_NAMES:
     setattr(components, _component_name, globals()[_component_name])
 
