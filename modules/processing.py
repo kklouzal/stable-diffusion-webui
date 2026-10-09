@@ -607,8 +607,10 @@ class StableDiffusionProcessing:
             # The SDXL refiner conditioner embeds these.
             opts.sdxl_refiner_low_aesthetic_score,
             opts.sdxl_refiner_high_aesthetic_score,
-            # Decides the "TI hashes" infotext that cache hits replay.
+            # Decide the "TI hashes" infotext that cache hits replay (a LoRA-bundled embedding's entry is empty while
+            # lora_bundled_ti_to_infotext is off; the option exists while the Lora extension is loaded).
             opts.textual_inversion_add_hashes_to_infotext,
+            getattr(opts, "lora_bundled_ti_to_infotext", None),
         )
 
     def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):

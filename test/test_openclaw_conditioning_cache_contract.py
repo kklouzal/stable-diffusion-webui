@@ -38,6 +38,7 @@ def test_conditioning_key_covers_parser_tokenization_and_effective_network_state
         "opts.comma_padding_backtrack",
         "required_prompts",
         "_conditioning_extra_network_data(extra_network_data)",
+        "getattr(opts, 'lora_bundled_ti_to_infotext', None)",
     }
     assert required <= elements
 

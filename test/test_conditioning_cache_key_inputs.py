@@ -129,3 +129,11 @@ def test_key_ignores_extra_network_tags_it_covers_otherwise(p):
     assert p.cached_params("c", prompts, 20, covered) == base
     assert p.cached_params("c", prompts, 20, {**covered, "other": [ExtraNetworkParams(["o"])]}) != base
 
+
+def test_key_covers_the_bundled_embedding_infotext_option(p, monkeypatch):
+    # A LoRA-bundled embedding writes "TI hashes" only while lora_bundled_ti_to_infotext is on, and hits replay it.
+    prompts = prompt_parser.SdConditioning(["a"], width=1024, height=1024)
+    monkeypatch.setattr(processing.opts, "lora_bundled_ti_to_infotext", True, raising=False)
+    on = p.cached_params("c", prompts, 20, None)
+    monkeypatch.setattr(processing.opts, "lora_bundled_ti_to_infotext", False, raising=False)
+    assert p.cached_params("c", prompts, 20, None) != on
