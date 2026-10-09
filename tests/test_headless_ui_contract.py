@@ -23,3 +23,13 @@ def test_components_accept_the_event_methods_quicksettings_wiring_calls():
     for component in (gr.Textbox(), gr.Slider(), gr.Dropdown(), gr.Checkbox()):
         for event in ("submit", "blur", "release", "change", "click", "then"):
             assert getattr(component, event)(fn=None, inputs=[], outputs=[]) is component
+
+
+def test_components_expose_the_attributes_vendored_controlnet_reads():
+    gr = load_headless_ui()
+    image = gr.Image()
+    # controlnet_ui_group.render wraps the upload preprocessor without calling it:
+    # image.preprocess = functools.partial(svg_preprocess, preprocess=image.preprocess)
+    assert image.preprocess("value") == "value"
+    # infotext.py names gr.components.IOComponent (an unevaluated function-scope annotation, kept until ControlNet drops it).
+    assert gr.components.IOComponent is gr.components.Component

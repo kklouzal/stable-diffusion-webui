@@ -46,6 +46,8 @@ class _FallbackComponent:
     def upload(self, *args: Any, **kwargs: Any): return self
     def load(self, *args: Any, **kwargs: Any): return self
     def render(self, *args: Any, **kwargs: Any): return self
+    # Read (not called) by vendored ControlNet, which wraps it: image.preprocess = partial(svg_preprocess, preprocess=...).
+    def preprocess(self, value: Any): return value
 
     @staticmethod
     def update(**kwargs: Any):
