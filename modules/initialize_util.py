@@ -169,11 +169,9 @@ def configure_opts_onchange():
     shared.opts.onchange("sd_vae_overrides_per_model_preferences", wrap_queued_call(lambda: sd_vae.reload_vae_weights()), call=False)
     shared.opts.onchange("cross_attention_optimization", wrap_queued_call(lambda: sd_hijack.model_hijack.redo_hijack(shared.sd_model)), call=False)
     shared.opts.onchange("fp8_storage", wrap_queued_call(lambda: sd_models.reload_model_weights()), call=False)
-    shared.opts.onchange("mxfp8_storage", wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True)), call=False)
-    shared.opts.onchange("mxfp8_linear_coverage", wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True)), call=False)
-    shared.opts.onchange("nvfp4_storage", wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True)), call=False)
-    shared.opts.onchange("nvfp4_linear_coverage", wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True)), call=False)
-    shared.opts.onchange("cache_fp16_weight", wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True)), call=False)
+    force_reload = wrap_queued_call(lambda: sd_models.reload_model_weights(forced_reload=True))
+    for key in ("mxfp8_storage", "mxfp8_linear_coverage", "nvfp4_storage", "nvfp4_linear_coverage", "cache_fp16_weight"):
+        shared.opts.onchange(key, force_reload, call=False)
     startup_timer.record("opts onchange")
 
 

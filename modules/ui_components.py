@@ -8,19 +8,6 @@ class FormComponent:
 class ToolButton(FormComponent, gr.Button):
     """Small button with single emoji as text, fits inside UI forms"""
 
-    def __init__(self, *args, **kwargs):
-        classes = kwargs.pop("elem_classes", [])
-        super().__init__(*args, elem_classes=["tool", *classes], **kwargs)
-
-
-class ResizeHandleRow(gr.Row):
-    """Same as gr.Row but fits inside UI forms"""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-        self.elem_classes.append("resize-handle-row")
-
 
 class FormRow(FormComponent, gr.Row):
     """Same as gr.Row but fits inside UI forms"""
@@ -69,10 +56,6 @@ class InputAccordion(gr.Checkbox):
             self.accordion_id = f"input-accordion-{InputAccordion.global_index}"
             InputAccordion.global_index += 1
 
-        if not InputAccordion.accordion_id_set:
-            from modules import script_callbacks
-            script_callbacks.on_script_unloaded(InputAccordion.reset)
-
         if self.accordion_id in InputAccordion.accordion_id_set:
             count = 1
             while (unique_id := f'{self.accordion_id}-{count}') in InputAccordion.accordion_id_set:
@@ -99,30 +82,9 @@ class InputAccordion(gr.Checkbox):
         }
         self.accordion = gr.Accordion(**kwargs_accordion)
 
-    def extra(self):
-        """Allows you to put something into the label of the accordion.
-
-        Use it like this:
-
-        ```
-        with InputAccordion(False, label="Accordion") as acc:
-            with acc.extra():
-                FormHTML(value="hello", min_width=0)
-
-            ...
-        ```
-        """
-
-        return gr.Column(elem_id=self.accordion_id + '-extra', elem_classes='input-accordion-extra', min_width=0)
-
     def __enter__(self):
         self.accordion.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.accordion.__exit__(exc_type, exc_val, exc_tb)
-
-    @classmethod
-    def reset(cls):
-        cls.global_index = 0
-        cls.accordion_id_set.clear()

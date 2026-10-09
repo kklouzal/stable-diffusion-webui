@@ -1001,4 +1001,3 @@ class ScriptRunner:
 scripts_txt2img: ScriptRunner = None
 scripts_img2img: ScriptRunner = None
 scripts_postproc: scripts_postprocessing.ScriptPostprocessingRunner = None
-scripts_current: ScriptRunner = None
