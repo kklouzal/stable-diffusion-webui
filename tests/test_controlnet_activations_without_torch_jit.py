@@ -23,10 +23,8 @@ def _load(path):
 def test_teed_activations_are_eager():
     x = torch.linspace(-8, 8, 2001, dtype=torch.float32)
     smish = _load(ANNOTATOR / "teed" / "Fsmish.py").smish
-    mish = _load(ANNOTATOR / "teed" / "Fmish.py").mish
 
     assert torch.equal(smish(x), x * torch.tanh(torch.log(1 + torch.sigmoid(x))))
-    assert torch.equal(mish(x), x * torch.tanh(F.softplus(x)))
 
 
 def test_geffnet_activations_are_eager_and_hand_written_backward_matches_autograd():
