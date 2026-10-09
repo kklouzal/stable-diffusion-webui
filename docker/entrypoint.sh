@@ -7,7 +7,7 @@ A1111_RUN_AS_USER="${A1111_RUN_AS_USER:-a1111}"
 mkdir -p "$A1111_HOME/tmp" "$A1111_HOME/models/ControlNet" "$A1111_HOME/models/VAE-approx"
 
 # Only a missing config.json starts as {}; an existing one is never rewritten here. gb10/run.sh seeds the host file
-# with {}, so an empty file is a damaged one (a save cut short): the app reports it, keeps a copy under tmp/ and resets
+# with {}, so an empty file is a damaged one (a save cut short): the app reports it, keeps a copy under cache/config-recovery/ and resets
 # it to {} (modules/settings_file.py) instead of this script resetting the settings without a word.
 if [[ ! -e "$A1111_HOME/config.json" ]]; then
   printf '{}\n' > "$A1111_HOME/config.json"

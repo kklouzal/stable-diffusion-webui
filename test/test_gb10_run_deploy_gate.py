@@ -378,14 +378,17 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
         assert check in sudo_commands
 
 
-def test_an_outputs_symlink_to_an_unmounted_target_is_kept(deploy, tmp_path):
-    """A dangling Outputs link (the NAS not mounted yet) to the expected target is the expected link, not a conflict."""
+def test_an_outputs_symlink_to_an_unmounted_target_stops_the_deploy_before_anything_changes(deploy, tmp_path):
+    """Docker cannot bind-mount a dangling Outputs link (the NAS not mounted), not even to restart the old container."""
     target = tmp_path / "unmounted"
     (deploy.host / "Outputs").symlink_to(target)
 
     result = deploy.run(OUTPUTS_TARGET=str(target))
 
-    assert result.returncode == 0, result.stdout
+    assert result.returncode != 0
+    assert "is not a reachable directory" in result.stdout
+    state = deploy.state()
+    assert not any(call[:1] in (["stop"], ["rename"], ["run"]) for call in state["calls"])
     assert os.readlink(deploy.host / "Outputs") == str(target)
 
 

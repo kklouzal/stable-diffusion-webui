@@ -41,7 +41,8 @@ DEPLOY_LOG_TEE_PID=$!
 # Closing our ends of the pipe ends the tee; waiting for it means the caller and the log have every line at exit.
 close_deploy_log() {
   exec >&- 2>&-
-  wait "${DEPLOY_LOG_TEE_PID}"
+  # The exit status is the script's; a tee that lost its terminal (and only wrote the log) must not replace it.
+  wait "${DEPLOY_LOG_TEE_PID}" || true
 }
 trap close_deploy_log EXIT
 
@@ -83,6 +84,12 @@ elif sudo test -L "${HOST_ROOT}/Outputs"; then
   fi
 else
   echo "ERROR: ${HOST_ROOT}/Outputs exists but is not a symlink to ${OUTPUTS_TARGET}" >&2
+  exit 1
+fi
+# Docker cannot bind-mount a dangling link, not even to restart the replaced container, so a missing target (the NAS
+# not mounted) stops the deploy here, while production still runs.
+if ! sudo test -d "${HOST_ROOT}/Outputs"; then
+  echo "ERROR: ${HOST_ROOT}/Outputs -> ${OUTPUTS_TARGET} is not a reachable directory (NAS not mounted?)" >&2
   exit 1
 fi
 
