@@ -1,11 +1,12 @@
-from pathlib import Path
+def test_extension_item_schema_allows_missing_git_metadata(initialize, tmp_path):
+    # An extension without readable git metadata keeps branch/commit_date None; /sdapi/v1/extensions still lists it.
+    from modules import extensions
+    from modules.api import models
 
+    extension = extensions.Extension("local-extension", str(tmp_path))
+    extension.remote = "https://example.invalid/local-extension.git"
 
-def test_extension_item_schema_allows_missing_git_metadata():
-    model_source = Path("modules/api/models.py").read_text()
-    extension_source = Path("modules/extensions.py").read_text()
+    item = models.ExtensionItem.model_validate({"name": extension.name, **extension.to_dict(), "enabled": extension.enabled})
 
-    assert "self.branch = None" in extension_source
-    assert "self.commit_date = None" in extension_source
-    assert "branch: Optional[str]" in model_source
-    assert "commit_date: Optional[int]" in model_source
+    assert item.branch is None
+    assert item.commit_date is None
