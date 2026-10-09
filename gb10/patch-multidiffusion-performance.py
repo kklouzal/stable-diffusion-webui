@@ -15,8 +15,15 @@ cleanly. The blocks:
 - TV-FB: the former local commit "Modernize Tiled VAE attention fallbacks" (5022f68): xformers is optional and falls
   back to SDP, and the sage2/sage3 method names map to SDP. Its torch.nn.attention import is no longer used since
   TV-ATTN; it is kept, like the sage names, so the deployed bytes stay unchanged.
-- TV-*, MD-W1: performance changes. Exactness of each is argued next to the code it patches and tested on CPU against
-  the unpatched extension (test/test_gb10_multidiffusion_performance_patcher.py).
+- TV-*, MD-W1, MD-CN: performance changes. Exactness of each is argued next to the code it patches and tested on CPU
+  against the unpatched extension (test/test_gb10_multidiffusion_performance_patcher.py). MD-CN builds each ControlNet
+  control tile once per request and skips reassigning an unchanged one; ControlNet still re-derives (and hashes) the
+  hint whenever the tile changes, i.e. per tile batch per step with more than one batch.
+- MD-NI-COND: noise inversion encodes this batch's prompts with extra networks parsed out, as SdConditioning with the
+  canvas size (SDXL embeds it), instead of the first batch's raw prompts as a plain list.
+- MD-NI-CACHE: the inverted-noise cache lives for one request and is reused only for exact matches (see the block).
+- MD-REGION-COND: region prompt control on SDXL/SD3 fails in Script.process(), before any work, instead of with a
+  TypeError once sampling has started.
 A checkout holding only the former 0001 commit (upstream + TV-FB, nothing else) is not accepted: reset it to upstream.
 """
 from __future__ import annotations
@@ -76,6 +83,9 @@ def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weig
 ''',
             sentinel="def _gb10_tile_origins",
         ),
+        Block("MD-NI-CACHE key", r"""NoiseInverseCache = namedtuple('NoiseInversionCache', ['model_hash', 'x0', 'xt', 'noise_inversion_steps', 'retouch', 'prompts'])
+""", r"""NoiseInverseCache = namedtuple('NoiseInversionCache', ['model_hash', 'x0', 'xt', 'noise_inversion_steps', 'retouch', 'prompts', 'extra_network_data'])  # gb10: MD-NI-CACHE
+"""),
     ],
     TILEVAE: [
         Block(
@@ -380,6 +390,197 @@ def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
     return out
 """,
         ),
+    ],
+    "tile_methods/abstractdiffusion.py": [
+        Block(
+            "MD-NI-COND/CACHE noise inversion prompts and cache",
+            r"""        prompts = p.all_prompts[:p.batch_size]
+        
+        latent = None
+        # try to use cached latent to save huge amount of time.
+        cached_latent: NoiseInverseCache = self.noise_inverse_get_cache()
+        if cached_latent is not None and \
+            cached_latent.model_hash == p.sd_model.sd_model_hash and \
+            cached_latent.noise_inversion_steps == self.noise_inverse_steps and \
+            len(cached_latent.prompts) == len(prompts) and \
+            all([cached_latent.prompts[i] == prompts[i] for i in range(len(prompts))]) and \
+            abs(cached_latent.retouch - self.noise_inverse_retouch) < 0.01 and \
+            cached_latent.x0.shape == p.init_latent.shape and \
+            torch.abs(cached_latent.x0.to(p.init_latent.device) - p.init_latent).sum() < 100: # the 100 is an arbitrary threshold copy-pasted from the img2img alt code
+                # use cached noise
+                print('[Tiled Diffusion] Your checkpoint, image, prompts, inverse steps, and retouch params are all unchanged.')
+                print('[Tiled Diffusion] Noise Inversion will use the cached noise from the previous run. To clear the cache, click the Free GPU button.')
+                latent = cached_latent.xt.to(noise.device)
+        if latent is None:
+            # run noise inversion
+            shared.state.job_count += 1
+            latent = self.find_noise_for_image_sigma_adjustment(sampler.model_wrap, self.noise_inverse_steps, prompts)
+            shared.state.nextjob()
+            self.noise_inverse_set_cache(p.init_latent.clone().cpu(), latent.clone().cpu(), prompts)
+            # The cache is only 1 latent image and is very small (16 MB for 8192 * 8192 image), so we don't need to worry about memory leakage.
+""",
+            r"""        # gb10 (MD-NI-COND): this batch's prompts with the extra networks processing parsed out (p.prompts), not the
+        # first batch's raw prompts (<lora:...> tags were encoded as text and every batch inverted the first one's).
+        prompts = p.prompts
+
+        latent = None
+        # gb10 (MD-NI-CACHE): the inversion depends on everything that shapes the UNet output (checkpoint, LoRA/TI/
+        # hypernetwork weights, ControlNet and the other UNet hooks, tiling, noise schedule, attention backend, dtype),
+        # so no complete key exists across requests: the cache lives for one request (Script.process clears it). It is
+        # reused between that request's batches only for the exact same init latent, prompts, extra networks, steps and
+        # retouch, and never with ControlNet (batch inputs can change its hints between batches). Upstream compared the
+        # init latents by an absolute sum |dx0| < 100 and retouch within 0.01, and accepted different inputs.
+        cached_latent: NoiseInverseCache = self.noise_inverse_get_cache()
+        if cached_latent is not None and not self.enable_controlnet and \
+            cached_latent.model_hash == p.sd_model.sd_model_hash and \
+            cached_latent.noise_inversion_steps == self.noise_inverse_steps and \
+            cached_latent.prompts == prompts and \
+            cached_latent.extra_network_data == p.extra_network_data and \
+            cached_latent.retouch == self.noise_inverse_retouch and \
+            cached_latent.x0.shape == p.init_latent.shape and \
+            torch.equal(cached_latent.x0.to(p.init_latent.device), p.init_latent):
+                print('[Tiled Diffusion] Noise Inversion reuses the inverted noise of the previous batch (same image, prompts and settings).')
+                latent = cached_latent.xt.to(noise.device)
+        if latent is None:
+            # run noise inversion
+            shared.state.job_count += 1
+            latent = self.find_noise_for_image_sigma_adjustment(sampler.model_wrap, self.noise_inverse_steps, prompts)
+            shared.state.nextjob()
+            # An interrupted inversion returns its partial latent: never cache it.
+            if not shared.state.interrupted:
+                self.noise_inverse_set_cache(p.init_latent.clone().cpu(), latent.clone().cpu(), prompts)
+""",
+        ),
+        Block("MD-NI-COND conditioning size", r"""        cond = self.p.sd_model.get_learned_conditioning(prompts)
+""", r"""        # gb10 (MD-NI-COND): SdConditioning carries the canvas size, which SDXL embeds (a plain list got 1024x1024).
+        cond = self.p.sd_model.get_learned_conditioning(prompt_parser.SdConditioning(prompts, width=self.p.width, height=self.p.height))
+"""),
+        Block("MD-CN tile memo reset", r"""    @controlnet
+    def prepare_controlnet_tensors(self, refresh:bool=False):
+        ''' Crop the control tensor into tiles and cache them '''
+
+        if not refresh:
+            if self.control_tensor_batch is not None or self.control_params is not None: return
+
+        if not self.enable_controlnet or self.controlnet_script is None: return
+""", r"""    @controlnet
+    def prepare_controlnet_tensors(self, refresh:bool=False):
+        ''' Crop the control tensor into tiles and cache them '''
+
+        if not refresh:
+            if self.control_tensor_batch is not None or self.control_params is not None: return
+
+        self.control_tile_device = {}  # gb10 (MD-CN): see switch_controlnet_tensors
+        if not self.enable_controlnet or self.controlnet_script is None: return
+"""),
+        Block(
+            "MD-CN tile memo",
+            r"""    @controlnet
+    def switch_controlnet_tensors(self, batch_id:int, x_batch_size:int, tile_batch_size:int, is_denoise=False):
+        if not self.enable_controlnet: return
+        if self.control_tensor_batch is None: return
+
+        for param_id in range(len(self.control_params)):
+            control_tile = self.control_tensor_batch[param_id][batch_id]
+            if self.is_kdiff:
+                all_control_tile = []
+                for i in range(tile_batch_size):
+                    this_control_tile = [control_tile[i].unsqueeze(0)] * x_batch_size
+                    all_control_tile.append(torch.cat(this_control_tile, dim=0))
+                control_tile = torch.cat(all_control_tile, dim=0)                                           
+            else:
+                control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
+            self.control_params[param_id].hint_cond = control_tile.to(devices.device)
+
+    @controlnet
+    def set_custom_controlnet_tensors(self, bbox_id:int, repeat_size:int):
+        if not self.enable_controlnet: return
+        if not len(self.control_tensor_custom): return
+        
+        for param_id in range(len(self.control_params)):
+            control_tensor = self.control_tensor_custom[param_id][bbox_id].to(devices.device)
+            self.control_params[param_id].hint_cond = control_tensor.repeat((repeat_size, 1, 1, 1))
+""",
+            r"""    @controlnet
+    def switch_controlnet_tensors(self, batch_id:int, x_batch_size:int, tile_batch_size:int, is_denoise=False):
+        if not self.enable_controlnet: return
+        if self.control_tensor_batch is None: return
+
+        for param_id in range(len(self.control_params)):
+            key = (param_id, batch_id, x_batch_size, tile_batch_size, is_denoise)
+            control_tile = self.control_tile_device.get(key)
+            if control_tile is None:
+                control_tile = self.control_tensor_batch[param_id][batch_id]
+                if self.is_kdiff:
+                    all_control_tile = []
+                    for i in range(tile_batch_size):
+                        this_control_tile = [control_tile[i].unsqueeze(0)] * x_batch_size
+                        all_control_tile.append(torch.cat(this_control_tile, dim=0))
+                    control_tile = torch.cat(all_control_tile, dim=0)
+                else:
+                    control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
+                control_tile = control_tile.to(devices.device)
+                self.remember_control_tile(key, control_tile)
+            self.assign_hint_cond(param_id, control_tile)
+
+    @controlnet
+    def set_custom_controlnet_tensors(self, bbox_id:int, repeat_size:int):
+        if not self.enable_controlnet: return
+        if not len(self.control_tensor_custom): return
+
+        for param_id in range(len(self.control_params)):
+            key = (param_id, 'custom', bbox_id, repeat_size)
+            control_tile = self.control_tile_device.get(key)
+            if control_tile is None:
+                control_tensor = self.control_tensor_custom[param_id][bbox_id].to(devices.device)
+                control_tile = control_tensor.repeat((repeat_size, 1, 1, 1))
+                self.remember_control_tile(key, control_tile)
+            self.assign_hint_cond(param_id, control_tile)
+
+    # gb10 (MD-CN): every hint_cond assignment makes ControlNet drop the hint's derived state; colorfix, inpaint_only
+    # and reference units then re-derive the hint latent, hashing the whole hint (host copy + sha1) per tile batch
+    # per step. The device tile of one (unit, batch, batch shape) is built once per request, and a unit whose hint
+    # already is that tile is not reassigned. Same tensor values: bit-identical. With "Move ControlNet tensor to CPU"
+    # the tiles are still built per call, as before, so none is held on the device.
+    def remember_control_tile(self, key, control_tile:Tensor):
+        if not self.control_tensor_cpu:
+            self.control_tile_device[key] = control_tile
+
+    def assign_hint_cond(self, param_id:int, control_tile:Tensor):
+        if self.control_params[param_id].hint_cond is not control_tile:
+            self.control_params[param_id].hint_cond = control_tile
+""",
+            sentinel="    def assign_hint_cond(",
+        ),
+    ],
+    "scripts/tilediffusion.py": [
+        Block(
+            "MD-NI-CACHE request scope and MD-REGION-COND",
+            r"""        # unhijack & unhook, in case it broke at last time
+        self.reset()
+
+        if not enabled: return
+""",
+            r"""        # unhijack & unhook, in case it broke at last time
+        self.reset()
+        # gb10 (MD-NI-CACHE): the noise inversion cache never outlives a request (see AbstractDiffusion.sample_img2img).
+        self.noise_inverse_cache = None
+
+        if not enabled: return
+
+        # gb10 (MD-REGION-COND): region prompts build tensor conditioning; with SDXL/SD3 dict conditioning the first
+        # region forward raised a TypeError (torch.cat of dicts) only after sampling had started. Same region filter as
+        # AbstractDiffusion.init_custom_bbox.
+        if enable_bbox_control and (getattr(shared.sd_model, 'is_sdxl', False) or getattr(shared.sd_model, 'is_sd3', False)):
+            if any(s.enable and s.x <= 1.0 and s.y <= 1.0 and s.w > 0.0 and s.h > 0.0 for s in build_bbox_settings(bbox_control_states).values()):
+                raise RuntimeError('[Tiled Diffusion] Region prompt control supports SD1/SD2 models only; disable the regions for SDXL/SD3.')
+""",
+        ),
+        Block("MD-NI-CACHE key from p", r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
+        self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts)
+""", r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
+        self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts, p.extra_network_data)  # gb10: MD-NI-CACHE
+"""),
     ],
     "tile_methods/mixtureofdiffusers.py": [
         Block(

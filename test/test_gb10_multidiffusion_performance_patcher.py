@@ -3,8 +3,7 @@
 The extension is not part of the fork. These tests copy the installed checkout (the host deploy root, or the same
 checkout where run.sh mounts it inside a webui container) and skip when neither is present. The installed checkout
 may already be patched, by this release or by the previous one (PREVIOUS), so the fixture reverses every block to its
-upstream text and asserts the patcher reproduces the installed bytes, or for a previous-release target the bytes it
-upgrades the installed copy to. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
+upstream text and asserts the patcher turns that into the bytes it leaves or makes in the installed copy. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
 """
 from __future__ import annotations
 
@@ -74,12 +73,10 @@ def copy_multidiffusion(target: Path) -> Path:
     for relative in TARGETS:
         (target / relative).write_bytes(unpatched(installed[relative].decode("utf-8"), relative).encode("utf-8"))
     if snapshot(target) != installed:
-        # The derived tree is only a valid upstream stand-in if the patcher turns it back into the installed bytes
-        # (a previous-release target: into the bytes it upgrades the installed copy to).
+        # The derived tree is only a valid upstream stand-in if the patcher turns it into the bytes it leaves (or makes)
+        # in the installed copy: current targets unchanged, previous-release and new targets upgraded.
         probe = run_patcher_on_copy(target, target.parent / f"{target.name}-roundtrip")
-        upgraded = run_patcher_on_copy(INSTALLED_MD, target.parent / f"{target.name}-upgraded")
-        assert probe == upgraded
-        assert all(upgraded[relative] == installed[relative] or relative in PATCHER_MODULE.PREVIOUS for relative in TARGETS)
+        assert probe == run_patcher_on_copy(INSTALLED_MD, target.parent / f"{target.name}-upgraded")
     return target
 
 
@@ -301,6 +298,14 @@ class NansException(Exception):
     pass
 
 
+class SdConditioning(list):
+    """modules.prompt_parser.SdConditioning: the prompts plus the canvas size SDXL embeds."""
+
+    def __init__(self, prompts, is_negative_prompt=False, width=None, height=None, copy_from=None):
+        super().__init__(prompts)
+        self.width, self.height, self.is_negative_prompt = width, height, is_negative_prompt
+
+
 def fork_sdpa_helper():
     """The fork's real run_scaled_dot_product_attention (and the backend parsing it uses), without importing webui."""
     source = (ROOT / "modules" / "sd_hijack_optimizations.py").read_text(encoding="utf-8")
@@ -352,8 +357,8 @@ def webui_stubs(monkeypatch):
         # modules.devices.without_autocast, for the CPU autocast these tests can run under.
         return torch.autocast("cpu", enabled=False) if torch.is_autocast_enabled("cpu") and not disable else contextlib.nullcontext()
 
-    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
-    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"))
+    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4, job_count=0, nextjob=lambda: None)
+    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"), parameterization="eps")
     shared = stub("modules.shared", state=state, opts=types.SimpleNamespace(upcast_attn=False), sd_model=sd_model, cmd_opts=types.SimpleNamespace())
     hijack = stub("modules.sd_hijack", model_hijack=types.SimpleNamespace(optimization_method="none"))
     packages = ("modules", "ldm", "ldm.modules", "ldm.modules.diffusionmodules", "ldm.models", "ldm.models.diffusion", "k_diffusion")
@@ -361,22 +366,26 @@ def webui_stubs(monkeypatch):
         **{name: stub(name, package=True) for name in packages},
         "gradio": stub("gradio"),
         "gradio.components": stub("gradio.components", Component=object),
-        "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object()),
+        "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object(), basedir=lambda: ""),
+        "modules.sd_samplers": stub("modules.sd_samplers"),
+        "modules.images": stub("modules.images"),
         "modules.devices": stub(
             "modules.devices", device=cpu, cpu=cpu, get_optimal_device=lambda: cpu, get_optimal_device_name=lambda: "cpu",
             torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException,
             without_autocast=without_autocast),
         "modules.shared": shared,
         "modules.ui": stub("modules.ui", gr_show=lambda *_args, **_kwargs: None),
-        "modules.processing": stub("modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object),
+        "modules.processing": stub(
+            "modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object,
+            get_fixed_seed=lambda seed: seed),
         "modules.sd_vae_approx": stub("modules.sd_vae_approx", cheap_approximation=cheap_approximation),
         "modules.sd_hijack": hijack,
         "modules.sd_hijack_optimizations": stub(
             "modules.sd_hijack_optimizations", get_available_vram=lambda: 2**40, get_xformers_flash_attention_op=lambda *_args: None,
             sub_quad_attention=None, run_scaled_dot_product_attention=run_scaled_dot_product_attention),
-        "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object),
+        "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object, SdConditioning=SdConditioning),
         "modules.extra_networks": stub("modules.extra_networks", ExtraNetworkParams=object),
-        "modules.sd_samplers_common": stub("modules.sd_samplers_common"),
+        "modules.sd_samplers_common": stub("modules.sd_samplers_common", setup_img2img_steps=lambda p, steps: (steps, steps), store_latent=lambda x: None),
         "modules.sd_samplers_kdiffusion": stub(
             "modules.sd_samplers_kdiffusion", KDiffusionSampler=type("KDiffusionSampler", (), {}), CFGDenoiser=object, CFGDenoiserKDiffusion=object),
         "modules.sd_samplers_timesteps": stub(
@@ -740,3 +749,205 @@ def test_mixture_of_diffusers_without_grid_tiles_precomputes_nothing(md_pair, im
     delegate.init_done()
     assert delegate.batched_tile_weights == []
     assert not hasattr(delegate, "tile_weights")
+
+
+# ---------------------------------------------------------------- noise inversion, ControlNet tiles, region control (CPU)
+
+
+def noise_inversion_setup(root: Path, import_extension):
+    """A MultiDiffusion delegate with noise inversion wired to a real Tiled Diffusion Script's cache; the inversion
+    itself is replaced by a recorder whose result differs per call."""
+    script_module, md = import_extension(root, "scripts/tilediffusion.py", "tile_methods.multidiffusion")
+    torch.manual_seed(0)
+    p = types.SimpleNamespace(
+        sampler_name="Euler", width=64, height=64, disable_extra_networks=False, batch_size=1, init_images=[],
+        all_prompts=["a cat <lora:x:1>", "a dog"], prompts=["a cat"], extra_network_data={"lora": [types.SimpleNamespace(items=["x", "1"])]},
+        init_latent=torch.randn((1, 4, 8, 8)), sd_model=types.SimpleNamespace(sd_model_hash="abc"))
+    sampler = md.KDiffusionSampler()
+    sampler.sample_img2img = lambda p, x, noise, *args: noise
+    sampler.get_sigmas = lambda p, steps: torch.tensor([2.0, 1.0])
+    sampler.model_wrap = None
+    delegate = md.MultiDiffusion(p, sampler)
+    script = script_module.Script()
+    calls = []
+
+    def find_noise(dnw, steps, prompts):
+        calls.append(list(prompts))
+        return torch.full_like(p.init_latent, float(len(calls)))
+
+    delegate.find_noise_for_image_sigma_adjustment = find_noise
+    delegate.init_noise_inverse(10, 1.0, script.noise_inverse_get_cache, lambda x0, xt, prompts: script.noise_inverse_set_cache(p, x0, xt, prompts, 10, 1.0), 0.0, 64)
+
+    def run():
+        x = torch.zeros_like(p.init_latent)
+        return delegate.sample_img2img(sampler, p, x, x, None, None)
+
+    return script, delegate, p, calls, run
+
+
+def test_upstream_noise_inversion_reuses_a_different_image_and_the_first_batch_prompts(md_pair, import_extension, webui_stubs):
+    original, _patched = md_pair
+    _script, _delegate, p, calls, run = noise_inversion_setup(original, import_extension)
+    run()
+    p.init_latent = p.init_latent.clone()
+    p.init_latent[0, 0, 0, 0] += 0.5
+    run()
+    assert calls == [["a cat <lora:x:1>"]]  # the raw first-batch prompt, then reused for a different init latent
+
+
+def test_noise_inversion_inverts_this_batch_and_reuses_only_exact_matches(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    script, delegate, p, calls, run = noise_inversion_setup(patched, import_extension)
+
+    first = run()
+    assert calls == [["a cat"]]  # p.prompts: this batch, extra networks parsed out
+    assert torch.equal(run(), first) and len(calls) == 1  # same batch inputs: reused
+
+    changes = [
+        lambda: p.init_latent.__setitem__((0, 0, 0, 0), p.init_latent[0, 0, 0, 0] + 1e-3),
+        lambda: setattr(p, "extra_network_data", {"lora": [types.SimpleNamespace(items=["x", "0.5"])]}),
+        lambda: setattr(delegate, "noise_inverse_retouch", 1.005),
+        lambda: setattr(p, "prompts", ["a dog"]),
+    ]
+    for count, change in enumerate(changes, start=2):
+        p.init_latent = p.init_latent.clone()
+        change()
+        run()
+        assert len(calls) == count
+
+    delegate.enable_controlnet = True
+    run()
+    assert len(calls) == len(changes) + 2  # never reused with ControlNet
+    delegate.enable_controlnet = False
+
+    webui_stubs.state.interrupted = True
+    p.prompts = ["a bird"]
+    run()
+    webui_stubs.state.interrupted = False
+    run()
+    assert calls[-2:] == [["a bird"], ["a bird"]]  # the interrupted (partial) inversion was not cached
+
+    assert script.noise_inverse_cache is not None
+    script.process(p, False, *([None] * 20))
+    assert script.noise_inverse_cache is None  # never outlives a request
+
+
+def test_noise_inversion_conditioning_carries_the_canvas_size(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    (md,) = import_extension(patched, "tile_methods.multidiffusion")
+    seen = []
+
+    def get_learned_conditioning(batch):
+        seen.append(batch)
+        return {"crossattn": torch.zeros((len(batch), 77, 8)), "vector": torch.zeros((len(batch), 4))}
+
+    p = types.SimpleNamespace(
+        sampler_name="Euler", width=1536, height=1024, disable_extra_networks=True, init_latent=torch.zeros((1, 4, 128, 192)),
+        image_conditioning=torch.zeros((1, 5, 1, 1)), sd_model=types.SimpleNamespace(get_learned_conditioning=get_learned_conditioning))
+    delegate = md.MultiDiffusion(p, md.KDiffusionSampler())
+    webui_stubs.state.interrupted = True  # stop before the first UNet step: only the conditioning is under test
+    delegate.find_noise_for_image_sigma_adjustment(types.SimpleNamespace(get_sigmas=lambda steps: torch.linspace(0.1, 10.0, steps + 1)), 4, ["a cat"])
+
+    (batch,) = seen
+    assert isinstance(batch, SdConditioning) and list(batch) == ["a cat"]
+    assert (batch.width, batch.height, batch.is_negative_prompt) == (1536, 1024, False)
+
+
+class FakeControlParams:
+    """ControlNet's ControlParams.hint_cond: every assignment drops the hint's derived state (counted here)."""
+
+    def __init__(self, hint):
+        self._hint_cond = hint
+        self.assigned = 0
+
+    @property
+    def hint_cond(self):
+        return self._hint_cond
+
+    @hint_cond.setter
+    def hint_cond(self, value):
+        self._hint_cond = value
+        self.assigned += 1
+
+
+def controlnet_delegate(module, hint, *, tile_batch_size, control_tensor_cpu=False, kdiff=True):
+    p = types.SimpleNamespace(sampler_name="Euler", width=512, height=384, disable_extra_networks=True)
+    delegate = module.MultiDiffusion(p, module.KDiffusionSampler() if kdiff else object())
+    delegate.init_grid_bbox(32, 32, 8, tile_batch_size)  # latent 64x48: 3x2 tiles
+    delegate.custom_bboxes = [module.CustomBBox(4, 6, 20, 18, "", "", module.BlendMode.BACKGROUND.value, 0.2, -1)]
+    param = FakeControlParams(hint.clone())
+    delegate.init_controlnet(types.SimpleNamespace(latest_network=types.SimpleNamespace(control_params=[param])), control_tensor_cpu)
+    return delegate, param
+
+
+@pytest.mark.parametrize("tile_batch_size", [4, 8], ids=["two-batches", "one-batch"])
+@pytest.mark.parametrize("kdiff", [True, False], ids=["kdiff", "timesteps"])
+@pytest.mark.parametrize("control_tensor_cpu", [False, True], ids=["device", "cpu"])
+def test_controlnet_tiles_are_built_once_and_bit_identical(md_pair, import_extension, webui_stubs, tile_batch_size, kdiff, control_tensor_cpu):
+    original, patched = md_pair
+    (old,) = import_extension(original, "tile_methods.multidiffusion")
+    (new,) = import_extension(patched, "tile_methods.multidiffusion")
+    hint = torch.rand((1, 3, 384, 512))
+    before, old_param = controlnet_delegate(old, hint, tile_batch_size=tile_batch_size, control_tensor_cpu=control_tensor_cpu, kdiff=kdiff)
+    after, new_param = controlnet_delegate(new, hint, tile_batch_size=tile_batch_size, control_tensor_cpu=control_tensor_cpu, kdiff=kdiff)
+
+    first_seen = {}
+    for step in range(3):
+        for batch_id, bboxes in enumerate(after.batched_bboxes):
+            for delegate in (before, after):
+                delegate.switch_controlnet_tensors(batch_id, 2, len(bboxes), is_denoise=step == 2)
+            assert torch.equal(new_param.hint_cond, old_param.hint_cond)
+            key = (batch_id, step == 2)
+            if key in first_seen and not control_tensor_cpu:
+                assert new_param.hint_cond is first_seen[key]  # built once per request
+            first_seen.setdefault(key, new_param.hint_cond)
+        for delegate in (before, after):
+            delegate.set_custom_controlnet_tensors(0, 2)
+        assert torch.equal(new_param.hint_cond, old_param.hint_cond)
+
+    # Grid batches and the region alternate, so every call here changes the tile and is still an assignment.
+    assert new_param.assigned == old_param.assigned == 3 * (len(after.batched_bboxes) + 1)
+    after.reset_controlnet_tensors()
+    assert new_param.hint_cond is after.org_control_tensor_batch[0]
+
+
+def test_controlnet_unchanged_tile_is_not_reassigned(md_pair, import_extension, webui_stubs):
+    _original, patched = md_pair
+    (new,) = import_extension(patched, "tile_methods.multidiffusion")
+    delegate, param = controlnet_delegate(new, torch.rand((1, 3, 384, 512)), tile_batch_size=8)
+    for _step in range(5):
+        delegate.switch_controlnet_tensors(0, 2, len(delegate.batched_bboxes[0]))
+    assert param.assigned == 1  # one grid batch: ControlNet keeps the hint's derived state across steps
+
+    tile = param.hint_cond
+    delegate.reset_controlnet_tensors()  # postprocess_batch, then the next batch's create_sampler refresh:
+    delegate.prepare_controlnet_tensors(refresh=True)  # new ControlNet batch inputs, so the memo starts over
+    delegate.switch_controlnet_tensors(0, 2, len(delegate.batched_bboxes[0]))
+    assert param.hint_cond is not tile and torch.equal(param.hint_cond, tile) and param.assigned == 3
+
+
+def region_states(enable, x=0.1):
+    return [enable, x, 0.1, 0.5, 0.5, "a red ball", "", "Background", 0.2, -1]
+
+
+@pytest.mark.parametrize("model,enable_bbox_control,states,rejected", [
+    ("is_sdxl", True, region_states(True), True),
+    ("is_sd3", True, region_states(False) + region_states(True), True),
+    ("is_sdxl", True, region_states(False), False),
+    ("is_sdxl", True, region_states(True, x=1.5), False),  # skipped by init_custom_bbox: harmless
+    ("is_sdxl", False, region_states(True), False),
+    ("is_sd1", True, region_states(True), False),
+])
+def test_region_prompt_control_is_rejected_up_front_for_dict_conditioning(md_pair, import_extension, webui_stubs, model, enable_bbox_control, states, rejected):
+    _original, patched = md_pair
+    (script_module,) = import_extension(patched, "scripts/tilediffusion.py")
+    setattr(webui_stubs.shared.sd_model, model, True)
+    p = types.SimpleNamespace()  # no width: a request that passes the check fails on its first canvas access
+    args = (True, "MultiDiffusion", False, False, 1024, 1024, 96, 96, 48, 4, "None", 2.0, False, 10, 1.0, 1.0, 64, False, enable_bbox_control, True, False, *states)
+    if rejected:
+        with pytest.raises(RuntimeError, match="Region prompt control supports SD1/SD2 models only"):
+            script_module.Script().process(p, *args)
+        assert vars(p) == {}
+    else:
+        with pytest.raises(AttributeError, match="width"):
+            script_module.Script().process(p, *args)
