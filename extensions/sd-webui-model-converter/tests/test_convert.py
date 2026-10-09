@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -420,6 +421,18 @@ class ConversionCorrectnessTests(unittest.TestCase):
         load_vae.assert_called_once_with("/vae/new.safetensors", map_location="cpu")
         self.assertIn('"openclaw_converter_baked_vae": "new.safetensors"', report)
         self.assertTrue(torch.equal(out["first_stage_model.encoder.conv_in.weight"], torch.full((3,), 2.0, dtype=torch.float16)))
+
+    def test_doctor_reports_the_nonfinite_scan_it_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "model.safetensors")
+            save_file({"model.diffusion_model.w": torch.tensor([1.0, float("nan")])}, source)
+            report = self._convert(source)
+            out = load_file(os.path.join(tmpdir, "out.safetensors"))
+
+        doctor = json.loads(report.split("OpenClaw checkpoint doctor report:\n", 1)[1])["source_doctor"]
+        self.assertEqual(doctor["nonfinite"]["nan_values"], 1)
+        self.assertNotIn("skipped", doctor["content_scan"])
+        self.assertEqual(out["model.diffusion_model.w"].tolist(), [1.0, 0.0])
 
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

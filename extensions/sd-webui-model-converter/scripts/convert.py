@@ -378,7 +378,7 @@ def checkpoint_doctor(
         "shape_issue_examples": shape_issues[:25],
         "huge_tensor_examples": huge_tensors[:10],
         "warnings": warnings,
-        "content_scan": "metadata-only; NaN/Inf full tensor scan intentionally skipped during conversion for speed",
+        "content_scan": "every floating-point tensor is scanned for NaN/Inf, which are repaired to 0; see nonfinite",
     }
 
 
