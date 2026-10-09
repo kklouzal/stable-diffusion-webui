@@ -1,11 +1,8 @@
 from __future__ import annotations
 import json
 import re
-import sys
 
 from modules import shared, processing, infotext_versions, prompt_parser
-
-sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]  # alias for old name
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)

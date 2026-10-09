@@ -15,7 +15,6 @@ def infotext_utils(monkeypatch):
     monkeypatch.setitem(sys.modules, "modules.shared", shared)
     monkeypatch.setitem(sys.modules, "modules.processing", types.SimpleNamespace())
     monkeypatch.setitem(sys.modules, "modules.infotext_versions", infotext_versions)
-    monkeypatch.setitem(sys.modules, "modules.generation_parameters_copypaste", None)
     spec = importlib.util.spec_from_file_location("infotext_utils_under_test", "modules/infotext_utils.py")
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
