@@ -184,11 +184,18 @@ def assign_network_names_to_compvis_modules(sd_model):
 
 
 class BundledTIHash(str):
+    """The "TI hashes" infotext value of a LoRA-bundled embedding: the LoRA's name while lora_bundled_ti_to_infotext
+    is on. While it is off the value is empty and false, so sd_hijack_clip leaves the embedding out (`if not
+    shorthash`) instead of writing "<embedding>: "."""
+
     def __init__(self, hash_str):
         self.hash = hash_str
 
     def __str__(self):
         return self.hash if shared.opts.lora_bundled_ti_to_infotext else ''
+
+    def __bool__(self):
+        return bool(str(self))
 
 
 def network_file_signature(filename):

@@ -39,6 +39,9 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
 
                 dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
                 dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
+                if dyn_dim is not None and dyn_dim < 1:
+                    # dyn keeps the first dyn ranks; 0 would drop the network and a negative value counts from the end
+                    raise ValueError(f"dyn must be at least 1 in <lora:{':'.join(params.items)}>")
 
                 if not (math.isfinite(te_multiplier) and math.isfinite(unet_multiplier)):
                     raise ValueError(f"non-finite multiplier in <lora:{':'.join(params.items)}>")

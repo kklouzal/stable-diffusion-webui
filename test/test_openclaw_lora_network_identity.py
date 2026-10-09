@@ -1127,7 +1127,7 @@ def test_lora_activation_errors_stop_generation_instead_of_dropping_every_lora(l
         extra_networks.activate(p, {"lora": [extra_networks.ExtraNetworkParams(items=["missing", "0.8"])]})
 
     monkeypatch.setattr(networks, "load_networks", lambda *args: loaded.append(args))
-    for items in (["alpha", "nan"], ["alpha", "1", "inf"], ["alpha", "te=-inf"], ["alpha", "abc"], ["alpha", "1", "1", "8.5"]):
+    for items in (["alpha", "nan"], ["alpha", "1", "inf"], ["alpha", "te=-inf"], ["alpha", "abc"], ["alpha", "1", "1", "8.5"], ["alpha", "1", "1", "0"], ["alpha", "dyn=-2"]):
         with pytest.raises(extra_networks_lora.FatalLoraPreparationError):
             lora.activate(p, [extra_networks.ExtraNetworkParams(items=items)])
     assert loaded == []
@@ -1187,3 +1187,17 @@ def test_lora_hashes_name_the_alias_this_request_used(lora_networks, monkeypatch
     second = activate("alpha")
     assert networks.loaded_networks[0].mentioned_name == "alpha-alias"  # the applied state was reused
     assert second.extra_generation_params["Lora hashes"] == "alpha: abc"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_bundled_ti_hash_follows_the_infotext_option(lora_networks, monkeypatch, enabled):
+    """sd_hijack_clip skips embeddings whose shorthash is false and writes f"{name}: {shorthash}"; with the option off
+    a bundled embedding wrote "<embedding>: " (the hash str is the LoRA name, so it was always true)."""
+    networks = lora_networks
+    monkeypatch.setattr(networks.shared.opts, "lora_bundled_ti_to_infotext", enabled)
+    shorthash = networks.BundledTIHash("my_lora")
+
+    entries = [f"emb: {h}" for h in (shorthash,) if h]
+
+    assert str(shorthash) == ("my_lora" if enabled else "")
+    assert entries == (["emb: my_lora"] if enabled else [])
