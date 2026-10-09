@@ -42,7 +42,8 @@ def commit_hash():
 
 @lru_cache()
 def git_tag():
-    # The image has no .git: gb10/run.sh passes the host checkout's `git describe --tags` as A1111_VERSION_TAG.
+    # The image has no .git: gb10/run.sh passes the version the image's provenance label records (the build checkout's
+    # `git describe --tags`, org.opencontainers.image.version) as A1111_VERSION_TAG.
     env_tag = _webui_source_version_env("A1111_VERSION_TAG")
     if env_tag is not None:
         return env_tag
