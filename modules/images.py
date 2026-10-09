@@ -20,10 +20,13 @@ import string
 import json
 import hashlib
 import io
+import logging
 
 from modules import sd_samplers, shared, script_callbacks, errors, png_writer
 from modules.paths_internal import roboto_ttf_file
 from modules.shared import opts
+
+logger = logging.getLogger(__name__)
 
 LANCZOS = Image.Resampling.LANCZOS
 
@@ -928,8 +931,8 @@ def pixel_fingerprint(image):
 
 class UnsupportedImageError(ValueError):
     """Decoded image data that has no defined mapping to 8-bit sRGB: a pixel mode whose value range the format does
-    not define (32-bit integer "I", float "F"), or an embedded ICC profile that is malformed, cannot be a source
-    profile or does not match the pixel mode."""
+    not define (32-bit integer "I", float "F"), or an embedded ICC profile that is malformed or cannot be a source
+    profile."""
 
 
 def read(fp, *, max_pixels=None, **kwargs):
@@ -1034,7 +1037,9 @@ def _icc_to_srgb_transform(icc_profile: bytes):
 def _convert_to_srgb(image):
     """Converts an image with an embedded RGB or CMYK ICC profile to sRGB, the colour space everything downstream
     assumes, and drops the profile. Untagged images, gray images and sRGB profiles (_icc_to_srgb_transform) keep their
-    pixels and info."""
+    pixels and info. A valid profile whose colour space does not match the pixel mode (a Gray or Lab profile left on
+    an RGB image) does not describe the pixels: browsers ignore it, and so does this, dropping it and keeping the
+    pixels. A malformed profile raises UnsupportedImageError."""
     icc_profile = image.info.get("icc_profile")
     if not icc_profile or image.mode in _ICC_GRAY_MODES:
         return image
@@ -1044,7 +1049,10 @@ def _convert_to_srgb(image):
         raise UnsupportedImageError(f"Unsupported image mode {image.mode} with an embedded ICC profile")
     colour_space, transform = _icc_to_srgb_transform(bytes(icc_profile))
     if colour_space != expected:
-        raise UnsupportedImageError(f"The embedded ICC profile's colour space {colour_space.strip()!r} does not match image mode {image.mode}")
+        logger.debug("Ignoring an embedded ICC profile of colour space %r on a %s image", colour_space.strip(), image.mode)
+        image = image.copy()  # the caller's image keeps its info
+        del image.info["icc_profile"]
+        return image
     if transform is None:
         return image
 

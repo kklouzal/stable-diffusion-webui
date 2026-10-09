@@ -537,10 +537,42 @@ def test_gray_images_ignore_their_profile(images):
     assert image.mode == "L" and np.array_equal(np.asarray(image), np.asarray(mask))
 
 
-def test_invalid_or_mismatched_profiles_are_rejected(images):
-    from PIL import ImageCms
-
+def test_malformed_profiles_are_rejected(images):
     with pytest.raises(images.UnsupportedImageError):
         images.read(_png(_random_rgb(4, 4), icc_profile=b"not an ICC profile" * 8))
-    with pytest.raises(images.UnsupportedImageError):  # an RGB image cannot be read through a Lab profile
-        images.read(_png(_random_rgb(4, 4), icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()))
+
+
+@pytest.mark.parametrize("space", ["LAB", "XYZ"])
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "CMYK"])
+def test_a_profile_of_another_colour_space_is_dropped_and_the_pixels_kept(images, space, mode):
+    """A valid profile that does not describe the pixel mode (a leftover Lab/XYZ/Gray profile) is ignored, as browsers
+    do: the pixels stay as they are and the profile is dropped. The caller's image keeps its info."""
+    from PIL import ImageCms
+
+    icc = ImageCms.ImageCmsProfile(ImageCms.createProfile(space)).tobytes()
+    source = _random_rgb(8, 6, seed=3).convert(mode)
+    tagged = source.copy()
+    tagged.info["icc_profile"] = icc
+
+    image = images.fix_image(tagged)
+
+    assert image.mode == mode and "icc_profile" not in image.info
+    assert np.array_equal(np.asarray(image), np.asarray(source))
+    assert tagged.info["icc_profile"] == icc
+    if mode != "CMYK":  # through the decoder as well
+        read = images.read(_png(source, icc_profile=icc))
+        assert read.mode == mode and "icc_profile" not in read.info
+        assert np.array_equal(np.asarray(read), np.asarray(source))
+
+
+def test_a_cmyk_image_with_an_rgb_profile_keeps_its_pixels(images):
+    from PIL import ImageCms
+
+    source = _random_rgb(8, 6, seed=4).convert("CMYK")
+    tagged = source.copy()
+    tagged.info["icc_profile"] = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+    image = images.fix_image(tagged)
+
+    assert image.mode == "CMYK" and "icc_profile" not in image.info
+    assert np.array_equal(np.asarray(image), np.asarray(source))
