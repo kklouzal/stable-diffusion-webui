@@ -135,7 +135,17 @@ def test_vae_graph_reset_keeps_enablement_cumulative_counters_and_epochs(vae_gra
     assert epochs.epoch_subset(epochs.EPOCH_DIMENSIONS) == lifecycle  # a cache reset is not a lifecycle change
 
 
-def test_unet_graph_first_request_returns_the_replayed_capture(monkeypatch):
+@pytest.fixture
+def without_autograd():
+    """Autograd off, as on the generation path (graph capture bypasses while grad is enabled). Patching
+    torch.is_grad_enabled instead would make every torch.no_grad() entered meanwhile restore grad mode to off."""
+    import torch
+
+    with torch.no_grad():
+        yield
+
+
+def test_unet_graph_first_request_returns_the_replayed_capture(monkeypatch, without_autograd):
     from modules import openclaw_cuda_graphs as graphs
 
     torch = graphs.torch
@@ -156,7 +166,6 @@ def test_unet_graph_first_request_returns_the_replayed_capture(monkeypatch):
     _fake_cuda(monkeypatch, torch.cuda, events, replay)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch, "is_tensor", lambda value: isinstance(value, _DeviceValue) or real_is_tensor(value))
-    monkeypatch.setattr(torch, "is_grad_enabled", lambda: False)
     monkeypatch.setattr(graphs, "on_default_stream", lambda device: True)
     monkeypatch.setattr(graphs, "_graph_denoiser_bypass_reason", lambda denoiser, fn: None)
     monkeypatch.setattr(graphs, "_cache_key", lambda fn, x, sigma, cond, denoiser: ("unet", "key"))

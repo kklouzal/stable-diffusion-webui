@@ -300,7 +300,8 @@ class CudaGraphCacheSizeTests(GraphTestCase):
         def replay():
             try:
                 tensor = FakeTensor()
-                result = openclaw_cuda_graphs.run(tensor, tensor, tensor, cond={"c": tensor})
+                with torch.no_grad():  # autograd off, as on the generation path (grad mode is per thread)
+                    result = openclaw_cuda_graphs.run(tensor, tensor, tensor, cond={"c": tensor})
                 events.append(("result", result))
             except Exception as exc:  # pragma: no cover - asserted below from the parent thread
                 thread_errors.append(exc)
@@ -309,8 +310,7 @@ class CudaGraphCacheSizeTests(GraphTestCase):
              mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None), \
              mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True), \
              mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False):
+             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))):
             replay_thread = threading.Thread(target=replay)
             replay_thread.start()
             self.assertTrue(copy_started.wait(1))
@@ -822,7 +822,6 @@ class CudaGraphCaptureContractTests(GraphTestCase):
         self.patches = [
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True),
             mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True),
-            mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False),
             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda v: isinstance(v, FakeCudaTensor) or real_is_tensor(v)),
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "Stream", return_value=stream),
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "current_stream", return_value=stream),
@@ -833,6 +832,9 @@ class CudaGraphCaptureContractTests(GraphTestCase):
         ]
         for patch in self.patches:
             patch.start()
+        # Autograd off, as on the generation path. (Patching torch.is_grad_enabled instead makes every torch.no_grad()
+        # entered meanwhile save "off" as the mode to restore, which leaves autograd disabled for later tests.)
+        self.enterContext(torch.no_grad())
         self.alphas = torch.linspace(0.99, 0.01, 8)
         self.model = FakeModel(self.alphas)
 
