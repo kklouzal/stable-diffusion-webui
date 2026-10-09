@@ -1,3 +1,4 @@
+import collections
 import functools
 import importlib
 import importlib.util
@@ -90,18 +91,21 @@ def install_a1111_stubs():
     sd_samplers_mod.create_sampler = create_sampler
     sd_samplers_common_mod = types.ModuleType("modules.sd_samplers_common")
 
-    class SamplerData:
-        def __init__(self, name, constructor, aliases=None, options=None):
-            self.name = name
-            self.constructor = constructor
-            self.aliases = aliases or []
-            self.options = options or {}
+    # modules/sd_samplers_common.py's SamplerData, verbatim.
+    SamplerDataTuple = collections.namedtuple('SamplerData', ['name', 'constructor', 'aliases', 'options'])
+
+    class SamplerData(SamplerDataTuple):
+        def total_steps(self, steps):
+            if self.options.get("second_order", False):
+                steps = steps * 2
+
+            return steps
 
     sd_samplers_common_mod.SamplerData = SamplerData
     # The timestep sampler registry, as modules/sd_samplers_timesteps.py declares it.
     sd_samplers_timesteps_mod = types.ModuleType("modules.sd_samplers_timesteps")
     sd_samplers_timesteps_mod.samplers_data_timesteps = [
-        SamplerData(name, None) for name in ("DDIM", "DDIM CFG++", "PLMS", "UniPC")
+        SamplerData(name, None, [], {}) for name in ("DDIM", "DDIM CFG++", "PLMS", "UniPC")
     ]
     sd_samplers_kdiffusion_mod = types.ModuleType("modules.sd_samplers_kdiffusion")
 
@@ -438,6 +442,75 @@ class DynamicThresholdingLifecycleTests(unittest.TestCase):
             with self.subTest(sampler=name), self.assertRaisesRegex(RuntimeError, "Cannot use sampler"):
                 script.process_batch(p, True, *args)
             self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler"})
+
+    ARGS = (7.0, 100.0, "Constant", 0.0, "Constant", 0.0, 4.0, True, "MEAN", "AD", 1.0, 0, [], [], [])
+
+    def test_renamed_sampler_keeps_the_sampler_data_subclass_and_fields(self):
+        # A "Multi" chain is a MultiSamplerData whose total_steps sums its stages; a plain SamplerData copy counted
+        # steps once per step (and second_order chains twice), so the hires/conds step counts were wrong.
+        SamplerData = sys.modules["modules.sd_samplers_common"].SamplerData
+
+        class MultiSamplerData(SamplerData):
+            def total_steps(self, steps):
+                return steps + 3
+
+        chain = MultiSamplerData("Multi: oi2", self.sd_samplers.all_samplers_map["Euler"].constructor, ["oi2"], {"scheduler": "exponential", "openclaw_chain": "{}"})
+        self.sd_samplers.all_samplers_map[chain.name] = chain
+        script = self.dynamic_thresholding.Script()
+        p = types.SimpleNamespace(sampler_name=chain.name, sampler=None, sd_model=object(), steps=4, extra_generation_params={})
+        script.process_batch(p, True, *self.ARGS)
+        renamed = self.sd_samplers.all_samplers_map[p.sampler_name]
+        self.assertIsInstance(renamed, MultiSamplerData)
+        self.assertEqual(renamed.total_steps(10), 13)
+        self.assertEqual((renamed.name, renamed.aliases, renamed.options), (p.sampler_name, chain.aliases, chain.options))
+        self.assertIsInstance(renamed.constructor(object()).model_wrap_cfg, self.dynamic_thresholding.CustomCFGDenoiser)
+        script.postprocess_batch(p)
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler", chain.name})
+
+    def test_hires_sampler_gets_dynamic_thresholding_too(self):
+        SamplerData = sys.modules["modules.sd_samplers_common"].SamplerData
+        euler = self.sd_samplers.all_samplers_map["Euler"]
+        self.sd_samplers.all_samplers_map["Heun"] = SamplerData("Heun", euler.constructor, [], {"second_order": True})
+        script = self.dynamic_thresholding.Script()
+
+        def request(hr_sampler_name):
+            return types.SimpleNamespace(sampler_name="Euler", hr_sampler_name=hr_sampler_name, sampler=None, sd_model=object(), steps=4, extra_generation_params={})
+
+        # A different hires sampler gets its own renamed sampler.
+        p = request("Heun")
+        script.process_batch(p, True, *self.ARGS)
+        self.assertTrue(p.hr_sampler_name.startswith("Heun_dynthres"))
+        hires = self.sd_samplers.all_samplers_map[p.hr_sampler_name]
+        self.assertEqual(hires.options, {"second_order": True})
+        self.assertIsInstance(hires.constructor(object()).model_wrap_cfg, self.dynamic_thresholding.CustomCFGDenoiser)
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler", "Heun", p.sampler_name, p.hr_sampler_name})
+        script.postprocess_batch(p)
+        self.assertEqual((p.sampler_name, p.hr_sampler_name), ("Euler", "Heun"))
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler", "Heun"})
+        self.assertEqual(self.dynamic_thresholding.Script.registered_samplers, set())
+
+        # The first pass's sampler named explicitly shares its renamed sampler; None keeps following sampler_name.
+        for hr_sampler_name in ("Euler", None):
+            p = request(hr_sampler_name)
+            script.process_batch(p, True, *self.ARGS)
+            with self.subTest(hr_sampler_name=hr_sampler_name):
+                self.assertEqual(p.hr_sampler_name, p.sampler_name if hr_sampler_name else None)
+                self.assertEqual(len(self.sd_samplers.all_samplers_map), 3)
+            script.postprocess_batch(p)
+            self.assertEqual((p.sampler_name, p.hr_sampler_name), ("Euler", hr_sampler_name))
+
+        # A timestep hires sampler is rejected like a first-pass one.
+        p = request("DDIM")
+        with self.assertRaisesRegex(RuntimeError, "Cannot use sampler DDIM"):
+            script.process_batch(p, True, *self.ARGS)
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler", "Heun"})
+
+        # A failed generation (no postprocess_batch) is cleaned up by the next batch, hires name included.
+        p = request("Heun")
+        script.process_batch(p, True, *self.ARGS)
+        script.process_batch(p, False, *self.ARGS)
+        self.assertEqual((p.sampler_name, p.hr_sampler_name), ("Euler", "Heun"))
+        self.assertEqual(set(self.sd_samplers.all_samplers_map), {"Euler", "Heun"})
 
     def test_ui_defaults_enable_dynthres_without_explicit_minimums(self):
         # Requests that enable DynThres but leave the scheduler minimums to their defaults (partial args, an

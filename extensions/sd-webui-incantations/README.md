@@ -23,7 +23,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 
 ## Source map
 
-- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (the timestep samplers DDIM, DDIM CFG++, PLMS and UniPC are rejected with an error). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
+- `scripts/dynamic_thresholding.py` and `dynthres_core.py`: A1111 Dynamic Thresholding / CFG-Fix source for k-diffusion samplers (the timestep samplers DDIM, DDIM CFG++, PLMS and UniPC are rejected with an error). It wraps the hires pass's `hr_sampler_name` as well (it used to run without Dynamic Thresholding when one was set), and its renamed sampler is a `_replace` copy that keeps the sampler data's class and fields (a Multi chain's `MultiSamplerData.total_steps`). ComfyUI/SwarmUI entrypoints from the old standalone extension were removed.
 - `scripts/pag.py` and `scripts/smoothed_energy_guidance.py`: Incantations guidance source with GB10 lifecycle fixes.
 - `scripts/cfg_combiner.py`: GB10-owned CFG composition glue for PAG and CFG-Fix coexistence.
 - `scripts/incantation_base.py`: GB10-trimmed A1111 entrypoint that exposes only the supported combined guidance stack.
