@@ -6,15 +6,26 @@ The user asked for a pass over the entire source to remove dead code, duplicatio
 work starts from a clean codebase. Any bug found along the way was fixed in the same pass.
 
 - **Base.** `c98dc893`, which equalled `origin/latest`: the deploy9 source (`75a94f59`) plus docs.
-- **Result.** Branch `cleanup-integration` at `881a93f3`, followed by two follow-up streams:
-  - S5a merges `tests/` into `test/` and moves the live-server tests to `test/live/`, which are skipped without
+- **Result.** Branch `cleanup-integration`, fast-forwarded into `latest`. Code streams S1-S4 were merged first and
+  integration-checked at `881a93f3`; two follow-up streams came after that:
+  - S5a merged `tests/` into `test/` and moved the live-server tests to `test/live/`, which are skipped without
     `--base-url`.
-  - S5b updates the docs and removes upstream leftovers.
+  - S5b updated the docs and removed upstream leftovers.
+- **Final gate** (image `local/gb10-a1111:cleanup-cand-c342f73a`, built from the final tree):
+  - `pytest test`: 1435 passed, 235 skipped (34 of them live), 0 failed.
+  - Every extension suite passes: clear-cond-cache 15, denoise-ramp 3, multi-sampler 16, controlnet 73,
+    incantations 56, model-converter 22, teacache 37.
+  - The CPU API probe shows only the deltas listed under "Observable API deltas".
+- **Rebuild drift.** The rebuild re-resolved the app dependencies to their newest compatible releases, as the
+  documented doctrine intends:
+  - ImageIO 2.38.1, omegaconf 2.4.0, pydantic 2.14.0, pydantic_core 2.50.0, tokenizers 0.23.3.
+  - The same tree gave identical gate results and byte-identical probe output on deploy9's image and on the new one.
+  - All 19 model configs shared by both images parse identically under omegaconf 2.4.0.
 - **Not deployed yet** (see "Deploy-time actions").
 - **Evidence.** Everything is in `~/audit-artifacts/gb10-a1111-cleanup-20261009/`:
   - `LEDGER.md` holds decisions and status.
   - `area-*.md` are the audit reports. Finding ids such as 4-05 refer to them.
-  - `S1/` to `S4/` and `S5b/` hold the stream logs.
+  - `S1/` to `S4/`, `S5a/` and `S5b/` hold the stream logs.
   - `gate-*` and `probe-*` hold the gate results.
 
 ## Method
@@ -241,9 +252,10 @@ their values and order, `/cmd-flags` and the schemas are unchanged, and every ke
 
 ## Deploy-time actions
 
-1. **Rebuild the image** on an idle host, under the guarded build. In the new image, check:
-   - the app tree matches the `.dockerignore` allowlist: no `test/`, `docs/`, `extensions/` or untracked host files
-   - `depth_anything` and `depth_anything_v2` import
+1. **Image.** Built and checked: `local/gb10-a1111:cleanup-cand-c342f73a`.
+   - The app tree matches the `.dockerignore` allowlist: no `test/`, `docs/`, `extensions/` or untracked host files.
+   - `depth_anything` and `depth_anything_v2` import.
+   - Retag it for the deploy.
 2. **Remove the retired host extension** before or with the deploy:
    `sudo rm -rf /opt/gb10/stable-diffusion/Extensions/openclaw-conditioning-probe`. run.sh never deletes a retired owned
    extension, so until then its two routes keep loading.
@@ -269,10 +281,11 @@ These items need an owner decision or a follow-up:
   state.
 - **Upstream-core items left alone by owner decision.** These include 4-08 (the unreachable unCLIP stats file) and
   4-64 (the extra-options-section headless snapshot); the full list is in `S4/LEDGER-S4.md`.
-- **Follow-ups not done:**
-  - a failed training run keeps partly trained weights in memory
-  - `ddpm_edit` has dead VQModelInterface branches after the LDSR removal
-  - `test_openclaw_cuda_graphs` leaks a grad-disabled state
+- **Follow-up not done:** a failed training run keeps its partly trained weights in memory. They are no longer saved
+  over the target file.
+- **Done after the streams merged:**
+  - the `ddpm_edit` VQModelInterface branches: always false once LDSR's hijack was gone, now removed
+  - the grad-disabled test leak: S5a
 - **Host leftovers.** Unmounted directories under `/opt/gb10/stable-diffusion` and the prompt-all-in-one quarantine
   copy (see STATUS.md).
 
