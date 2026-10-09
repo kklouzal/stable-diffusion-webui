@@ -59,14 +59,11 @@ def test_generation_exception_deactivates_extra_networks_and_restores_state():
 
 
 def test_extra_network_cleanup_is_owned_by_processing_finally():
+    # process_images' finally deactivates (the two behavioral tests here); the inner loop must never deactivate itself,
+    # or a failure after its own deactivation would deactivate twice. It runs the whole pipeline, so this is AST-checked.
     tree = ast.parse(Path("modules/processing.py").read_text())
-    outer = _function(tree, "process_images")
     inner = _function(tree, "process_images_inner")
-    outer_try = next(node for node in outer.body if isinstance(node, ast.Try))
-    outer_finally_source = ast.unparse(ast.Module(body=outer_try.finalbody, type_ignores=[]))
 
-    assert "active_extra_network_data = p._active_extra_network_data" in outer_finally_source
-    assert "extra_networks.deactivate(p, active_extra_network_data)" in outer_finally_source
     assert not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -75,27 +72,20 @@ def test_extra_network_cleanup_is_owned_by_processing_finally():
     )
 
 
-def test_model_and_override_cleanup_survive_extra_network_cleanup_failure():
-    tree = ast.parse(Path("modules/processing.py").read_text())
-    outer = _function(tree, "process_images")
-    outer_try = next(node for node in outer.body if isinstance(node, ast.Try))
-    cleanup_try = next(node for node in outer_try.finalbody if isinstance(node, ast.Try))
-    guaranteed_cleanup_source = ast.unparse(ast.Module(body=cleanup_try.finalbody, type_ignores=[]))
-
-    assert "p._active_extra_network_data = None" in guaranteed_cleanup_source
-    assert "sd_models.apply_token_merging(p.sd_model, 0)" in guaranteed_cleanup_source
-    assert "restore_processing_override_settings(stored_opts)" in guaranteed_cleanup_source
-
-
 def test_processing_tracks_activation_before_it_can_raise():
-    source = Path("modules/processing.py").read_text()
-    start = source.index("def process_images_inner")
-    end = source.index("@dataclass(repr=False)", start)
-    inner = source[start:end]
-    activate_at = inner.index("extra_networks.activate(p, p.extra_network_data)")
-    tracked_at = inner.rindex("p._active_extra_network_data = p.extra_network_data", 0, activate_at)
+    # activate can raise midway; process_images' finally deactivates only what was recorded, so the record comes first.
+    inner = _function(ast.parse(Path("modules/processing.py").read_text()), "process_images_inner")
+    [activate] = [node for node in ast.walk(inner) if isinstance(node, ast.Call) and ast.unparse(node.func) == "extra_networks.activate"]
+    assert ast.unparse(activate) == "extra_networks.activate(p, p.extra_network_data)"
 
-    assert tracked_at < activate_at
+    # The statements directly before the one that (at any nesting level) activates.
+    preceding = []
+    for node in ast.walk(inner):
+        for body in (getattr(node, field, None) for field in ("body", "orelse")):
+            if isinstance(body, list):
+                preceding += [ast.unparse(body[index - 1]) for index, statement in enumerate(body) if index and activate in set(ast.walk(statement))]
+
+    assert "p._active_extra_network_data = p.extra_network_data" in preceding
 
 
 def test_cleanup_failure_still_restores_model_and_overrides():
