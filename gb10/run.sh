@@ -75,8 +75,6 @@ printf "Discovered owned extensions:"
 printf " %s" "${OWNED_EXTENSIONS[@]}"
 printf "\n"
 
-SUPERSEDED_DYNTHRES_TARGET="${HOST_ROOT}/Extensions/sd-dynamic-thresholding"
-
 # Stop the bind-mounted live container before mutating Extensions underneath it.
 sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
@@ -109,13 +107,6 @@ fi
 ULTIMATE_UPSCALE_ROOT="${HOST_ROOT}/Extensions/ultimate-upscale-for-automatic1111"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${ULTIMATE_UPSCALE_ROOT}"
 sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${ULTIMATE_UPSCALE_ROOT}"
-# Dynamic Thresholding / CFG-Fix is now vendored inside the owned Incantations extension.
-# Remove the old standalone checkout so A1111 does not load duplicate CFG-Fix scripts.
-sudo rm -rf "${SUPERSEDED_DYNTHRES_TARGET}"
-if [[ -e "${SUPERSEDED_DYNTHRES_TARGET}" ]]; then
-  echo "ERROR: failed to remove superseded extension: ${SUPERSEDED_DYNTHRES_TARGET}" >&2
-  exit 1
-fi
 
 sudo chown -R 2323:2323 \
   "${HOST_ROOT}/BLIP" \
