@@ -1005,24 +1005,30 @@ def _device_has_unified_memory(device):
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
 
-def checkpoint_switch_in_place_on_device(m):
-    """Whether a checkpoint switch loads the new weights straight into the device-resident model `m`.
+def weights_load_in_place_on_device(m):
+    """Whether new weights for the device-resident model `m` load straight into it instead of a CPU round trip.
 
-    With sd_checkpoints_limit == 1 the outgoing model is never kept as a cached copy: it is either reused as the
-    container for the new weights or trashed. On unified memory, parking it on the CPU first frees no physical
-    memory; it costs a full device-to-host copy, a CPU-side load and a full host-to-device copy, briefly holding
-    both. Loading in place gives the same weights: copy_ from the CPU state_dict converts dtype on the CPU either
-    way, and the remaining load steps are layout changes, same-dtype no-ops, or round-to-nearest-even casts that
-    match the CPU bit for bit on non-NaN values. lowvram/medvram and TorchAO-quantized models keep their own
-    movement paths.
+    On unified memory, parking the model on the CPU to load weights frees no physical memory; it costs a full
+    device-to-host copy, a CPU-side load and a full host-to-device copy, briefly holding both. Loading in place
+    gives the same weights: copy_ from the CPU state_dict converts dtype on the CPU either way, and the remaining
+    load steps are layout changes, same-dtype no-ops, or round-to-nearest-even casts that match the CPU bit for bit
+    on non-NaN values. lowvram/medvram and TorchAO-quantized models keep their own movement paths.
     """
     return (
         m is not None
-        and shared.opts.sd_checkpoints_limit == 1
         and not m.lowvram
         and not model_has_torchao_quantization(m)
         and _device_has_unified_memory(devices.device)
     )
+
+
+def checkpoint_switch_in_place_on_device(m):
+    """Whether a checkpoint switch loads the new weights straight into the device-resident model `m`.
+
+    Only with sd_checkpoints_limit == 1: the outgoing model is then never kept as a cached copy, so it is either
+    reused as the container for the new weights or trashed. See weights_load_in_place_on_device.
+    """
+    return shared.opts.sd_checkpoints_limit == 1 and weights_load_in_place_on_device(m)
 
 
 def release_model_for_in_place_reload(m):
