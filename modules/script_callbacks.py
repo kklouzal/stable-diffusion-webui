@@ -28,6 +28,17 @@ def _run_output_callbacks(category, job, *args):
             raise
 
 
+def _run_reported_callbacks(category, job, *args, reverse=False):
+    """Callbacks that do not change what a generation produces (notifications, settings and list registration): one
+    that raises is reported and the others still run."""
+    callbacks = ordered_callbacks(category)
+    for c in reversed(callbacks) if reverse else callbacks:
+        try:
+            c.callback(*args)
+        except Exception:
+            report_exception(c, job)
+
+
 class ImageSaveParams:
     def __init__(self, image, p, filename, pnginfo):
         self.image = image
@@ -280,19 +291,11 @@ def app_started_callback(demo: Optional[Blocks], app: FastAPI):
 
 
 def model_loaded_callback(sd_model):
-    for c in ordered_callbacks('model_loaded'):
-        try:
-            c.callback(sd_model)
-        except Exception:
-            report_exception(c, 'model_loaded_callback')
+    _run_reported_callbacks('model_loaded', 'model_loaded_callback', sd_model)
 
 
 def ui_settings_callback():
-    for c in ordered_callbacks('ui_settings'):
-        try:
-            c.callback()
-        except Exception:
-            report_exception(c, 'ui_settings_callback')
+    _run_reported_callbacks('ui_settings', 'ui_settings_callback')
 
 
 def before_image_saved_callback(params: ImageSaveParams):
@@ -300,11 +303,7 @@ def before_image_saved_callback(params: ImageSaveParams):
 
 
 def image_saved_callback(params: ImageSaveParams):
-    for c in ordered_callbacks('image_saved'):
-        try:
-            c.callback(params)
-        except Exception:
-            report_exception(c, 'image_saved_callback')
+    _run_reported_callbacks('image_saved', 'image_saved_callback', params)
 
 
 def extra_noise_callback(params: ExtraNoiseParams):
@@ -328,42 +327,22 @@ def image_grid_callback(params: ImageGridLoopParams):
 
 
 def infotext_pasted_callback(infotext: str, params: dict[str, Any]):
-    for c in ordered_callbacks('infotext_pasted'):
-        try:
-            c.callback(infotext, params)
-        except Exception:
-            report_exception(c, 'infotext_pasted')
+    _run_reported_callbacks('infotext_pasted', 'infotext_pasted', infotext, params)
 
 
 def before_ui_callback():
-    for c in reversed(ordered_callbacks('before_ui')):
-        try:
-            c.callback()
-        except Exception:
-            report_exception(c, 'before_ui')
+    _run_reported_callbacks('before_ui', 'before_ui', reverse=True)
 
 
 def list_optimizers_callback():
     res = []
-
-    for c in ordered_callbacks('list_optimizers'):
-        try:
-            c.callback(res)
-        except Exception:
-            report_exception(c, 'list_optimizers')
-
+    _run_reported_callbacks('list_optimizers', 'list_optimizers', res)
     return res
 
 
 def list_unets_callback():
     res = []
-
-    for c in ordered_callbacks('list_unets'):
-        try:
-            c.callback(res)
-        except Exception:
-            report_exception(c, 'list_unets')
-
+    _run_reported_callbacks('list_unets', 'list_unets', res)
     return res
 
 
