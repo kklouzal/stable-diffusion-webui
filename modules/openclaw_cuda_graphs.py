@@ -399,17 +399,22 @@ def _runtime_branch_key() -> tuple[Any, ...]:
     - lora_functional: the Lora extension's per-layer functional path instead of merged weights, and the UNet
       norms' bf16-native eligibility (sd_hijack_unet.bf16_native_norm_eligible).
     - the NHWC GroupNorm switch (modules/openclaw_nhwc_groupnorm.py): which GroupNorm kernels and layouts run.
+    - tiling: sd_hijack.model_hijack.apply_circular(p.tiling) sets every hijacked Conv2d's padding_mode, which picks
+      the padding a convolution runs (a captured graph freezes it). The hijack flag is the authoritative state of
+      that switch and costs no module walk per UNet call.
     Request override_settings set these without callbacks, so they must be part of the key.
     """
     shared = sys.modules.get("modules.shared")
     opts = getattr(shared, "opts", None)
     cross_attention = getattr(sys.modules.get("sgm.modules.attention"), "CrossAttention", None)
     nhwc_group_norm = sys.modules.get("modules.openclaw_nhwc_groupnorm")
+    model_hijack = getattr(sys.modules.get("modules.sd_hijack"), "model_hijack", None)
     return (
         getattr(cross_attention, "forward", None),
         bool(getattr(opts, "upcast_attn", False)),
         _lora_functional(),
         nhwc_group_norm.state_key() if nhwc_group_norm is not None else None,
+        bool(getattr(model_hijack, "circular_enabled", False)),
     )
 
 
