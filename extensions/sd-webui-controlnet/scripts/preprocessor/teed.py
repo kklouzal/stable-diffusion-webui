@@ -70,7 +70,6 @@ class PreprocessorAnyline(Preprocessor):
             value=2,
             step=1,
         )
-        self.preprocessor_deps = ["lineart_standard"]
         self.model = None
 
     def __call__(

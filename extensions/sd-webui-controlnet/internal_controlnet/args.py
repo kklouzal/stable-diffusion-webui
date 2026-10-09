@@ -274,17 +274,6 @@ class ControlNetUnit(BaseModel):
             return False
         return "IP-Adapter" in p.tags
 
-    def get_actual_preprocessors(self) -> List[Any]:
-        p = ControlNetUnit.cls_get_preprocessor(self.module)
-        # Map "ip-adapter-auto" to actual preprocessor.
-        if self.module == "ip-adapter-auto":
-            p = p.get_preprocessor_by_model(self.model)
-
-        # Add all dependencies.
-        return [p] + [
-            ControlNetUnit.cls_get_preprocessor(dep) for dep in p.preprocessor_deps
-        ]
-
     @classmethod
     def parse_image(cls, image) -> np.ndarray:
         """An ndarray, or a base64 string (decoded by cls_decode_base64; never read as a server file path)."""

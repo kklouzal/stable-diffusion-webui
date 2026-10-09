@@ -782,12 +782,6 @@ class Script(scripts.Script, metaclass=(
         h = align_dim_latent(p.height)
         w = align_dim_latent(p.width)
 
-        # Unload unused preprocessors
-        Preprocessor.unload_unused(active_processors={
-            p
-            for unit in self.enabled_units
-            for p in unit.get_actual_preprocessors()
-        })
         high_res_fix = (
             isinstance(p, StableDiffusionProcessingTxt2Img)
             and getattr(p, 'enable_hr', False)

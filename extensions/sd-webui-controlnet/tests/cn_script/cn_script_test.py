@@ -4,6 +4,7 @@ from unittest import mock
 from PIL import Image, ImageOps
 import cv2
 import numpy as np
+import torch
 
 import importlib
 
@@ -128,6 +129,27 @@ class TestDetectmapResizeInterpolation(unittest.TestCase):
         seg = palette[rng.integers(0, 12, (6, 5))].repeat(8, axis=0).repeat(8, axis=1)
         _, up = Script.detectmap_proc(seg, "seg_anime_face", ResizeMode.RESIZE, 96, 80)
         np.testing.assert_array_equal(up, cv2.resize(seg, (80, 96), interpolation=cv2.INTER_NEAREST))
+
+
+class TestPreprocessorsStayLoaded(unittest.TestCase):
+    def test_a_request_does_not_unload_the_preprocessors_it_does_not_use(self):
+        from scripts.supported_preprocessor import Preprocessor
+
+        class Stop(Exception):
+            pass
+
+        unit = ControlNetUnit(enabled=True, module="canny", model="None")
+        unused = Preprocessor.get_preprocessor("depth_zoe")
+        sd_model = SimpleNamespace(model=SimpleNamespace(diffusion_model=torch.nn.Module()), is_sdxl=False)
+        p = SimpleNamespace(sd_model=sd_model)
+        with mock.patch.object(Script, "get_enabled_units", return_value=[unit]), \
+                mock.patch.object(Script, "check_sd_version_compatible", side_effect=Stop), \
+                mock.patch.object(type(unused), "unload") as unload, \
+                mock.patch.object(type(unused), "clear_cache") as clear_cache:
+            with self.assertRaises(Stop):
+                Script().controlnet_main_entry(p)
+        unload.assert_not_called()
+        clear_cache.assert_not_called()
 
 
 class TestSetNumpySeed(unittest.TestCase):

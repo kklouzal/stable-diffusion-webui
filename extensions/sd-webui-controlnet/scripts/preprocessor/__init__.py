@@ -1,5 +1,4 @@
-"""Importing this package registers every preprocessor (Preprocessor.add_supported_preprocessor). The import order
-is the registration order, which Preprocessor.unload_unused iterates."""
+"""Importing this package registers every preprocessor (Preprocessor.add_supported_preprocessor)."""
 from . import teed  # noqa: F401
 from . import inpaint  # noqa: F401
 from . import lama_inpaint  # noqa: F401
