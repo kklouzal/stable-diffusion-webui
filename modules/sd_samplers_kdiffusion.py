@@ -259,16 +259,20 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
 
         return samples
 
+    @staticmethod
+    def scale_initial_noise(p, x, sigma_max):
+        """Scales unit-variance txt2img noise to the first sigma. With the SGM noise multiplier option (recorded in
+        infotext) the factor is sqrt(1 + sigma^2), as in generative-models' sgm sampling.py; the multi-sampler shares it."""
+        if opts.sgm_noise_multiplier:
+            p.extra_generation_params["SGM noise multiplier"] = True
+            return x * torch.sqrt(1.0 + sigma_max ** 2.0)
+        return x * sigma_max
+
     def sample(self, p, x, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps = steps or p.steps
 
         sigmas = self.get_sigmas(p, steps)
-
-        if opts.sgm_noise_multiplier:
-            p.extra_generation_params["SGM noise multiplier"] = True
-            x = x * torch.sqrt(1.0 + sigmas[0] ** 2.0)
-        else:
-            x = x * sigmas[0]
+        x = self.scale_initial_noise(p, x, sigmas[0])
 
         extra_params_kwargs = self.initialize(p)
         parameters = inspect.signature(self.func).parameters

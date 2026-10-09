@@ -545,11 +545,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
     def sample(self, p, x, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
         steps = steps or p.steps
         sigmas = self._base_sigmas(p, steps)
-        if opts.sgm_noise_multiplier:
-            p.extra_generation_params["SGM noise multiplier"] = True
-            x = x * torch.sqrt(1.0 + sigmas[0] ** 2.0)
-        else:
-            x = x * sigmas[0]
+        x = self.scale_initial_noise(p, x, sigmas[0])
         samples = self._run_chain(p, x, conditioning, unconditional_conditioning, sigmas, steps, image_conditioning=image_conditioning)
         self.add_infotext(p)
         return samples
