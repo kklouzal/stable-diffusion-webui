@@ -46,16 +46,10 @@ class _FallbackComponent:
     def upload(self, *args: Any, **kwargs: Any): return self
     def load(self, *args: Any, **kwargs: Any): return self
     def render(self, *args: Any, **kwargs: Any): return self
-    # Read (not called) by vendored ControlNet, which wraps it: image.preprocess = partial(svg_preprocess, preprocess=...).
-    def preprocess(self, value: Any): return value
 
     @staticmethod
     def update(**kwargs: Any):
         return update(**kwargs)
-
-
-class Interface(_FallbackComponent):
-    """Base class for ControlNet's ModalInterface."""
 
 
 class Blocks(_FallbackComponent):
@@ -72,8 +66,8 @@ def Warning(message: str):
 
 _COMPONENT_NAMES = {
     "Accordion", "Button", "Checkbox", "CheckboxGroup", "Code", "ColorPicker", "Column", "Dropdown", "File",
-    "Gallery", "Group", "HTML", "Image", "Info", "Markdown", "Number", "Plot", "Radio", "Row", "Slider", "State",
-    "Tab", "TabItem", "Tabs", "Text", "Textbox", "UploadButton", "Video",
+    "Group", "HTML", "Image", "Info", "Markdown", "Number", "Plot", "Radio", "Row", "Slider", "State",
+    "Tab", "TabItem", "Tabs", "Text", "Textbox",
 }
 
 
@@ -85,8 +79,7 @@ for _component_name in _COMPONENT_NAMES:
 # declaring API script controls. Route those imports to this inert headless
 # surface instead of requiring the real browser UI dependency.
 components = ModuleType("gradio.components")
-components.Component = _FallbackComponent
-components.IOComponent = _FallbackComponent  # named in vendored ControlNet annotations
+components.Component = _FallbackComponent  # MultiDiffusion's tile_utils/typing.py imports it
 for _component_name in _COMPONENT_NAMES:
     setattr(components, _component_name, globals()[_component_name])
 

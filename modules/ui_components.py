@@ -21,10 +21,6 @@ class FormGroup(FormComponent, gr.Group):
     """Same as gr.Group but fits inside UI forms"""
 
 
-class FormHTML(FormComponent, gr.HTML):
-    """Same as gr.HTML but fits inside UI forms"""
-
-
 class FormColorPicker(FormComponent, gr.ColorPicker):
     """Same as gr.ColorPicker but fits inside UI forms"""
 
