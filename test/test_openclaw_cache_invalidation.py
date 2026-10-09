@@ -129,9 +129,10 @@ def test_img2img_init_cache_restore_clones_under_cache_lock(monkeypatch):
     p = StableDiffusionProcessingImg2Img.__new__(StableDiffusionProcessingImg2Img)
     p.extra_generation_params = {}
 
-    assert p._restore_img2img_init_cache(("key",)) is True
+    assert p._restore_img2img_init_cache(("key",), True) is True
     assert guard.entries >= 1
     assert p.is_using_inpainting_conditioning is True
+    assert p.color_corrections == []  # the request computes color corrections (add_color_corrections)
     assert p.extra_generation_params == {"Cached": "yes"}
 
 
