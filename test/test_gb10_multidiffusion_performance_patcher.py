@@ -2,8 +2,9 @@
 
 The extension is not part of the fork. These tests copy the installed checkout (the host deploy root, or the same
 checkout where run.sh mounts it inside a webui container) and skip when neither is present. The installed checkout
-may already be patched, so the fixture reverses every block to its upstream text and asserts the patcher reproduces
-the installed bytes. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
+may already be patched, by this release or by the previous one (PREVIOUS), so the fixture reverses every block to its
+upstream text and asserts the patcher reproduces the installed bytes, or for a previous-release target the bytes it
+upgrades the installed copy to. The shared fail-closed engine itself is tested in test_gb10_patchlib.py.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ INSTALLED_MD = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensio
 UPSTREAM_COMMIT = "22798f6"  # origin/main the blocks' ORIGINAL texts are taken from
 SGM_ROOT = ROOT / "repositories" / "generative-models"
 UTILS = "tile_utils/utils.py"
-TERMINAL_HELPER = "def _gb10_terminal_tile_origins"
+TERMINAL_HELPER = "def _gb10_tile_origins"
 
 
 # The patcher imports patchlib as a sibling module, as under run.sh.
@@ -51,10 +52,17 @@ def snapshot(root: Path) -> dict[str, bytes]:
     return {relative: (root / relative).read_bytes() for relative in TARGETS}
 
 
-def unpatched(source: str, blocks) -> str:
-    for block in reversed(blocks):
+def unpatched(source: str, relative: str) -> str:
+    for block in [*reversed(PATCHER_MODULE.BLOCKS[relative]), *reversed(PATCHER_MODULE.PREVIOUS.get(relative, []))]:
         source = source.replace(block.patched, block.original)
     return source
+
+
+def copy_targets(source: Path, target: Path) -> Path:
+    for relative in TARGETS:
+        (target / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, target / relative)
+    return target
 
 
 def copy_multidiffusion(target: Path) -> Path:
@@ -63,18 +71,23 @@ def copy_multidiffusion(target: Path) -> Path:
         pytest.skip(f"installed MultiDiffusion fixture missing: {EXTENSION}")
     shutil.copytree(INSTALLED_MD, target, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
     installed = snapshot(target)
-    for relative, blocks in PATCHER_MODULE.BLOCKS.items():
-        (target / relative).write_bytes(unpatched(installed[relative].decode("utf-8"), blocks).encode("utf-8"))
+    for relative in TARGETS:
+        (target / relative).write_bytes(unpatched(installed[relative].decode("utf-8"), relative).encode("utf-8"))
     if snapshot(target) != installed:
-        # The derived tree is only a valid upstream stand-in if the patcher turns it back into the installed bytes.
-        probe = target.parent / f"{target.name}-roundtrip"
-        for relative in TARGETS:
-            (probe / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(target / relative, probe / relative)
-        run_patcher(probe)
-        assert snapshot(probe) == installed
-        shutil.rmtree(probe)
+        # The derived tree is only a valid upstream stand-in if the patcher turns it back into the installed bytes
+        # (a previous-release target: into the bytes it upgrades the installed copy to).
+        probe = run_patcher_on_copy(target, target.parent / f"{target.name}-roundtrip")
+        upgraded = run_patcher_on_copy(INSTALLED_MD, target.parent / f"{target.name}-upgraded")
+        assert probe == upgraded
+        assert all(upgraded[relative] == installed[relative] or relative in PATCHER_MODULE.PREVIOUS for relative in TARGETS)
     return target
+
+
+def run_patcher_on_copy(source: Path, probe: Path) -> dict[str, bytes]:
+    run_patcher(copy_targets(source, probe))
+    patched = snapshot(probe)
+    shutil.rmtree(probe)
+    return patched
 
 
 def apply_block(root: Path, relative: str, name: str) -> None:
@@ -132,6 +145,26 @@ def test_patcher_is_idempotent_and_check_mode_verifies(tmp_path: Path):
     assert patched[UTILS].decode("utf-8").count(TERMINAL_HELPER) == 1
 
 
+def test_patcher_upgrades_the_previous_release(tmp_path: Path):
+    fresh = copy_multidiffusion(tmp_path / "fresh")
+    run_patcher(fresh)
+    expected = snapshot(fresh)
+    root = copy_targets(fresh, tmp_path / "md")
+    for relative, blocks in PATCHER_MODULE.PREVIOUS.items():
+        text = unpatched((root / relative).read_text(encoding="utf-8"), relative)
+        for block in blocks:
+            text = text.replace(block.original, block.patched)
+        (root / relative).write_text(text, encoding="utf-8")
+    previous = snapshot(root)
+    assert previous != expected
+
+    result = run_patcher(root, "--check", check=False)
+    assert result.returncode != 0 and "MultiDiffusion patch outdated" in result.stderr
+    assert snapshot(root) == previous
+    assert run_patcher(root).stdout.count("Patched MultiDiffusion changes") == len(PATCHER_MODULE.PREVIOUS)
+    assert snapshot(root) == expected
+
+
 def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
     root = copy_multidiffusion(tmp_path / "md")
     tilevae = root / "scripts" / "tilevae.py"
@@ -175,15 +208,11 @@ def test_patcher_fails_closed_without_writing_anything(tmp_path: Path):
 def multidiffusion_origins(module_path: Path, extent: int, tile: int, overlap: int) -> list[int]:
     source = module_path.read_text(encoding="utf-8")
     if TERMINAL_HELPER in source:
-        match = re.search(
-            r"def _gb10_terminal_tile_origins\(extent:int, tile:int, overlap:int\).*?(?=\n\ndef split_bboxes)",
-            source,
-            flags=re.S,
-        )
-        assert match, "patched terminal-origin helper not found"
+        match = re.search(r"def _gb10_tile_origins\(extent:int, tile:int, overlap:int\).*?(?=\n\ndef split_bboxes)", source, flags=re.S)
+        assert match, "patched tile-origin helper not found"
         namespace: dict[str, object] = {}
-        exec("from typing import List\n" + match.group(0), namespace)
-        return namespace["_gb10_terminal_tile_origins"](extent, tile, overlap)  # type: ignore[index,operator]
+        exec("import math\nfrom typing import List\n" + match.group(0), namespace)
+        return namespace["_gb10_tile_origins"](extent, tile, overlap)  # type: ignore[index,operator]
 
     match = re.search(
         r"cols = math\.ceil\(\(w - overlap\) / \(tile_w - overlap\)\).*?x = min\(int\(col \* dx\), w - tile_w\)",
@@ -191,22 +220,19 @@ def multidiffusion_origins(module_path: Path, extent: int, tile: int, overlap: i
         flags=re.S,
     )
     assert match, "upstream MultiDiffusion origin calculation not found"
+    return upstream_origins(extent, tile, overlap)
+
+
+def upstream_origins(extent: int, tile: int, overlap: int) -> list[int]:
     cols = math.ceil((extent - overlap) / (tile - overlap))
     dx = (extent - tile) / (cols - 1) if cols > 1 else 0
     return [min(int(col * dx), extent - tile) for col in range(cols)]
 
 
-def assert_axis_coverage(origins: list[int], extent: int, tile: int) -> None:
-    assert origins == sorted(origins)
-    assert len(origins) == len(set(origins))
-    assert all(origin >= 0 for origin in origins)
-    assert origins[0] == 0
-    assert origins[-1] == max(0, extent - tile)
-    covered = [False] * extent
-    for origin in origins:
-        for idx in range(origin, min(origin + tile, extent)):
-            covered[idx] = True
-    assert all(covered)
+def covers(origins: list[int], extent: int, tile: int) -> bool:
+    """Sorted, distinct, from 0 to the terminal origin extent - tile, no gap: every row/column gets weight."""
+    gaps = [b - a for a, b in zip(origins, origins[1:])]
+    return origins[0] == 0 and origins[-1] == max(0, extent - tile) and all(0 < gap <= tile for gap in gaps)
 
 
 def test_upstream_tile_origins_still_have_the_proven_floor_rounding_gap(tmp_path: Path):
@@ -218,22 +244,54 @@ def test_upstream_tile_origins_still_have_the_proven_floor_rounding_gap(tmp_path
     assert origins[-1] != 555 - 64
 
 
-def test_patched_tile_origins_cover_the_terminal_edges(tmp_path: Path):
+def test_patched_tile_origins_pin_only_the_terminal_origin(tmp_path: Path):
     root = copy_multidiffusion(tmp_path / "md")
-    utils = root / UTILS
-    assert multidiffusion_origins(utils, extent=160, tile=64, overlap=16) == [0, 48, 96]
     run_patcher(root)
+    utils = root / UTILS
 
-    x_origins = multidiffusion_origins(utils, extent=555, tile=64, overlap=16)
-    y_origins = multidiffusion_origins(utils, extent=427, tile=64, overlap=16)
-    assert x_origins[-2:] == [480, 491]
-    assert y_origins[-2:] == [336, 363]
-    assert (x_origins[0], y_origins[0]) == (0, 0)
-    assert (x_origins[-1], y_origins[-1]) == (491, 363)
-    assert_axis_coverage(x_origins, 555, 64)
-    assert_axis_coverage(y_origins, 427, 64)
-    # A grid that already ends on the terminal origin is unchanged.
-    assert multidiffusion_origins(utils, extent=160, tile=64, overlap=16) == [0, 48, 96]
+    assert multidiffusion_origins(utils, extent=555, tile=64, overlap=16)[-3:] == [401, 446, 491]
+    # 2048 px SDXL, tile 96, overlap 48: upstream's even spacing (deploy10 stepped by 48: [0, 48, 96, 144, 160]).
+    assert multidiffusion_origins(utils, extent=256, tile=96, overlap=48) == [0, 40, 80, 120, 160]
+    # A tile spanning the extent is one origin, also when init_grid_bbox's clamp leaves overlap == extent (upstream:
+    # ZeroDivisionError).
+    assert multidiffusion_origins(utils, extent=48, tile=48, overlap=48) == [0]
+    with pytest.raises(ZeroDivisionError):
+        upstream_origins(48, 48, 48)
+    with pytest.raises(ValueError, match="tile overlap"):
+        multidiffusion_origins(utils, extent=100, tile=48, overlap=48)
+
+    # Every UI-reachable latent config (tile 16..256 step 16, overlap 0..tile-4 step 4, extent up to 8192 px): equal to
+    # upstream wherever upstream covers the extent, otherwise only the last origin moves, by one. The full grid (every
+    # tile 5..256 and overlap 0..tile-4) was checked the same way when the block was written: 27,374,592 configs,
+    # 204,933 uncovered by upstream, no other difference.
+    uncovered = 0
+    for tile in range(16, 257, 16):
+        for overlap in range(0, tile - 3, 4):
+            for extent in range(tile + 1, 1025):
+                upstream = upstream_origins(extent, tile, overlap)
+                origins = multidiffusion_origins(utils, extent, tile, overlap)
+                assert covers(origins, extent, tile), (extent, tile, overlap)
+                if covers(upstream, extent, tile):
+                    assert origins == upstream, (extent, tile, overlap)
+                else:
+                    uncovered += 1
+                    assert origins == upstream[:-1] + [upstream[-1] + 1], (extent, tile, overlap)
+    assert uncovered > 0
+
+
+def test_patched_split_bboxes_covers_every_latent_pixel(md_pair, import_extension):
+    _, patched = md_pair
+    (utils,) = import_extension(patched, "tile_utils.utils")
+    bboxes, weight = utils.split_bboxes(555, 427, 64, 64, overlap=16)
+
+    xs, ys = sorted({bbox.x for bbox in bboxes}), sorted({bbox.y for bbox in bboxes})
+    assert [(bbox.y, bbox.x) for bbox in bboxes] == [(y, x) for y in ys for x in xs]  # upstream's row-major order
+    assert (xs[-1], ys[-1]) == (555 - 64, 427 - 64)
+    assert weight.shape == (1, 1, 427, 555) and bool((weight > 0).all())
+    expected = torch.zeros_like(weight)
+    for bbox in bboxes:
+        expected[:, :, bbox.y:bbox.y + 64, bbox.x:bbox.x + 64] += 1
+    assert torch.equal(weight, expected)
 
 
 # ---------------------------------------------------------------- differential tests (CPU)
@@ -364,7 +422,8 @@ def import_extension(webui_stubs):
 @pytest.fixture()
 def md_pair(tmp_path: Path):
     """(original, patched) checkouts. The original keeps the terminal tile origins patched, so every differential
-    isolates the other changes; the origin change itself is intentionally not bit-identical (see above)."""
+    isolates the other changes; the origin change itself is intentionally not bit-identical where upstream leaves the
+    edge uncovered (see above)."""
     original = copy_multidiffusion(tmp_path / "original")
     apply_block(original, UTILS, "MD terminal tile origins")
     patched = copy_multidiffusion(tmp_path / "patched")

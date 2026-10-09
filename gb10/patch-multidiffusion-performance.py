@@ -6,9 +6,12 @@ patched, or fully patched and is left alone; anything else, CRLF included, abort
 every target verifies; --check writes nothing). ORIGINAL is upstream origin/main 22798f6, so a fresh install patches
 cleanly. The blocks:
 - MD terminal tile origins (tile_utils/utils.py): upstream spreads origins as int(col * (w - tile_w) / (cols - 1));
-  the float floor can leave the last latent column or row uncovered (weight 0). The replacement steps by
-  tile - overlap and appends the terminal origin. Its tile count equals upstream's, but the origins differ from
-  upstream for most extents, not only for the uncovered ones.
+  the float floor can put the last one at w - tile_w - 1 and leave the last latent column or row uncovered
+  (weight 0). The replacement keeps upstream's count and origins and pins the last origin to w - tile_w. Over every
+  tile 5..256, overlap 0..tile-4 and extent tile+1..1024 it equals upstream wherever upstream covers the extent and
+  otherwise moves only the last origin, by one. A tile that spans the extent is one origin (upstream divides by zero
+  when init_grid_bbox's clamped overlap equals it). The deploy10 release stepped by tile - overlap instead, which
+  shrank the seam overlaps against upstream's even spacing for most extents; PREVIOUS upgrades it.
 - TV-FB: the former local commit "Modernize Tiled VAE attention fallbacks" (5022f68): xformers is optional and falls
   back to SDP, and the sage2/sage3 method names map to SDP. Its torch.nn.attention import is no longer used since
   TV-ATTN; it is kept, like the sage names, so the deployed bytes stay unchanged.
@@ -46,22 +49,20 @@ BLOCKS: dict[str, list[Block]] = {
 
     return bbox_list, weight
 ''',
-            '''def _gb10_terminal_tile_origins(extent:int, tile:int, overlap:int) -> List[int]:
-    if extent <= 0 or tile <= 0:
-        raise ValueError(f"extent and tile must be positive, got extent={extent}, tile={tile}")
-    terminal = max(0, extent - tile)
-    if terminal == 0:
+            '''def _gb10_tile_origins(extent:int, tile:int, overlap:int) -> List[int]:
+    # gb10: upstream's origins with the last one pinned to extent - tile (see gb10/patch-multidiffusion-performance.py).
+    if tile >= extent:
         return [0]
-    stride = max(1, tile - overlap)
-    origins = list(range(0, terminal + 1, stride))
-    if origins[-1] != terminal:
-        origins.append(terminal)
-    return origins
+    if not 0 <= overlap < tile:
+        raise ValueError(f"tile overlap must be in [0, tile), got overlap={overlap}, tile={tile}")
+    count = math.ceil((extent - overlap) / (tile - overlap))
+    step = (extent - tile) / (count - 1)
+    return [int(i * step) for i in range(count - 1)] + [extent - tile]
 
 
 def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
-    x_origins = _gb10_terminal_tile_origins(w, tile_w, overlap)
-    y_origins = _gb10_terminal_tile_origins(h, tile_h, overlap)
+    x_origins = _gb10_tile_origins(w, tile_w, overlap)
+    y_origins = _gb10_tile_origins(h, tile_h, overlap)
 
     bbox_list: List[BBox] = []
     weight = torch.zeros((1, 1, h, w), device=devices.device, dtype=torch.float32)
@@ -73,7 +74,7 @@ def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weig
 
     return bbox_list, weight
 ''',
-            sentinel="def _gb10_terminal_tile_origins",
+            sentinel="def _gb10_tile_origins",
         ),
     ],
     TILEVAE: [
@@ -413,10 +414,51 @@ def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
 }
 
 
+# The deploy10 release of the blocks that changed since (gb10/patchlib.py `previous`): installed copies patched by it
+# are reverted to upstream and patched again.
+PREVIOUS: dict[str, list[Block]] = {
+    "tile_utils/utils.py": [
+        Block(
+            "MD terminal tile origins (deploy10)",
+            BLOCKS["tile_utils/utils.py"][0].original,
+            '''def _gb10_terminal_tile_origins(extent:int, tile:int, overlap:int) -> List[int]:
+    if extent <= 0 or tile <= 0:
+        raise ValueError(f"extent and tile must be positive, got extent={extent}, tile={tile}")
+    terminal = max(0, extent - tile)
+    if terminal == 0:
+        return [0]
+    stride = max(1, tile - overlap)
+    origins = list(range(0, terminal + 1, stride))
+    if origins[-1] != terminal:
+        origins.append(terminal)
+    return origins
+
+
+def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
+    x_origins = _gb10_terminal_tile_origins(w, tile_w, overlap)
+    y_origins = _gb10_terminal_tile_origins(h, tile_h, overlap)
+
+    bbox_list: List[BBox] = []
+    weight = torch.zeros((1, 1, h, w), device=devices.device, dtype=torch.float32)
+    for y in y_origins:
+        for x in x_origins:
+            bbox = BBox(x, y, tile_w, tile_h)
+            bbox_list.append(bbox)
+            weight[bbox.slicer] += init_weight
+
+    return bbox_list, weight
+''',
+            sentinel="def _gb10_terminal_tile_origins",
+        ),
+    ],
+}
+
+
 def main() -> int:
     args = parse_cli(__doc__.splitlines()[0])
     targets = {args.path / relative: blocks for relative, blocks in BLOCKS.items()}
-    written = apply_blocks(targets, label=LABEL, check=args.check)
+    previous = {args.path / relative: blocks for relative, blocks in PREVIOUS.items()}
+    written = apply_blocks(targets, label=LABEL, check=args.check, previous=previous)
     for path in written:
         print(f"Patched MultiDiffusion changes: {path}")
     if not written:
