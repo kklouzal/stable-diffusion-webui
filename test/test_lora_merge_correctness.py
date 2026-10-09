@@ -484,3 +484,45 @@ def test_quant_managed_qkv_linear_applies_partial_qkv_lora(bf16_lora, monkeypatc
 
     assert networks.network_apply_quant_merged_lora(backend, layer)
     assert torch.equal(seen[0], (layer.network_nvfp4_base_weight.double() + delta).to(torch.bfloat16))
+
+
+def test_lora_set_change_touches_only_the_layers_of_changed_networks(bf16_lora, monkeypatch):
+    """A layer no old or new network touches was backed up to the CPU and copied back from the backup on every LoRA
+    set change; a layer whose networks did not change was restored and re-merged to the same bits."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(41)
+    shared = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    shared.network_layer_name = "diffusion_model_shared"
+    only_b = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    only_b.network_layer_name = "diffusion_model_only_b"
+    untouched = torch.nn.Linear(8, 8, bias=True, dtype=torch.bfloat16)
+    untouched.network_layer_name = "diffusion_model_untouched"
+    a = _lora(networks, shared, "a", _grid((8, 2), g), _grid((2, 8), g), 2.0, 0.5)
+    b = _lora(networks, only_b, "b", _grid((8, 2), g), _grid((2, 8), g), 2.0, 0.75)
+    base_shared, base_b = shared.weight.detach().clone(), only_b.weight.detach().clone()
+    untouched_storage = (untouched.weight.data_ptr(), untouched.bias.data_ptr())
+    untouched_values = (untouched.weight.detach().clone(), untouched.bias.detach().clone())
+    merges, restores = [], []
+    calc = a.modules[shared.network_layer_name].calc_updown
+    monkeypatch.setattr(a.modules[shared.network_layer_name], "calc_updown", lambda w: merges.append("a") or calc(w))
+    real_restore = networks.restore_weights_backup
+    monkeypatch.setattr(networks, "restore_weights_backup", lambda obj, field, w: restores.append(obj.network_layer_name) or real_restore(obj, field, w))
+
+    def apply(nets):
+        networks._set_loaded_networks(nets)
+        for layer in (shared, only_b, untouched):
+            networks.network_apply_weights(layer)
+
+    apply([a])
+    merged_a = shared.weight.detach().clone()
+    apply([a, b])
+    apply([b])
+    apply([])
+
+    assert merges == ["a"]  # [a] -> [a, b] keeps shared's merge; [a, b] -> [b] restores it once
+    assert sorted(set(restores)) == ["diffusion_model_only_b", "diffusion_model_shared"]
+    assert not hasattr(untouched, "network_weights_backup") and not hasattr(untouched, "network_current_names")
+    assert (untouched.weight.data_ptr(), untouched.bias.data_ptr()) == untouched_storage
+    assert torch.equal(untouched.weight, untouched_values[0]) and torch.equal(untouched.bias, untouched_values[1])
+    assert torch.equal(merged_a, (base_shared.double() + 0.5 * (a.modules[shared.network_layer_name].up_model.weight.double() @ a.modules[shared.network_layer_name].down_model.weight.double())).to(torch.bfloat16))
+    assert torch.equal(shared.weight, base_shared) and torch.equal(only_b.weight, base_b)

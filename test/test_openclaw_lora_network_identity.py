@@ -529,7 +529,7 @@ def test_quant_prepared_check_rejects_same_signature_module_marker_mismatch(lora
         network_mxfp8_managed_modules=[("layer", linear)],
         network_mxfp8_active_config_ready=True,
     )
-    net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None)
+    net = SimpleNamespace(source_key=("alpha",), te_multiplier=1.0, unet_multiplier=1.0, dyn_dim=None, modules={})
     networks.loaded_networks[:] = [net]
 
     assert networks.network_quant_capture_managed_base(MXFP8, model) == 0
@@ -885,7 +885,6 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
         mha.network_layer_name + "_out_proj": _mha_delta_module(torch, 4.0),
     })
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
 
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
@@ -899,13 +898,11 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
     assert torch.equal(mha.in_proj_weight, expected_qkv)
     assert torch.equal(mha.out_proj.weight, base_out + 4)
     monkeypatch.setattr(networks, "loaded_networks", [])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: ())
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
     assert torch.equal(mha.in_proj_weight, base_qkv)
     assert torch.equal(mha.out_proj.weight, base_out)
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("alpha", 1.0, 1.0, None),))
     networks.network_apply_weights(mha)
     networks.network_apply_weights(mha.out_proj)
     assert torch.equal(mha.in_proj_weight, expected_qkv)
@@ -928,7 +925,6 @@ def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch)
         mha.network_layer_name + "_v_proj": _mha_delta_module(torch, 3.0),
     })
     monkeypatch.setattr(networks, "loaded_networks", [net])
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (("broken", 1.0, 1.0, None),))
     with pytest.raises(RuntimeError, match="LoRA broken cannot be applied to layer 1_model_transformer_resblocks_0_attn_k_proj: injected failure"):
         networks.network_apply_weights(mha)
     assert torch.equal(mha.in_proj_weight, base_qkv)
@@ -1030,7 +1026,7 @@ def test_wanted_names_are_built_once_per_published_set(lora_networks, monkeypatc
     assert networks.network_wanted_names() == (signature(beta),)
     networks._set_loaded_networks([])
     assert networks.network_wanted_names() == ()
-    assert networks._wanted_names_memo == ((), ())  # no reference to the unloaded set is kept
+    assert networks._wanted_names_memo == ((), (), {})  # no reference to the unloaded set is kept
 
 
 def test_apply_weights_returns_early_without_loras(lora_networks, monkeypatch):
@@ -1039,7 +1035,7 @@ def test_apply_weights_returns_early_without_loras(lora_networks, monkeypatch):
     linear = torch.nn.Linear(2, 2)
     linear.network_layer_name = "layer"
     weight = linear.weight.detach().clone()
-    monkeypatch.setattr(networks, "network_wanted_names", lambda: (_ for _ in ()).throw(AssertionError("no-LoRA forward must not build names")))
+    monkeypatch.setattr(networks, "_wanted_names_state", lambda: (_ for _ in ()).throw(AssertionError("no-LoRA forward must not build names")))
 
     networks.network_apply_weights(linear)
 

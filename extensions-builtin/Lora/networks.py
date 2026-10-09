@@ -747,7 +747,11 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         return
 
     current_names = getattr(self, "network_current_names", ())
-    wanted_names = network_wanted_names()
+    wanted_names = network_layer_wanted_names(network_layer_name)
+    # No published network touches this layer and none is merged into it: its weights are the base, so a LoRA set
+    # change that does not involve it needs no backup, restore or merge.
+    if not wanted_names and not current_names:
+        return
 
     weights_backup = getattr(self, "network_weights_backup", None)
     # The weight and bias backups describe the same unmodified layer, so they are taken together. A bias-less
@@ -944,27 +948,48 @@ def network_loaded_weight_signature(net):
     )
 
 
-# (published Network objects, their wanted names); see network_wanted_names().
-_wanted_names_memo = ((), ())
+# (published Network objects, their wanted names, wanted names per layer); see _wanted_names_state().
+_wanted_names_memo = ((), (), {})
+
+
+def _wanted_names_state():
+    """(published networks, their signatures in application order, {layer name: signatures of the networks that
+    touch that layer, in application order}).
+
+    Every patched Linear/Conv/norm forward reads this, so it is built once per published set (at publish, by
+    _set_loaded_networks) and reused while loaded_networks holds exactly the same Network objects; the memo holds
+    them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks stamps
+    source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always arrives as
+    different objects. A network touches the layers its modules are keyed by, and through q/k/v projection modules
+    the combined projection they belong to.
+    """
+    global _wanted_names_memo
+    published = _wanted_names_memo[0]
+    if len(published) == len(loaded_networks) and all(held is net for held, net in zip(published, loaded_networks)):
+        return _wanted_names_memo
+    published = tuple(loaded_networks)
+    names = tuple(network_loaded_weight_signature(x) for x in published)
+    by_layer = {}
+    for net, name in zip(published, names):
+        layers = set(net.modules)
+        layers.update(m.group(1) for m in map(re_x_proj.match, net.modules) if m)
+        for layer in layers:
+            by_layer.setdefault(layer, []).append(name)
+    _wanted_names_memo = (published, names, {layer: tuple(layer_names) for layer, layer_names in by_layer.items()})
+    return _wanted_names_memo
 
 
 def network_wanted_names():
-    """Signatures of the published LoRA set in application order; layers compare it with network_current_names.
+    """Signatures of the published LoRA set in application order: the state quant-managed layers compare with
+    their network_current_names (prepare_quant_active_config rebuilds all of them for a set)."""
+    return _wanted_names_state()[1]
 
-    Every patched Linear/Conv/norm forward calls this, so the tuple is built once per published set (at publish,
-    by _set_loaded_networks) and reused while loaded_networks holds exactly the same Network objects; the memo
-    holds them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks
-    stamps source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always
-    arrives as different objects.
-    """
-    global _wanted_names_memo
-    published, names = _wanted_names_memo
-    if len(published) == len(loaded_networks) and all(held is net for held, net in zip(published, loaded_networks)):
-        return names
-    published = tuple(loaded_networks)
-    names = tuple(network_loaded_weight_signature(x) for x in published)
-    _wanted_names_memo = (published, names)
-    return names
+
+def network_layer_wanted_names(network_layer_name):
+    """Signatures of the published networks that touch layer `network_layer_name`, in application order; the
+    generic merge compares them with the layer's network_current_names, so a LoRA set change re-merges only the
+    layers whose networks changed (the merge of the others would be bit-identical)."""
+    return _wanted_names_state()[2].get(network_layer_name, ())
 
 
 def _set_loaded_networks(networks_to_load):
