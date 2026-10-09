@@ -10,38 +10,33 @@ CPU tests:
 CUDA tests (GPU host): accuracy within torch's bf16 path at SDXL shapes and at any mean/std ratio, bitwise run-to-run
 and CUDA-graph replay identity, SDXL-sized blocks against the switch-off path:
     python -m pytest -q test/test_openclaw_nhwc_groupnorm.py -k cuda
-Timing: test/benchmark_nhwc_groupnorm.py.
+Timing: tools/benchmark_nhwc_groupnorm.py.
 """
 import copy
-import importlib
 import json
 import os
 import re
 import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from test.test_sd_hijack_unet import (  # noqa: F401  (default_runtime is a fixture)
-    BF16,
-    _error_over_rms,
-    _random_activations,
-    _randomize,
-    default_runtime,
-    sd_hijack_unet,
-    sgm_attention,
-    sgm_util,
-    sgm_vae,
-)
-from test.test_openclaw_lora_network_identity import lora_networks  # noqa: F401  (fixture)
-from modules import openclaw_nhwc_groupnorm as nhwc
+from test.helpers import ROOT as _ROOT, add_repositories_to_sys_path, error_over_rms, random_activations, randomize
 
-_ROOT = Path(__file__).resolve().parents[1]
-sgm_openaimodel = importlib.import_module("sgm.modules.diffusionmodules.openaimodel")
+add_repositories_to_sys_path("generative-models", "stable-diffusion-stability-ai")
+pytest.importorskip("sgm.modules.attention")
+pytest.importorskip("ldm.modules.attention")
+
+from modules import openclaw_nhwc_groupnorm as nhwc, sd_hijack_unet  # noqa: E402
+import sgm.modules.attention as sgm_attention  # noqa: E402
+import sgm.modules.diffusionmodules.model as sgm_vae  # noqa: E402
+import sgm.modules.diffusionmodules.openaimodel as sgm_openaimodel  # noqa: E402
+import sgm.modules.diffusionmodules.util as sgm_util  # noqa: E402
+
+BF16 = torch.bfloat16
 CL = torch.channels_last
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the NHWC GroupNorm kernels run on CUDA only")
 
@@ -63,7 +58,7 @@ def switch(monkeypatch):
 
 
 @pytest.fixture
-def kernel(monkeypatch, switch, default_runtime):  # noqa: F811  (the imported fixture)
+def kernel(monkeypatch, switch, default_runtime):
     """Stand-in launch: records each call and returns what the torch path computes from the same tensor."""
     assert nhwc._is_torch_group_norm_forward(torch.nn.GroupNorm.forward), "an earlier test left GroupNorm.forward patched"
     calls = []
@@ -83,7 +78,7 @@ def kernel(monkeypatch, switch, default_runtime):  # noqa: F811  (the imported f
 
 
 def _bf16_cl(module):
-    return _randomize(module).eval().to(BF16).to(memory_format=CL)
+    return randomize(module).eval().to(BF16).to(memory_format=CL)
 
 
 def _input(shape, memory_format=CL, seed=0):
@@ -102,12 +97,12 @@ def _off_and_on(module, *args, scopes="all"):
 
 
 def _resblock(channels=64, out_channels=128, memory_format=CL):
-    block = _randomize(sgm_openaimodel.ResBlock(channels, 128, 0.0, out_channels=out_channels)).eval().to(BF16)
+    block = randomize(sgm_openaimodel.ResBlock(channels, 128, 0.0, out_channels=out_channels)).eval().to(BF16)
     return block.to(memory_format=memory_format)
 
 
 def _transformer(memory_format=CL):
-    transformer = _randomize(sgm_attention.SpatialTransformer(64, 2, 32, depth=1, context_dim=48, use_linear=True, use_checkpoint=False))
+    transformer = randomize(sgm_attention.SpatialTransformer(64, 2, 32, depth=1, context_dim=48, use_linear=True, use_checkpoint=False))
     return transformer.eval().to(BF16).to(memory_format=memory_format)
 
 
@@ -231,7 +226,7 @@ def test_group_norm_declines_unsupported_calls(kernel):
         assert nhwc.group_norm(norm, x) is None
     with torch.no_grad():
         assert nhwc.group_norm(_bf16_cl(torch.nn.GroupNorm(8, 40)), _input((2, 40, 8, 12))) is None  # C % 16
-        assert nhwc.group_norm(_randomize(torch.nn.GroupNorm(32, 64)).to(memory_format=CL), x) is None  # fp32 weights
+        assert nhwc.group_norm(randomize(torch.nn.GroupNorm(32, 64)).to(memory_format=CL), x) is None  # fp32 weights
         assert nhwc.group_norm(_bf16_cl(torch.nn.GroupNorm(32, 64, affine=False)), x) is None
         assert nhwc.group_norm(norm, _input((2, 64, 1, 1))) is None  # NHWC and NCHW at once: torch copies nothing
         assert nhwc.group_norm(norm, x) is not None
@@ -270,7 +265,7 @@ def test_unknown_group_norm_forward_patch_falls_back_to_the_class_chain(kernel, 
     assert nhwc.status()["fallbacks"] == {"groupnorm_forward_chain": 1}
 
 
-def test_merged_lora_is_applied_before_the_kernel_and_functional_lora_falls_back(kernel, lora_networks, monkeypatch):  # noqa: F811  (the imported fixture)
+def test_merged_lora_is_applied_before_the_kernel_and_functional_lora_falls_back(kernel, lora_networks, monkeypatch):
     networks = lora_networks
     monkeypatch.setattr(networks, "originals", SimpleNamespace(GroupNorm_forward=torch.nn.GroupNorm.forward), raising=False)
     monkeypatch.setattr(torch.nn.GroupNorm, "forward", networks.network_GroupNorm_forward)
@@ -299,7 +294,7 @@ def test_merged_lora_is_applied_before_the_kernel_and_functional_lora_falls_back
     assert nhwc.status()["fallbacks"] == {"groupnorm_forward_chain": 1}
 
 
-def test_network_group_norm_forward_keeps_both_paths(lora_networks, monkeypatch):  # noqa: F811  (the imported fixture)
+def test_network_group_norm_forward_keeps_both_paths(lora_networks, monkeypatch):
     networks = lora_networks
     calls = []
     monkeypatch.setattr(networks, "originals", SimpleNamespace(GroupNorm_forward=lambda module, input: calls.append("original") or input), raising=False)
@@ -409,12 +404,12 @@ _INTERPRETER_CASES = {
 
 @pytest.fixture(scope="module")
 def interpreter_results():
-    """All cases in one fresh process (test/nhwc_groupnorm_interpreter_check.py) with TRITON_INTERPRET=1."""
+    """All cases in one fresh process (tools/nhwc_groupnorm_interpreter_check.py) with TRITON_INTERPRET=1."""
     pytest.importorskip("triton")
     env = {key: value for key, value in os.environ.items() if key != nhwc.ENV_NAME}
     env["TRITON_INTERPRET"] = "1"
     process = subprocess.run(
-        [sys.executable, str(_ROOT / "test" / "nhwc_groupnorm_interpreter_check.py"), json.dumps(_INTERPRETER_CASES)],
+        [sys.executable, str(_ROOT / "tools" / "nhwc_groupnorm_interpreter_check.py"), json.dumps(_INTERPRETER_CASES)],
         cwd=_ROOT, env=env, capture_output=True, text=True, timeout=900,
     )
     assert process.returncode == 0, process.stderr[-6000:]
@@ -497,7 +492,7 @@ def test_kernels_compile_for_sm121_without_atomics():
 # --- CUDA: the compiled kernels --------------------------------------------------------------------------------
 
 @pytest.fixture
-def kernels_on(default_runtime, switch):  # noqa: F811  (the imported fixture)
+def kernels_on(default_runtime, switch):
     nhwc.set_scopes("all")  # imports Triton and the kernels
     yield
     nhwc.set_scopes("")
@@ -513,7 +508,7 @@ _CUDA_SHAPES = [
 
 
 def _cuda_norm(channels, eps):
-    return _randomize(torch.nn.GroupNorm(32, channels, eps=eps)).to("cuda", BF16)
+    return randomize(torch.nn.GroupNorm(32, channels, eps=eps)).to("cuda", BF16)
 
 
 @needs_cuda
@@ -521,7 +516,7 @@ def _cuda_norm(channels, eps):
 @pytest.mark.parametrize("channels,size,eps,batch", _CUDA_SHAPES)
 def test_cuda_error_is_within_the_torch_bf16_path_and_runs_repeat_bitwise(kernels_on, channels, size, eps, batch, act):
     norm = _cuda_norm(channels, eps)
-    x = _random_activations((batch, channels, size, size), CL)
+    x = random_activations((batch, channels, size, size), CL)
     with torch.inference_mode():
         y = nhwc.group_norm(norm, x, act=act or None)
         assert y is not None and y.is_contiguous(memory_format=CL) and y.dtype == BF16
@@ -530,9 +525,9 @@ def test_cuda_error_is_within_the_torch_bf16_path_and_runs_repeat_bitwise(kernel
         reference = F.group_norm(x.double(), 32, norm.weight.double(), norm.bias.double(), eps)
         if act:
             native, reference = F.silu(native), F.silu(reference)
-    kernel_max, kernel_mean = _error_over_rms(y, reference)
-    native_max, native_mean = _error_over_rms(native, reference)
-    floor_max, floor_mean = _error_over_rms(reference.to(BF16), reference)
+    kernel_max, kernel_mean = error_over_rms(y, reference)
+    native_max, native_mean = error_over_rms(native, reference)
+    floor_max, floor_mean = error_over_rms(reference.to(BF16), reference)
     assert kernel_max <= native_max + floor_max, (kernel_max, native_max, floor_max)
     assert kernel_mean <= native_mean + 0.05 * floor_mean, (kernel_mean, native_mean, floor_mean)
 
@@ -548,9 +543,9 @@ def test_cuda_accuracy_holds_at_any_mean_over_std(kernels_on, offset):
         y = nhwc.group_norm(norm, x)
         native = F.group_norm(x, 32, norm.weight, norm.bias, 1e-5)
         reference = F.group_norm(x.double(), 32, norm.weight.double(), norm.bias.double(), 1e-5)
-    kernel_max, _ = _error_over_rms(y, reference)
-    native_max, _ = _error_over_rms(native, reference)
-    floor_max, _ = _error_over_rms(reference.to(BF16), reference)
+    kernel_max, _ = error_over_rms(y, reference)
+    native_max, _ = error_over_rms(native, reference)
+    floor_max, _ = error_over_rms(reference.to(BF16), reference)
     assert kernel_max <= native_max + floor_max, (offset, kernel_max, native_max)
 
 
@@ -575,10 +570,10 @@ def _sdxl_block(kind):
     decode runs)."""
     module = _block_module(kind)
     if kind == "resblock":
-        return module, (_random_activations((2, 640, 64, 64), CL), _random_activations((2, 1280))), True
+        return module, (random_activations((2, 640, 64, 64), CL), random_activations((2, 1280))), True
     if kind == "spatial_transformer":
-        return module, (_random_activations((2, 640, 64, 64), CL), [_random_activations((2, 77, 2048))]), True
-    return module, (_random_activations((1, 512, 128, 128), CL), None), False
+        return module, (random_activations((2, 640, 64, 64), CL), [random_activations((2, 77, 2048))]), True
+    return module, (random_activations((1, 512, 128, 128), CL), None), False
 
 
 def _float64_reference(module, device):
@@ -611,7 +606,7 @@ def test_float64_block_references_run_and_compute_the_block(switch, kind):
     """The CUDA block test's float64 reference, on CPU at test size: a plain float64 copy of a ResBlock fails in sgm
     GroupNorm32 (float32 input, float64 weights), the reference built by _float64_reference runs every kind and agrees
     with the float32 block."""
-    module = _randomize(_block_module(kind, small=True)).eval()
+    module = randomize(_block_module(kind, small=True)).eval()
     generator = torch.Generator().manual_seed(5)
     x = torch.randn((2, 64, 8, 8), generator=generator, dtype=torch.float64)
     extra = {"resblock": torch.randn((2, 128), generator=generator, dtype=torch.float64),
@@ -635,7 +630,7 @@ def test_cuda_fused_blocks_match_the_torch_paths_and_replay_in_cuda_graphs(kerne
     """Switch-on error against float64 within 10% of switch-off's, a second run bitwise equal, and a CUDA graph replay
     equal to the eager run."""
     module, args, autocast = _sdxl_block(kind)
-    module = _randomize(module).eval()
+    module = randomize(module).eval()
     reference_module = _float64_reference(module, "cuda")
     module = module.to("cuda", BF16).to(memory_format=CL)
 
@@ -643,8 +638,8 @@ def test_cuda_fused_blocks_match_the_torch_paths_and_replay_in_cuda_graphs(kerne
     assert torch.equal(on, _run_block(module, args, autocast, "all"))
     with torch.inference_mode():
         reference = reference_module(*[_double(a) for a in args])
-    off_max, off_mean = _error_over_rms(off.float(), reference)
-    on_max, on_mean = _error_over_rms(on.float(), reference)
+    off_max, off_mean = error_over_rms(off.float(), reference)
+    on_max, on_mean = error_over_rms(on.float(), reference)
     assert on_mean <= 1.1 * off_mean and on_max <= 2 * off_max, (on_mean, off_mean, on_max, off_max)
 
     nhwc.set_scopes("all")

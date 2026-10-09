@@ -7,12 +7,6 @@ from unittest.mock import Mock
 API_PATH = Path(__file__).resolve().parents[1] / "modules/api/api.py"
 
 
-def get_api_method_node(name):
-    tree = ast.parse(API_PATH.read_text(encoding="utf8"))
-    api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
-    return next(node for node in api_class.body if isinstance(node, ast.FunctionDef) and node.name == name)
-
-
 def load_api_class_with_methods(*method_names):
     tree = ast.parse(API_PATH.read_text(encoding="utf8"))
     api_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Api")
@@ -29,13 +23,6 @@ def load_api_class_with_methods(*method_names):
     namespace = {"models": SimpleNamespace(InterrogateRequest=object)}
     exec(compile(module, str(API_PATH), "exec"), namespace)
     return namespace["FakeApi"]
-
-
-def test_interrogate_api_uses_queue_lock_helper():
-    source = ast.get_source_segment(API_PATH.read_text(encoding="utf8"), get_api_method_node("interrogateapi"))
-
-    assert "self._call_with_queue_lock(interrogate_image)" in source
-    assert "with self.queue_lock" not in source
 
 
 def test_interrogate_api_preserves_model_dispatch_under_queue_lock():
@@ -61,10 +48,15 @@ def test_interrogate_api_preserves_model_dispatch_under_queue_lock():
     assert api.interrogateapi(SimpleNamespace(image="input", model="deepdanbooru")) == {"caption": "booru tags"}
     assert calls == ["interrogate_image", "interrogate_image"]
 
-def test_interrogate_request_reuses_shared_base64_image_field():
-    model_source = (Path(__file__).resolve().parents[1] / "modules/api/models.py").read_text(encoding="utf8")
+def test_interrogate_request_reuses_shared_base64_image_field(initialize):
+    from modules.api import models
 
-    assert "class _Base64ImageRequest(BaseModel):" in model_source
-    assert 'image: str = Field(default="", title="Image"' in model_source
-    assert "class ExtrasSingleImageRequest(ExtrasBaseRequest, _Base64ImageRequest):" in model_source
-    assert "class InterrogateRequest(_Base64ImageRequest):" in model_source
+    shared_field = models._Base64ImageRequest.model_fields["image"]
+    for request_model in (models.InterrogateRequest, models.ExtrasSingleImageRequest):
+        assert issubclass(request_model, models._Base64ImageRequest)
+        field = request_model.model_fields["image"]
+        assert (field.annotation, field.default, field.title, field.description) == (
+            shared_field.annotation, shared_field.default, shared_field.title, shared_field.description,
+        )
+        assert request_model.model_validate({}).image == ""
+        assert request_model.model_validate({"image": "aGVsbG8="}).image == "aGVsbG8="

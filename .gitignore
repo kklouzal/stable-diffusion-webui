@@ -39,7 +39,6 @@ __pycache__
 /extensions/**/*.pyc
 /cache.json*
 /.coverage*
-/test/test_outputs
 /cache
 trace.json
 /sysinfo-????-??-??-??-??.json

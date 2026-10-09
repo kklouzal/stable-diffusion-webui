@@ -1,50 +1,31 @@
 from __future__ import annotations
 
-import importlib.util
+import contextlib
 import os
 import sys
 import threading
 import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import torch
 
 import modules
 from modules import openclaw_cuda_graphs
+from test.helpers import load_source, module, stub_modules
 
-shared_stub = types.ModuleType("modules.shared")
-shared_stub.opts = types.SimpleNamespace(batch_cond_uncond=True)
-shared_stub.sd_model = None
-
-# The graph modules resolve `shared` at call time (sys.modules / `from modules import shared`). Install the stub
-# only while this file's tests run: left in sys.modules it replaced the real modules.shared for every test file
-# collected after this one (tests/test_inpainting_geometry_contract.py failed on a missing cmd_opts).
-# (Only this key is swapped and restored: mock.patch.dict(sys.modules) would also drop every module imported meanwhile.)
-_MISSING = object()
-_saved_shared_module = _MISSING
-_module_patches = [
-    mock.patch.object(modules, "shared", shared_stub, create=True),
-    mock.patch.object(sys, "argv", [sys.argv[0]]),  # a real shared import must not parse unittest flags
-]
+shared_stub = module("modules.shared", opts=types.SimpleNamespace(batch_cond_uncond=True), sd_model=None)
 
 
-def setUpModule():
-    global _saved_shared_module
-    _saved_shared_module = sys.modules.get("modules.shared", _MISSING)
-    sys.modules["modules.shared"] = shared_stub
-    for patch in _module_patches:
-        patch.start()
+class GraphTestCase(unittest.TestCase):
+    """Runs each test (setUp, the test, tearDown, cleanups) on shared_stub: the graph modules resolve `shared` at call
+    time (sys.modules / `from modules import shared`). The real modules.shared is back after every test."""
 
-
-def tearDownModule():
-    for patch in reversed(_module_patches):
-        patch.stop()
-    if _saved_shared_module is _MISSING:
-        sys.modules.pop("modules.shared", None)
-    else:
-        sys.modules["modules.shared"] = _saved_shared_module
+    def run(self, result=None):
+        with stub_modules({"modules.shared": shared_stub}), \
+             mock.patch.object(modules, "shared", shared_stub, create=True), \
+             mock.patch.object(sys, "argv", [sys.argv[0]]):  # a real shared import must not parse the runner's flags
+            return super().run(result)
 
 
 def make_denoiser(*, active=True, start=0, end=4, total_steps=5, hooks=True, blur_sigma=11.0):
@@ -75,7 +56,7 @@ def make_denoiser(*, active=True, start=0, end=4, total_steps=5, hooks=True, blu
     return types.SimpleNamespace(mask=None, nmask=None, p=p, total_steps=total_steps)
 
 
-class CudaGraphBypassTests(unittest.TestCase):
+class CudaGraphBypassTests(GraphTestCase):
     def test_active_seg_always_bypasses_graphs(self):
         for denoiser in (make_denoiser(), make_denoiser(end=3), make_denoiser(hooks=False)):
             self.assertEqual(openclaw_cuda_graphs._graph_denoiser_bypass_reason(denoiser), "seg_attention_hooks")
@@ -134,7 +115,7 @@ class CudaGraphBypassTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
-class CudaGraphInvalidationTests(unittest.TestCase):
+class CudaGraphInvalidationTests(GraphTestCase):
     def setUp(self):
         self.previous_env = os.environ.get("OPENCLAW_SDPA_BACKEND")
         openclaw_cuda_graphs.clear()
@@ -205,7 +186,7 @@ class CudaGraphInvalidationTests(unittest.TestCase):
         self.assertEqual(changed_vae["invalidation_reasons"], {"vae_changed": 1})
 
 
-class CudaGraphCacheSizeTests(unittest.TestCase):
+class CudaGraphCacheSizeTests(GraphTestCase):
     def setUp(self):
         self.previous_max_cache_size = openclaw_cuda_graphs._MAX_CACHE_SIZE
         openclaw_cuda_graphs.set_enabled(False, clear=True)
@@ -319,7 +300,8 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
         def replay():
             try:
                 tensor = FakeTensor()
-                result = openclaw_cuda_graphs.run(tensor, tensor, tensor, cond={"c": tensor})
+                with torch.no_grad():  # autograd off, as on the generation path (grad mode is per thread)
+                    result = openclaw_cuda_graphs.run(tensor, tensor, tensor, cond={"c": tensor})
                 events.append(("result", result))
             except Exception as exc:  # pragma: no cover - asserted below from the parent thread
                 thread_errors.append(exc)
@@ -328,8 +310,7 @@ class CudaGraphCacheSizeTests(unittest.TestCase):
              mock.patch.object(openclaw_cuda_graphs, "_graph_denoiser_bypass_reason", return_value=None), \
              mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True), \
              mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))), \
-             mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False):
+             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda value: isinstance(value, (FakeStatic, FakeTensor))):
             replay_thread = threading.Thread(target=replay)
             replay_thread.start()
             self.assertTrue(copy_started.wait(1))
@@ -364,7 +345,7 @@ class OpenClawImportOrderTests(unittest.TestCase):
         self.assertIn("from modules import sd_models", source)
 
 
-class OpenClawVaeDecodeGraphTests(unittest.TestCase):
+class OpenClawVaeDecodeGraphTests(GraphTestCase):
     def setUp(self):
         from modules import openclaw_vae_decode_graphs
 
@@ -658,7 +639,7 @@ def unmasked_denoiser(model=None):
     return denoiser
 
 
-class CudaGraphRequestOverrideTests(unittest.TestCase):
+class CudaGraphRequestOverrideTests(GraphTestCase):
     """Per-request Python overrides that a replay would skip must keep the call eager (TD-G1, B1, B2)."""
 
     def setUp(self):
@@ -761,7 +742,7 @@ class CudaGraphRequestOverrideTests(unittest.TestCase):
         # Hypernetworks run inside every attention forward from shared.loaded_hypernetworks and their multipliers;
         # a graph captured with or without them would replay that state for every later request.
         shared = types.SimpleNamespace(opts=types.SimpleNamespace(), loaded_hypernetworks=[object()])
-        with mock.patch.dict(sys.modules, {"modules.shared": shared}):
+        with stub_modules({"modules.shared": shared}):
             self.assertEqual(self.reason(), "hypernetworks")
             shared.loaded_hypernetworks = []
             self.assertIsNone(self.reason())
@@ -805,7 +786,7 @@ class FakeCudaTensor:
         return self
 
 
-class CudaGraphCaptureContractTests(unittest.TestCase):
+class CudaGraphCaptureContractTests(GraphTestCase):
     """Capture path with faked CUDA objects: one warm-up, shared pool, LRU, entry ownership (G2, G3, BUG-G1)."""
 
     def setUp(self):
@@ -841,7 +822,6 @@ class CudaGraphCaptureContractTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "is_available", return_value=True),
             mock.patch.object(openclaw_cuda_graphs, "on_default_stream", return_value=True),
-            mock.patch.object(openclaw_cuda_graphs.torch, "is_grad_enabled", return_value=False),
             mock.patch.object(openclaw_cuda_graphs.torch, "is_tensor", side_effect=lambda v: isinstance(v, FakeCudaTensor) or real_is_tensor(v)),
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "Stream", return_value=stream),
             mock.patch.object(openclaw_cuda_graphs.torch.cuda, "current_stream", return_value=stream),
@@ -852,6 +832,9 @@ class CudaGraphCaptureContractTests(unittest.TestCase):
         ]
         for patch in self.patches:
             patch.start()
+        # Autograd off, as on the generation path. (Patching torch.is_grad_enabled instead makes every torch.no_grad()
+        # entered meanwhile save "off" as the mode to restore, which leaves autograd disabled for later tests.)
+        self.enterContext(torch.no_grad())
         self.alphas = torch.linspace(0.99, 0.01, 8)
         self.model = FakeModel(self.alphas)
 
@@ -950,7 +933,7 @@ class CudaGraphCaptureContractTests(unittest.TestCase):
         shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
         calls = []
         fn = self.make_fn(calls)
-        with mock.patch.dict(sys.modules, {"modules.shared": shared}):
+        with stub_modules({"modules.shared": shared}):
             self.run_shape(fn, (1,))
             shared.opts.upcast_attn = True
             self.run_shape(fn, (1,))
@@ -964,7 +947,7 @@ class CudaGraphCaptureContractTests(unittest.TestCase):
         self.assertEqual(openclaw_cuda_graphs.status()["replays"], 1)
 
 
-class CudaGraphKeyTests(unittest.TestCase):
+class CudaGraphKeyTests(GraphTestCase):
     def setUp(self):
         self.alphas = torch.linspace(0.99, 0.01, 8)
         self.model = FakeModel(self.alphas)
@@ -976,11 +959,10 @@ class CudaGraphKeyTests(unittest.TestCase):
             raise AssertionError("LoRA files must not be re-read per denoiser call")
 
         networks_stub = types.SimpleNamespace(loaded_networks=[net], network_file_signature=no_file_reads, network_lora_source_signature=no_file_reads)
-        with mock.patch.dict(sys.modules, {"networks": networks_stub}):
+        with stub_modules({"networks": networks_stub}):
             signature = openclaw_cuda_graphs._lora_signature()
         self.assertEqual(signature, (("a", "a-alias", 1.0, 0.5, None, net.source_key),))
-        with mock.patch.dict(sys.modules):
-            sys.modules.pop("networks", None)
+        with stub_modules({"networks": None}):
             self.assertIsNone(openclaw_cuda_graphs._lora_signature())
 
     def test_schedule_signature_is_read_once_per_wrapper_and_tracks_mutation(self):
@@ -1040,7 +1022,7 @@ class CudaGraphKeyTests(unittest.TestCase):
     def test_runtime_branch_key_tracks_attention_forward_upcast_and_functional_lora(self):
         attention = types.SimpleNamespace(CrossAttention=type("CrossAttention", (), {"forward": lambda self, x: x}))
         shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
-        with mock.patch.dict(sys.modules, {"modules.shared": shared, "sgm.modules.attention": attention}):
+        with stub_modules({"modules.shared": shared, "sgm.modules.attention": attention}):
             base = openclaw_cuda_graphs._runtime_branch_key()
             self.assertEqual(openclaw_cuda_graphs._runtime_branch_key(), base)
             for name in ("upcast_attn", "lora_functional"):
@@ -1055,21 +1037,20 @@ class CudaGraphKeyTests(unittest.TestCase):
         # A captured UNet graph freezes which GroupNorm kernels and layouts ran (modules/openclaw_nhwc_groupnorm.py).
         switch = types.SimpleNamespace(state_key=lambda: ())
         shared = types.SimpleNamespace(opts=types.SimpleNamespace(upcast_attn=False, lora_functional=False))
-        with mock.patch.dict(sys.modules, {"modules.shared": shared, "modules.openclaw_nhwc_groupnorm": switch}):
+        with stub_modules({"modules.shared": shared, "modules.openclaw_nhwc_groupnorm": switch}):
             off = openclaw_cuda_graphs._runtime_branch_key()
             switch.state_key = lambda: ("silu", "unet")
             self.assertNotEqual(openclaw_cuda_graphs._runtime_branch_key(), off)
 
     def test_attention_key_reads_active_backend_without_status_scan(self):
         optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: "flash,math", sdpa_backend_status=mock.Mock(side_effect=AssertionError("per-call status scan")))
-        with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
+        with stub_modules({"modules.sd_hijack_optimizations": optimizations}):
             self.assertEqual(openclaw_cuda_graphs._attention_key(), "flash,math")
-        with mock.patch.dict(sys.modules):
-            sys.modules.pop("modules.sd_hijack_optimizations", None)
+        with stub_modules({"modules.sd_hijack_optimizations": None}):
             self.assertIsNone(openclaw_cuda_graphs._attention_key())
 
 
-class CudaGraphSharedPoolDeviceTests(unittest.TestCase):
+class CudaGraphSharedPoolDeviceTests(GraphTestCase):
     """GPU-only: graphs sharing one pool replay in any order with eager-identical outputs."""
 
     def test_alternating_replays_of_pool_sharing_graphs_match_eager(self):
@@ -1102,7 +1083,7 @@ class CudaGraphSharedPoolDeviceTests(unittest.TestCase):
             openclaw_cuda_graphs.set_enabled(False, clear=True)
 
 
-class VaeDecodeGraphSafetyTests(unittest.TestCase):
+class VaeDecodeGraphSafetyTests(GraphTestCase):
     def setUp(self):
         from modules import openclaw_vae_decode_graphs
 
@@ -1117,22 +1098,19 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
         self.vae = vae
         self.model = types.SimpleNamespace(first_stage_model=vae, decode_first_stage=lambda x: x, lowvram=False)
         self.x = types.SimpleNamespace(is_cuda=True, ndim=4, shape=(1, 4, 8, 8), device="cuda:0")
-        import modules
-
         lowvram = types.SimpleNamespace(is_enabled=lambda model: model.lowvram)
-        self.patches = [
-            mock.patch.dict(sys.modules, {"modules.lowvram": lowvram, "modules.shared": self.shared}),
+        self.patches = contextlib.ExitStack()
+        for patch in (
+            stub_modules({"modules.lowvram": lowvram, "modules.shared": self.shared}),
             mock.patch.object(modules, "lowvram", lowvram, create=True),
             mock.patch.object(modules, "shared", self.shared, create=True),
             mock.patch.object(self.graphs.torch, "is_tensor", return_value=True),
             mock.patch.object(self.graphs, "on_default_stream", return_value=True),
-        ]
-        for patch in self.patches:
-            patch.start()
+        ):
+            self.patches.enter_context(patch)
 
     def tearDown(self):
-        for patch in reversed(self.patches):
-            patch.stop()
+        self.patches.close()
         self.graphs.set_enabled(False, clear_cache=True)
 
     def test_plain_decode_is_graphable(self):
@@ -1180,7 +1158,7 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
 
         def key(backend="cudnn"):
             optimizations = types.SimpleNamespace(active_sdpa_backend=lambda: backend)
-            with mock.patch.dict(sys.modules, {"modules.sd_hijack_optimizations": optimizations}):
+            with stub_modules({"modules.sd_hijack_optimizations": optimizations}):
                 return self.graphs._key(self.model, x)
 
         base = key()
@@ -1194,7 +1172,7 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
     def test_key_tracks_the_nhwc_group_norm_switch(self):
         x = torch.zeros(1, 4, 8, 8)
         switch = types.SimpleNamespace(state_key=lambda: ())
-        with mock.patch.dict(sys.modules, {"modules.openclaw_nhwc_groupnorm": switch}):
+        with stub_modules({"modules.openclaw_nhwc_groupnorm": switch}):
             off = self.graphs._key(self.model, x)
             switch.state_key = lambda: ("silu", "vae")  # the VAE GroupNorm kernel and fused swish a capture freezes
             self.assertNotEqual(self.graphs._key(self.model, x), off)
@@ -1281,16 +1259,13 @@ class VaeDecodeGraphSafetyTests(unittest.TestCase):
         self.assertEqual(family("E11")["reason_counts"].get("manual", 0), e11_before + 1)
 
 
-def _load_module_copy(module, name, environ):
-    """Execute a fresh copy of `module`'s source under `name` (sys.modules is untouched) with `environ` applied."""
-    spec = importlib.util.spec_from_file_location(name, Path(module.__file__))
-    copy = importlib.util.module_from_spec(spec)
+def _load_module_copy(original, name, environ):
+    """Execute a fresh copy of `original`'s source under the new name `name` with `environ` applied."""
     with mock.patch.dict(os.environ, environ):
-        spec.loader.exec_module(copy)
-    return copy
+        return load_source(name, original.__file__)
 
 
-class GraphCacheStateContractTests(unittest.TestCase):
+class GraphCacheStateContractTests(GraphTestCase):
     def setUp(self):
         from modules import openclaw_vae_decode_graphs
 

@@ -1,5 +1,3 @@
-import importlib.util
-import os
 import sys
 import types
 import unittest
@@ -7,82 +5,36 @@ from unittest import mock
 
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from test.helpers import available_test_device, load_source, module, stub_modules
 
 
 def load_unipc_module():
-    spec = importlib.util.spec_from_file_location("test_unipc_module", "modules/models/diffusion/uni_pc/uni_pc.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_source("test_unipc_module", "modules/models/diffusion/uni_pc/uni_pc.py")
 
 
 def load_timesteps_impl_module():
-    module_name = "test_timesteps_impl_module"
     unipc_module = load_unipc_module()
-    originals = {}
+    shared_module = module("modules.shared", opts=types.SimpleNamespace())
+    torch_utils_module = module("modules.torch_utils", float64=lambda tensor: torch.float32 if tensor.device.type == "xpu" else torch.float64)
+    k_diffusion_sampling = module("k_diffusion.sampling", torch=torch)
+    uni_pc_pkg = module("modules.models.diffusion.uni_pc", uni_pc=unipc_module)
+    diffusion_pkg = module("modules.models.diffusion", uni_pc=uni_pc_pkg)
+    models_pkg = module("modules.models", diffusion=diffusion_pkg)
 
-    def put(name, module):
-        originals[name] = sys.modules.get(name)
-        sys.modules[name] = module
-
-    modules_pkg = types.ModuleType("modules")
-    models_pkg = types.ModuleType("modules.models")
-    diffusion_pkg = types.ModuleType("modules.models.diffusion")
-    uni_pc_pkg = types.ModuleType("modules.models.diffusion.uni_pc")
-    shared_module = types.ModuleType("modules.shared")
-    torch_utils_module = types.ModuleType("modules.torch_utils")
-    k_diffusion_pkg = types.ModuleType("k_diffusion")
-    k_diffusion_pkg.__path__ = []
-    k_diffusion_sampling = types.ModuleType("k_diffusion.sampling")
-
-    shared_module.opts = types.SimpleNamespace()
-    torch_utils_module.float64 = lambda tensor: torch.float32 if tensor.device.type == "xpu" else torch.float64
-    k_diffusion_sampling.torch = torch
-    k_diffusion_pkg.sampling = k_diffusion_sampling
-    uni_pc_pkg.uni_pc = unipc_module
-    diffusion_pkg.uni_pc = uni_pc_pkg
-
-    modules_pkg.shared = shared_module
-    modules_pkg.models = models_pkg
-    modules_pkg.torch_utils = torch_utils_module
-    models_pkg.diffusion = diffusion_pkg
-
-    for name, module in (
-        ("modules", modules_pkg),
-        ("modules.shared", shared_module),
-        ("modules.models", models_pkg),
-        ("modules.models.diffusion", diffusion_pkg),
-        ("modules.models.diffusion.uni_pc", uni_pc_pkg),
-        ("modules.models.diffusion.uni_pc.uni_pc", unipc_module),
-        ("modules.torch_utils", torch_utils_module),
-        ("k_diffusion", k_diffusion_pkg),
-        ("k_diffusion.sampling", k_diffusion_sampling),
-    ):
-        put(name, module)
-
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, "modules/sd_samplers_timesteps_impl.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    finally:
-        for name, original in originals.items():
-            if original is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = original
-
-    return module
+    return load_source("test_timesteps_impl_module", "modules/sd_samplers_timesteps_impl.py", {
+        "modules": module("modules", shared=shared_module, models=models_pkg, torch_utils=torch_utils_module),
+        "modules.shared": shared_module,
+        "modules.models": models_pkg,
+        "modules.models.diffusion": diffusion_pkg,
+        "modules.models.diffusion.uni_pc": uni_pc_pkg,
+        "modules.models.diffusion.uni_pc.uni_pc": unipc_module,
+        "modules.torch_utils": torch_utils_module,
+        "k_diffusion": module("k_diffusion", package=True, sampling=k_diffusion_sampling),
+        "k_diffusion.sampling": k_diffusion_sampling,
+    })
 
 
 def load_timesteps_sampler_module(device=None):
-    module_name = "test_timesteps_sampler_module"
-    originals = {}
-
-    def put(name, module):
-        originals[name] = sys.modules.get(name)
-        sys.modules[name] = module
-
     class CFGDenoiser:
         def __init__(self, sampler):
             self.sampler = sampler
@@ -104,87 +56,41 @@ def load_timesteps_sampler_module(device=None):
         def __new__(cls, name, constructor, aliases, options):
             return tuple.__new__(cls, (name, constructor, aliases, options))
 
-    modules_pkg = types.ModuleType("modules")
-    devices_module = types.ModuleType("modules.devices")
-    devices_module.device = device or torch.device("cpu")
-    callbacks_module = types.ModuleType("modules.script_callbacks")
-    callbacks_module.ExtraNoiseParams = object
-    callbacks_module.extra_noise_callback = lambda params: None
-    cfg_module = types.ModuleType("modules.sd_samplers_cfg_denoiser")
-    cfg_module.CFGDenoiser = CFGDenoiser
-    common_module = types.ModuleType("modules.sd_samplers_common")
-    common_module.Sampler = Sampler
-    common_module.SamplerData = SamplerData
-    impl_module = types.ModuleType("modules.sd_samplers_timesteps_impl")
-    impl_module.ddim = lambda *args, **kwargs: None
-    impl_module.ddim_cfgpp = lambda *args, **kwargs: None
-    impl_module.plms = lambda *args, **kwargs: None
-    impl_module.unipc = lambda *args, **kwargs: None
-    shared_module = types.ModuleType("modules.shared")
-    shared_module.opts = types.SimpleNamespace(always_discard_next_to_last_sigma=False)
-    shared_module.sd_model = types.SimpleNamespace(parameterization="eps", alphas_cumprod=torch.linspace(0.999, 0.001, 1000))
-    generation_profile_module = types.ModuleType("modules.openclaw_generation_profile")
-    generation_profile_module.cached_tensor = lambda **kwargs: kwargs["factory"]()
-    modules_pkg.openclaw_generation_profile = generation_profile_module
+    generation_profile_module = module("modules.openclaw_generation_profile", cached_tensor=lambda **kwargs: kwargs["factory"]())
 
-    for name, module in (
-        ("modules", modules_pkg),
-        ("modules.devices", devices_module),
-        ("modules.script_callbacks", callbacks_module),
-        ("modules.sd_samplers_cfg_denoiser", cfg_module),
-        ("modules.sd_samplers_common", common_module),
-        ("modules.sd_samplers_timesteps_impl", impl_module),
-        ("modules.openclaw_generation_profile", generation_profile_module),
-        ("modules.shared", shared_module),
-    ):
-        put(name, module)
-    # Importing sd_samplers_timesteps aliases itself as modules.sd_samplers_compvis; that alias must not outlive the load.
-    originals.setdefault("modules.sd_samplers_compvis", sys.modules.get("modules.sd_samplers_compvis"))
-
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, "modules/sd_samplers_timesteps.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(module_name, None)
-        for name, original in originals.items():
-            if original is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = original
-
-    return module
-
-
-def available_test_device():
-    if not torch.cuda.is_available():
-        return torch.device("cpu")
-    try:
-        probe = torch.empty((), device="cuda:0")
-        del probe
-        return torch.device("cuda:0")
-    except Exception:
-        return torch.device("cpu")
+    return load_source("test_timesteps_sampler_module", "modules/sd_samplers_timesteps.py", {
+        "modules": module("modules", openclaw_generation_profile=generation_profile_module),
+        "modules.devices": module("modules.devices", device=device or torch.device("cpu")),
+        "modules.script_callbacks": module("modules.script_callbacks", ExtraNoiseParams=object, extra_noise_callback=lambda params: None),
+        "modules.sd_samplers_cfg_denoiser": module("modules.sd_samplers_cfg_denoiser", CFGDenoiser=CFGDenoiser),
+        "modules.sd_samplers_common": module("modules.sd_samplers_common", Sampler=Sampler, SamplerData=SamplerData),
+        "modules.sd_samplers_timesteps_impl": module(
+            "modules.sd_samplers_timesteps_impl",
+            ddim=lambda *args, **kwargs: None,
+            ddim_cfgpp=lambda *args, **kwargs: None,
+            plms=lambda *args, **kwargs: None,
+            unipc=lambda *args, **kwargs: None,
+        ),
+        "modules.openclaw_generation_profile": generation_profile_module,
+        "modules.shared": module(
+            "modules.shared",
+            opts=types.SimpleNamespace(always_discard_next_to_last_sigma=False),
+            sd_model=types.SimpleNamespace(parameterization="eps", alphas_cumprod=torch.linspace(0.999, 0.001, 1000)),
+        ),
+        # Importing sd_samplers_timesteps aliases itself as modules.sd_samplers_compvis; that alias must not outlive the load.
+        "modules.sd_samplers_compvis": None,
+    })
 
 
 class OpenClawDeviceDtypeTests(unittest.TestCase):
     def test_module_loaders_restore_sys_modules(self):
-        sentinel = types.ModuleType("modules.sd_samplers_compvis")
+        sentinel = module("modules.sd_samplers_compvis")
         names = ("modules", "modules.shared", "modules.devices", "modules.openclaw_generation_profile", "modules.sd_samplers_compvis", "k_diffusion", "k_diffusion.sampling")
-        saved = {name: sys.modules.get(name) for name in names}
-        sys.modules["modules.sd_samplers_compvis"] = sentinel
-        try:
+        with stub_modules({"modules.sd_samplers_compvis": sentinel}):
             before = {name: sys.modules.get(name) for name in names}
             load_timesteps_impl_module()
             load_timesteps_sampler_module()
             after = {name: sys.modules.get(name) for name in names}
-        finally:
-            for name, module in saved.items():
-                if module is None:
-                    sys.modules.pop(name, None)
-                else:
-                    sys.modules[name] = module
         self.assertEqual({name: id(module) for name, module in after.items()}, {name: id(module) for name, module in before.items()})
 
 
@@ -212,18 +118,7 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
 
     def test_generation_profile_cache_returns_fresh_timesteps(self):
         module = load_timesteps_sampler_module()
-        import importlib.util as _importlib_util
-        spec = _importlib_util.spec_from_file_location("modules.openclaw_generation_profile", "modules/openclaw_generation_profile.py")
-        real_profile = _importlib_util.module_from_spec(spec)
-        original_profile = sys.modules.get("modules.openclaw_generation_profile")
-        sys.modules["modules.openclaw_generation_profile"] = real_profile
-        try:
-            spec.loader.exec_module(real_profile)
-        finally:
-            if original_profile is None:
-                sys.modules.pop("modules.openclaw_generation_profile", None)
-            else:
-                sys.modules["modules.openclaw_generation_profile"] = original_profile
+        real_profile = load_source("modules.openclaw_generation_profile", "modules/openclaw_generation_profile.py")
         module.openclaw_generation_profile = real_profile
 
         class Sampler(module.CompVisSampler):

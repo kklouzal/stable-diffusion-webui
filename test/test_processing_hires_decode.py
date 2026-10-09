@@ -1,6 +1,5 @@
 """Hires fix: no discarded full-size VAE decode (PL5) and device-resident decoded images (PL7)."""
 
-import sys
 import ast
 import contextlib
 from pathlib import Path
@@ -9,20 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules import devices, processing  # noqa: E402
 from modules.processing import StableDiffusionProcessingTxt2Img  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _real_webui_modules_package(monkeypatch):
-    # Other test files leave stub "modules" packages in sys.modules; shared.sd_model resolves
-    # modules.sd_models through it.
-    monkeypatch.setitem(sys.modules, "modules", processing.modules)
 
 
 MODEL_KINDS = {

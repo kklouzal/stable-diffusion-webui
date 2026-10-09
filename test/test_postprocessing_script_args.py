@@ -1,19 +1,6 @@
-import sys
 import types
 
 from modules import headless_ui as gr
-
-sys.modules.setdefault("modules.errors", types.SimpleNamespace(display=lambda *args, **kwargs: None))
-sys.modules.setdefault(
-    "modules.shared",
-    types.SimpleNamespace(
-        opts=types.SimpleNamespace(
-            postprocessing_operation_order=[],
-            postprocessing_disable_in_extras=[],
-        )
-    ),
-)
-
 from modules import scripts_postprocessing
 
 

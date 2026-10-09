@@ -1,22 +1,14 @@
 """refresh_vae_list(): natural name order and a deterministic winner for duplicate basenames."""
 
 import os
-import sys
 
 import pytest
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
-from modules import processing, sd_vae  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _real_webui_modules_package(monkeypatch):
-    # Other test files leave stub "modules" packages in sys.modules.
-    monkeypatch.setitem(sys.modules, "modules", processing.modules)
+from modules import sd_vae  # noqa: E402
 
 
 @pytest.fixture

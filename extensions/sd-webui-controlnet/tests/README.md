@@ -7,7 +7,7 @@ Backend tests that import the A1111 modules in-process (no server, no GPU). `tes
 - `annotator_tests/`: annotator output and pre/post-processing fixes.
 - `external_code_api/`: the `internal_controlnet.external_code` helpers.
 - `../unit_tests/`: `ControlNetUnit` validation, run by the repository test
-  `tests/test_controlnet_legacy_api_fields.py`.
+  `test/test_controlnet_legacy_api_fields.py`.
 
 Run them from the A1111 root inside the deploy image (CPU only), for example:
 

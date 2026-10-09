@@ -17,7 +17,7 @@ _unit_lut_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 def _unit_lut(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """`v / 255` for every uint8 `v`: divided in float64 and rounded once to `dtype` on the CPU, then moved to
     `device`. Bitwise equal to the former numpy path (float64 `/ 255`, then `.to(device, dtype)`, which converts on the
-    CPU side); see tests/test_upscaler_device_conversions.py.
+    CPU side); see test/test_upscaler_device_conversions.py.
     """
     key = (device, dtype)
     lut = _unit_lut_cache.get(key)

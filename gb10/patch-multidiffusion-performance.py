@@ -13,7 +13,7 @@ cleanly. The blocks:
   back to SDP, and the sage2/sage3 method names map to SDP. Its torch.nn.attention import is no longer used since
   TV-ATTN; it is kept, like the sage names, so the deployed bytes stay unchanged.
 - TV-*, MD-W1: performance changes. Exactness of each is argued next to the code it patches and tested on CPU against
-  the unpatched extension (tests/test_gb10_multidiffusion_performance_patcher.py).
+  the unpatched extension (test/test_gb10_multidiffusion_performance_patcher.py).
 A checkout holding only the former 0001 commit (upstream + TV-FB, nothing else) is not accepted: reset it to upstream.
 """
 from __future__ import annotations

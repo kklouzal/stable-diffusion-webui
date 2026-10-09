@@ -1,9 +1,8 @@
 from fractions import Fraction
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
 from modules.processing import StableDiffusionProcessingTxt2Img  # noqa: E402
 

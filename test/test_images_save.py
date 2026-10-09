@@ -1,21 +1,13 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
 
-
-def module(name, **attrs):
-    mod = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(mod, key, value)
-    return mod
+from test.helpers import load_source, module
 
 
-def load_images_module(monkeypatch):
+def load_images_module():
     opts = SimpleNamespace(
         data={},
         enable_pnginfo=False,
@@ -66,33 +58,30 @@ def load_images_module(monkeypatch):
         image_saved_callback=lambda params: None,
     )
 
-    monkeypatch.setitem(sys.modules, "numpy", module("numpy", float32=float, uint8=int))
-    monkeypatch.setitem(sys.modules, "pytz", module("pytz", timezone=lambda name: None, exceptions=SimpleNamespace(UnknownTimeZoneError=Exception)))
     piexif = module("piexif", load=lambda data: {}, dump=lambda data: b"", insert=lambda exif, filename: None, ExifIFD=SimpleNamespace(UserComment=0))
     piexif.helper = module("piexif.helper", UserComment=SimpleNamespace(load=lambda data: "", dump=lambda text, encoding=None: b""))
-    monkeypatch.setitem(sys.modules, "piexif", piexif)
-    monkeypatch.setitem(sys.modules, "piexif.helper", piexif.helper)
-    monkeypatch.setitem(sys.modules, "pillow_avif", module("pillow_avif"))
-    # `from modules import shared` reads the package attribute before sys.modules["modules.shared"]; once another
-    # test file imported the real modules.shared, the real package would hand images.py the real shared (and its
-    # opts) instead of the stub below. Stub the package too, so every `modules` name images.py resolves is ours.
-    monkeypatch.setitem(sys.modules, "modules", module("modules", __path__=[]))
-    monkeypatch.setitem(sys.modules, "modules.sd_samplers", module("modules.sd_samplers", find_sampler_config=lambda name: SimpleNamespace(options={}), samplers_map={}))
-    monkeypatch.setitem(sys.modules, "modules.shared", shared)
-    monkeypatch.setitem(sys.modules, "modules.script_callbacks", callbacks)
-    monkeypatch.setitem(sys.modules, "modules.errors", module("modules.errors", report=lambda *a, **k: None, display=lambda *a, **k: None))
-    monkeypatch.setitem(sys.modules, "modules.paths_internal", module("modules.paths_internal", roboto_ttf_file=""))
-    # numpy is stubbed above: the parallel PNG writer declines every image here, so PNG files come from Pillow.
-    monkeypatch.setitem(sys.modules, "modules.png_writer", module("modules.png_writer", encode=lambda image, pnginfo: None))
+    return load_source("test_loaded_images", "modules/images.py", {
+        "numpy": module("numpy", float32=float, uint8=int),
+        "pytz": module("pytz", timezone=lambda name: None, exceptions=SimpleNamespace(UnknownTimeZoneError=Exception)),
+        "piexif": piexif,
+        "piexif.helper": piexif.helper,
+        "pillow_avif": module("pillow_avif"),
+        # `from modules import shared` reads the package attribute before sys.modules["modules.shared"]; once another
+        # test file imported the real modules.shared, the real package would hand images.py the real shared (and its
+        # opts) instead of the stub below. Stub the package too, so every `modules` name images.py resolves is ours.
+        "modules": module("modules", package=True),
+        "modules.sd_samplers": module("modules.sd_samplers", find_sampler_config=lambda name: SimpleNamespace(options={}), samplers_map={}),
+        "modules.shared": shared,
+        "modules.script_callbacks": callbacks,
+        "modules.errors": module("modules.errors", report=lambda *a, **k: None, display=lambda *a, **k: None),
+        "modules.paths_internal": module("modules.paths_internal", roboto_ttf_file=""),
+        # numpy is stubbed above: the parallel PNG writer declines every image here, so PNG files come from Pillow.
+        "modules.png_writer": module("modules.png_writer", encode=lambda image, pnginfo: None),
+    })
 
-    spec = importlib.util.spec_from_file_location("test_loaded_images", Path("modules/images.py"))
-    images = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(images)
-    return images
 
-
-def test_save_image_reports_number_suffixed_duplicate_filename(tmp_path, monkeypatch):
-    images = load_images_module(monkeypatch)
+def test_save_image_reports_number_suffixed_duplicate_filename(tmp_path):
+    images = load_images_module()
 
     original = tmp_path / "duplicate.png"
     original.write_bytes(b"existing")
@@ -118,7 +107,7 @@ def test_save_image_reports_number_suffixed_duplicate_filename(tmp_path, monkeyp
 
 
 def test_save_image_creates_callback_rewritten_directory(tmp_path, monkeypatch):
-    images = load_images_module(monkeypatch)
+    images = load_images_module()
 
     callback_dir = tmp_path / "callback-target"
 
@@ -147,7 +136,7 @@ def test_save_image_creates_callback_rewritten_directory(tmp_path, monkeypatch):
 
 
 def test_save_image_reports_exported_4chan_jpg_path(tmp_path, monkeypatch):
-    images = load_images_module(monkeypatch)
+    images = load_images_module()
     images.opts.export_for_4chan = True
     images.opts.target_side_length = 2
 
@@ -175,8 +164,8 @@ def test_save_image_reports_exported_4chan_jpg_path(tmp_path, monkeypatch):
     assert (tmp_path / "large.jpg").is_file()
     assert (tmp_path / "large.txt").read_text(encoding="utf8") == "export metadata\n"
 
-def test_save_image_truncates_long_filename_component_only(tmp_path, monkeypatch):
-    images = load_images_module(monkeypatch)
+def test_save_image_truncates_long_filename_component_only(tmp_path):
+    images = load_images_module()
     image = Image.new("RGB", (1, 1), color="white")
     max_stem_len = os.statvfs(tmp_path).f_namemax - 4
 

@@ -1,65 +1,28 @@
-import importlib.util
-import os
-import sys
 import types
 import unittest
 
 import torch
 
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-
-def _module(name, **attrs):
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    return module
+from test.helpers import load_source, module
 
 
 def load_scheduler_module():
-    originals = {}
-
-    def put(name, module):
-        originals[name] = sys.modules.get(name)
-        sys.modules[name] = module
-
-    sampling_module = _module(
+    sampling_module = module(
         "k_diffusion.sampling",
         get_sigmas_karras=lambda *args, **kwargs: None,
         get_sigmas_exponential=lambda *args, **kwargs: None,
         get_sigmas_polyexponential=lambda *args, **kwargs: None,
     )
-    k_diffusion_module = _module("k_diffusion", sampling=sampling_module)
-    modules_pkg = _module("modules")
-    shared_module = _module(
-        "modules.shared",
-        sd_model=types.SimpleNamespace(is_sdxl=False),
-        opts=types.SimpleNamespace(beta_dist_alpha=0.6, beta_dist_beta=0.6),
-    )
-
-    for name, module in (
-        ("k_diffusion", k_diffusion_module),
-        ("k_diffusion.sampling", sampling_module),
-        ("modules", modules_pkg),
-        ("modules.shared", shared_module),
-    ):
-        put(name, module)
-
-    try:
-        spec = importlib.util.spec_from_file_location("test_scheduler_module", "modules/sd_schedulers.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["test_scheduler_module"] = module
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop("test_scheduler_module", None)
-        for name, original in originals.items():
-            if original is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = original
-
-    return module
+    return load_source("test_scheduler_module", "modules/sd_schedulers.py", {
+        "k_diffusion": module("k_diffusion", sampling=sampling_module),
+        "k_diffusion.sampling": sampling_module,
+        "modules": module("modules"),
+        "modules.shared": module(
+            "modules.shared",
+            sd_model=types.SimpleNamespace(is_sdxl=False),
+            opts=types.SimpleNamespace(beta_dist_alpha=0.6, beta_dist_beta=0.6),
+        ),
+    })
 
 
 class VectorInnerModel:

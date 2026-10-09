@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-import importlib.util
 import types
 import unittest
-from pathlib import Path
 
 import torch
 
+from test.helpers import load_source
+
 
 def load_row_memo():
-    path = Path(__file__).resolve().parents[1] / "modules" / "sd_unet_row_memo.py"
-    spec = importlib.util.spec_from_file_location("sd_unet_row_memo_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_source("sd_unet_row_memo_under_test", "modules/sd_unet_row_memo.py")
 
 
 class FakeDenoiser(torch.nn.Module):

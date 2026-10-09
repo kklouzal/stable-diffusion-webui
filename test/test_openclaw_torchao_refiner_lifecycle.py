@@ -5,12 +5,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modules import shared, shared_init
+from test.helpers import init_shared
 
-if getattr(shared, "opts", None) is None:
-    shared_init.initialize()
+shared = init_shared()
 
-from modules import sd_models, sd_vae, torchao_weight_quant
+from modules import sd_models, sd_vae, torchao_weight_quant  # noqa: E402
 
 
 class NoGenericToModel(torch.nn.Module):
