@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import ast
 import os
-import sys
 import tempfile
 import threading
 import types
@@ -12,56 +10,10 @@ from unittest.mock import patch
 from pathlib import Path
 from PIL import Image
 
+from test.helpers import module, stub_modules, stubbed_generation_last
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "generation_last.py"
-
-
-def load_script_arg_range():
-    """modules.scripts.script_arg_range itself, compiled without importing the webui runtime."""
-    path = MODULE_PATH.parent / "scripts.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "script_arg_range"]
-    namespace = {}
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
-    return namespace["script_arg_range"]
-
-
-def load_generation_last(data_path: Path):
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    paths = types.ModuleType("modules.paths")
-    paths.data_path = str(data_path)
-    shared = types.ModuleType("modules.shared")
-    shared.opts = types.SimpleNamespace(CLIP_stop_at_last_layers=2)
-    shared.state = types.SimpleNamespace(interrupted=False, stopping_generation=False)
-    scripts = types.ModuleType("modules.scripts")
-    scripts.script_arg_range = load_script_arg_range()
-
-    previous = {name: sys.modules.get(name) for name in ("modules", "modules.paths", "modules.shared", "modules.scripts", "modules.persistent_artifact_cache", "modules.generation_last")}
-    sys.modules["modules"] = modules_pkg
-    sys.modules["modules.paths"] = paths
-    sys.modules["modules.shared"] = shared
-    sys.modules["modules.scripts"] = scripts
-    modules_pkg.scripts = scripts
-    # Stdlib-only dependency: load the real module so the file runs in isolation.
-    cache_spec = importlib.util.spec_from_file_location("modules.persistent_artifact_cache", MODULE_PATH.parent / "persistent_artifact_cache.py")
-    artifact_cache = importlib.util.module_from_spec(cache_spec)
-    sys.modules["modules.persistent_artifact_cache"] = artifact_cache
-    cache_spec.loader.exec_module(artifact_cache)
-    modules_pkg.persistent_artifact_cache = artifact_cache
-    spec = importlib.util.spec_from_file_location("modules.generation_last", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["modules.generation_last"] = module
-    spec.loader.exec_module(module)
-    return module, shared, previous
-
-
-def restore_modules(previous):
-    for name, value in previous.items():
-        if value is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = value
 
 
 class StableDiffusionProcessingTxt2Img:
@@ -167,12 +119,8 @@ class GenerationLastTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("GENERATION_LAST_DIR", None)
-        self.module, self.shared, self.previous = load_generation_last(Path(self.temp.name))
+        self.module, self.shared = self.enterContext(stubbed_generation_last(Path(self.temp.name)))
         self.processed = types.SimpleNamespace(images=[object()], all_seeds=[123456], all_subseeds=[654321])
-
-    def tearDown(self):
-        restore_modules(self.previous)
-        self.temp.cleanup()
 
     def test_txt2img_snapshot_is_persistent_and_replayable(self):
         p = StableDiffusionProcessingTxt2Img()
@@ -197,9 +145,8 @@ class GenerationLastTests(unittest.TestCase):
 
     def test_capture_or_report_reports_a_failed_snapshot_without_failing_the_generation(self):
         reports = []
-        errors = types.ModuleType("modules.errors")
-        errors.report = lambda message, exc_info=False: reports.append((message, exc_info))
-        with patch.dict(sys.modules, {"modules.errors": errors}), patch.object(self.module, "persist_snapshot", side_effect=OSError("disk full")):
+        errors = module("modules.errors", report=lambda message, exc_info=False: reports.append((message, exc_info)))
+        with stub_modules({"modules.errors": errors}), patch.object(self.module, "persist_snapshot", side_effect=OSError("disk full")):
             self.assertIsNone(self.module.capture_or_report(StableDiffusionProcessingTxt2Img(), self.processed))
         self.assertEqual(reports, [("Failed to persist the last-generation snapshot", True)])
 

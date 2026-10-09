@@ -3,9 +3,9 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-
-from test.test_generation_last import load_generation_last, restore_modules
 import tempfile
+
+from test.helpers import stubbed_generation_last
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,31 +103,23 @@ class ScriptArgumentRangeTests(unittest.TestCase):
     def test_snapshot_uses_the_same_ranges_as_runtime(self):
         p = self.prepare({"A": {"args": ["A0", "A1"]}, "B": {"args": ["B0"]}})
         p.scripts = SimpleNamespace(alwayson_scripts=[self.a, self.b])
-        with tempfile.TemporaryDirectory() as directory:
-            module, _, previous = load_generation_last(Path(directory))
-            try:
-                parameters, limitations = {}, []
-                module._capture_script_parameters(p, parameters, limitations, {"bytes": 0})
-                self.assertEqual(parameters["alwayson_scripts"], {
-                    "A": {"args": ["A0", "A1"]}, "B": {"args": ["B0"]}})
-                self.assertEqual(limitations, [])
-            finally:
-                restore_modules(previous)
+        with tempfile.TemporaryDirectory() as directory, stubbed_generation_last(Path(directory)) as (module, _):
+            parameters, limitations = {}, []
+            module._capture_script_parameters(p, parameters, limitations, {"bytes": 0})
+            self.assertEqual(parameters["alwayson_scripts"], {
+                "A": {"args": ["A0", "A1"]}, "B": {"args": ["B0"]}})
+            self.assertEqual(limitations, [])
 
     def test_snapshot_captures_selectable_overflow_without_neighbors(self):
         selected = script("Selected", 1, 2, False)
         p = self.prepare({"B": {"args": ["B0"]}}, selected, ["S0", "S1"])
         p.scripts = SimpleNamespace(alwayson_scripts=[self.b], selectable_scripts=[selected])
-        with tempfile.TemporaryDirectory() as directory:
-            module, _, previous = load_generation_last(Path(directory))
-            try:
-                parameters, limitations = {}, []
-                module._capture_script_parameters(p, parameters, limitations, {"bytes": 0})
-                self.assertEqual(parameters["script_args"], ["S0", "S1"])
-                self.assertEqual(parameters["alwayson_scripts"]["B"]["args"], ["B0"])
-                self.assertEqual(limitations, [])
-            finally:
-                restore_modules(previous)
+        with tempfile.TemporaryDirectory() as directory, stubbed_generation_last(Path(directory)) as (module, _):
+            parameters, limitations = {}, []
+            module._capture_script_parameters(p, parameters, limitations, {"bytes": 0})
+            self.assertEqual(parameters["script_args"], ["S0", "S1"])
+            self.assertEqual(parameters["alwayson_scripts"]["B"]["args"], ["B0"])
+            self.assertEqual(limitations, [])
 
 
 if __name__ == "__main__":
