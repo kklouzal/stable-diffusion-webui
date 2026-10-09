@@ -33,5 +33,8 @@ models_path = cmd_opts_pre.models_dir if cmd_opts_pre.models_dir else os.path.jo
 extensions_dir = os.path.join(data_path, "extensions")
 extensions_builtin_dir = os.path.join(script_path, "extensions-builtin")
 default_output_dir = os.path.join(data_path, "outputs")
+# The app cache (modules/cache.py, TORCH_HOME/HF_HOME downloads, the settings recovery copies): a host mount in the
+# gb10 deployment, so what is written there survives the container's replacement.
+cache_dir = os.environ.get('SD_WEBUI_CACHE_DIR', os.path.join(data_path, "cache"))
 
 roboto_ttf_file = os.path.join(modules_path, 'Roboto-Regular.ttf')

@@ -1554,18 +1554,23 @@ def _reload_model_weights(sd_model, info, forced_reload):
         raise reload_exc_info[1].with_traceback(reload_exc_info[2])
 
     model_data.set_sd_model(sd_model)
-
-    # The pad_cond_uncond padding is the new text encoder's empty prompt, computed as load_model does.
-    with devices.autocast(), torch.no_grad():
-        sd_model.cond_stage_model_empty_prompt = get_empty_cond(sd_model)
-    timer.record("calculate empty prompt")
-
-    print(f"Weights loaded in {timer.summary()}.")
+    # The previous text encoder's empty prompt is stale from here: until the recompute below succeeds, padding has
+    # none to use (pad_cond_uncond fails) instead of the previous checkpoint's.
+    sd_model.cond_stage_model_empty_prompt = None
 
     sd_unet.apply_unet()
     openclaw_cuda_graphs.note_model_loaded(sd_model)
     vae_bytes_changed, vae_object_changed = openclaw_lifecycle_epochs.take_pending_vae_commit(sd_model)
     openclaw_lifecycle_epochs.publish_checkpoint_commit(changed=True, vae_bytes_changed=vae_bytes_changed, vae_object_changed=vae_object_changed)
+
+    # The pad_cond_uncond padding is the new text encoder's empty prompt, computed as load_model does. It runs after
+    # the commit: the new weights are in place and published whether or not it succeeds, so a failure here leaves a
+    # fully committed checkpoint without padding rather than a half-committed lifecycle.
+    with devices.autocast(), torch.no_grad():
+        sd_model.cond_stage_model_empty_prompt = get_empty_cond(sd_model)
+    timer.record("calculate empty prompt")
+
+    print(f"Weights loaded in {timer.summary()}.")
 
     return sd_model
 

@@ -8,7 +8,9 @@ import json
 import os
 import shutil
 import subprocess
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -128,7 +130,8 @@ save()
 
 FAKE_SUDO = r'''#!/bin/sh
 # Runs the command as the current user; the ownership operations the deploy does as root become checks that the
-# arguments are well formed.
+# arguments are well formed. Every command is recorded in $FAKE_SUDO_LOG.
+printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
 case "$1" in
   chown) exit 0 ;;
   install) shift; args=""; while [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) args="$args $1"; shift ;; esac; done; exec install $args ;;
@@ -188,8 +191,12 @@ if delete:
                 shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
 '''
 
+# While the file FAKE_DOCKER_STATE.unready exists no container answers, so a test can hold a deploy (or its rollback)
+# in wait_ready.
 FAKE_CURL = r'''
 import json, os, sys
+if os.path.exists(os.environ["FAKE_DOCKER_STATE"] + ".unready"):
+    sys.exit(7)
 with open(os.environ["FAKE_DOCKER_STATE"]) as f:
     state = json.load(f)
 ready = any(c["status"] == "running" and c["image"] not in state["unready_images"] for c in state["containers"].values())
@@ -265,11 +272,15 @@ def deploy(tmp_path):
         def state(self):
             return json.loads(state_path.read_text(encoding="utf-8"))
 
-        def run(self, **env):
+        def sudo_commands(self):
+            return (tmp_path / "sudo.log").read_text(encoding="utf-8").splitlines()
+
+        def env(self, **env):
             full_env = {
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "FAKE_DOCKER_STATE": str(state_path),
+                "FAKE_SUDO_LOG": str(tmp_path / "sudo.log"),
                 "DOCKER_BIN": str(bin_dir / "docker"),
                 "HOST_ROOT": str(host),
                 "OUTPUTS_TARGET": str(outputs),
@@ -281,7 +292,34 @@ def deploy(tmp_path):
             for name in ("IMAGE_TAG", "A1111_COMMIT_HASH", "A1111_VERSION_TAG", "COMMANDLINE_ARGS"):
                 if name not in env:
                     full_env.pop(name, None)
-            return subprocess.run(["bash", str(project / "gb10" / "run.sh")], env=full_env, capture_output=True, text=True, timeout=120)
+            return full_env
+
+        def run(self, **env):
+            result = subprocess.run(["bash", str(project / "gb10" / "run.sh")], env=self.env(**env), capture_output=True, text=True, timeout=120)
+            # stdout and stderr both go to the caller's stdout and to the deploy log.
+            assert result.stderr == ""
+            first, rest = result.stdout.split("\n", 1)
+            assert first.startswith(f"Deploy log: {host}/deploy-logs/run-") and first.endswith(".log")
+            assert Path(first.removeprefix("Deploy log: ")).read_text(encoding="utf-8") == rest
+            return result
+
+        def popen(self, **env):
+            """run.sh in its own session (process group), its output on pipes the test may close."""
+            return subprocess.Popen(["bash", str(project / "gb10" / "run.sh")], env=self.env(**env), stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+
+        def calls(self):
+            """The docker calls so far, read while a deploy runs (the stand-in rewrites its state file)."""
+            while True:
+                try:
+                    return self.state()["calls"]
+                except json.JSONDecodeError:
+                    time.sleep(0.05)
+
+        def hold_unready(self):
+            """While the returned file exists, no container answers the API."""
+            hold = Path(str(state_path) + ".unready")
+            hold.touch()
+            return hold
 
     return Deploy()
 
@@ -292,8 +330,8 @@ def _calls(state, command):
 
 def _assert_rolled_back(deploy, result):
     assert result.returncode != 0
-    assert "rolling back" in result.stderr
-    assert "Rolled back: gb10-a1111-latest runs the previous image" in result.stderr
+    assert "rolling back" in result.stdout
+    assert "Rolled back: gb10-a1111-latest runs the previous image" in result.stdout
     state = deploy.state()
     assert state["containers"] == {"gb10-a1111-latest": {"image": OLD_ID, "status": "running", "restarts": 0, "env": ["A1111_PORT=7860"]}}
     ext_a = deploy.host / "Extensions" / "ext-a"
@@ -307,7 +345,7 @@ def _assert_rolled_back(deploy, result):
 def test_a_healthy_image_replaces_the_running_container(deploy):
     result = deploy.run()
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout
     state = deploy.state()
     assert list(state["containers"]) == ["gb10-a1111-latest"]
     new = state["containers"]["gb10-a1111-latest"]
@@ -333,6 +371,22 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
     assert f"{deploy.host}/Caches/app:/opt/stable-diffusion-webui/cache" in mounts
     assert f"{deploy.host}/Caches/compile:/opt/stable-diffusion-webui/cache/compile" in mounts
     assert list(deploy.tmp.iterdir()) == []
+    # Host paths written as root are also tested as root.
+    sudo_commands = deploy.sudo_commands()
+    for check in (f"test -e {deploy.host}/config/config.json", f"test -d {deploy.host}/Extensions/ext-a",
+                  f"test -d {deploy.host}/Extensions/ultimate-upscale-for-automatic1111", f"test -L {deploy.host}/Outputs"):
+        assert check in sudo_commands
+
+
+def test_an_outputs_symlink_to_an_unmounted_target_is_kept(deploy, tmp_path):
+    """A dangling Outputs link (the NAS not mounted yet) to the expected target is the expected link, not a conflict."""
+    target = tmp_path / "unmounted"
+    (deploy.host / "Outputs").symlink_to(target)
+
+    result = deploy.run(OUTPUTS_TARGET=str(target))
+
+    assert result.returncode == 0, result.stdout
+    assert os.readlink(deploy.host / "Outputs") == str(target)
 
 
 def test_a_container_that_dies_during_startup_is_replaced_by_the_previous_one(deploy):
@@ -341,9 +395,9 @@ def test_a_container_that_dies_during_startup_is_replaced_by_the_previous_one(de
     result = deploy.run()
 
     _assert_rolled_back(deploy, result)
-    assert "stopped or restarted before it was ready" in result.stderr
-    assert "fake container log line" in result.stderr
-    assert f"docker tag {OLD_ID} local/gb10-a1111:latest" in result.stderr
+    assert "stopped or restarted before it was ready" in result.stdout
+    assert "fake container log line" in result.stdout
+    assert f"docker tag {OLD_ID} local/gb10-a1111:latest" in result.stdout
 
 
 def test_a_failed_smoke_test_rolls_back(deploy):
@@ -360,7 +414,7 @@ def test_an_api_that_never_answers_rolls_back_after_the_timeout(deploy):
     result = deploy.run(READY_TIMEOUT="1")
 
     _assert_rolled_back(deploy, result)
-    assert "did not answer /sdapi/v1/progress on port 7860 within 1 s" in result.stderr
+    assert "did not answer /sdapi/v1/progress on port 7860 within 1 s" in result.stdout
 
 
 def test_a_failure_with_nothing_to_roll_back_to_removes_the_new_container(deploy):
@@ -369,7 +423,7 @@ def test_a_failure_with_nothing_to_roll_back_to_removes_the_new_container(deploy
     result = deploy.run()
 
     assert result.returncode != 0
-    assert "No container was running before this deploy" in result.stderr
+    assert "No container was running before this deploy" in result.stdout
     assert deploy.state()["containers"] == {}
 
 
@@ -381,7 +435,7 @@ def test_a_leftover_previous_container_stops_the_deploy_before_anything_changes(
     result = deploy.run()
 
     assert result.returncode == 1
-    assert "an earlier deploy did not finish" in result.stderr
+    assert "an earlier deploy did not finish" in result.stdout
     assert not _calls(deploy.state(), "stop") and not _calls(deploy.state(), "run")
     assert (deploy.host / "Extensions" / "ext-a" / "main.py").read_text(encoding="utf-8") == "old\n"
 
@@ -390,12 +444,12 @@ def test_an_image_without_provenance_labels_needs_its_version_given(deploy):
     result = deploy.run(IMAGE_TAG="local/gb10-a1111:old")
 
     assert result.returncode == 1
-    assert "carries no provenance labels" in result.stderr
+    assert "carries no provenance labels" in result.stdout
     assert not _calls(deploy.state(), "stop")
 
     result = deploy.run(IMAGE_TAG="local/gb10-a1111:old", A1111_COMMIT_HASH="c22a9794", A1111_VERSION_TAG="v-old")
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout
     env = deploy.state()["containers"]["gb10-a1111-latest"]["env"]
     assert "A1111_COMMIT_HASH=c22a9794" in env and "A1111_VERSION_TAG=v-old" in env
 
@@ -409,3 +463,63 @@ def test_stop_sh_stops_gracefully_before_removing(tmp_path, deploy):
     state = deploy.state()
     assert state["containers"] == {}
     assert [call for call in state["calls"] if call[0] in ("stop", "rm")] == [["stop", "-t", "120", "gb10-a1111-latest"], ["rm", "gb10-a1111-latest"]]
+
+
+def _wait_until(proc, condition, what):
+    deadline = time.monotonic() + 60
+    while not condition():
+        assert proc.poll() is None and time.monotonic() < deadline, f"run.sh ended or timed out before {what}"
+        time.sleep(0.1)
+
+
+def _deploy_log(proc):
+    return Path(proc.stdout.readline().decode().removeprefix("Deploy log: ").strip())
+
+
+@pytest.mark.parametrize("smoke_fails", [False, True], ids=["deploys", "rolls-back"])
+def test_a_lost_caller_does_not_stop_the_deploy_or_its_rollback(deploy, smoke_fails):
+    """The caller's output pipes close and the session gets SIGHUP (an SSH drop, a caller killed on its timeout) while
+    the new container starts: the deploy, or its rollback, still runs to the end, and the log holds all of it."""
+    if smoke_fails:
+        deploy.set(smoke_fail_images=[NEW_ID])
+    hold = deploy.hold_unready()
+    proc = deploy.popen()
+    log = _deploy_log(proc)
+    _wait_until(proc, lambda: any(call[0] == "run" for call in deploy.calls()), "the new container was started")
+    proc.stdout.close()
+    proc.stderr.close()
+    os.killpg(proc.pid, signal.SIGHUP)
+    time.sleep(0.5)
+    hold.unlink()
+
+    returncode = proc.wait(timeout=120)
+
+    output = log.read_text(encoding="utf-8")
+    assert "smoke test of gb10-a1111-latest" in output
+    if smoke_fails:
+        _assert_rolled_back(deploy, subprocess.CompletedProcess(proc.args, returncode, output, ""))
+    else:
+        assert returncode == 0, output
+        assert output.rstrip().endswith("this image is API/headless only.")
+        assert deploy.state()["containers"]["gb10-a1111-latest"]["image"] == NEW_ID
+
+
+def test_ctrl_c_during_the_rollback_does_not_stop_it(deploy):
+    """The new container never answers. While the rollback waits for the restarted previous container, Ctrl-C twice
+    (SIGINT to the whole process group): the rollback still finishes, and the deploy exits with its first failure."""
+    hold = deploy.hold_unready()
+    proc = deploy.popen(READY_TIMEOUT="8")
+    log = _deploy_log(proc)
+    _wait_until(proc, lambda: ["start", "gb10-a1111-latest"] in deploy.calls(), "the rollback restarted the previous container")
+    for _ in range(2):
+        os.killpg(proc.pid, signal.SIGINT)
+        time.sleep(0.5)
+    hold.unlink()
+
+    out, err = proc.communicate(timeout=120)
+
+    output = log.read_text(encoding="utf-8")
+    assert out.decode() == output and err == b""
+    _assert_rolled_back(deploy, subprocess.CompletedProcess(proc.args, proc.returncode, output, ""))
+    assert proc.returncode == 1
+    assert "within 8 s" in output and "ERROR: rollback:" not in output

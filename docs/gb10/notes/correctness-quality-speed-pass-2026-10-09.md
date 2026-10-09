@@ -203,7 +203,7 @@ All of these were checked on the GPU. Sample sheets were shown to the operator.
 - **Ultimate SD Upscale:**
   - interrupts survive (U1);
   - overrides are applied once (U2);
-  - exact-size tiles (U3, U4);
+  - exact-size tiles (U3, U4), one size for every tile of a pass (edge tiles shift inward), so a pass is one CUDA graph shape;
   - infotext (U5).
 - **Tiled VAE:**
   - GroupNorm statistics from valid regions, pooled exactly (T1). PSNR vs untiled goes from 47.1 to 59.0 dB.

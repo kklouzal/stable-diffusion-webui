@@ -57,7 +57,9 @@ for path in (
         print(f'{path}: ok (progress={payload.get("progress")})')
 PY
 
-sudo "${DOCKER_BIN}" exec -i "${CONTAINER_NAME}" python - <<'PY'
+# As the app's UID/GID: the Triton kernels this check compiles land in the mounted compile cache, which must stay
+# writable by the app (a root exec would leave root-owned entries there).
+sudo "${DOCKER_BIN}" exec -i -u 2323:2323 "${CONTAINER_NAME}" python - <<'PY'
 import importlib.util
 import sys
 

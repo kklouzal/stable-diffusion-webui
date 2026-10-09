@@ -1,6 +1,7 @@
 """modules/settings_file: config.json is read and written in place (gb10/run.sh bind-mounts it as a single file, which
-rename cannot replace), a completed write is fsynced, and an unusable file reverts to the defaults with a copy kept
-under tmp/ instead of stopping the server."""
+rename cannot replace), a completed write is fsynced, and an unusable file reverts to the defaults with a durable copy
+kept under the app cache's config-recovery/ (a host mount, so it survives the container) instead of stopping the
+server."""
 import json
 import os
 import types
@@ -13,12 +14,22 @@ from test.helpers import load_source, module
 
 @pytest.fixture
 def webui_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings_file, "script_path", str(tmp_path))
+    monkeypatch.setattr(settings_file, "cache_dir", str(tmp_path / "cache"))
     return tmp_path
 
 
+def _recovery_dir(root):
+    return root / "cache" / "config-recovery"
+
+
 def _quarantined(root):
-    return sorted((root / "tmp").glob("config.json.corrupt-*"))
+    return sorted(_recovery_dir(root).glob("config.json.corrupt-*"))
+
+
+def test_the_recovery_copies_go_to_the_app_cache():
+    from modules import cache, paths_internal
+
+    assert settings_file.cache_dir == cache.cache_dir == paths_internal.cache_dir
 
 
 def test_read_returns_the_stored_settings_and_leaves_the_file_alone(webui_root):
@@ -27,7 +38,7 @@ def test_read_returns_the_stored_settings_and_leaves_the_file_alone(webui_root):
 
     assert settings_file.read(str(config)) == {"sd_model_checkpoint": "a.safetensors", "clip_stop_at_last_layers": 2}
     assert config.read_text(encoding="utf8") == '{"sd_model_checkpoint": "a.safetensors", "clip_stop_at_last_layers": 2}'
-    assert not (webui_root / "tmp").exists()
+    assert not (webui_root / "cache").exists()
 
 
 def test_read_of_a_missing_file_is_empty_settings(webui_root):
@@ -57,6 +68,32 @@ def test_an_unusable_file_is_copied_aside_and_reset_in_place(webui_root, content
     assert f'Its content was copied to "{backup}"' in capsys.readouterr().err
 
 
+def test_the_copy_is_durable_before_the_file_is_reset(webui_root, monkeypatch):
+    """The copy, its directory entry and the entry of a new config-recovery/ are fsynced, all before the reset."""
+    config = webui_root / "config.json"
+    config.write_bytes(b"{broken")
+    events = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        events.append(("fsync", os.readlink(f"/proc/self/fd/{fd}")))
+        real_fsync(fd)
+
+    real_write = settings_file.write
+    monkeypatch.setattr(settings_file.os, "fsync", fsync)
+    monkeypatch.setattr(settings_file, "write", lambda filename, text: (events.append(("reset", filename)), real_write(filename, text)))
+
+    assert settings_file.read(str(config)) == {}
+
+    [backup] = _quarantined(webui_root)
+    assert events[:4] == [
+        ("fsync", str(backup)),
+        ("fsync", str(_recovery_dir(webui_root))),
+        ("fsync", str(webui_root / "cache")),
+        ("reset", str(config)),
+    ]
+
+
 def test_each_unusable_file_keeps_its_own_copy(webui_root):
     config = webui_root / "config.json"
     for content in (b"{broken", b"[1]"):
@@ -69,7 +106,8 @@ def test_each_unusable_file_keeps_its_own_copy(webui_root):
 def test_a_failed_copy_leaves_the_damaged_file_untouched(webui_root):
     config = webui_root / "config.json"
     config.write_bytes(b"{broken")
-    (webui_root / "tmp").write_text("a file where the tmp directory belongs", encoding="utf8")
+    (webui_root / "cache").mkdir()
+    _recovery_dir(webui_root).write_text("a file where the recovery directory belongs", encoding="utf8")
 
     with pytest.raises(OSError):
         settings_file.read(str(config))
@@ -89,7 +127,7 @@ def test_an_unreadable_file_raises_instead_of_reverting_to_defaults(webui_root):
         config.chmod(0o600)
 
     assert config.read_text(encoding="utf8") == '{"a": 1}'
-    assert not (webui_root / "tmp").exists()
+    assert not (webui_root / "cache").exists()
 
 
 def test_write_rewrites_in_place_and_fsyncs_before_returning(webui_root, monkeypatch):

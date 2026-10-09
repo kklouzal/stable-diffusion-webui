@@ -856,22 +856,32 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
         self.network_bias_backup = bias_backup
 
     if current_names != wanted_names:
-        network_restore_weights_from_backup(self)
-        # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
-        self.network_current_names = ()
+        # Weights and an existing bias are restored and merged in place (copy_), so the tensors captured CUDA graphs
+        # read stay the same objects. A bias-less layer is the exception: a network bias creates a Parameter on it and
+        # the restore removes it, so every merge change there replaces the object graphs captured. The published-state
+        # notification cannot see that when the state returns to an earlier key (a failed publish rolled back to the
+        # previous networks), so a replaced bias drops the graphs itself.
+        bias_parameter = getattr(self, "bias", None)
+        try:
+            network_restore_weights_from_backup(self)
+            # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
+            self.network_current_names = ()
 
-        target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
-        # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
-        # matmul/einsum results of calc_updown to bf16.
-        with torch.no_grad(), torch.autocast(target.device.type, enabled=False):
-            merged_weight, merged_bias = network_merge_loaded_deltas(self, network_layer_name)
-            if merged_weight is not None:
-                target.copy_(merged_weight)
-            if merged_bias is not None:
-                if self.bias is None:
-                    self.bias = torch.nn.Parameter(merged_bias.to(self.weight.dtype), requires_grad=False)
-                else:
-                    self.bias.copy_(merged_bias)
+            target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
+            # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
+            # matmul/einsum results of calc_updown to bf16.
+            with torch.no_grad(), torch.autocast(target.device.type, enabled=False):
+                merged_weight, merged_bias = network_merge_loaded_deltas(self, network_layer_name)
+                if merged_weight is not None:
+                    target.copy_(merged_weight)
+                if merged_bias is not None:
+                    if self.bias is None:
+                        self.bias = torch.nn.Parameter(merged_bias.to(self.weight.dtype), requires_grad=False)
+                    else:
+                        self.bias.copy_(merged_bias)
+        finally:
+            if getattr(self, "bias", None) is not bias_parameter:
+                openclaw_cuda_graphs.invalidate("lora_bias_parameter_replaced", network_layer_name)
 
         self.network_current_names = wanted_names
 
@@ -1011,11 +1021,15 @@ def network_reset_cached_weight(self: Union[torch.nn.Conv2d, torch.nn.Linear]):
     self.network_bias_backup = None
 
 
-def network_loaded_weight_signature(net):
+def network_loaded_weight_signature(net, text_encoder=True, unet=True):
+    """Identity of network net's merged contribution: its source, multipliers, dyn dim and the merge implementation.
+    A layer's modules use only one of the multipliers (network.is_text_encoder_key), so a layer's signature names only
+    the ones it uses (text_encoder/unet): changing the other leaves its merge as it is. The published set's signature
+    (network_wanted_names) names both."""
     return (
         getattr(net, "source_key", network_source_key(getattr(net, "network_on_disk", None), getattr(net, "source_signature", None))),
-        float(getattr(net, "te_multiplier", 1.0)).hex(),
-        float(getattr(net, "unet_multiplier", 1.0)).hex(),
+        float(getattr(net, "te_multiplier", 1.0)).hex() if text_encoder else None,
+        float(getattr(net, "unet_multiplier", 1.0)).hex() if unet else None,
         getattr(net, "dyn_dim", None),
         LORA_APPLIED_IMPLEMENTATION_REVISION,
     )
@@ -1034,7 +1048,7 @@ def _wanted_names_state():
     them, so their ids cannot be reused by other objects. Published networks are immutable: load_networks stamps
     source and multiplier fields on fresh per-use clones before publishing, so a changed LoRA set always arrives as
     different objects. A network touches the layers its modules are keyed by, and through q/k/v projection modules
-    the combined projection they belong to.
+    the combined projection they belong to; its signature for a layer names the multipliers of those modules.
     """
     global _wanted_names_memo
     published = _wanted_names_memo[0]
@@ -1043,11 +1057,18 @@ def _wanted_names_state():
     published = tuple(loaded_networks)
     names = tuple(network_loaded_weight_signature(x) for x in published)
     by_layer = {}
-    for net, name in zip(published, names):
-        layers = set(net.modules)
-        layers.update(m.group(1) for m in map(re_x_proj.match, net.modules) if m)
-        for layer in layers:
-            by_layer.setdefault(layer, []).append(name)
+    for net in published:
+        text_encoder_uses = {}  # layer -> whether each module that touches it is a text encoder module
+        for key in net.modules:
+            m = re_x_proj.match(key)
+            for layer in (key, m.group(1)) if m else (key,):
+                text_encoder_uses.setdefault(layer, set()).add(network.is_text_encoder_key(key))
+        signatures = {}
+        for layer, uses in text_encoder_uses.items():
+            used = (True in uses, False in uses)
+            if used not in signatures:
+                signatures[used] = network_loaded_weight_signature(net, *used)
+            by_layer.setdefault(layer, []).append(signatures[used])
     _wanted_names_memo = (published, names, {layer: tuple(layer_names) for layer, layer_names in by_layer.items()})
     return _wanted_names_memo
 
@@ -1222,71 +1243,76 @@ def prepare_quant_active_config(backend):
         network_quant_mark_model_unprepared(backend, model)
         return True
 
-    network_quant_mark_model_unprepared(backend, model)
-    network_quant_capture_managed_base(backend, model)
+    # Rebuilding replaces the weight and bias Parameter of every managed module (quantize_ swaps the weight for a
+    # TorchAO tensor subclass, so nothing can be updated in place). CUDA graphs captured on the previous parameters
+    # would replay against freed memory, so the rebuild is a mutable runtime boundary: it drops them and keeps replay
+    # and capture out until it completes, whatever invalidation the caller's path already did.
+    with openclaw_cuda_graphs.mutable_runtime_boundary(f"lora_{name}_prepare", label):
+        network_quant_mark_model_unprepared(backend, model)
+        network_quant_capture_managed_base(backend, model)
 
-    wanted_names = network_wanted_names()
-    from torchao.quantization import quantize_
-    quantize_config = backend.make_config()
-    backend.validate_config(quantize_config)
-    quantize_fn = quantize_
+        wanted_names = network_wanted_names()
+        from torchao.quantization import quantize_
+        quantize_config = backend.make_config()
+        backend.validate_config(quantize_config)
+        quantize_fn = quantize_
 
-    prepared = 0
-    quantized = 0
-    untouched = 0
-    failed = 0
-    failures = []
-    snapshots = []
+        prepared = 0
+        quantized = 0
+        untouched = 0
+        failed = 0
+        failures = []
+        snapshots = []
 
-    for fqn, module in managed_modules:
-        snapshots.append(network_quant_snapshot_state(backend, module))
-        if network_apply_quant_merged_lora(backend, module, quantize_config=quantize_config, quantize_fn=quantize_fn):
-            prepared += 1
-            if backend.is_quant_tensor(getattr(module, "weight", None)):
-                quantized += 1
+        for fqn, module in managed_modules:
+            snapshots.append(network_quant_snapshot_state(backend, module))
+            if network_apply_quant_merged_lora(backend, module, quantize_config=quantize_config, quantize_fn=quantize_fn):
+                prepared += 1
+                if backend.is_quant_tensor(getattr(module, "weight", None)):
+                    quantized += 1
+                else:
+                    untouched += 1
+                module.network_current_names = wanted_names
             else:
-                untouched += 1
-            module.network_current_names = wanted_names
-        else:
-            failed += 1
-            failures.append(getattr(module, "network_layer_name", fqn))
+                failed += 1
+                failures.append(getattr(module, "network_layer_name", fqn))
 
-    stats = {
-        "signature": signature,
-        "prepared_linear": prepared,
-        "quantized_linear": quantized,
-        "untouched_linear": untouched,
-        "failed_linear": failed,
-        "failed_layers": failures[:50],
-        "active_lora_count": len(loaded_networks),
-        f"{name}_linear_coverage": sorted(getattr(shared.opts, f"{name}_linear_coverage", ()) or ()),
-    }
-    setattr(model, f"network_{name}_prepare_stats", stats)
+        stats = {
+            "signature": signature,
+            "prepared_linear": prepared,
+            "quantized_linear": quantized,
+            "untouched_linear": untouched,
+            "failed_linear": failed,
+            "failed_layers": failures[:50],
+            "active_lora_count": len(loaded_networks),
+            f"{name}_linear_coverage": sorted(getattr(shared.opts, f"{name}_linear_coverage", ()) or ()),
+        }
+        setattr(model, f"network_{name}_prepare_stats", stats)
 
-    if failed == 0:
-        setattr(model, f"network_{name}_active_config_signature", signature)
-        setattr(model, f"network_{name}_active_config_ready", True)
-        try:
-            delattr(model, f"network_{name}_prepare_error")
-        except Exception:
-            pass
-        if prepared:
-            print(
-                f"Prepared active {label} LoRA config: "
-                f"prepared {prepared} Linear, quantized {quantized}, "
-                f"untouched {untouched}, "
-                f"LoRAs {len(loaded_networks)}",
-                flush=True,
-            )
-        return True
+        if failed == 0:
+            setattr(model, f"network_{name}_active_config_signature", signature)
+            setattr(model, f"network_{name}_active_config_ready", True)
+            try:
+                delattr(model, f"network_{name}_prepare_error")
+            except Exception:
+                pass
+            if prepared:
+                print(
+                    f"Prepared active {label} LoRA config: "
+                    f"prepared {prepared} Linear, quantized {quantized}, "
+                    f"untouched {untouched}, "
+                    f"LoRAs {len(loaded_networks)}",
+                    flush=True,
+                )
+            return True
 
-    for snapshot in reversed(snapshots):
-        network_quant_restore_state(backend, snapshot)
+        for snapshot in reversed(snapshots):
+            network_quant_restore_state(backend, snapshot)
 
-    message = f"failed to prepare active {label} LoRA config for {failed} Linear modules: {failures[:10]}"
-    setattr(model, f"network_{name}_prepare_error", message)
-    logging.warning(message)
-    return False
+        message = f"failed to prepare active {label} LoRA config for {failed} Linear modules: {failures[:10]}"
+        setattr(model, f"network_{name}_prepare_error", message)
+        logging.warning(message)
+        return False
 
 
 def network_quant_lora_ops_for_layer(self, network_layer_name):

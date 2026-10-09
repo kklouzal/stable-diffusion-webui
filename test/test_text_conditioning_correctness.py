@@ -263,3 +263,42 @@ def test_duplicate_embedding_names_load_one_file_deterministically_and_are_repor
         f"Textual inversion embedding {tmp_path / 'a' / 'style.safetensors'} is not loaded: {tmp_path / 'style.safetensors'} has the same name 'style'",
         f"Textual inversion embedding {tmp_path / 'b' / 'style.safetensors'} is not loaded: {tmp_path / 'style.safetensors'} has the same name 'style'",
     ]
+
+
+def _save_wide_embedding(path, value):
+    import safetensors.torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file({"emb_params": torch.full((1, 2048), float(value))}, str(path))
+
+
+def test_a_skipped_embedding_does_not_block_a_fitting_one_of_the_same_name(monkeypatch, tmp_path):
+    """sd15/foo (768 wide, skipped for a 2048-wide model) sorts before sdxl/foo: the fitting sdxl/foo loads and replaces
+    the skipped entry. A second fitting foo, or a skipped-shape foo after a loaded one, is still reported."""
+    ti, db = _embedding_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(ti.shared, "sd_model", SimpleNamespace(cond_stage_model=SimpleNamespace(tokenize=lambda names: [[len(names[0])]])), raising=False)
+    reports = []
+    monkeypatch.setattr(ti.errors, "report", lambda message, **_kwargs: reports.append(message))
+    _save_embedding(tmp_path / "sd15" / "foo.safetensors", 1)
+    _save_wide_embedding(tmp_path / "sdxl" / "foo.safetensors", 2)
+    _save_embedding(tmp_path / "sd15" / "bar.safetensors", 3)
+
+    assert db.load_textual_inversion_embeddings()
+
+    assert reports == []
+    assert list(db.word_embeddings) == ["foo"]
+    assert db.word_embeddings["foo"].filename == str(tmp_path / "sdxl" / "foo.safetensors")
+    assert torch.equal(db.word_embeddings["foo"].vec.cpu(), torch.full((1, 2048), 2.0))
+    assert sorted(db.skipped_embeddings) == ["bar"]
+
+    _save_wide_embedding(tmp_path / "zz" / "foo.safetensors", 4)
+    _save_embedding(tmp_path / "zz" / "later" / "foo.safetensors", 5)
+
+    assert not db.load_textual_inversion_embeddings()  # both new files are rejected: the published maps do not change
+
+    assert db.word_embeddings["foo"].filename == str(tmp_path / "sdxl" / "foo.safetensors")
+    assert sorted(db.skipped_embeddings) == ["bar"]
+    assert reports == [
+        f"Textual inversion embedding {tmp_path / 'zz' / 'foo.safetensors'} is not loaded: {tmp_path / 'sdxl' / 'foo.safetensors'} has the same name 'foo'",
+        f"Textual inversion embedding {tmp_path / 'zz' / 'later' / 'foo.safetensors'} is not loaded: {tmp_path / 'sdxl' / 'foo.safetensors'} has the same name 'foo'",
+    ]

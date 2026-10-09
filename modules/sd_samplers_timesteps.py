@@ -143,7 +143,8 @@ class CompVisSampler(sd_samplers_common.Sampler):
         self.last_latent = x
         self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
 
-        samples = self.launch_sampling(t_enc + 1, lambda: self.func(self.model_wrap_cfg, xi, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self.callback_state, **extra_params_kwargs))
+        # The loop takes one step per timestep it is given (t_enc here), and so does the reported step count.
+        samples = self.launch_sampling(len(timesteps_sched), lambda: self.func(self.model_wrap_cfg, xi, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self.callback_state, **extra_params_kwargs))
 
         self.add_infotext(p)
 
@@ -161,7 +162,9 @@ class CompVisSampler(sd_samplers_common.Sampler):
 
         self.last_latent = x
         self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
-        samples = self.launch_sampling(steps, lambda: self.func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self.callback_state, **extra_params_kwargs))
+        # ldm's uniform schedule has 1000 // steps strides, so more entries than steps when steps does not divide 1000
+        # (15 -> 16, as the reference DDIMSampler runs): the reported step count is the number of steps the loop takes.
+        samples = self.launch_sampling(len(timesteps), lambda: self.func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self.callback_state, **extra_params_kwargs))
 
         self.add_infotext(p)
 

@@ -244,6 +244,62 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
             # One step per timestep, the last one down to alphas_cumprod[0] (the ldm reference loops).
             self.assertEqual([payload["i"] for payload in callbacks], [0, 1, 2, 3])
 
+    def test_reported_sampling_steps_equal_the_steps_the_loop_takes(self):
+        # ldm's uniform DDIM schedule has 1000 // steps strides: 15 steps give 16 timesteps, and the loop takes all.
+        module = load_timesteps_sampler_module()
+        impl = load_timesteps_impl_module()
+
+        class FakeModel:
+            inner_model = types.SimpleNamespace(inner_model=types.SimpleNamespace(alphas_cumprod=torch.linspace(0.999, 0.001, 1000, dtype=torch.float64)))
+            def __call__(self, x, t, **kwargs):
+                self.last_noise_uncond = torch.zeros_like(x)
+                return torch.zeros_like(x)
+
+        class Sampler(module.CompVisSampler):
+            def __init__(self, func):
+                self.config = types.SimpleNamespace(name="DDIM", options={})
+                self.funcname = "ddim"
+                self.func = func
+                self.model_wrap_cfg = FakeModel()
+                self.sampler_extra_args = {}
+                self.callbacks = 0
+
+            def initialize(self, p):
+                return {}
+
+            def set_sampler_extra_args(self, *args):
+                pass
+
+            def add_infotext(self, p):
+                pass
+
+            def callback_state(self, d):
+                self.callbacks += 1
+
+            def launch_sampling(self, steps, func):
+                self.reported = steps
+                return func()
+
+        module.shared.cmd_opts = types.SimpleNamespace(disable_console_progressbars=True)
+        module.openclaw_generation_profile = types.SimpleNamespace(cached_tensor=lambda *key, params: key[-1]())
+        module.opts.img2img_extra_noise = 0
+        x = torch.zeros((1, 1, 2, 2), dtype=torch.float64)
+        processing = types.SimpleNamespace(extra_generation_params={})
+        for func in (impl.ddim, impl.ddim_cfgpp, impl.plms, impl.unipc):
+            for steps in (15, 20, 1001):
+                sampler = Sampler(func)
+                with mock.patch.object(impl.shared, "opts", types.SimpleNamespace(uni_pc_variant="bh1", uni_pc_skip_type="time_uniform", uni_pc_order=3, uni_pc_lower_order_final=True)):
+                    sampler.sample(processing, x, None, None, steps=steps)
+                expected = len(range(0, 1000, max(1, 1000 // steps)))
+                self.assertEqual((sampler.reported, sampler.callbacks), (expected, expected), (func.__name__, steps))
+
+            for steps, t_enc in ((15, 7), (20, 19)):
+                sampler = Sampler(func)
+                module.sd_samplers_common.setup_img2img_steps = lambda p, s, steps=steps, t_enc=t_enc: (steps, t_enc)
+                with mock.patch.object(impl.shared, "opts", types.SimpleNamespace(uni_pc_variant="bh1", uni_pc_skip_type="time_uniform", uni_pc_order=3, uni_pc_lower_order_final=True)):
+                    sampler.sample_img2img(processing, x, torch.zeros_like(x), None, None, steps=steps)
+                self.assertEqual((sampler.reported, sampler.callbacks), (t_enc, t_enc), (func.__name__, steps, t_enc))
+
     def test_unipc_wrapper_callback_count_matches_solver_steps(self):
         sd_samplers_timesteps_impl = load_timesteps_impl_module()
 

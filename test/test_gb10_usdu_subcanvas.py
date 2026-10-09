@@ -1,5 +1,5 @@
-"""Ultimate SD Upscale per-tile size and sub-canvas patcher: fail-closed patching, tiles processed at their crop's own
-size, and a bitwise differential of the sub-canvas window against the full canvas.
+"""Ultimate SD Upscale per-tile size and sub-canvas patcher: fail-closed patching, tiles processed unresampled at one
+size per pass, and a bitwise differential of the sub-canvas window against the full canvas.
 
 The differential runs the patched USDU passes with the window and with the full canvas (same tile sizes) against the
 real StableDiffusionProcessingImg2Img.init (mask blur, crop region, crop/resize, overlay, latent mask, inpainting
@@ -80,7 +80,7 @@ def test_patcher_rejects_source_drift_partial_patch_and_crlf(usdu_source: Path, 
     drifted = tmp_path / "drifted.py"
     drifted.write_text(source.replace("                p.init_images = [fixed_image]\n", "                p.init_images = [fixed_image, image]\n"), encoding="utf-8")
     result = run_patcher(drifted, check=False)
-    assert result.returncode != 0 and "partially patched Ultimate Upscale sub-canvas source for seams-fix fixed tile" in result.stderr
+    assert result.returncode != 0 and "partially patched Ultimate Upscale sub-canvas source for intersection seams" in result.stderr
     assert "_gb10_process_tile" not in drifted.read_text(encoding="utf-8")
 
     crlf = tmp_path / "crlf.py"
@@ -92,7 +92,7 @@ def test_patcher_rejects_source_drift_partial_patch_and_crlf(usdu_source: Path, 
     patched = usdu_source.read_text(encoding="utf-8")
     partial = tmp_path / "partial.py"
     partial.write_text(patched.replace(
-        "            processed = _gb10_process_tile(self, p, image, mask)\n",
+        "            processed = _gb10_process_tile(self, p, image, mask, col_gradient)\n",
         "            p.init_images = [image]\n            p.image_mask = mask\n            processed = processing.process_images(p)\n",
         1,
     ), encoding="utf-8")
@@ -165,6 +165,7 @@ class Recorder:
         self.env = env
         self.calls = []
         self.sizes = []  # (crop region size, processing size) of every "Only masked" tile
+        self.shapes = {}  # (pass method, id of the content its tiles pasted) -> their processing sizes; patched script only
 
     def process_images(self, p):
         import numpy as np
@@ -176,6 +177,12 @@ class Recorder:
         p.init([""], [p.seed], [p.seed])
         if p.inpaint_full_res:  # False: the mask blurred to nothing and img2img fell back to the whole image
             self.sizes.append((tuple(p.paste_to[2:]), (p.width, p.height)))
+            frame = sys._getframe(1)
+            while frame is not None and frame.f_code.co_name != "_gb10_process_tile":
+                frame = frame.f_back
+            if frame is not None:
+                key = (frame.f_back.f_code.co_name, id(frame.f_locals["content"]))
+                self.shapes.setdefault(key, []).append((p.width, p.height))
         if p.image_mask is not None and p.paste_to is not None and p.inpaint_full_res:
             x = p.init_latent[0].float()
             n = p.nmask[0].float()
@@ -286,10 +293,11 @@ def test_subcanvas_tiles_are_bitwise_identical_to_full_canvas(usdu_pair, real_mo
     assert len(window_calls) == len(full_calls) > 1
     # Only the first tile (before the last-generation snapshot) has to see the whole canvas.
     assert window_calls[0] == full_calls[0] == (canvas, canvas)
-    if all(call == (canvas, canvas) for call in full_calls):
+    # A tile whose crop is the whole canvas (a canvas no larger than the pass's tile size) needs the whole canvas.
+    if all(call == (canvas, canvas) for call in full_calls) and any(crop != canvas for crop, _ in full.sizes[1:]):
         assert any(call[0] != canvas for call in window_calls[1:])
-    # else: a mask that blurs to nothing made img2img fall back to the whole image (upstream shrinks the canvas to
-    # the tile size); the patched run must and does reproduce that through the full-canvas path.
+    # else also: a mask that blurs to nothing made img2img fall back to the whole image (upstream shrinks the canvas
+    # to the tile size); the patched run must and does reproduce that through the full-canvas path.
 
 
 @pytest.mark.parametrize("case", [dict(c, seed=i) for i, c in enumerate(EDGE_CASES + random_cases(64))])
@@ -308,6 +316,42 @@ def test_every_tile_is_processed_at_its_crop_size(usdu_pair, usdu_upstream, real
             assert crop == size
         else:
             assert 0 <= size[0] - crop[0] < 8 and 0 <= size[1] - crop[1] < 8
+
+
+# Odd band-pass seam widths on canvases whose sides are not multiples of 8: no padding makes those bands exact, and
+# they keep the pass's size, resampled by less than 8 pixels.
+ODD_BAND_CASES = [
+    dict(canvas=(198, 218), tile=(48, 48), padding=19, mask_blur=15, redraw=1, seams=1, seams_padding=28, seams_blur=8, seams_width=53),
+    dict(canvas=(203, 226), tile=(64, 64), padding=25, mask_blur=0, redraw=1, seams=1, seams_padding=33, seams_blur=7, seams_width=51),
+    dict(canvas=(351, 290), tile=(64, 64), padding=0, mask_blur=0, redraw=0, seams=1, seams_padding=17, seams_blur=10, seams_width=61),
+]
+
+
+@pytest.mark.parametrize("case", [dict(c, seed=i) for i, c in enumerate(EDGE_CASES + random_cases(64) + ODD_BAND_CASES)])
+def test_every_tile_of_a_pass_runs_at_one_shape(usdu_pair, real_modules, monkeypatch, case):
+    """Tiles clipped by a canvas edge take a crop shifted inward instead of a smaller one: all tiles that paste the
+    same content (redraw tile, seam gradient) run at one processing size, so the UNet/VAE CUDA graphs and compiled
+    kernels, cached per shape, are captured once per pass instead of once per edge and corner shape."""
+    _, patched = usdu_pair
+    _, recorder = run_usdu(real_modules, patched, monkeypatch, case)
+
+    assert sum(len(sizes) for sizes in recorder.shapes.values()) == len(recorder.sizes) > 0
+    assert {key: set(sizes) for key, sizes in recorder.shapes.items() if len(set(sizes)) != 1} == {}
+    assert all(0 <= size[0] - crop[0] < 8 and 0 <= size[1] - crop[1] < 8 for crop, size in recorder.sizes)
+
+
+@pytest.mark.parametrize("canvas, tile, padding, mask_blur", [((1216, 832), (512, 512), 32, 8), ((2048, 1536), (1024, 1024), 64, 16), ((1000, 744), (384, 256), 16, 4)])
+def test_edge_and_corner_tiles_share_the_interior_shape(usdu_pair, real_modules, monkeypatch, canvas, tile, padding, mask_blur):
+    """A canvas that the tiles do not divide: the clipped last row/column and the corner used to run at their own
+    smaller sizes (one latent shape each); they now run at the interior tile's size, unresampled."""
+    _, patched = usdu_pair
+    case = dict(canvas=canvas, tile=tile, padding=padding, mask_blur=mask_blur, redraw=0, seams=0, seams_padding=0, seams_blur=0, seams_width=8, seed=11)
+    _, recorder = run_usdu(real_modules, patched, monkeypatch, case)
+
+    rows, cols = -(-canvas[1] // tile[1]), -(-canvas[0] // tile[0])
+    assert len(recorder.sizes) == rows * cols
+    (sizes,) = recorder.shapes.values()
+    assert all(crop == size == sizes[0] for crop, size in recorder.sizes)
 
 
 @pytest.mark.parametrize("seams_width, seams_padding", [(64, 16), (50, 13), (24, 0), (37, 5)])
@@ -336,7 +380,7 @@ def test_tile_size_holds_for_its_tile_only(usdu_pair, real_modules, monkeypatch)
     image = canvas_image(1024, 1024, 5)
     mask = Image.new("L", image.size, "black")
     ImageDraw.Draw(mask).rectangle((256, 256, 767, 767), fill="white")  # an interior 512 x 512 tile
-    patched._gb10_process_tile(types.SimpleNamespace(), p, image, mask)
+    patched._gb10_process_tile(types.SimpleNamespace(), p, image, mask, Image.new("L", (512, 512), "white"))
 
     (crop, size), = recorder.sizes
     # blurred bbox 512 + 2 * 20 (blur reach of 8) = 552, + 2 * 32 padding = 616 = 77 * 8: exact without extra padding

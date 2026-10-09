@@ -1,7 +1,8 @@
 # Build context allowlist. Only what the image build reads is sent, so the image never depends on untracked
 # host state (config.json, params.txt, ui-config.json, styles.csv, cache/, config_states/, tmp/, outputs/,
 # logs, caches) or ships non-runtime tracked content (test/, docs/, gb10/, README, changelog, ...).
-# Patterns are relative to the context root. Add a new top-level runtime path here when the app gains one.
+# Patterns are relative to the context root. Add a new top-level runtime path here when the app gains one. gb10/build.sh
+# reads the "!path" lines as the literal paths whose changes mark the image revision -dirty, so they name no patterns.
 *
 !webui.py
 !launch.py

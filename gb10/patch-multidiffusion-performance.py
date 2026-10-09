@@ -26,7 +26,8 @@ cleanly. The blocks:
   or failed). Fast mode keeps its documented estimated statistics. TV-NANEND checks NaNs once per finished tile.
 - MD-NI-COND: noise inversion encodes this batch's prompts with extra networks parsed out, as SdConditioning with the
   canvas size (SDXL embeds it), instead of the first batch's raw prompts as a plain list.
-- MD-NI-CACHE: the inverted-noise cache lives for one request and is reused only for exact matches (see the block).
+- MD-NI-CACHE: the inverted-noise cache lives for one request and is reused only for exact matches (see the block),
+  for Tiled Diffusion (scripts/tilediffusion.py) and DemoFusion (scripts/tileglobal.py) alike: both build the cache entry.
 - MD-REGION-COND: region prompt control on SDXL/SD3 fails in Script.process(), before any work, instead of with a
   TypeError once sampling has started.
 A checkout holding only the former 0001 commit (upstream + TV-FB, nothing else) is not accepted: reset it to upstream.
@@ -685,6 +686,27 @@ def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
 """,
         ),
         Block("MD-NI-CACHE key from p", r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
+        self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts)
+""", r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
+        self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts, p.extra_network_data)  # gb10: MD-NI-CACHE
+"""),
+    ],
+    # DemoFusion shares AbstractDiffusion.sample_img2img and the NoiseInverseCache type: the same key and request scope.
+    "scripts/tileglobal.py": [
+        Block(
+            "MD-NI-CACHE DemoFusion request scope",
+            r"""        # unhijack & unhook, in case it broke at last time
+        self.reset()
+        p.mixture = mixture_mode
+""",
+            r"""        # unhijack & unhook, in case it broke at last time
+        self.reset()
+        # gb10 (MD-NI-CACHE): the noise inversion cache never outlives a request (see AbstractDiffusion.sample_img2img).
+        self.noise_inverse_cache = None
+        p.mixture = mixture_mode
+""",
+        ),
+        Block("MD-NI-CACHE DemoFusion key from p", r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
         self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts)
 """, r"""    def noise_inverse_set_cache(self, p: ProcessingImg2Img, x0: Tensor, xt: Tensor, prompts: List[str], steps: int, retouch:float):
         self.noise_inverse_cache = NoiseInverseCache(p.sd_model.sd_model_hash, x0,  xt, steps, retouch, prompts, p.extra_network_data)  # gb10: MD-NI-CACHE

@@ -208,13 +208,16 @@ class EmbeddingDatabase:
             embedding = create_embedding_from_data(data, name, filename=filename, filepath=path)
             embedding.file_revision = revision
 
-            duplicate = self.word_embeddings.get(name) or self.skipped_embeddings.get(name)
+            fits = self.expected_shape == -1 or self.expected_shape == embedding.shape
+            # A skipped embedding (another model's shape) never blocks one that fits: the fitting one replaces it.
+            duplicate = self.word_embeddings.get(name) or (None if fits else self.skipped_embeddings.get(name))
             if duplicate is not None:
                 # Files load in a sorted walk, so the same file wins on every load.
                 errors.report(f"Textual inversion embedding {path} is not loaded: {duplicate.filename} has the same name '{name}'")
                 return
 
-            if self.expected_shape == -1 or self.expected_shape == embedding.shape:
+            if fits:
+                self.skipped_embeddings.pop(name, None)
                 self.register_embedding(embedding, shared.sd_model)
             else:
                 self.skipped_embeddings[name] = embedding

@@ -22,7 +22,7 @@ DOCKER_BUILDKIT=1
 # boot-isolated with isolcpus=domain the kernel does not load-balance between them and
 # every parallel compile job would share one core, so the slice is used only when none
 # of its CPUs are domain-isolated.
-BUILD_CGROUP_PARENT="${BUILD_CGROUP_PARENT:-gb10build.slice}"
+BUILD_CGROUP_PARENT="${BUILD_CGROUP_PARENT-gb10build.slice}"  # set and empty: default placement
 expand_cpus() {  # "5-9 15-19" or "5-9,15-19" -> one CPU number per line, sorted as text for comm
   local part
   for part in ${1//,/ }; do seq "${part%-*}" "${part#*-}"; done | sort
@@ -44,11 +44,27 @@ if [[ -n "${BUILD_CGROUP_PARENT}" ]]; then
 fi
 
 # Provenance, recorded as OCI labels on the image (gb10/run.sh reads them, so every image reports its own version):
-# - revision: the checkout's commit, with -dirty when it has uncommitted or untracked changes
+# - revision: the checkout's commit, with -dirty when what the build reads has uncommitted or untracked (not ignored)
+#   changes: the build context, which is .dockerignore's allowlist (its "!path" lines, the one list of what is sent),
+#   .dockerignore itself and the Dockerfile. A Dockerfile outside the checkout is not described by the commit at all.
 # - version: `git describe --tags`, the infotext Version (the image has no .git)
 # - base.name/base.digest: the base image, built by that digest so the label names exactly the base used
 SOURCE_REVISION="$(git -C "${PROJECT_ROOT}" rev-parse HEAD)"
-SOURCE_STATUS="$(git -C "${PROJECT_ROOT}" status --porcelain)"
+BUILD_INPUT_PATHSPECS=(":(literal).dockerignore")
+while IFS= read -r context_path; do
+  if [[ "${context_path}" == *[][*?\\]* ]]; then
+    echo "[build.sh] ERROR: .dockerignore allows '${context_path}', a pattern; the provenance check reads the allowlist as literal paths." >&2
+    exit 1
+  fi
+  BUILD_INPUT_PATHSPECS+=(":(literal)${context_path}")
+done < <(sed -n 's/^!//p' "${PROJECT_ROOT}/.dockerignore")
+SOURCE_STATUS=""
+if [[ "${DOCKERFILE}" == "${PROJECT_ROOT}/"* ]]; then
+  BUILD_INPUT_PATHSPECS+=(":(literal)${DOCKERFILE#"${PROJECT_ROOT}/"}")
+else
+  SOURCE_STATUS="Dockerfile outside the checkout: ${DOCKERFILE}"
+fi
+SOURCE_STATUS+="$(git -C "${PROJECT_ROOT}" status --porcelain -- "${BUILD_INPUT_PATHSPECS[@]}")"
 if [[ -n "${SOURCE_STATUS}" ]]; then
   SOURCE_REVISION="${SOURCE_REVISION}-dirty"
 fi

@@ -180,7 +180,35 @@ def test_in_place_switch_keeps_lifecycle_order(monkeypatch):
     _, events, _ = _switch(monkeypatch, torch.device("cpu"), unified=True)
 
     assert events[:5] == ["apply_unet", "boundary:model_reload_in_place", "torch_gc", "undo_hijack", "load_vae"]
-    assert events[5:] == ["hijack", "boundary:model_to_device", "model_loaded_callback", "get_empty_cond", "apply_unet", "note_model_loaded", "publish_checkpoint_commit"]
+    assert events[5:] == ["hijack", "boundary:model_to_device", "model_loaded_callback", "apply_unet", "note_model_loaded", "publish_checkpoint_commit", "get_empty_cond"]
+
+
+def test_a_failed_empty_prompt_recompute_leaves_the_switch_committed_and_padding_unusable(monkeypatch):
+    recorder = _environment(monkeypatch, torch.device("cpu"), unified=True)
+    model, _ = _loaded_model()
+    model.cond_stage_model_empty_prompt = empty_prompt_of(model)
+    alternate_info, alternate_state_dict = _checkpoint("alternate", 2)
+    monkeypatch.setattr(sd_models, "get_checkpoint_state_dict", lambda info, _timer: {key: value.clone() for key, value in alternate_state_dict.items()})
+
+    def get_empty_cond(_model):
+        recorder.events.append("get_empty_cond")
+        raise RuntimeError("text encoder failed")
+
+    monkeypatch.setattr(sd_models, "get_empty_cond", get_empty_cond)
+    recorder.events.clear()
+
+    with pytest.raises(RuntimeError, match="text encoder failed"):
+        sd_models.reload_model_weights(model, alternate_info)
+
+    # Every commit step ran before the recompute: the new checkpoint is fully in place, not half-committed.
+    assert recorder.events[-4:] == ["apply_unet", "note_model_loaded", "publish_checkpoint_commit", "get_empty_cond"]
+    assert model.sd_checkpoint_info is alternate_info and sd_models.model_data.sd_model is model
+    # The previous checkpoint's padding is gone; padding fails instead of using it.
+    assert model.cond_stage_model_empty_prompt is None
+    from modules import sd_samplers_cfg_denoiser
+    denoiser = SimpleNamespace(padded_cond_uncond=False)
+    with pytest.raises(RuntimeError, match="no empty-prompt padding"):
+        sd_samplers_cfg_denoiser.CFGDenoiser.pad_cond_uncond(denoiser, torch.zeros(1, 154, 1), torch.zeros(1, 77, 1))
 
 
 @pytest.mark.parametrize("unified", [False, True], ids=["cpu-round-trip", "in-place"])

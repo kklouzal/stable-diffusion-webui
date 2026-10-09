@@ -28,7 +28,8 @@ For GB10 A1111 img2img work, keep cleanup/refactors outside final image math unl
 - `mask`: optional base64/data-URI inpaint mask. Its alpha is the mask when it has transparency; a mask of another size
   is stretched onto the init image.
 - Input images: 16-bit grayscale is rounded to 8 bits, and RGB/CMYK images with a non-sRGB ICC profile are converted to
-  sRGB. I/F-mode images (undefined value range) and malformed or mismatched ICC profiles answer 422.
+  sRGB; a profile of another colour space than the pixels (a leftover Gray/Lab profile on an RGB image) is ignored, as
+  browsers do. I/F-mode images (undefined value range) and malformed ICC profiles answer 422.
 - `include_init_images`: controls whether `parameters.init_images` and `parameters.mask` are echoed back in the response; it does not affect generation.
 - `send_images`: controls whether generated images are included as base64 in the response; it does not affect generation.
 - `save_images`: controls whether generated images are saved to disk; it does not affect generation.

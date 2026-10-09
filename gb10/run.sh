@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A lost terminal or a closed output pipe (SSH drop, a caller killed on timeout) must not stop a deploy halfway: the
+# deploy and its rollback carry on, and everything they print is kept in DEPLOY_LOG below.
+trap '' HUP PIPE
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -25,6 +28,22 @@ STOP_TIMEOUT="${STOP_TIMEOUT:-120}"
 READY_TIMEOUT="${READY_TIMEOUT:-900}"
 # The container being replaced keeps this name, stopped, until the new one passed its checks.
 PREVIOUS_CONTAINER_NAME="${CONTAINER_NAME}-previous"
+
+# All output (stdout and stderr) goes to the caller and to DEPLOY_LOG, owned by the invoking user. The tee ignores
+# HUP, INT, TERM and a failing output pipe (GNU tee --output-error=warn-nopipe keeps writing the file), so the log
+# holds the whole run, rollback included, even when the caller is gone; on_exit waits for it to drain.
+DEPLOY_LOG_DIR="${HOST_ROOT}/deploy-logs"
+sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 "${DEPLOY_LOG_DIR}"
+DEPLOY_LOG="${DEPLOY_LOG_DIR}/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+echo "Deploy log: ${DEPLOY_LOG}"
+exec > >(trap '' INT TERM; exec tee --output-error=warn-nopipe -a "${DEPLOY_LOG}") 2>&1
+DEPLOY_LOG_TEE_PID=$!
+# Closing our ends of the pipe ends the tee; waiting for it means the caller and the log have every line at exit.
+close_deploy_log() {
+  exec >&- 2>&-
+  wait "${DEPLOY_LOG_TEE_PID}"
+}
+trap close_deploy_log EXIT
 
 # Host directory under HOST_ROOT -> path under the container's app directory. One table drives the host mkdir,
 # the ownership repair and the bind mounts, in this order. Caches/app holds the app's cache/ (hash and metadata
@@ -53,10 +72,11 @@ for d in "${HOST_DIRS[@]}"; do
   sudo mkdir -p "${HOST_ROOT}/${d}"
 done
 
-if [[ ! -e "${HOST_ROOT}/Outputs" ]]; then
+# Host paths are created and written as root, so they are also tested as root: the invoking user may not see them.
+if ! sudo test -e "${HOST_ROOT}/Outputs" && ! sudo test -L "${HOST_ROOT}/Outputs"; then
   sudo ln -s "${OUTPUTS_TARGET}" "${HOST_ROOT}/Outputs"
-elif [[ -L "${HOST_ROOT}/Outputs" ]]; then
-  current_target="$(readlink "${HOST_ROOT}/Outputs")"
+elif sudo test -L "${HOST_ROOT}/Outputs"; then
+  current_target="$(sudo readlink "${HOST_ROOT}/Outputs")"
   if [[ "${current_target}" != "${OUTPUTS_TARGET}" ]]; then
     echo "ERROR: ${HOST_ROOT}/Outputs points to ${current_target}, expected ${OUTPUTS_TARGET}" >&2
     exit 1
@@ -68,7 +88,7 @@ fi
 
 sudo mkdir -p "${HOST_ROOT}/config/generation-last"
 # A new settings file starts as {}: the app treats an empty one as damaged (modules/settings_file.py).
-if [[ ! -e "${HOST_ROOT}/config/config.json" ]]; then
+if ! sudo test -e "${HOST_ROOT}/config/config.json"; then
   printf '{}\n' | sudo tee "${HOST_ROOT}/config/config.json" >/dev/null
 fi
 sudo touch "${HOST_ROOT}/config/styles.csv"
@@ -170,7 +190,7 @@ fi
 # directory to patch.
 patch_third_party_extensions() {
   local extensions_root="$1"
-  if [[ -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111" ]]; then
+  if sudo test -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111"; then
     sudo python3 "${PROJECT_ROOT}/gb10/patch-multidiffusion-performance.py" "${extensions_root}/multidiffusion-upscaler-for-automatic1111"
   fi
   sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
@@ -232,23 +252,31 @@ wait_ready() {
   return 1
 }
 
+# Marks the rollback incomplete (rollback's local ok) and says which step failed; the remaining steps still run.
+rollback_step_failed() {  # $1 what failed
+  echo "ERROR: rollback: ${1} failed; continuing with the remaining steps" >&2
+  ok=0
+}
+
 rollback() {
   local ok=1 extension_name
   echo "ERROR: deploy of ${IMAGE_TAG} (${TARGET_IMAGE_ID}) failed; rolling back" >&2
   if (( NEW_CONTAINER_CREATED )) && container_exists "${CONTAINER_NAME}"; then
     echo "--- last 200 log lines of the failed ${CONTAINER_NAME}:" >&2
-    sudo "${DOCKER_BIN}" logs --tail 200 "${CONTAINER_NAME}" >&2 || ok=0
+    sudo "${DOCKER_BIN}" logs --tail 200 "${CONTAINER_NAME}" >&2 || rollback_step_failed "reading the new container's log"
     echo "---" >&2
-    { sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}" >/dev/null && sudo "${DOCKER_BIN}" rm "${CONTAINER_NAME}" >/dev/null; } || ok=0
+    { sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}" >/dev/null && sudo "${DOCKER_BIN}" rm "${CONTAINER_NAME}" >/dev/null; } \
+      || rollback_step_failed "removing the new container ${CONTAINER_NAME}"
   fi
   for extension_name in "${OWNED_EXTENSIONS[@]}"; do
-    if [[ -d "${EXTENSION_BACKUP_ROOT}/${extension_name}" ]]; then
-      mirror_owned_extension "${EXTENSION_BACKUP_ROOT}/${extension_name}" "${HOST_ROOT}/Extensions/${extension_name}" || ok=0
+    if sudo test -d "${EXTENSION_BACKUP_ROOT}/${extension_name}"; then
+      mirror_owned_extension "${EXTENSION_BACKUP_ROOT}/${extension_name}" "${HOST_ROOT}/Extensions/${extension_name}" \
+        || rollback_step_failed "restoring the owned extension ${extension_name}"
     fi
   done
   # An owned extension this deploy added did not exist before: the replaced image never loaded it.
   for extension_name in "${NEW_OWNED_EXTENSIONS[@]}"; do
-    sudo rm -rf -- "${HOST_ROOT:?}/Extensions/${extension_name:?}" || ok=0
+    sudo rm -rf -- "${HOST_ROOT:?}/Extensions/${extension_name:?}" || rollback_step_failed "removing the added owned extension ${extension_name}"
   done
   if [[ -n "${PREVIOUS_IMAGE_ID}" ]]; then
     # Interrupted between the stop and the rename, the replaced container still has its name.
@@ -257,7 +285,7 @@ rollback() {
       && wait_ready "${CONTAINER_NAME}" "${PREVIOUS_PORT}"; then
       echo "Rolled back: ${CONTAINER_NAME} runs the previous image ${PREVIOUS_IMAGE_ID} again." >&2
     else
-      ok=0
+      rollback_step_failed "restarting the replaced container"
     fi
   else
     echo "No container was running before this deploy; nothing to restart." >&2
@@ -271,14 +299,19 @@ rollback() {
   fi
 }
 
+# The rollback and the cleanup run to the end: errexit is off, so a failing step is reported and the next one runs,
+# and INT/TERM are ignored (by the commands it runs too), so a second Ctrl-C cannot leave production down.
 on_exit() {
   local status=$?
-  trap - EXIT INT TERM
+  set +e
+  trap '' INT TERM
+  trap - EXIT
   if [[ "${DEPLOY_PHASE}" == replacing ]]; then
     rollback
     (( status )) || status=1
   fi
-  sudo rm -rf -- "${SCRATCH_ROOT}"
+  sudo rm -rf -- "${SCRATCH_ROOT}" || echo "ERROR: could not remove the scratch directory ${SCRATCH_ROOT}" >&2
+  close_deploy_log
   exit "${status}"
 }
 trap on_exit EXIT
@@ -289,7 +322,7 @@ trap 'exit 143' TERM
 # Extensions changes before the live container is stopped, and a source a patcher rejects fails the deploy here.
 echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
 for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
-  if [[ -d "${HOST_ROOT}/Extensions/${third_party_extension}" ]]; then
+  if sudo test -d "${HOST_ROOT}/Extensions/${third_party_extension}"; then
     sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
       "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"
   fi
@@ -300,7 +333,7 @@ patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}" >/dev/null
 # a rollback can put it back.
 for extension_name in "${OWNED_EXTENSIONS[@]}"; do
   owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
-  if [[ -d "${owned_extension_target}" ]]; then
+  if sudo test -d "${owned_extension_target}"; then
     sudo rsync -a --exclude '/data/' --exclude '/annotator/downloads/' --exclude '/models/' \
       "${owned_extension_target}/" "${EXTENSION_BACKUP_ROOT}/${extension_name}/"
   else

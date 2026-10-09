@@ -528,6 +528,50 @@ def test_lora_set_change_touches_only_the_layers_of_changed_networks(bf16_lora, 
     assert torch.equal(shared.weight, base_shared) and torch.equal(only_b.weight, base_b)
 
 
+def test_changing_one_multiplier_re_merges_only_the_layers_that_use_it(bf16_lora, monkeypatch):
+    """A layer's signature named both multipliers of each network that touches it, so changing only te (or only unet)
+    re-merged every U-Net (or text encoder) layer of that network to the same bits."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(53)
+    te_layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    te_layer.network_layer_name = "transformer_text_model_encoder_layers_0_mlp_fc1"
+    unet_layer = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+    unet_layer.network_layer_name = "diffusion_model_input_blocks_1_1_proj_in"
+    layers = (te_layer, unet_layer)
+    _publish_layers(networks, monkeypatch, *layers)
+    factors = {layer.network_layer_name: (_grid((8, 2), g), _grid((2, 8), g)) for layer in layers}
+    bases = [layer.weight.detach().clone() for layer in layers]
+
+    def use(te, unet):
+        net = _net(networks, "a")
+        for layer in layers:
+            up, down = factors[layer.network_layer_name]
+            _add_module(networks, net, layer, {"lora_up.weight": up, "lora_down.weight": down, "alpha": torch.tensor(2.0)}, networks.network_lora.NetworkModuleLora)
+        net.te_multiplier, net.unet_multiplier = te, unet
+        return net
+
+    def expected(layer, base, net):
+        up, down = factors[layer.network_layer_name]
+        multiplier = net.te_multiplier if layer is te_layer else net.unet_multiplier
+        return (base.double() + multiplier * (up.double() @ down.double())).to(torch.bfloat16)
+
+    merges = []
+    layer_delta = networks.network_layer_delta
+    monkeypatch.setattr(networks, "network_layer_delta", lambda net, name, *args: merges.append(name) or layer_delta(net, name, *args))
+
+    for net, merged in (
+        (use(1.0, 1.0), [te_layer, unet_layer]),
+        (use(0.5, 1.0), [te_layer]),
+        (use(0.5, 0.25), [unet_layer]),
+        (use(1.0, 1.0), [te_layer, unet_layer]),
+    ):
+        merges.clear()
+        assert networks._publish_applied_state([net])
+        assert merges == [layer.network_layer_name for layer in merged]
+        for layer, base in zip(layers, bases):
+            assert torch.equal(layer.weight, expected(layer, base, net))
+
+
 def test_switching_lora_functional_republishes_the_same_networks(bf16_lora, monkeypatch):
     """A lora_functional request restores the base weights in its forwards. The next merged request with the same
     networks was an applied-state hit: nothing re-merged before sampling, and CUDA graphs captured on the merged
@@ -625,3 +669,45 @@ def test_functional_lora_keeps_float32_text_encoder_inputs_under_upcast_sampling
     unet_layer.network_layer_name = "diffusion_model_layer"
     with torch.no_grad():
         assert networks.network_forward(unet_layer, x, torch.nn.Linear.forward).dtype == torch.bfloat16
+
+
+def test_failed_publish_rollback_drops_graphs_that_read_a_replaced_bias(bf16_lora, monkeypatch):
+    """A network bias on a bias-less layer is a Parameter the merge creates and the restore removes. A failed publish
+    rolled back to the previous networks re-created it as a new object, while the applied-state key returned to the
+    previous one, so CUDA graphs captured before the failed publish replayed against the freed bias. A layer that has
+    its own bias keeps the same Parameter through merge, restore and rollback (copy_), so it drops no graphs."""
+    networks = bf16_lora
+    g = torch.Generator().manual_seed(47)
+    biasless = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    biasless.network_layer_name = "diffusion_model_biasless"
+    biased = torch.nn.Linear(4, 4, bias=True, dtype=torch.bfloat16)
+    biased.network_layer_name = "diffusion_model_biased"
+    _publish_layers(networks, monkeypatch, biasless, biased)
+    diff, diff_b = torch.full((4, 4), 0.25, dtype=torch.float16), torch.arange(4, dtype=torch.float16)
+    good = _net(networks, "good")
+    _add_module(networks, good, biasless, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+    _add_module(networks, good, biased, {"diff": diff, "diff_b": diff_b}, networks.network_full.NetworkModuleFull)
+    invalidations, notes = [], []
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "invalidate", lambda reason, details=None: invalidations.append((reason, details)))
+    monkeypatch.setattr(networks.openclaw_cuda_graphs, "note_lora_loaded", lambda: notes.append(networks._applied_state_key))
+
+    assert networks._publish_applied_state([good])
+    created, own_bias = biasless.bias, biased.bias
+    merged = (biasless.bias.detach().clone(), biased.bias.detach().clone())
+    assert invalidations == [("lora_bias_parameter_replaced", "diffusion_model_biasless")] and len(notes) == 1
+    invalidations.clear()
+
+    bad = _lora(networks, biasless, "bad", _grid((4, 1), g), _grid((1, 1), g), 1.0, 1.0)
+    with pytest.raises(RuntimeError, match="LoRA bad cannot be applied to layer diffusion_model_biasless"):
+        networks._publish_applied_state([good, bad])
+
+    assert len(notes) == 1  # the rolled-back state has the previous key: no published-state notification
+    assert biasless.bias is not created and torch.equal(biasless.bias, merged[0])
+    assert ("lora_bias_parameter_replaced", "diffusion_model_biasless") in invalidations
+    assert {details for _, details in invalidations} == {"diffusion_model_biasless"}
+    assert biased.bias is own_bias and torch.equal(biased.bias, merged[1])
+    invalidations.clear()
+
+    assert networks._publish_applied_state([])
+    assert biasless.bias is None and biased.bias is own_bias
+    assert invalidations == [("lora_bias_parameter_replaced", "diffusion_model_biasless")]

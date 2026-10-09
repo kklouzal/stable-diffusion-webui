@@ -388,7 +388,10 @@ def webui_stubs(monkeypatch):
             sub_quad_attention=None, run_scaled_dot_product_attention=run_scaled_dot_product_attention),
         "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object, SdConditioning=SdConditioning),
         "modules.extra_networks": stub("modules.extra_networks", ExtraNetworkParams=object),
-        "modules.sd_samplers_common": stub("modules.sd_samplers_common", setup_img2img_steps=lambda p, steps: (steps, steps), store_latent=lambda x: None),
+        "modules.sd_samplers_common": stub(
+            "modules.sd_samplers_common", setup_img2img_steps=lambda p, steps: (steps, steps), store_latent=lambda x: None,
+            InterruptedException=type("InterruptedException", (BaseException,), {}), Sampler=type("Sampler", (), {})),
+        "modules.rng": stub("modules.rng"),
         "modules.sd_samplers_kdiffusion": stub(
             "modules.sd_samplers_kdiffusion", KDiffusionSampler=type("KDiffusionSampler", (), {}), CFGDenoiser=object, CFGDenoiserKDiffusion=object),
         "modules.sd_samplers_timesteps": stub(
@@ -754,10 +757,20 @@ def test_mixture_of_diffusers_without_grid_tiles_precomputes_nothing(md_pair, im
 # ---------------------------------------------------------------- noise inversion, ControlNet tiles, region control (CPU)
 
 
-def noise_inversion_setup(root: Path, import_extension):
-    """A MultiDiffusion delegate with noise inversion wired to a real Tiled Diffusion Script's cache; the inversion
-    itself is replaced by a recorder whose result differs per call."""
-    script_module, md = import_extension(root, "scripts/tilediffusion.py", "tile_methods.multidiffusion")
+# The scripts that build a noise inversion cache entry: Tiled Diffusion with MultiDiffusion, and DemoFusion.
+NOISE_INVERSION_SCRIPTS = {
+    "tilediffusion": ("scripts/tilediffusion.py", "tile_methods.multidiffusion", "MultiDiffusion"),
+    "tileglobal": ("scripts/tileglobal.py", "tile_methods.demofusion", "DemoFusion"),
+}
+# Script.process(p, enabled=False, ...) of each: returns before any work, after its request-start reset.
+DISABLED_PROCESS_ARGS = {"tilediffusion": [None] * 20, "tileglobal": [None] * 20 + [True]}
+
+
+def noise_inversion_setup(root: Path, import_extension, script_name: str = "tilediffusion"):
+    """A MultiDiffusion (or DemoFusion) delegate with noise inversion wired to a real Tiled Diffusion (or DemoFusion)
+    Script's cache; the inversion itself is replaced by a recorder whose result differs per call."""
+    script_path, method_module, method_class = NOISE_INVERSION_SCRIPTS[script_name]
+    script_module, md = import_extension(root, script_path, method_module)
     torch.manual_seed(0)
     p = types.SimpleNamespace(
         sampler_name="Euler", width=64, height=64, disable_extra_networks=False, batch_size=1, init_images=[],
@@ -767,7 +780,7 @@ def noise_inversion_setup(root: Path, import_extension):
     sampler.sample_img2img = lambda p, x, noise, *args: noise
     sampler.get_sigmas = lambda p, steps: torch.tensor([2.0, 1.0])
     sampler.model_wrap = None
-    delegate = md.MultiDiffusion(p, sampler)
+    delegate = getattr(md, method_class)(p, sampler)
     script = script_module.Script()
     calls = []
 
@@ -795,9 +808,10 @@ def test_upstream_noise_inversion_reuses_a_different_image_and_the_first_batch_p
     assert calls == [["a cat <lora:x:1>"]]  # the raw first-batch prompt, then reused for a different init latent
 
 
-def test_noise_inversion_inverts_this_batch_and_reuses_only_exact_matches(md_pair, import_extension, webui_stubs):
+@pytest.mark.parametrize("script_name", NOISE_INVERSION_SCRIPTS)
+def test_noise_inversion_inverts_this_batch_and_reuses_only_exact_matches(md_pair, import_extension, webui_stubs, script_name):
     _original, patched = md_pair
-    script, delegate, p, calls, run = noise_inversion_setup(patched, import_extension)
+    script, delegate, p, calls, run = noise_inversion_setup(patched, import_extension, script_name)
 
     first = run()
     assert calls == [["a cat"]]  # p.prompts: this batch, extra networks parsed out
@@ -827,9 +841,36 @@ def test_noise_inversion_inverts_this_batch_and_reuses_only_exact_matches(md_pai
     run()
     assert calls[-2:] == [["a bird"], ["a bird"]]  # the interrupted (partial) inversion was not cached
 
-    assert script.noise_inverse_cache is not None
-    script.process(p, False, *([None] * 20))
+    assert script.noise_inverse_cache.extra_network_data is p.extra_network_data
+    script.process(p, False, *DISABLED_PROCESS_ARGS[script_name])
     assert script.noise_inverse_cache is None  # never outlives a request
+
+
+@pytest.mark.parametrize("script_name", NOISE_INVERSION_SCRIPTS)
+def test_noise_inversion_cache_entry_builds_on_upstream_and_patched(tmp_path: Path, import_extension, webui_stubs, script_name):
+    """Every script that builds the cache entry builds the NoiseInverseCache its checkout declares: upstream's six
+    fields, or with the patch the seventh, extra_network_data (a script left unpatched raised TypeError)."""
+    upstream = copy_multidiffusion(tmp_path / "upstream")
+    patched = copy_multidiffusion(tmp_path / "patched")
+    run_patcher(patched)
+    for root, fields in ((upstream, 6), (patched, 7)):
+        script, _delegate, p, calls, run = noise_inversion_setup(root, import_extension, script_name)
+        run()
+        assert len(calls) == 1 and len(script.noise_inverse_cache) == fields
+        assert script.noise_inverse_cache.model_hash == "abc" and torch.equal(script.noise_inverse_cache.x0, p.init_latent)
+
+
+def test_every_noise_inverse_cache_construction_is_patched(md_pair):
+    """No call in the patched checkout builds NoiseInverseCache with upstream's six positional fields."""
+    _original, patched = md_pair
+    calls = [
+        (path.relative_to(patched), node) for path in sorted(patched.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "NoiseInverseCache"
+    ]
+    assert sorted(str(path) for path, _node in calls) == ["scripts/tilediffusion.py", "scripts/tileglobal.py"]
+    for path, node in calls:
+        assert len(node.args) == 7 and not node.keywords, path
 
 
 def test_noise_inversion_conditioning_carries_the_canvas_size(md_pair, import_extension, webui_stubs):

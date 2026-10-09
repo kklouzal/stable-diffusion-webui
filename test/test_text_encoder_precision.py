@@ -112,6 +112,68 @@ def test_float32_text_encoder_runs_with_autocast_off_and_ieee_matmuls(monkeypatc
     assert seen == ["without_autocast", "ieee", "without_autocast", "tf32"]
 
 
+def _matmul_precision_state():
+    backends = torch.backends
+    return (backends.cuda.matmul.fp32_precision, backends.mkldnn.matmul.fp32_precision,
+            backends.cuda.matmul.allow_tf32, torch.get_float32_matmul_precision())
+
+
+@pytest.fixture
+def tf32_process(monkeypatch):
+    """The process state devices.enable_tf32 leaves, restored afterwards; autocast is a no-op stand-in."""
+    monkeypatch.setattr(devices, "without_autocast", lambda: torch.autocast("cpu", enabled=False))
+    backends = torch.backends
+    saved = (torch.get_float32_matmul_precision(), backends.cuda.matmul.fp32_precision, backends.mkldnn.matmul.fp32_precision)
+    backends.cuda.matmul.fp32_precision = "tf32"
+    yield _matmul_precision_state()
+    torch.set_float32_matmul_precision(saved[0])
+    backends.cuda.matmul.fp32_precision, backends.mkldnn.matmul.fp32_precision = saved[1:]
+
+
+def test_legacy_matmul_precision_readers_stay_consistent_inside_the_scope(tf32_process):
+    # Setting only cuda.matmul.fp32_precision = "ieee" made these legacy reads raise "mix of the legacy and new APIs".
+    assert tf32_process[2] is True and tf32_process[3] == "high"
+    with sd_hijack_clip.text_encoder_precision(torch.nn.Linear(2, 2)):
+        assert _matmul_precision_state() == ("ieee", "ieee", False, "highest")
+    assert _matmul_precision_state() == tf32_process
+
+
+def test_overlapping_scopes_on_two_threads_restore_the_state_they_found(tf32_process):
+    import threading
+
+    model = torch.nn.Linear(2, 2)
+    first_inside, release_first, second_entered = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+
+    def first():
+        try:
+            with sd_hijack_clip.text_encoder_precision(model):
+                first_inside.set()
+                assert release_first.wait(10)
+        except BaseException as e:  # reported to the main thread
+            errors.append(e)
+
+    def second():
+        try:
+            assert first_inside.wait(10)
+            with sd_hijack_clip.text_encoder_precision(model):
+                second_entered.set()
+                assert _matmul_precision_state()[0] == "ieee"
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    # Unserialized, the second scope saved the first one's "ieee" and restored it after the first restored TF32.
+    assert not second_entered.wait(0.5)
+    release_first.set()
+    for thread in threads:
+        thread.join(10)
+    assert not errors and second_entered.is_set()
+    assert _matmul_precision_state() == tf32_process
+
+
 @pytest.mark.parametrize("table_dtype", [torch.float32, torch.bfloat16])
 def test_textual_inversion_vectors_take_the_embedding_table_dtype(monkeypatch, table_dtype):
     # --upcast-sampling made cond_cast_unet round the vector to the bf16 UNet dtype even for a float32 table.

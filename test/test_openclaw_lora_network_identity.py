@@ -585,6 +585,43 @@ def test_quant_prepare_is_one_transaction_and_rolls_back_on_failure(lora_network
     assert not getattr(model, "network_nvfp4_active_config_ready", False)
 
 
+def test_quant_prepare_rebuild_drops_cuda_graphs_and_excludes_replay(lora_networks, monkeypatch):
+    """A rebuild replaces every managed module's weight and bias Parameter; graphs captured on the old ones must not
+    survive it or replay while it runs, whichever invalidation the caller's path did before. A prepared config with
+    the same signature replaces nothing and keeps the graphs."""
+    import collections
+    import copy
+    import dataclasses
+    import torch
+    networks = lora_networks
+    graphs = networks.openclaw_cuda_graphs
+    monkeypatch.setattr(graphs, "_CACHE", collections.OrderedDict())
+    monkeypatch.setattr(graphs, "_STATS", copy.deepcopy(graphs._STATS))
+    monkeypatch.setattr(graphs, "_GRAPH_POOL", None)
+    linear = torch.nn.Linear(2, 2, bias=True, dtype=torch.bfloat16)
+    linear.network_layer_name = "layer"
+    linear.network_nvfp4_base_weight = linear.weight.detach().cpu().clone()
+    linear.network_nvfp4_base_bias = linear.bias.detach().cpu().clone()
+    model = SimpleNamespace(network_nvfp4_managed_modules=[("layer", linear)], sd_checkpoint_info=SimpleNamespace(filename="ckpt", hash="h", sha256="s"))
+    monkeypatch.setattr(networks.shared, "sd_model", model, raising=False)
+    monkeypatch.setattr(networks.shared.opts, "nvfp4_linear_coverage", ["unet_other"], raising=False)
+    monkeypatch.setattr(networks.devices, "nvfp4", True, raising=False)
+    monkeypatch.setattr(networks.devices, "device", torch.device("cpu"), raising=False)
+    under_runtime_lock = []
+    monkeypatch.setitem(sys.modules, "torchao.quantization", SimpleNamespace(quantize_=lambda *_args, **_kwargs: under_runtime_lock.append(graphs._RUNTIME_LOCK._is_owned())))
+    backend = dataclasses.replace(NVFP4, make_config=lambda: "nvfp4-config", validate_config=lambda _config: None, tensor_type=lambda: torch.nn.Parameter)
+
+    graphs._CACHE["captured-before"] = {}
+    old_bias = linear.bias
+    assert networks.prepare_quant_active_config(backend)
+    assert linear.bias is not old_bias and under_runtime_lock == [True]
+    assert not graphs._CACHE and graphs.status()["last_invalidation_reason"] == "lora_nvfp4_prepare"
+
+    graphs._CACHE["captured-after"] = {}
+    assert networks.prepare_quant_active_config(backend)  # same signature: nothing replaced
+    assert list(graphs._CACHE) == ["captured-after"] and under_runtime_lock == [True]
+
+
 def test_generation_owner_rejects_cross_request_overlap_and_cleans_exception(lora_networks):
     import threading
     networks = lora_networks
@@ -1014,18 +1051,19 @@ def test_wanted_names_are_built_once_per_published_set(lora_networks, monkeypatc
     networks = lora_networks
     built = []
     signature = networks.network_loaded_weight_signature
-    monkeypatch.setattr(networks, "network_loaded_weight_signature", lambda net: built.append(net.name) or signature(net))
+    monkeypatch.setattr(networks, "network_loaded_weight_signature", lambda net, *used: built.append(net.name) or signature(net, *used))
     alpha, _ = _published_net("alpha")
     beta, _ = _published_net("beta")
 
     networks._set_loaded_networks([alpha])
     names = networks.network_wanted_names()
-    assert built == ["alpha"]  # built at publish, reused by every later forward
+    assert built == ["alpha", "alpha"]  # the set's and its U-Net layer's, built at publish, reused by every later forward
     assert all(networks.network_wanted_names() is names for _ in range(3))
     assert names == (signature(alpha),)
+    assert networks.network_layer_wanted_names("layer") == (signature(alpha, False, True),)
 
     networks._set_loaded_networks([alpha, beta])
-    assert built == ["alpha", "alpha", "beta"]
+    assert built == ["alpha", "alpha", "alpha", "beta", "alpha", "beta"]
     networks.loaded_networks[:] = [beta]  # a direct list replacement is still observed
     assert networks.network_wanted_names() == (signature(beta),)
     networks._set_loaded_networks([])

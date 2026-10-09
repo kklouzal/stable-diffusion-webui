@@ -39,7 +39,7 @@ The build records its provenance as OCI labels on the image, which `gb10/run.sh`
 
 | Label | Value |
 |---|---|
-| `org.opencontainers.image.revision` | `git rev-parse HEAD` of the checkout, with `-dirty` when `git status --porcelain` is not empty |
+| `org.opencontainers.image.revision` | `git rev-parse HEAD` of the checkout, with `-dirty` when what the build reads has uncommitted or untracked (not ignored) changes: the paths `.dockerignore` allows (read as literal paths), `.dockerignore` and the Dockerfile. A Dockerfile outside the checkout always counts as dirty |
 | `org.opencontainers.image.version` | `git describe --tags` of the checkout: the infotext `Version` |
 | `org.opencontainers.image.base.name` / `.base.digest` | the base image and its registry digest (`docker buildx imagetools inspect`) |
 
@@ -56,6 +56,12 @@ IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh   # deploy or roll back to another 
 
 run.sh replaces the running container only when the new one is healthy. Otherwise it puts the old one back and exits
 non-zero (see "Order of operations").
+
+Its first line names the deploy log, `${HOST_ROOT}/deploy-logs/run-<UTC timestamp>-<PID>.log` (owned by the invoking user).
+All of run.sh's output, stdout and stderr, goes to the caller's stdout and to that log. run.sh ignores SIGHUP and
+SIGPIPE, and the log's `tee` keeps writing the file when the caller's pipe closes. A deploy whose terminal or caller
+goes away (an SSH drop, a caller killed on its timeout) therefore still finishes, or rolls back, and the log holds the
+whole run.
 
 Environment overrides:
 
@@ -122,6 +128,9 @@ Any failure or interruption (Ctrl-C, SIGTERM) after step 4 rolls back:
 - rename `${CONTAINER_NAME}-previous` back, start it, and wait until it answers
 - exit non-zero
 
+The rollback runs every step even when one fails: it names each failed step, then reports that the rollback did not
+complete. It ignores SIGINT and SIGTERM, and so do the commands it runs: a second Ctrl-C does not stop it.
+
 The rollback restores the previous container itself: the same image ID, environment and mounts. It leaves the
 third-party patches applied, because every patcher accepts its patched text. It does not move tags: after a failed
 `build.sh && run.sh`, `IMAGE_TAG` still names the failed image, and run.sh prints the `docker tag` command that points
@@ -137,7 +146,8 @@ running container in two parts:
   in txt2img or img2img) must be loaded. The default lists ControlNet, Incantations, Dynamic Thresholding, TeaCache, the
   two openclaw scripts, Tiled Diffusion, Tiled VAE, Ultimate SD upscale and Detail Daemon.
 - a `docker exec` check that fails when torch in the container cannot use CUDA, checks the imports, and runs one small
-  TorchAO MXFP8 and one NVFP4 `Linear` on the GPU
+  TorchAO MXFP8 and one NVFP4 `Linear` on the GPU. It runs as UID/GID 2323, so the kernels it compiles into the
+  mounted compile cache stay writable by the app
 
 The script generates no images.
 
