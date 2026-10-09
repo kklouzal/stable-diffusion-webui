@@ -1,5 +1,6 @@
 import gc
 import logging
+import sys
 import warnings
 from threading import Thread
 
@@ -20,6 +21,11 @@ def require_torch_device(args):
 
 def imports():
     logging.getLogger("torch.distributed.nn").setLevel(logging.ERROR)  # sshh...
+
+    # timm.utils.summary (open_clip <- sgm <- modules.paths) imports wandb when it is installed, which NGC does: 0.6-0.7 s
+    # of a warm start for a package nothing here uses. A None entry makes `import wandb` raise ImportError, which timm
+    # and the other optional users handle as "not installed".
+    sys.modules["wandb"] = None
 
     import torch  # noqa: F401
     startup_timer.record("import torch")

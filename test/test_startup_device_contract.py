@@ -1,5 +1,5 @@
 """initialize.imports(), the first step of startup: it fails without a usable CUDA device unless the command line chose
-another device."""
+another device, and it keeps wandb (installed by NGC, used by nothing here) from being imported through timm."""
 import os
 import subprocess
 import sys
@@ -40,8 +40,12 @@ def test_startup_with_cuda_needs_no_flag(monkeypatch):
 def _run_imports(*flags):
     """initialize.imports() in a fresh interpreter, the way webui.py runs it, with `flags` as the command line."""
     code = (
+        "import sys\n"
         "from modules import initialize\n"
         "initialize.imports()\n"
+        "import open_clip, sgm.modules.encoders.modules, timm.utils.summary\n"
+        "assert sys.modules['wandb'] is None, sys.modules['wandb']\n"
+        "assert not hasattr(timm.utils.summary, 'wandb')\n"
         "print('imports ok')\n"
     )
     env = {**os.environ, "IGNORE_CMD_ARGS_ERRORS": "1", "COMMANDLINE_ARGS": ""}
@@ -57,7 +61,7 @@ def test_real_startup_imports_fail_without_cuda_and_a_device_flag():
     assert "imports ok" not in result.stdout
 
 
-def test_real_startup_imports_complete_with_a_device_flag_and_no_cuda():
+def test_real_startup_imports_load_timm_open_clip_and_sgm_without_wandb():
     result = _run_imports("--skip-torch-cuda-test")
 
     assert result.returncode == 0, result.stdout + result.stderr
