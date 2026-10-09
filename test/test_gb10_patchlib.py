@@ -113,6 +113,43 @@ def test_patched_text_must_verify_before_it_is_written(tmp_path: Path):
     assert target.read_text() == ORIGINAL
 
 
+# The release deployed before block A changed (A then patched to "a = 9"); B is unchanged.
+PREVIOUS = [Block("A", "a = 1\n", "a = 9  # v1\n"), BLOCKS[1]]
+PREVIOUS_PATCHED = "a = 9  # v1\nb = 2  # gb10\n"
+
+
+def test_previous_release_is_reverted_and_patched_and_check_reports_it(tmp_path: Path):
+    target = tmp_path / "one.py"
+    target.write_text(PREVIOUS_PATCHED)
+    previous = {target: PREVIOUS}
+
+    with pytest.raises(SystemExit, match="Fixture patch outdated"):
+        apply_blocks({target: BLOCKS}, label=LABEL, check=True, previous=previous)
+    assert target.read_text() == PREVIOUS_PATCHED
+    with pytest.raises(SystemExit, match="unsupported or partially patched Fixture source for A"):
+        apply_blocks({target: BLOCKS}, label=LABEL, check=False)  # without `previous` it stays unsupported
+
+    assert apply_blocks({target: BLOCKS}, label=LABEL, check=False, previous=previous) == [target]
+    assert target.read_text() == PATCHED
+    assert apply_blocks({target: BLOCKS}, label=LABEL, check=True, previous=previous) == []
+    target.write_text(ORIGINAL)
+    assert apply_blocks({target: BLOCKS}, label=LABEL, check=False, previous=previous) == [target]
+    assert target.read_text() == PATCHED
+
+
+@pytest.mark.parametrize("source", [
+    "a = 9  # v1\nb = 1\n",  # partially patched by the previous release
+    PREVIOUS_PATCHED + "a = 1\n",  # previous release plus a stray upstream copy: the revert would not round-trip
+    PREVIOUS_PATCHED + "a = 9  # v1\n",
+])
+def test_previous_release_must_match_exactly(tmp_path: Path, source: str):
+    target = tmp_path / "one.py"
+    target.write_text(source)
+    with pytest.raises(SystemExit, match="partially patched Fixture source"):
+        apply_blocks({target: BLOCKS}, label=LABEL, check=False, previous={target: PREVIOUS})
+    assert target.read_text() == source
+
+
 def test_symlinked_target_is_written_through(tmp_path: Path):
     real = tmp_path / "real.py"
     real.write_text(ORIGINAL)

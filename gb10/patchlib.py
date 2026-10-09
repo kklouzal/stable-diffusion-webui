@@ -7,7 +7,9 @@ Every patcher holds to the same rules:
 - Sources are UTF-8 with LF line endings and are read without newline translation; CRLF fails closed instead of being
   rewritten.
 - A target is either exactly original (it is patched) or exactly patched (it is verified and left alone). Anything
-  else (unknown upstream text, a partial patch) raises SystemExit and aborts the deploy.
+  else (unknown upstream text, a partial patch) raises SystemExit and aborts the deploy. A patcher whose blocks for a
+  target changed also names that target's previously deployed blocks: a target exactly patched by those is reverted
+  to its original text (a round trip proves the revert exact) and patched again.
 - Every target is validated and its patched text verified before any file is written; each file is then replaced
   atomically, keeping its mode and owner.
 - --check writes nothing and fails unless every target is patched.
@@ -114,23 +116,53 @@ def file_state(source: str, blocks: Sequence[Block], path: Path, label: str) -> 
     return states.pop()
 
 
+def _revert_previous(source: str, previous: Sequence[Block]) -> str | None:
+    """source's original text when it is exactly patched by the previously deployed blocks, else None.
+
+    The revert is accepted only if re-applying `previous` reproduces source byte for byte."""
+    if any(_block_state(source, block) != "patched" for block in previous):
+        return None
+    reverted = source
+    for block in reversed(previous):
+        reverted = reverted.replace(block.patched, block.original)
+    repatched = reverted
+    for block in previous:
+        repatched = repatched.replace(block.original, block.patched)
+    if repatched != source or any(_block_state(reverted, block) != "original" for block in previous):
+        return None
+    return reverted
+
+
 def apply_blocks(
     targets: Mapping[Path, Sequence[Block]],
     *,
     label: str,
     check: bool,
     verify: Callable[[Path, str], None] | None = None,
+    previous: Mapping[Path, Sequence[Block]] | None = None,
 ) -> list[Path]:
     """Patch every original target and verify every target, writing nothing until all of them verify.
 
     `verify(path, text)` adds a patcher-specific post-condition on the patched text (raise SystemExit to fail). Each
     patched text must also be fully patched (a PATCHED text that re-introduces another block's ORIGINAL fails here)
-    and valid Python. Returns the written paths; with check=True nothing is written and an original target fails.
+    and valid Python. `previous` maps a target to the blocks of the release deployed before its blocks changed: a
+    target exactly patched by them is reverted to its original text, then patched. Returns the written paths; with
+    check=True nothing is written and an original or previous-release target fails.
     """
     pending: dict[Path, str] = {}
     for path, blocks in targets.items():
         source = read_lf(path, label)
-        if file_state(source, blocks, path, label) == "original":
+        try:
+            state = file_state(source, blocks, path, label)
+        except SystemExit:
+            reverted = _revert_previous(source, previous[path]) if previous and path in previous else None
+            if reverted is None:
+                raise
+            if check:
+                raise SystemExit(f"{label} patch outdated (previous release): {path}") from None
+            source = reverted
+            state = file_state(source, blocks, path, label)
+        if state == "original":
             if check:
                 raise SystemExit(f"{label} patch missing: {path}")
             for block in blocks:
