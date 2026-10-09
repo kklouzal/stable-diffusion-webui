@@ -1243,71 +1243,76 @@ def prepare_quant_active_config(backend):
         network_quant_mark_model_unprepared(backend, model)
         return True
 
-    network_quant_mark_model_unprepared(backend, model)
-    network_quant_capture_managed_base(backend, model)
+    # Rebuilding replaces the weight and bias Parameter of every managed module (quantize_ swaps the weight for a
+    # TorchAO tensor subclass, so nothing can be updated in place). CUDA graphs captured on the previous parameters
+    # would replay against freed memory, so the rebuild is a mutable runtime boundary: it drops them and keeps replay
+    # and capture out until it completes, whatever invalidation the caller's path already did.
+    with openclaw_cuda_graphs.mutable_runtime_boundary(f"lora_{name}_prepare", label):
+        network_quant_mark_model_unprepared(backend, model)
+        network_quant_capture_managed_base(backend, model)
 
-    wanted_names = network_wanted_names()
-    from torchao.quantization import quantize_
-    quantize_config = backend.make_config()
-    backend.validate_config(quantize_config)
-    quantize_fn = quantize_
+        wanted_names = network_wanted_names()
+        from torchao.quantization import quantize_
+        quantize_config = backend.make_config()
+        backend.validate_config(quantize_config)
+        quantize_fn = quantize_
 
-    prepared = 0
-    quantized = 0
-    untouched = 0
-    failed = 0
-    failures = []
-    snapshots = []
+        prepared = 0
+        quantized = 0
+        untouched = 0
+        failed = 0
+        failures = []
+        snapshots = []
 
-    for fqn, module in managed_modules:
-        snapshots.append(network_quant_snapshot_state(backend, module))
-        if network_apply_quant_merged_lora(backend, module, quantize_config=quantize_config, quantize_fn=quantize_fn):
-            prepared += 1
-            if backend.is_quant_tensor(getattr(module, "weight", None)):
-                quantized += 1
+        for fqn, module in managed_modules:
+            snapshots.append(network_quant_snapshot_state(backend, module))
+            if network_apply_quant_merged_lora(backend, module, quantize_config=quantize_config, quantize_fn=quantize_fn):
+                prepared += 1
+                if backend.is_quant_tensor(getattr(module, "weight", None)):
+                    quantized += 1
+                else:
+                    untouched += 1
+                module.network_current_names = wanted_names
             else:
-                untouched += 1
-            module.network_current_names = wanted_names
-        else:
-            failed += 1
-            failures.append(getattr(module, "network_layer_name", fqn))
+                failed += 1
+                failures.append(getattr(module, "network_layer_name", fqn))
 
-    stats = {
-        "signature": signature,
-        "prepared_linear": prepared,
-        "quantized_linear": quantized,
-        "untouched_linear": untouched,
-        "failed_linear": failed,
-        "failed_layers": failures[:50],
-        "active_lora_count": len(loaded_networks),
-        f"{name}_linear_coverage": sorted(getattr(shared.opts, f"{name}_linear_coverage", ()) or ()),
-    }
-    setattr(model, f"network_{name}_prepare_stats", stats)
+        stats = {
+            "signature": signature,
+            "prepared_linear": prepared,
+            "quantized_linear": quantized,
+            "untouched_linear": untouched,
+            "failed_linear": failed,
+            "failed_layers": failures[:50],
+            "active_lora_count": len(loaded_networks),
+            f"{name}_linear_coverage": sorted(getattr(shared.opts, f"{name}_linear_coverage", ()) or ()),
+        }
+        setattr(model, f"network_{name}_prepare_stats", stats)
 
-    if failed == 0:
-        setattr(model, f"network_{name}_active_config_signature", signature)
-        setattr(model, f"network_{name}_active_config_ready", True)
-        try:
-            delattr(model, f"network_{name}_prepare_error")
-        except Exception:
-            pass
-        if prepared:
-            print(
-                f"Prepared active {label} LoRA config: "
-                f"prepared {prepared} Linear, quantized {quantized}, "
-                f"untouched {untouched}, "
-                f"LoRAs {len(loaded_networks)}",
-                flush=True,
-            )
-        return True
+        if failed == 0:
+            setattr(model, f"network_{name}_active_config_signature", signature)
+            setattr(model, f"network_{name}_active_config_ready", True)
+            try:
+                delattr(model, f"network_{name}_prepare_error")
+            except Exception:
+                pass
+            if prepared:
+                print(
+                    f"Prepared active {label} LoRA config: "
+                    f"prepared {prepared} Linear, quantized {quantized}, "
+                    f"untouched {untouched}, "
+                    f"LoRAs {len(loaded_networks)}",
+                    flush=True,
+                )
+            return True
 
-    for snapshot in reversed(snapshots):
-        network_quant_restore_state(backend, snapshot)
+        for snapshot in reversed(snapshots):
+            network_quant_restore_state(backend, snapshot)
 
-    message = f"failed to prepare active {label} LoRA config for {failed} Linear modules: {failures[:10]}"
-    setattr(model, f"network_{name}_prepare_error", message)
-    logging.warning(message)
-    return False
+        message = f"failed to prepare active {label} LoRA config for {failed} Linear modules: {failures[:10]}"
+        setattr(model, f"network_{name}_prepare_error", message)
+        logging.warning(message)
+        return False
 
 
 def network_quant_lora_ops_for_layer(self, network_layer_name):
