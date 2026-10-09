@@ -810,28 +810,12 @@ def network_merge_loaded_deltas(self, network_layer_name):
         module_q = net.modules.get(network_layer_name + "_q_proj", None)
         module_k = net.modules.get(network_layer_name + "_k_proj", None)
         module_v = net.modules.get(network_layer_name + "_v_proj", None)
-        if isinstance(self, torch.nn.MultiheadAttention) and module_q and module_k and module_v:
+        if isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)) and module_q and module_k and module_v:
             try:
-                # out_proj is applied exactly once through its separately
-                # mapped Linear module; MHA owns combined Q/K/V only.
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'in_proj_weight')
-                qw, kw, vw = weight.chunk(3, 0)
-                updown_q, _ = module_q.calc_updown(qw)
-                updown_k, _ = module_k.calc_updown(kw)
-                updown_v, _ = module_v.calc_updown(vw)
-                del qw, kw, vw
-                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
-
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
-            continue
-
-        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v:
-            try:
-                # Send "real" orig_weight into MHA's lora module
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+                # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
+                # separately mapped Linear module) or SD3 QkvLinear's weight.
+                field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
+                weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
                 qw, kw, vw = weight.chunk(3, 0)
                 updown_q, _ = module_q.calc_updown(qw)
                 updown_k, _ = module_k.calc_updown(kw)

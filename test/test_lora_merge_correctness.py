@@ -125,19 +125,28 @@ def test_fp16_master_merge_keeps_every_network(bf16_lora):
     assert not torch.equal(layer.weight.float(), last_only.float())
 
 
-def test_mha_in_proj_lora_merges_in_float32(bf16_lora):
+@pytest.mark.parametrize("layer_kind", ["mha", "sd3_qkv_linear"])
+def test_combined_qkv_lora_merges_in_float32(bf16_lora, layer_kind):
+    """q/k/v LoRA modules merge into MHA's in_proj_weight or SD3 QkvLinear's weight."""
     networks = bf16_lora
     g = torch.Generator().manual_seed(3)
-    mha = torch.nn.MultiheadAttention(8, 2, bias=False, batch_first=True, dtype=torch.bfloat16)
-    mha.network_layer_name = "1_model_transformer_resblocks_0_attn"
-    base = mha.in_proj_weight.detach().clone()
+    if layer_kind == "mha":
+        layer = torch.nn.MultiheadAttention(8, 2, bias=False, batch_first=True, dtype=torch.bfloat16)
+        layer.network_layer_name = "1_model_transformer_resblocks_0_attn"
+        field = "in_proj_weight"
+    else:
+        from modules.models.sd3.mmdit import QkvLinear
+        layer = QkvLinear(8, 24, bias=False, dtype=torch.bfloat16)
+        layer.network_layer_name = "diffusion_model_joint_blocks_0_x_block_attn_qkv"
+        field = "weight"
+    base = getattr(layer, field).detach().clone()
     proj = torch.nn.Linear(8, 8, bias=False)  # shape donor for the q/k/v LoRA modules
     nets, expected = [], base.double()
     for i in range(3):
         net = _net(networks, f"n{i}")
         deltas = []
         for part in ("q", "k", "v"):
-            proj.network_layer_name = f"{mha.network_layer_name}_{part}_proj"
+            proj.network_layer_name = f"{layer.network_layer_name}_{part}_proj"
             up, down = _grid((8, 1), g), _grid((1, 8), g)
             _add_module(networks, net, proj, {"lora_up.weight": up, "lora_down.weight": down}, networks.network_lora.NetworkModuleLora)
             deltas.append(up.double() @ down.double())
@@ -146,9 +155,9 @@ def test_mha_in_proj_lora_merges_in_float32(bf16_lora):
 
     networks._set_loaded_networks(nets)
     with _autocast(True):
-        networks.network_apply_weights(mha)
+        networks.network_apply_weights(layer)
 
-    assert torch.equal(mha.in_proj_weight, expected.to(torch.bfloat16))
+    assert torch.equal(getattr(layer, field), expected.to(torch.bfloat16))
 
 
 @pytest.mark.parametrize("autocast", [False, True])
