@@ -31,6 +31,7 @@ This is the GB10-owned vendored guidance extension, combining Incantations PAG/S
 - `tests/`: CPU unit tests with A1111 stubbed; run them in their own pytest process.
 - Removed abandoned A1111-discovered Incantations scripts: legacy prompt incanting, S-CFG, T2I-Zero, and attention-map saving. They were not part of the GB10 active guidance path and still used stale callback cleanup / debug code.
 - Removed PAG's CFG Scheduler ("CFG Interval": noise-interval CFG and CFG weight schedules). Its four script args stay as placeholders, see below.
+- PAG's perturbed pass replaces the middle-block self-attention map with the identity, so the layer outputs `to_out(to_v(x))` as in the paper, diffusers' `PAGIdentitySelfAttnProcessor` and ComfyUI. Upstream Incantations (and this tree until 2026-10-09) returned `to_v(x)` and skipped the output projection; the fix changes PAG images.
 
 
 ## A1111 API argument order

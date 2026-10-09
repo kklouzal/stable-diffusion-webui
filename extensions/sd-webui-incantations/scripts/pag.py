@@ -283,7 +283,8 @@ class PAGExtensionScript(UIWrapper):
         def ready_hijack_forward(self, crossattn_modules):
                 """ Create hooks in the forward pass of the cross attention modules
                 Copies the output of the to_v module to the parent module
-                Then applies the PAG perturbation to the output of the cross attention module (multiplication by identity)
+                Then applies the PAG perturbation to the output of the cross attention module: with the identity
+                attention map the output is to_out(to_v(x))
                 """
 
                 # add field for last_to_v
@@ -304,15 +305,21 @@ class PAGExtensionScript(UIWrapper):
                         if not module.pag_enable:
                                 return
 
-                        # get the last to_v output and save it
                         last_to_v = module.pag_last_to_v
-
-                        _, seq_len, _ = output.shape
-                        if last_to_v is not None:
-                                # Multiplication by an expanded identity matrix is exactly this slice.
-                                # Avoid allocating the identity tensor and launching an einsum per attention call.
-                                return last_to_v[:, :seq_len, :]
-                        return output
+                        if last_to_v is None:
+                                raise RuntimeError("PAG: the perturbed attention call ran without a to_v output")
+                        batch, seq_len, _ = output.shape
+                        if last_to_v.shape[0] != batch or last_to_v.shape[1] < seq_len:
+                                # Hypertile tiling this layer calls to_v on (batch * tiles) tile rows.
+                                raise RuntimeError(
+                                        f"PAG: the attention input was split into {last_to_v.shape[0]} rows of {last_to_v.shape[1]} tokens, "
+                                        f"not the {batch} rows of {seq_len} tokens of its output (hypertile tiling the middle block?)"
+                                )
+                        # The identity attention map makes the attention output the values themselves, which then go
+                        # through the output projection like any attention output (Ahn et al. 2024; diffusers
+                        # PAGIdentitySelfAttnProcessor): to_out(to_v(x)). A context longer than x (ControlNet
+                        # reference banks) keeps the values of the layer's own tokens, the leading seq_len.
+                        return module.to_out(last_to_v[:, :seq_len, :])
 
                 # Keep RemovableHandles so cleanup does not need to rewrite PyTorch hook tables globally.
                 for module in crossattn_modules:

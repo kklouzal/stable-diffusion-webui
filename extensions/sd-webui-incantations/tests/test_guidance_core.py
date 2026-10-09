@@ -834,15 +834,26 @@ class PAGBatchingTests(unittest.TestCase):
             script.on_cfg_denoised_callback(types.SimpleNamespace(sampling_step=1, inner_model=None), pag_params)
 
     @staticmethod
-    def attention_module():
+    def attention_module(attn_mask=None):
+        # The shape of the SDPA CrossAttention forward (modules/sd_hijack_optimizations.py): q/k/v projections,
+        # attention, then to_out = [Linear, Dropout]. attn_mask stands in for the attention map in tests.
         class CrossAttention(torch.nn.Module):
             def __init__(self):
                 super().__init__()
+                self.heads = 2
+                self.to_q = torch.nn.Linear(8, 8, bias=False)
+                self.to_k = torch.nn.Linear(8, 8, bias=False)
                 self.to_v = torch.nn.Linear(8, 8, bias=False)
+                self.to_out = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Dropout(0.0))
 
-            def forward(self, x):
-                return self.to_v(x) * 2
+            def forward(self, x, context=None):
+                context = x if context is None else context
+                b, n, inner = x.shape
+                q, k, v = (t.view(b, -1, self.heads, inner // self.heads).transpose(1, 2) for t in (self.to_q(x), self.to_k(context), self.to_v(context)))
+                out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+                return self.to_out(out.transpose(1, 2).reshape(b, n, inner))
 
+        torch.manual_seed(0)
         return CrossAttention()
 
     @staticmethod
@@ -898,8 +909,8 @@ class PAGBatchingTests(unittest.TestCase):
         with torch.no_grad():
             plain = attn(x)
             attn.pag_enable = True
-            # The perturbed pass replaces the attention output with the to_v output.
-            self.assertTrue(torch.equal(attn(x), attn.to_v(x)))
+            # The perturbed pass is the attention with an identity map: the output projection of the values.
+            self.assertTrue(torch.equal(attn(x), attn.to_out(attn.to_v(x))))
             attn.pag_enable = False
 
         script.pag_process_batch(self.processing(), False, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
@@ -911,6 +922,46 @@ class PAGBatchingTests(unittest.TestCase):
         self.assertEqual(len(attn.to_v._forward_hooks), 0)
         with torch.no_grad():
             self.assertTrue(torch.equal(attn(x), plain))
+
+    def test_perturbed_attention_is_the_identity_attention_map_through_to_out(self):
+        attn = self.attention_module()
+        script = self.pag.PAGExtensionScript()
+        script.get_cross_attn_modules = lambda: [attn]
+        p = self.processing()
+        script.pag_process_batch(p, True, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
+        # A LoRA on the output projection (a forward hook on to_out[0], like the functional LoRA path) applies too.
+        lora = attn.to_out[0].register_forward_hook(lambda module, args, output: output + 0.25)
+        x = torch.randn(2, 5, 8)
+        # Independent oracle: the same attention module run with an identity attention map.
+        identity = torch.full((5, 5), float("-inf")).fill_diagonal_(0.0)
+        oracle = self.attention_module(attn_mask=identity)
+        oracle.load_state_dict(attn.state_dict())
+        oracle.to_out[0].register_forward_hook(lambda module, args, output: output + 0.25)
+        with torch.no_grad():
+            attn.pag_enable = True
+            perturbed = attn(x)
+            attn.pag_enable = False
+            plain = attn(x)
+            expected = oracle(x)
+        torch.testing.assert_close(perturbed, expected, rtol=0, atol=1e-6)
+        self.assertFalse(torch.allclose(perturbed, plain))
+        lora.remove()
+        script.postprocess_batch(p)
+
+    def test_perturbed_attention_fails_on_split_attention_input(self):
+        # Hypertile tiling the middle block runs to_v on (rows * tiles) tile rows; their values are not the layer's.
+        attn = self.attention_module()
+        script = self.pag.PAGExtensionScript()
+        script.get_cross_attn_modules = lambda: [attn]
+        p = self.processing()
+        script.pag_process_batch(p, True, 3.0, 0, 150, False, "Constant", 0.0, 100.0, False)
+        tiled = attn.to_v.register_forward_hook(lambda module, args, output: output.reshape(4, 2, 8), prepend=True)
+        attn.pag_enable = True
+        with torch.no_grad(), self.assertRaisesRegex(RuntimeError, "PAG: the attention input was split"):
+            attn(torch.randn(2, 4, 8))
+        attn.pag_enable = False
+        tiled.remove()
+        script.postprocess_batch(p)
 
     def test_pag_fails_when_model_has_no_middle_attention(self):
         # Requested PAG must not silently render without PAG under an infotext that says "PAG Active".
