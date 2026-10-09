@@ -80,6 +80,8 @@ What the patches do:
     last latent row or column is always covered; identical to upstream wherever upstream covers it
   - the Tiled VAE attention fallbacks (previously `patches/mounted-extensions/`)
   - the Tiled VAE and MultiDiffusion performance changes, including ControlNet control tiles built once per request
+  - Tiled VAE results: exact group-norm statistics in non-fast mode (pooled over each tile's own region), float32
+    normalize, encoder tiles on the 8-pixel latent grid; fast mode keeps its estimated statistics
   - noise inversion: this batch's prompts with extra networks parsed out, SDXL size conditioning, and an
     inverted-noise cache that never outlives a request and is reused only for exact matches
   - region prompt control on SDXL/SD3 fails before any work instead of with a TypeError mid-sampling

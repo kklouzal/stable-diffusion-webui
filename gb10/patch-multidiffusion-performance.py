@@ -19,6 +19,11 @@ cleanly. The blocks:
   against the unpatched extension (test/test_gb10_multidiffusion_performance_patcher.py). MD-CN builds each ControlNet
   control tile once per request and skips reassigning an unchanged one; ControlNet still re-derives (and hashes) the
   hint whenever the tile changes, i.e. per tile batch per step with more than one batch.
+- TV-GN, TV-NORM, TV-ENC8 (Tiled VAE results): non-fast group-norm statistics are pooled exactly over each tile's
+  valid region (upstream took whole padded tiles and dropped the between-tile variance: real SDXL VAE 640x768 decode,
+  tile 48, PSNR vs untiled 47.1 -> 59.0 dB); the normalize keeps float32 statistics and affine and rounds once (bf16
+  no worse than native GroupNorm); encoder tile sizes floor to a multiple of 8 (off-grid tiles misplaced the latent
+  or failed). Fast mode keeps its documented estimated statistics. TV-NANEND checks NaNs once per finished tile.
 - MD-NI-COND: noise inversion encodes this batch's prompts with extra networks parsed out, as SdConditioning with the
   canvas size (SDXL embeds it), instead of the first batch's raw prompts as a plain list.
 - MD-NI-CACHE: the inverted-noise cache lives for one request and is reused only for exact matches (see the block).
@@ -32,6 +37,7 @@ from patchlib import Block, apply_blocks, parse_cli
 
 LABEL = "MultiDiffusion"
 TILEVAE = "scripts/tilevae.py"
+TILEVAE_DEPLOY10_BLOCKS = 8  # TV-GC .. TV-APX return; the TV-NORM, TV-GN, TV-ENC8 and TV-NANEND blocks came after
 
 BLOCKS: dict[str, list[Block]] = {
     "tile_utils/utils.py": [
@@ -274,6 +280,108 @@ def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weig
                 result = torch.cat([F.interpolate(cheap_approximation(x).unsqueeze(0), scale_factor=opt_f, mode='nearest-exact') for x in z], dim=0)
             return result.to(device, dtype=dtype)
         return result.to(dtype)
+""",
+        ),
+        Block(
+            'TV-NORM fused fp32 normalize',
+            r"""    b, c = input.size(0), input.size(1)
+    channel_in_group = int(c/num_groups)
+    input_reshaped = input.contiguous().view(
+        1, int(b * num_groups), channel_in_group, *input.size()[2:])
+
+    out = F.batch_norm(input_reshaped, mean.to(input), var.to(input), weight=None, bias=None, training=False, momentum=0, eps=eps)
+    out = out.view(b, c, *input.size()[2:])
+
+    # post affine transform
+    if weight is not None:
+        out *= weight.view(1, -1, 1, 1)
+    if bias is not None:
+        out += bias.view(1, -1, 1, 1)
+    return out
+""",
+            r"""    b, c = input.size(0), input.size(1)
+    channel_in_group = int(c/num_groups)
+    # gb10 (TV-NORM): one batch_norm over the b*c channels of a [1, b*c, H, W] view, with the per-(sample, group)
+    # statistics expanded to their channels and the affine folded in. Statistics and affine stay float32 (batch_norm
+    # computes in float32 for half/bfloat16 input) and the output is rounded once, like F.group_norm. The former
+    # path rounded the statistics to the tile dtype and rounded again after the normalize, the scale and the shift.
+    def per_channel(t):
+        return t.float().view(b, num_groups, 1).expand(b, num_groups, channel_in_group).reshape(b * c)
+    out = F.batch_norm(input.contiguous().view(1, b * c, *input.size()[2:]), per_channel(mean), per_channel(var),
+                       weight=None if weight is None else weight.float().repeat(b),
+                       bias=None if bias is None else bias.float().repeat(b), training=False, momentum=0, eps=eps)
+    return out.view(b, c, *input.size()[2:])
+""",
+        ),
+        Block(
+            'TV-GN crop margins at any resolution',
+            r"""    padded_bbox = [i * 8 if is_decoder else i//8 for i in input_bbox]
+    margin = [target_bbox[i] - padded_bbox[i] for i in range(4)]
+    return x[:, :, margin[2]:x.size(2)+margin[3], margin[0]:x.size(3)+margin[1]]
+""",
+            r"""    padded_bbox = [i * 8 if is_decoder else i//8 for i in input_bbox]
+    # gb10 (TV-GN): x may also be an intermediate activation of the tile (group norm statistics): scale the output-space
+    # margins by x's size relative to the final tile. Decoder margins are multiples of 8 and encoder tiles start on the
+    # 8-pixel grid (TV-ENC8), so the scaling is exact; for the final tile it is the identity.
+    h, w = padded_bbox[3] - padded_bbox[2], padded_bbox[1] - padded_bbox[0]
+    margin = [(target_bbox[i] - padded_bbox[i]) * (x.size(3) if i < 2 else x.size(2)) // (w if i < 2 else h) for i in range(4)]
+    return x[:, :, margin[2]:x.size(2)+margin[3], margin[0]:x.size(3)+margin[1]]
+""",
+        ),
+        Block(
+            'TV-GN pooled statistics',
+            r"""        var = torch.vstack(self.var_list)
+        mean = torch.vstack(self.mean_list)
+        max_value = max(self.pixel_list)
+        pixels = torch.tensor(self.pixel_list, dtype=torch.float32, device=devices.device) / max_value
+        sum_pixels = torch.sum(pixels)
+        pixels = pixels.unsqueeze(1) / sum_pixels
+        var = torch.sum(var * pixels, dim=0)
+        mean = torch.sum(mean * pixels, dim=0)
+""",
+            r"""        # gb10 (TV-GN): exact pooling of the disjoint valid regions (law of total variance) in float32: the within-tile
+        # variances plus the spread of the tile means. Upstream averaged the variances only, over whole padded tiles.
+        var = torch.vstack(self.var_list).float()
+        mean = torch.vstack(self.mean_list).float()
+        pixels = torch.tensor(self.pixel_list, dtype=torch.float32, device=mean.device)
+        pixels = (pixels / pixels.sum()).unsqueeze(1)
+        mean_all = torch.sum(mean * pixels, dim=0)
+        var = torch.sum((var + (mean - mean_all) ** 2) * pixels, dim=0)
+        mean = mean_all
+""",
+        ),
+        Block(
+            'TV-ENC8 encoder tile grid',
+            r"""        self.tile_size = tile_size
+""",
+            r"""        # gb10 (TV-ENC8): encoder tiles stay on the 8-pixel latent grid (get_best_tile_size keeps multiples of 8 only if
+        # tile_size is one; the UI slider steps by 16, API arguments need not).
+        self.tile_size = tile_size if is_decoder else max(8, int(tile_size) // 8 * 8)
+""",
+        ),
+        Block(
+            'TV-GN valid-region statistics',
+            r"""                    if task[0] == 'pre_norm':
+                        group_norm_param.add_tile(tile, task[1])
+""",
+            r"""                    if task[0] == 'pre_norm':
+                        # gb10 (TV-GN): statistics of the tile's own output region only; its padding overlaps the
+                        # neighbouring tiles (counted 2-4x) and holds the tile-local zero padding.
+                        group_norm_param.add_tile(crop_valid_region(tile, in_bboxes[i], out_bboxes[i], is_decoder), task[1])
+""",
+        ),
+        Block(
+            'TV-NANEND finished-tile NaN check',
+            r"""                # check for NaNs in the tile.
+                # If there are NaNs, we abort the process to save user's time
+                devices.test_for_nans(tile, "vae")
+""",
+            r"""                # gb10 (TV-NANEND): check the finished tile only, not after every group-norm pass (a host sync per tile per
+                # pass). A NaN anywhere in a tile survives every later op in place (TV-NAN's argument; strided convs read
+                # every input position) and a NaN in a valid region poisons the pooled statistics of every tile, so a
+                # NaN that the per-pass check caught still reaches the finished tile's [0,0,0,0] check, only later.
+                if len(task_queue) == 0:
+                    devices.test_for_nans(tile, "vae")
 """,
         ),
     ],
@@ -652,6 +760,7 @@ def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weig
             sentinel="def _gb10_terminal_tile_origins",
         ),
     ],
+    TILEVAE: BLOCKS[TILEVAE][:TILEVAE_DEPLOY10_BLOCKS],
 }
 
 

@@ -36,6 +36,9 @@ UPSTREAM_COMMIT = "22798f6"  # origin/main the blocks' ORIGINAL texts are taken 
 SGM_ROOT = ROOT / "repositories" / "generative-models"
 UTILS = "tile_utils/utils.py"
 TERMINAL_HELPER = "def _gb10_tile_origins"
+TILEVAE = "scripts/tilevae.py"
+TILEVAE_SEMANTIC_BLOCKS = ("TV-NORM fused fp32 normalize", "TV-GN crop margins at any resolution", "TV-GN pooled statistics",
+                           "TV-ENC8 encoder tile grid", "TV-GN valid-region statistics")
 
 
 # The patcher imports patchlib as a sibling module, as under run.sh.
@@ -430,11 +433,12 @@ def import_extension(webui_stubs):
 
 @pytest.fixture()
 def md_pair(tmp_path: Path):
-    """(original, patched) checkouts. The original keeps the terminal tile origins patched, so every differential
-    isolates the other changes; the origin change itself is intentionally not bit-identical where upstream leaves the
-    edge uncovered (see above)."""
+    """(original, patched) checkouts. The original has the blocks that change results applied too (the terminal tile
+    origins, the Tiled VAE group-norm statistics and normalize, the encoder tile grid), so every differential
+    isolates the performance changes; those blocks are tested against upstream and the untiled VAE on their own."""
     original = copy_multidiffusion(tmp_path / "original")
-    apply_block(original, UTILS, "MD terminal tile origins")
+    for relative, name in [(UTILS, "MD terminal tile origins"), *((TILEVAE, name) for name in TILEVAE_SEMANTIC_BLOCKS)]:
+        apply_block(original, relative, name)
     patched = copy_multidiffusion(tmp_path / "patched")
     run_patcher(patched)
     return original, patched
@@ -951,3 +955,145 @@ def test_region_prompt_control_is_rejected_up_front_for_dict_conditioning(md_pai
     else:
         with pytest.raises(AttributeError, match="width"):
             script_module.Script().process(p, *args)
+
+
+# ---------------------------------------------------------------- Tiled VAE group norm statistics (CPU, against the untiled VAE)
+
+
+def exact_stats_vae():
+    """tiny_vae with the mid attention's output zeroed (x + 0): every op left is local, so with a padding beyond the
+    receptive field a tiled pass with exact group-norm statistics equals the untiled VAE up to float reassociation."""
+    encoder, decoder = tiny_vae()
+    with torch.no_grad():
+        for net in (encoder, decoder):
+            net.mid.attn_1.proj_out.weight.zero_()
+            net.mid.attn_1.proj_out.bias.zero_()
+    return encoder, decoder
+
+
+def run_padded_hook(module, net, x, *, is_decoder, tile_size, pad, fast=False):
+    hook = module.VAEHook(net, tile_size, is_decoder=is_decoder, fast_decoder=fast, fast_encoder=fast, color_fix=False)
+    hook.pad = pad
+    return hook(x)
+
+
+def rms(a, b):
+    return float((a.float() - b.float()).pow(2).mean().sqrt())
+
+
+def varying_field(shape, seed):
+    """Noise plus a smooth horizontal ramp, so tiles have different statistics (as image content does)."""
+    torch.manual_seed(seed)
+    return torch.randn(shape) * 0.8 + torch.linspace(-1.5, 1.5, shape[-1])
+
+
+@pytest.fixture()
+def tilevae_upstream_and_patched(tmp_path: Path, import_extension):
+    upstream = copy_multidiffusion(tmp_path / "upstream")
+    patched = copy_multidiffusion(tmp_path / "patched")
+    run_patcher(patched)
+    (old,) = import_extension(upstream, "scripts/tilevae.py")
+    (new,) = import_extension(patched, "scripts/tilevae.py")
+    return old, new
+
+
+GN_CASES = [
+    # (is_decoder, input shape, tile size, pad)
+    pytest.param(True, (2, 4, 40, 90), 16, 24, id="decoder-batch2-tile-below-pad"),
+    pytest.param(True, (1, 4, 9, 100), 16, 24, id="decoder-thin"),
+    pytest.param(True, (1, 4, 61, 87), 16, 24, id="decoder-odd"),
+    pytest.param(False, (1, 3, 200, 360), 64, 128, id="encoder"),
+    pytest.param(False, (2, 3, 136, 344), 64, 128, id="encoder-batch2"),
+]
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size,pad", GN_CASES)
+def test_tiled_vae_synced_group_norm_matches_the_untiled_vae(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size, pad):
+    """Non-fast mode pools each group norm's statistics over all tiles. Upstream took them over whole padded tiles
+    (overlaps counted 2-4x) and averaged the per-tile variances only; TV-GN pools the valid regions exactly."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = exact_stats_vae()
+    net = decoder if is_decoder else encoder
+    x = varying_field(shape, 2)
+    with torch.no_grad():
+        reference = net(x)
+    scale = float(reference.pow(2).mean().sqrt())
+
+    before = run_padded_hook(old, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    after = run_padded_hook(new, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    assert after.shape == reference.shape
+    assert rms(after, reference) < 1e-4 * scale
+    assert rms(before, reference) > 1e-2 * scale
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size", [(True, (1, 4, 40, 48), 12), (False, (1, 3, 192, 168), 64)])
+def test_tiled_vae_fast_mode_is_unchanged_in_float32(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size):
+    """Fast mode estimates the statistics from a downsampled tile (a documented approximation, kept). TV-NORM only
+    folds the affine into the normalize, so float32 results agree to rounding."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = tiny_vae()
+    net = decoder if is_decoder else encoder
+    torch.manual_seed(3)
+    x = torch.randn(shape)
+    before = run_hook(old, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, fast=True)
+    after = run_hook(new, net, x.clone(), is_decoder=is_decoder, tile_size=tile_size, fast=True)
+    torch.testing.assert_close(after, before, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("is_decoder,shape,tile_size,pad", [GN_CASES[0], GN_CASES[3]])
+def test_tiled_vae_bf16_group_norm_is_no_worse_than_native(tilevae_upstream_and_patched, webui_stubs, is_decoder, shape, tile_size, pad):
+    """TV-NORM keeps the statistics and the affine in float32 and rounds the output once, like F.group_norm; upstream
+    rounded the statistics to bfloat16 and then rounded after the normalize, the scale and the shift."""
+    old, new = tilevae_upstream_and_patched
+    encoder, decoder = exact_stats_vae()
+    net = decoder if is_decoder else encoder
+    x = varying_field(shape, 5)
+    with torch.no_grad():
+        reference = net(x)
+        native = copy.deepcopy(net).to(torch.bfloat16)(x.to(torch.bfloat16))
+    bf16_net = copy.deepcopy(net).to(torch.bfloat16)
+    bf16_net.original_forward = bf16_net.forward
+    after = run_padded_hook(new, bf16_net, x.to(torch.bfloat16), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    before = run_padded_hook(old, bf16_net, x.to(torch.bfloat16), is_decoder=is_decoder, tile_size=tile_size, pad=pad)
+    assert after.dtype == torch.bfloat16
+    assert rms(after, reference) <= rms(native, reference) * 1.05
+    assert rms(after, reference) < rms(before, reference)
+
+
+def test_tiled_vae_encoder_tiles_stay_on_the_latent_grid(tilevae_upstream_and_patched, webui_stubs):
+    """An API tile size that is not a multiple of 8 put encoder tiles off the 8-pixel latent grid (TV-ENC8)."""
+    old, new = tilevae_upstream_and_patched
+    encoder, _decoder = exact_stats_vae()
+    x = varying_field((1, 3, 136, 856), 6)
+    with torch.no_grad():
+        reference = encoder(x)
+    scale = float(reference.pow(2).mean().sqrt())
+    off_grid = run_padded_hook(new, encoder, x.clone(), is_decoder=False, tile_size=300, pad=128)
+    assert torch.equal(off_grid, run_padded_hook(new, encoder, x.clone(), is_decoder=False, tile_size=296, pad=128))
+    assert rms(off_grid, reference) < 1e-4 * scale
+    # Upstream: the off-grid tile's latent crop does not even fit its output region here.
+    with pytest.raises(RuntimeError, match="expanded size"):
+        run_padded_hook(old, encoder, x.clone(), is_decoder=False, tile_size=300, pad=128)
+
+
+def test_tiled_vae_checks_nans_once_per_finished_tile(tilevae_upstream_and_patched, webui_stubs, monkeypatch):
+    old, new = tilevae_upstream_and_patched
+    _encoder, decoder = exact_stats_vae()
+    devices = sys.modules["modules.devices"]
+    checks = []
+    test_for_nans = devices.test_for_nans
+    monkeypatch.setattr(devices, "test_for_nans", lambda x, where: (checks.append(where), test_for_nans(x, where)))
+    torch.manual_seed(7)
+    z = torch.randn((1, 4, 40, 90))
+    counts = []
+    for module in (old, new):
+        checks.clear()
+        hook = module.VAEHook(decoder, 16, is_decoder=True, fast_decoder=False, fast_encoder=False, color_fix=False)
+        tiles = len(hook.split_tiles(40, 90)[0])
+        hook(z.clone())
+        counts.append(len(checks))
+    assert counts[1] == tiles < counts[0]  # one host sync per tile instead of one per tile per group-norm pass
+
+    z[0, 0, 0, 0] = float("nan")
+    with pytest.raises(NansException):
+        run_hook(new, decoder, z, is_decoder=True, tile_size=16, fast=False)
