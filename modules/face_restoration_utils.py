@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import torch
 
-from modules import devices, errors, face_restoration, shared
+from modules import devices, face_restoration, shared
 
 if TYPE_CHECKING:
     from facexlib.utils.face_restoration_helper import FaceRestoreHelper
@@ -82,12 +82,11 @@ def restore_with_face_helper(
             normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
             cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
 
-            try:
-                with torch.no_grad():
-                    cropped_face_t = restore_face(cropped_face_t)
-                devices.torch_gc()
-            except Exception:
-                errors.report('Failed face-restoration inference', exc_info=True)
+            # An inference error fails the request, like a load error in restore_with_helper: pasting back the
+            # unrestored crop would leave faces unrestored while infotext names this restorer.
+            with torch.no_grad():
+                cropped_face_t = restore_face(cropped_face_t)
+            devices.torch_gc()
 
             restored_face = rgb_tensor_to_bgr_image(cropped_face_t, min_max=(-1, 1))
             # Round like the reference GFPGAN/CodeFormer post-processing (basicsr tensor2img); astype truncates.
