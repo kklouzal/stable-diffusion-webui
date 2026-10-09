@@ -805,20 +805,21 @@ def test_rollback_failure_publishes_explicit_empty_fail_closed_state(lora_networ
     assert graphs == ["lora_changed"]
 
 
-def test_current_network_state_identity_reuses_semantically_identical_lifecycle(lora_networks, monkeypatch):
+def test_current_text_encoder_state_identity_reuses_semantically_identical_lifecycle(lora_networks, monkeypatch):
     networks = lora_networks
-    base, _module, _payload = _base_network(networks)
+    base, module, _payload = _base_network(networks)
+    base.modules = {"0_transformer_text_model_encoder_layers_0_mlp_fc1": module}
     base.source_key = ("opaque", ("sha256", "same"), networks.LORA_SOURCE_SCHEMA_REVISION, ())
     monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "same"))
     monkeypatch.setattr(networks, "network_source_key", lambda *_args: base.source_key)
     monkeypatch.setattr(networks, "load_network", lambda *_args: base)
 
     networks.load_networks(["alpha"], [0.75], [1.25], [4])
-    first = networks.current_network_state_identity()
+    first = networks.current_text_encoder_state_identity()
     networks.load_networks([], [], [], [])
-    unloaded = networks.current_network_state_identity()
+    unloaded = networks.current_text_encoder_state_identity()
     networks.load_networks(["alpha"], [0.75], [1.25], [4])
-    reapplied = networks.current_network_state_identity()
+    reapplied = networks.current_text_encoder_state_identity()
 
     assert first == reapplied
     assert first != unloaded
@@ -827,7 +828,7 @@ def test_current_network_state_identity_reuses_semantically_identical_lifecycle(
     assert networks.loaded_networks[0].dyn_dim == 4
 
 
-def test_current_network_state_identity_changes_for_effective_inputs(lora_networks):
+def test_network_applied_state_key_changes_for_effective_inputs(lora_networks):
     networks = lora_networks
     first, _module, _payload = _base_network(networks)
     first.source_key = ("opaque", ("sha256", "a"), networks.LORA_SOURCE_SCHEMA_REVISION, ())

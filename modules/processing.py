@@ -18,7 +18,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
@@ -90,6 +90,10 @@ def apply_overlay(image, paste_loc, overlay):
     return image, original_denoised_image
 
 def create_binary_mask(image, round=True):
+    if image.mode != 'RGBA' and image.has_transparency_data:
+        # LA/PA/La/RGBa, and P/L/RGB with a "transparency" key: their alpha is the mask, as for RGBA (images.flatten)
+        image = image.convert('RGBA')
+
     if image.mode == 'RGBA' and image.getextrema()[-1] != (255, 255):
         if round:
             image = image.split()[-1].convert("L").point(lambda x: 255 if x > 128 else 0)
@@ -165,7 +169,18 @@ def _record_cache_stats_miss(stats, started_at):
     stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
 
 
-_IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "color_corrections", "paste_to")
+# Extra networks whose effect on the conditioning the cond cache key holds otherwise: LoRA through the published text
+# encoder state (active_lora_cond_signature); hypernetworks act on the U-Net's cross-attention only.
+_COND_KEY_COVERED_EXTRA_NETWORKS = frozenset(("lora", "lyco", "hypernet"))
+
+
+def _conditioning_extra_network_data(extra_network_data):
+    """The prompt's extra-network parameters the conditioning may depend on: those of networks it does not cover."""
+    return {name: params for name, params in (extra_network_data or {}).items() if name not in _COND_KEY_COVERED_EXTRA_NETWORKS}
+
+
+# color_corrections is cached separately: only when the request computed it (a caller's preset value is its own).
+_IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "paste_to")
 
 
 def _image_to_chw_float32_array(image, scale_to_signed=False):
@@ -548,10 +563,10 @@ class StableDiffusionProcessing:
         self.main_negative_prompt = self.all_negative_prompts[0]
 
     def active_lora_cond_signature(self):
-        """Return the canonical atomically-published effective network state."""
+        """Return the published LoRA state the text encoders run with (networks.current_text_encoder_state_identity)."""
         try:
             import networks
-            return networks.current_network_state_identity()
+            return networks.current_text_encoder_state_identity()
         except (ImportError, AttributeError):
             return ()
 
@@ -574,7 +589,7 @@ class StableDiffusionProcessing:
             opts.sdxl_clip_l_skip,
             shared.sd_model.sd_checkpoint_info,
             effective_network_state,
-            extra_network_data,
+            _conditioning_extra_network_data(extra_network_data),
             opts.sdxl_crop_left,
             opts.sdxl_crop_top,
             self.width,
@@ -592,8 +607,10 @@ class StableDiffusionProcessing:
             # The SDXL refiner conditioner embeds these.
             opts.sdxl_refiner_low_aesthetic_score,
             opts.sdxl_refiner_high_aesthetic_score,
-            # Decides the "TI hashes" infotext that cache hits replay.
+            # Decide the "TI hashes" infotext that cache hits replay (a LoRA-bundled embedding's entry is empty while
+            # lora_bundled_ti_to_infotext is off; the option exists while the Lora extension is loaded).
             opts.textual_inversion_add_hashes_to_infotext,
+            getattr(opts, "lora_bundled_ti_to_infotext", None),
         )
 
     def get_conds_with_caching(self, cache_namespace, function, required_prompts, steps, cache, extra_network_data, hires_steps=None):
@@ -1050,6 +1067,7 @@ def _failed_batch_images(p):
 
 def process_images(p: StableDiffusionProcessing) -> Processed:
     p._active_extra_network_data = None
+    p._generation_last_snapshot = None
     stored_opts = None
     script_runner = p.scripts
     previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
@@ -1094,6 +1112,9 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             if script_runner is not None:
                 script_runner.end_generation(p, previous_script_lifecycle)
 
+    # A request whose cleanup failed (e.g. extra network deactivation) is not a completed generation.
+    generation_last.persist_or_report(p, p._generation_last_snapshot)
+    p._generation_last_snapshot = None
     return res
 
 
@@ -1279,10 +1300,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     if save_samples and opts.save_images_before_face_restoration:
                         images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p, suffix="-before-face-restoration")
 
-                    devices.torch_gc()
-
                     x_sample = modules.face_restoration.restore_faces(x_sample)
-                    devices.torch_gc()
 
                 image = Image.fromarray(x_sample)
 
@@ -1385,11 +1403,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     if p.scripts is not None:
         p.scripts.postprocess(p, res)
 
-    # This is the common successful-completion path for UI and API generations.
-    # The snapshot helper ignores interrupted/cancelled and empty results, so those
-    # cannot replace the last completed generation.
-    from modules import generation_last
-    generation_last.capture_or_report(p, res)
+    # This is the common successful-completion path for UI and API generations. The snapshot is built here, while the
+    # request's override settings and model are live; process_images persists it once the request's cleanup succeeded.
+    # The snapshot helper ignores interrupted/cancelled and empty results, so those cannot replace the last completed
+    # generation.
+    p._generation_last_snapshot = generation_last.snapshot_or_report(p, res)
 
     return res
 
@@ -1567,8 +1585,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             else:
                 image = _image_to_chw_float32_array(self.firstpass_image)
-                image = torch.from_numpy(np.expand_dims(image, axis=0))
-                image = image.to(shared.device, dtype=devices.dtype_vae)
+                image = torch.from_numpy(np.expand_dims(image, axis=0)).to(shared.device)  # float32: see images_tensor_to_samples
 
                 self.add_vae_encoder_generation_param()
 
@@ -1655,14 +1672,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 image = images.resize_image(0, image, target_width, target_height, upscaler_name=self.hr_upscaler)
                 batch_images.append(_image_to_chw_float32_array(image))
 
-            decoded_samples = torch.from_numpy(np.array(batch_images))
-            decoded_samples = decoded_samples.to(shared.device, dtype=devices.dtype_vae)
+            decoded_samples = torch.from_numpy(np.array(batch_images)).to(shared.device)  # float32: see images_tensor_to_samples
 
             self.add_vae_encoder_generation_param()
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
 
             # Image conditioning reads [-1, 1] sources, as on the latent path (decode_first_stage) and in img2img.
-            source_image = decoded_samples * 2 - 1 if self.img2img_image_conditioning_reads_source() else None
+            source_image = (decoded_samples * 2 - 1).to(devices.dtype_vae) if self.img2img_image_conditioning_reads_source() else None
             image_conditioning = self.img2img_image_conditioning(source_image, samples)
 
         shared.state.nextjob()
@@ -1831,6 +1847,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     init_img_hash: str = field(default=None, init=False)
     mask_for_overlay: Image = field(default=None, init=False)
     init_latent: torch.Tensor = field(default=None, init=False)
+    # "latent noise" fill: (unfilled init latent, seeds of the noise filled into init_latent); sample() refills per batch.
+    latent_noise_fill: tuple = field(default=None, init=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1953,7 +1971,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             str(shared.device),
         )
 
-    def _restore_img2img_init_cache(self, cache_key):
+    def _restore_img2img_init_cache(self, cache_key, add_color_corrections):
+        """add_color_corrections is part of cache_key: an entry stored with it holds the computed color corrections; an
+        entry stored without it holds none and the caller's color_corrections (e.g. Loopback's) stay as they are."""
         if cache_key is None:
             return False
 
@@ -1968,13 +1988,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             for attr in _IMG2IMG_INIT_CACHE_ATTRS:
                 setattr(self, attr, _clone_cache_value(payload.get(attr)))
+            if add_color_corrections:
+                self.color_corrections = _clone_cache_value(payload["color_corrections"])
 
             self.is_using_inpainting_conditioning = is_using_inpainting_conditioning
             self.extra_generation_params.update(generation_params)
             self._record_img2img_init_cache_hit()
             return True
 
-    def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params):
+    def _store_img2img_init_cache(self, cache_key, started_at, extra_generation_params, add_color_corrections):
         if cache_key is None:
             return
 
@@ -1982,6 +2004,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             StableDiffusionProcessing.cached_img2img_init = [cache_key, {
                 attr: _clone_cache_value(getattr(self, attr, None)) for attr in _IMG2IMG_INIT_CACHE_ATTRS
             } | {
+                "color_corrections": _clone_cache_value(self.color_corrections) if add_color_corrections else None,
                 "is_using_inpainting_conditioning": self.is_using_inpainting_conditioning,
                 "extra_generation_params": _clone_cache_value(extra_generation_params),
             }]
@@ -2001,6 +2024,13 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             # image_mask is passed in as RGBA by the legacy UI layer to support alpha masks,
             # but we still want to support binary masks.
             image_mask = create_binary_mask(image_mask, round=self.mask_round)
+
+            # The mask covers the init image: "only masked" crops in its coordinates and the other paths resize both the
+            # same way, so a mask of another size is stretched onto the image first. Bilinear does not ring, so the
+            # masked area (and the crop around it) grows by at most a pixel.
+            init_size = self.init_images[0].size
+            if image_mask.size != init_size:
+                image_mask = image_mask.resize(init_size, resample=Image.Resampling.BILINEAR)
 
             if self.inpainting_mask_invert:
                 image_mask = ImageOps.invert(image_mask)
@@ -2038,7 +2068,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     model_hijack.comments.append(massage)
                     logging.info(massage)
             else:
-                image_mask = images.resize_image(self.resize_mode, image_mask, self.width, self.height)
+                # resize_mode 3 stretches the init latent to the target size (bilinear), so the mask stretches too.
+                image_mask = images.resize_image(0 if self.resize_mode == 3 else self.resize_mode, image_mask, self.width, self.height)
                 np_mask = np.asarray(image_mask, dtype=np.float32)
                 np_mask = np.clip(np_mask * 2, 0, 255).astype(np.uint8)
                 self.mask_for_overlay = Image.fromarray(np_mask)
@@ -2062,10 +2093,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 image = images.resize_image(self.resize_mode, image, self.width, self.height)
 
             if image_mask is not None:
-                if self.mask_for_overlay.size != (image.width, image.height):
-                    self.mask_for_overlay = images.resize_image(self.resize_mode, self.mask_for_overlay, image.width, image.height)
-                image_masked = Image.new('RGBa', (image.width, image.height))
-                image_masked.paste(image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(self.mask_for_overlay.convert('L')))
+                # The overlay is composited onto the output: with resize_mode 3 the image stays at its own size for the
+                # VAE (its latent is stretched), so the overlay takes the image stretched to the output size.
+                overlay_image = image
+                if crop_region is None and self.resize_mode == 3 and image.size != (self.width, self.height):
+                    overlay_image = image.resize((self.width, self.height), resample=images.LANCZOS)
+                if self.mask_for_overlay.size != overlay_image.size:
+                    self.mask_for_overlay = images.resize_image(self.resize_mode, self.mask_for_overlay, overlay_image.width, overlay_image.height)
+                image_masked = Image.new('RGBa', overlay_image.size)
+                image_masked.paste(overlay_image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(self.mask_for_overlay.convert('L')))
 
                 self.overlay_images.append(image_masked.convert('RGBA'))
 
@@ -2076,7 +2112,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             if image_mask is not None:
                 if self.inpainting_fill != 1:
-                    image = masking.fill(image, latent_mask)
+                    # resize_mode 3 fills the image at its own size: the target-size mask is stretched back onto it
+                    fill_mask = latent_mask if latent_mask.size == image.size else latent_mask.resize(image.size, resample=images.LANCZOS)
+                    image = masking.fill(image, fill_mask)
 
                     if self.inpainting_fill == 0:
                         self.extra_generation_params["Masked content"] = 'fill'
@@ -2119,7 +2157,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             for key in ("VAE Encoder", "Masked content")
             if key in self.extra_generation_params
         }
-        if self._restore_img2img_init_cache(init_cache_key):
+        if self._restore_img2img_init_cache(init_cache_key, add_color_corrections):
             return
 
         if key_raw_images:
@@ -2134,8 +2172,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         # A single image stays a strided view (its NHWC memory layout reaches the VAE unchanged).
         batch_images = np.expand_dims(imgs[0], axis=0) if len(imgs) == 1 else np.array(imgs)
 
-        image = torch.from_numpy(batch_images)
-        image = image.to(shared.device, dtype=devices.dtype_vae)
+        # float32: images_tensor_to_samples maps it to [-1, 1] before its one cast to the VAE dtype
+        image = torch.from_numpy(batch_images).to(shared.device)
 
         self.init_latent = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
 
@@ -2151,23 +2189,34 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             latmask = _resize_latent_mask(init_mask, (self.init_latent.shape[3], self.init_latent.shape[2]), self.mask_round)
             self.mask, self.nmask = _latent_blend_masks(latmask, self.init_latent.shape[1])
 
-            # this needs to be fixed to be done in sample() using actual seeds for batches
             if self.inpainting_fill == 2:
-                self.init_latent = self.init_latent * self.mask + create_random_tensors(self.init_latent.shape[1:], all_seeds[0:self.init_latent.shape[0]]) * self.nmask
+                # Filled here with the first batch's seeds (what sample() would draw for it); sample() refills each later
+                # batch with its own seeds.
+                seeds = tuple(all_seeds[0:self.init_latent.shape[0]])
+                self.latent_noise_fill = (self.init_latent, seeds)
+                self.init_latent = self._latent_noise_filled(self.init_latent, seeds)
                 self.extra_generation_params["Masked content"] = 'latent noise'
 
             elif self.inpainting_fill == 3:
                 self.init_latent = self.init_latent * self.mask
 
-        self.image_conditioning = self.img2img_image_conditioning(image * 2 - 1, self.init_latent, image_mask, self.mask_round)
-        self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params)
+        self.image_conditioning = self.img2img_image_conditioning((image * 2 - 1).to(devices.dtype_vae), self.init_latent, image_mask, self.mask_round)
+        self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params, add_color_corrections)
 
     def close(self):
         super().close()
         if not opts.persistent_img2img_init_cache:
             self.clear_img2img_init_cache()
 
+    def _latent_noise_filled(self, init_latent, seeds):
+        return init_latent * self.mask + create_random_tensors(init_latent.shape[1:], list(seeds)) * self.nmask
+
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
+        if self.latent_noise_fill is not None and tuple(seeds) != self.latent_noise_fill[1]:
+            unfilled = self.latent_noise_fill[0]
+            self.latent_noise_fill = (unfilled, tuple(seeds))
+            self.init_latent = self._latent_noise_filled(unfilled, seeds)
+
         x = self.rng.next()
 
         if self.initial_noise_multiplier != 1.0:

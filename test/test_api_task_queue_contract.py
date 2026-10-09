@@ -82,3 +82,15 @@ def test_img2img_decodes_every_input_image_before_starting_the_task():
         ("task", "task(img2img)"),
         ("init_images", ["image:a", "image:b"]),
     ]
+
+
+def test_img2img_without_init_images_is_rejected_before_the_task():
+    import pytest
+
+    for init_images, status in ((None, 404), ([], 422)):
+        events = []
+        api, HTTPException = _img2imgapi(events)
+        with pytest.raises(HTTPException) as raised:
+            api.img2imgapi(_request(init_images, "m"))
+        assert raised.value.status_code == status
+        assert events == []  # nothing decoded, no task

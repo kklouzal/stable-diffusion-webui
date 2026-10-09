@@ -18,9 +18,12 @@ class State:
     job_timestamp = '0'
     sampling_step = 0
     sampling_steps = 0
-    current_latent = None
+    _current_latent = None
     current_image = None
     current_image_sampling_step = 0
+    # Set by a /progress poll (request_current_image), consumed by the sampler thread (current_latent's setter). A plain
+    # attribute: a racing poll can only cost one decode more or less.
+    current_image_requested = False
     textinfo = None
     time_start = None
 
@@ -65,6 +68,7 @@ class State:
         self.current_latent = None
         self.current_image = None
         self.current_image_sampling_step = 0
+        self.current_image_requested = False
         self.skipped = False
         self.interrupted = False
         self.stopping_generation = False
@@ -89,13 +93,34 @@ class State:
         # other processes.
         devices.torch_gc()
 
-    def set_current_image(self):
-        """if enough sampling steps have been made after the last call to this, sets self.current_image from self.current_latent"""
-        if not shared.parallel_processing_allowed:
+    @property
+    def current_latent(self):
+        return self._current_latent
+
+    @current_latent.setter
+    def current_latent(self, latent):
+        """The sampler thread stores each step's preview latent here (sd_samplers_common.store_latent). When a /progress
+        poll asked for a preview (request_current_image) and enough sampling steps have been made since the last one,
+        it is decoded here, on the sampler thread, between denoiser calls.
+
+        Previews are decoded on the GPU (VAE or approximation). Decoded on the polling thread, they ran concurrently
+        with sampling and could poison a CUDA graph capture in progress (the U-Net/VAE graphs and torch.compile's
+        reduce-overhead graphs): every device operation stays on the generating thread instead, under its inference
+        mode and autocast. Without parallel_processing_allowed (lowvram, training) store_latent itself decodes at the
+        preview period, so requests are not served here."""
+        self._current_latent = latent
+        if latent is None or not self.current_image_requested or not shared.parallel_processing_allowed:
             return
 
-        if self.sampling_step - self.current_image_sampling_step >= shared.opts.show_progress_every_n_steps and shared.opts.live_previews_enable and shared.opts.show_progress_every_n_steps != -1:
+        period = shared.opts.show_progress_every_n_steps
+        if shared.opts.live_previews_enable and period != -1 and self.sampling_step - self.current_image_sampling_step >= period:
+            self.current_image_requested = False
             self.do_set_current_image()
+
+    def request_current_image(self):
+        """Ask the sampler thread for a live preview: the next stored latent due by the preview period is decoded into
+        current_image (see current_latent). Called by /progress, which returns the current_image already produced."""
+        self.current_image_requested = True
 
     def do_set_current_image(self):
         if self.current_latent is None:

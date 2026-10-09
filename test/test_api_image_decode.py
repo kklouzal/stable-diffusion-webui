@@ -29,6 +29,10 @@ class HTTPException(Exception):
         self.detail = detail
 
 
+class UnsupportedImageError(ValueError):
+    """Stands in for modules.images.UnsupportedImageError."""
+
+
 def read_image(fp, *, max_pixels=None):
     """images.read's contract (test/test_images_boundary.py tests the real one): the pixel budget is checked from
     the header, before decoding."""
@@ -54,7 +58,7 @@ def load_api_functions(*, forbid_local=True, img_max_size_mp=200):
         "requests": requests,
         "HTTPException": HTTPException,
         "opts": SimpleNamespace(api_enable_requests=True, api_forbid_local_requests=forbid_local, api_useragent="", img_max_size_mp=img_max_size_mp),
-        "images": SimpleNamespace(read=read_image),
+        "images": SimpleNamespace(read=read_image, UnsupportedImageError=UnsupportedImageError),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(API_PATH), "exec"), namespace)
     return SimpleNamespace(**{node.name: namespace[node.name] for node in nodes if hasattr(node, "name")}, namespace=namespace)
@@ -83,6 +87,25 @@ def test_malformed_data_urls_are_invalid_encoded_images(value):
         api.decode_base64_to_image(value)
 
     assert raised.value.detail == "Invalid encoded image"
+
+
+def test_images_without_an_srgb_mapping_answer_422():
+    """images.read raises UnsupportedImageError for 32-bit/float modes and unusable ICC profiles: a client error."""
+    api = load_api_functions()
+
+    def read(fp, *, max_pixels=None):
+        raise UnsupportedImageError("Unsupported image mode F: the range of its values is undefined")
+
+    api.namespace["images"] = SimpleNamespace(read=read, UnsupportedImageError=UnsupportedImageError)
+    with pytest.raises(HTTPException) as raised:
+        api.decode_base64_to_image(png_base64())
+    assert (raised.value.status_code, raised.value.detail) == (422, "Unsupported image mode F: the range of its values is undefined")
+
+    api = fake_session(api, {"https://global.example/a.png": FakeResponse(content=base64.b64decode(png_base64()))}, [])
+    api.namespace["verify_url"] = lambda url: ["93.184.216.34"]
+    with pytest.raises(HTTPException) as raised:
+        api.decode_base64_to_image("https://global.example/a.png")
+    assert raised.value.status_code == 422
 
 
 def fake_getaddrinfo(table, calls):
@@ -469,7 +492,7 @@ def counting_api(calls, **kwargs):
             image = image.convert("RGBA")
         return image
 
-    api.namespace["images"] = SimpleNamespace(read=read)
+    api.namespace["images"] = SimpleNamespace(read=read, UnsupportedImageError=UnsupportedImageError)
     api.reference_read = read
     return api
 

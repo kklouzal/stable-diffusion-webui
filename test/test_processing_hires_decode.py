@@ -149,7 +149,7 @@ def test_upscaler_hires_conditions_on_signed_source_image(monkeypatch, kind):
         p.sample_hr_pass(None, decoded, [1], [1], 0.0, [""])
 
     unit = 64 / 255  # round(255 * (-0.5 + 1) / 2)
-    assert encoded[0].dtype == devices.dtype_vae
+    assert encoded[0].dtype == torch.float32  # images_tensor_to_samples casts to the VAE dtype after its affine
     assert torch.allclose(encoded[0].double(), torch.full(encoded[0].shape, unit, dtype=torch.float64), atol=1e-3)
     if kind == "sdxl":
         assert calls == []

@@ -163,42 +163,58 @@ _PNG_DROPPED_CHUNKS = frozenset((
 # images.read() (API decode) applies EXIF orientation from these info keys, so
 # dropping their chunks would change replayed pixels; such inputs are re-encoded.
 _ORIENTATION_INFO_KEYS = frozenset(("exif", "Raw profile type exif", "XML:com.adobe.xmp", "xmp"))
+# Pillow sets those keys only from eXIf and from text chunks with these keywords (the bytes before the first NUL,
+# decoded as Latin-1; iTXt "XML:com.adobe.xmp" also sets "xmp").
+_ORIENTATION_TEXT_KEYWORDS = frozenset(key.encode("latin-1") for key in _ORIENTATION_INFO_KEYS)
 
 
-def _png_without_metadata(raw: bytes) -> bytes | None:
-    """Return raw (unchanged object) or a copy without _PNG_DROPPED_CHUNKS; None if raw needs re-encoding."""
+def _png_without_metadata(raw: bytes) -> tuple[bytes | None, bool]:
+    """Return (png, may_orient): png is raw (unchanged object) or a copy without _PNG_DROPPED_CHUNKS, None if raw
+    needs re-encoding; may_orient tells whether a walked chunk can give the decoded image an _ORIENTATION_INFO_KEYS
+    entry (a superset: Pillow skips some malformed text chunks)."""
     if not raw.startswith(_PNG_SIGNATURE):
-        return None
+        return None, False
     view = memoryview(raw)
     chunks = [view[:len(_PNG_SIGNATURE)]]
     offset = len(_PNG_SIGNATURE)
     chunk_type = None
     dropped = False
+    may_orient = False
     while chunk_type != b"IEND":
         if offset + 12 > len(raw):
-            return None
+            return None, may_orient
         end = offset + 12 + int.from_bytes(raw[offset:offset + 4], "big")
         chunk_type = raw[offset + 4:offset + 8]
         if end > len(raw):
-            return None
+            return None, may_orient
         if chunk_type in _PNG_RETAINED_CHUNKS:
             chunks.append(view[offset:end])
         elif chunk_type in _PNG_DROPPED_CHUNKS:
             dropped = True
+            if chunk_type == b"eXIf":
+                may_orient = True
+            elif chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
+                nul = raw.find(b"\0", offset + 8, end - 4)
+                may_orient = may_orient or raw[offset + 8:end - 4 if nul < 0 else nul] in _ORIENTATION_TEXT_KEYWORDS
         else:
-            return None  # APNG frames, private or newer chunks: keep the decoded-pixel path.
+            return None, may_orient  # APNG frames, private or newer chunks: keep the decoded-pixel path.
         offset = end
     if not dropped and offset == len(raw):
-        return raw
-    return b"".join(chunks)  # also drops data after IEND, which decoders ignore
+        return raw, may_orient
+    return b"".join(chunks), may_orient  # also drops data after IEND, which decoders ignore
 
 
-def _decode_inline_image(value: str, keep_png: bool = True):
+def _decode_inline_image(value: str, keep_png: bool = True, api_decoded: bool = False):
     """Validate bounded inline base64 image data; never resolve paths or fetch URLs.
 
     Returns (retained_base64, None) for a PNG kept as sent minus metadata, so its
     pixels, mode, palette and transparency replay exactly (only when keep_png);
     else (None, decoded image).
+
+    api_decoded means the API's images.read() decoded value's image data completely in this request (it raised on
+    truncated or corrupt data), so the same bytes decode here too: a PNG that keeps no orientation-capable chunk is
+    then retained from its header and a chunk walk, without decoding its pixels again (~30 ms at 1280x1280). The
+    result is the same as with the full decode.
     """
     from PIL import Image
     import base64
@@ -214,21 +230,26 @@ def _decode_inline_image(value: str, keep_png: bool = True):
     with Image.open(io.BytesIO(raw)) as decoded:
         if decoded.width > 16384 or decoded.height > 16384 or decoded.width * decoded.height > 64 * 1024 * 1024:
             raise ValueError("Image dimensions exceed budget")
+        if api_decoded and keep_png:
+            png, may_orient = _png_without_metadata(raw)
+            if png is not None and not may_orient:
+                return (value if png is raw else base64.b64encode(png).decode("ascii")), None
         # Rejects truncated/corrupt data before retention and reads trailing text chunks into info.
         decoded.load()
-    png = _png_without_metadata(raw) if keep_png and _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
+    png = _png_without_metadata(raw)[0] if keep_png and _ORIENTATION_INFO_KEYS.isdisjoint(decoded.info) else None
     if png is None:
         return None, decoded
     return (value if png is raw else base64.b64encode(png).decode("ascii")), None
 
 
-def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict):
+def _decode_inline_image_once(value: str, keep_png: bool, decoded_inline: dict, api_decoded: bool = False):
     """_decode_inline_image memoized in decoded_inline, which lives for one snapshot (a pure function of its
-    arguments; a decoded image it returns is only read). An init image's request data and a ControlNet unit image are
-    often the same string, decoded once per use before (~28 ms at 1280x1280). Failures are not memoized."""
+    arguments; a decoded image it returns is only read; api_decoded never changes the result, so it is not part of the
+    key). An init image's request data and a ControlNet unit image are often the same string, decoded once per use
+    before (~28 ms at 1280x1280). Failures are not memoized."""
     key = (value, keep_png)
     if key not in decoded_inline:
-        decoded_inline[key] = _decode_inline_image(value, keep_png)
+        decoded_inline[key] = _decode_inline_image(value, keep_png, api_decoded)
     return decoded_inline[key]
 
 
@@ -246,7 +267,7 @@ def _encode_api_png(value: Any, source: str | None, compress_level: int, keep_in
 
     if source is not None and keep_inline_png:
         try:
-            retained, _ = _decode_inline_image_once(source, True, decoded_inline)
+            retained, _ = _decode_inline_image_once(source, True, decoded_inline, api_decoded=True)
         except Exception:
             # The run accepted value through the API's own decoder; data this
             # stricter check rejects is simply encoded from value instead.
@@ -634,10 +655,50 @@ def _completed_successfully(p, processed) -> bool:
 def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None:
     path = path or snapshot_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    if len(payload.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+    # ASCII output parses to the same value as UTF-8 output and is ~6x faster to produce for the multi-megabyte base64
+    # image strings (the C encoder's non-ASCII-preserving path is slower).
+    payload = json.dumps(snapshot, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if "\\ud" in payload:
+        # Escaped surrogates: astral characters, which are fine, or lone surrogates, which UTF-8 cannot encode (the
+        # API answers with UTF-8 JSON). Reject the latter as the UTF-8 encoding always did.
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    data = payload.encode("ascii")
+    # The limit bounds the stored file: non-ASCII text counts as its escapes.
+    if len(data) > _MAX_SNAPSHOT_BYTES:
         raise ValueError(f"last-generation snapshot exceeds the {_MAX_SNAPSHOT_BYTES}-byte retention limit")
-    persistent_artifact_cache.atomic_write(path, payload.encode("utf-8"))
+    persistent_artifact_cache.atomic_write(path, data)
+
+
+def _report_capture_failure():
+    from modules import errors  # not at the top: the tests load this module without the webui runtime
+    errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+
+
+def snapshot_or_report(p, processed) -> dict[str, Any] | None:
+    """The snapshot of a completed generation, built while the request's state (override settings, model) is still
+    live, for persist_or_report once the request's cleanup succeeded. None when there is nothing to capture, or when
+    the build failed: that is reported and never fails the generation it describes."""
+    try:
+        if getattr(p, "_generation_last_captured", False) or not _completed_successfully(p, processed):
+            return None
+        return build_snapshot(p, processed)
+    except Exception:
+        _report_capture_failure()
+        return None
+
+
+def persist_or_report(p, snapshot: dict[str, Any] | None) -> None:
+    """Persist a snapshot_or_report result once per processing object; a failure is reported, as in capture_or_report."""
+    if snapshot is None:
+        return
+    try:
+        with _LOCK:
+            if getattr(p, "_generation_last_captured", False):
+                return
+            persist_snapshot(snapshot)
+            p._generation_last_captured = True
+    except Exception:
+        _report_capture_failure()
 
 
 def capture_or_report(p, processed) -> None:
@@ -646,8 +707,7 @@ def capture_or_report(p, processed) -> None:
     try:
         capture_completed_generation(p, processed)
     except Exception:
-        from modules import errors  # not at the top: the tests load this module without the webui runtime
-        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+        _report_capture_failure()
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:

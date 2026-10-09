@@ -69,6 +69,12 @@ class NetworkOnDisk:
             return self.alias
 
 
+def is_text_encoder_key(sd_key):
+    """Whether a layer key (NetworkModule.sd_key) names a text encoder layer: the layers that use te_multiplier. The
+    U-Net's keys start with diffusion_model_, so their transformer blocks are past the first 20 characters."""
+    return 'transformer' in sd_key[:20]
+
+
 class Network:  # LoraModule
     def __init__(self, name, network_on_disk: NetworkOnDisk):
         self.name = name
@@ -143,7 +149,7 @@ class NetworkModule:
         self.dora_norm_dims = len(self.shape) - 1
 
     def multiplier(self):
-        if 'transformer' in self.sd_key[:20]:
+        if is_text_encoder_key(self.sd_key):
             return self.network.te_multiplier
         else:
             return self.network.unet_multiplier
