@@ -379,6 +379,24 @@ class ConversionCorrectnessTests(unittest.TestCase):
         for key, tensor in finite.items():
             self.assertIs(model[key], tensor)
 
+    def test_other_delete_keeps_v_pred_and_ztsnr_markers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "model.safetensors")
+            save_file(
+                {
+                    "model.diffusion_model.w": torch.ones(2),
+                    "v_pred": torch.tensor([]),
+                    "ztsnr": torch.tensor([]),
+                    "denoiser.sigmas": torch.ones(3),
+                },
+                source,
+            )
+            self._convert(source, others_conv="delete")
+            out = load_file(os.path.join(tmpdir, "out.safetensors"))
+
+        self.assertEqual(sorted(out), ["model.diffusion_model.w", "v_pred", "ztsnr"])
+        self.assertEqual(out["v_pred"].dtype, torch.float32)
+
     def test_resolvers_only_accept_listed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outside = Path(tmpdir) / "outside.safetensors"

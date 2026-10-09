@@ -54,6 +54,11 @@ KNOWN_JUNK_PREFIXES = (
 # In a LoRA file the lora_*/lycoris_* keys are the payload, not junk: only the training/runtime residue is.
 LORA_JUNK_PREFIXES = tuple(prefix for prefix in KNOWN_JUNK_PREFIXES if not prefix.startswith(("lora_", "lycoris_")))
 KNOWN_JUNK_EXACT = {"global_step", "pytorch-lightning_version"}
+# Top-level keys whose presence A1111 reads as model configuration: "v_pred" selects the SDXL v-prediction config
+# (sd_models_config.guess_model_config_from_state_dict) and "ztsnr" the zero-terminal-SNR schedule
+# (sd_models.load_model_weights). They classify as "other" weights; "other: delete" copies them instead, so a
+# conversion never turns a v-pred/ZTSNR model into an eps one.
+MODEL_MARKER_KEYS = {"v_pred", "ztsnr"}
 
 
 class MockModelInfo:
@@ -867,6 +872,8 @@ def do_convert(
             if not isinstance(tensor, Tensor):
                 return
             action = extra_opt[check_weight_type(weight_key)]
+            if action == "delete" and weight_key in MODEL_MARKER_KEYS:
+                action = "copy"
             if action == "convert":
                 ok[weight_key] = convert_tensor(weight_key, tensor)
             elif action == "copy":
