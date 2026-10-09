@@ -236,3 +236,23 @@ def test_local_files_only_requests_stay_local(monkeypatch, class_dicts):
             transformers.configuration_utils.cached_file("some/repo", "config.json", local_files_only=True)
 
     assert calls == [True], "a local-only lookup went to the network"
+
+
+def test_clip_added_tokens_lookup_is_skipped(monkeypatch, class_dicts):
+    """openai/clip-vit-large-patch14 has no added_tokens.json: the tokenizer lookup answers None without a request."""
+    import transformers.tokenization_utils_base
+
+    calls = []
+
+    def cached_file(path_or_repo_id, filename, local_files_only=False, **kwargs):
+        calls.append((path_or_repo_id, filename, local_files_only))
+        return f"/hf-cache/{filename}"
+
+    monkeypatch.setattr(transformers.tokenization_utils_base, "cached_file", cached_file)
+    with sd_disable_initialization.DisableInitialization(disable_clip=True):
+        added_tokens = transformers.tokenization_utils_base.cached_file("openai/clip-vit-large-patch14", "added_tokens.json")
+        vocab = transformers.tokenization_utils_base.cached_file("openai/clip-vit-large-patch14", "vocab.json")
+
+    assert added_tokens is None
+    assert vocab == "/hf-cache/vocab.json"
+    assert calls == [("openai/clip-vit-large-patch14", "vocab.json", True)]

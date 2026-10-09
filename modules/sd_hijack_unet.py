@@ -1,5 +1,4 @@
 import torch
-from packaging import version
 from einops import repeat
 import math
 
@@ -360,7 +359,7 @@ CondFunc('ldm.modules.diffusionmodules.openaimodel.timestep_embedding', timestep
 CondFunc('ldm.modules.attention.SpatialTransformer.forward', spatial_transformer_forward)
 CondFunc('sgm.modules.attention.SpatialTransformer.forward', sgm_spatial_transformer_forward)
 
-if version.parse(torch.__version__) <= version.parse("1.13.2") or torch.cuda.is_available():
+if torch.cuda.is_available():
     CondFunc('ldm.modules.diffusionmodules.util.GroupNorm32.forward', lambda orig_func, self, *args, **kwargs: orig_func(self.float(), *args, **kwargs), unet_needs_upcast)
     CondFunc('ldm.modules.attention.GEGLU.forward', lambda orig_func, self, x: orig_func(self.float(), x.float()).to(devices.dtype_unet), unet_needs_upcast)
     CondFunc('open_clip.transformer.ResidualAttentionBlock.__init__', lambda orig_func, *args, **kwargs: kwargs.update({'act_layer': GELUHijack}) and False or orig_func(*args, **kwargs), lambda _, *args, **kwargs: kwargs.get('act_layer') is None or kwargs['act_layer'] == torch.nn.GELU)

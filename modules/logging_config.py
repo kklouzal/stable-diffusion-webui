@@ -1,28 +1,24 @@
 import logging
 import os
 
-try:
-    from tqdm import tqdm
+from tqdm import tqdm
 
 
-    class TqdmLoggingHandler(logging.Handler):
-        def __init__(self, fallback_handler: logging.Handler):
-            super().__init__()
-            self.fallback_handler = fallback_handler
+class TqdmLoggingHandler(logging.Handler):
+    def __init__(self, fallback_handler: logging.Handler):
+        super().__init__()
+        self.fallback_handler = fallback_handler
 
-        def emit(self, record):
-            try:
-                # If there are active tqdm progress bars,
-                # attempt to not interfere with them.
-                if tqdm._instances:
-                    tqdm.write(self.format(record))
-                else:
-                    self.fallback_handler.emit(record)
-            except Exception:
+    def emit(self, record):
+        try:
+            # If there are active tqdm progress bars,
+            # attempt to not interfere with them.
+            if tqdm._instances:
+                tqdm.write(self.format(record))
+            else:
                 self.fallback_handler.emit(record)
-
-except ImportError:
-    TqdmLoggingHandler = None
+        except Exception:
+            self.fallback_handler.emit(record)
 
 
 def setup_logging(loglevel):
@@ -48,9 +44,7 @@ def setup_logging(loglevel):
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
 
-    if TqdmLoggingHandler:
-        handler = TqdmLoggingHandler(handler)
-
+    handler = TqdmLoggingHandler(handler)
     handler.setFormatter(formatter)
 
     log_level = getattr(logging, loglevel.upper(), None) or logging.INFO

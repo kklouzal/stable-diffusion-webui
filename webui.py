@@ -9,8 +9,6 @@ startup_timer.record("launcher")
 
 initialize.imports()
 
-initialize.check_versions()
-
 
 def create_api(app):
     from modules.api.api import Api

@@ -89,22 +89,3 @@ def run(code, task):
         code()
     except Exception as e:
         display(e, task)
-
-
-def check_versions():
-    from packaging import version
-    import torch
-
-
-    expected_torch_version = "2.1.2"
-
-    if version.parse(torch.__version__) < version.parse(expected_torch_version):
-        print_error_explanation(f"""
-You are running torch {torch.__version__}.
-The program is tested to work with torch {expected_torch_version}.
-To reinstall the desired version, run with commandline flag --reinstall-torch.
-Beware that this will cause a lot of large files to be downloaded, as well as
-there are reports of issues with training tab on the latest version.
-
-Use --skip-version-check commandline argument to disable this check.
-        """.strip())
