@@ -655,7 +655,7 @@ def cross_attention_attnblock_forward(self, x):
         return h3
 
 
-def sdp_attnblock_forward(self, x):
+def sdp_attnblock_forward(self, x, sdpa_backend_override=None):
     h_ = x
     h_ = self.norm(h_)
     q = self.q(h_)
@@ -675,7 +675,7 @@ def sdp_attnblock_forward(self, x):
     v = v.contiguous()
     # Upcasting turns autocast off for the kernel, which autocast would otherwise run in its lower-precision dtype.
     with devices.without_autocast(disable=not upcast):
-        out = run_scaled_dot_product_attention(q, k, v, is_causal=False)
+        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
     out = out.to(dtype)
     out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
     out = self.proj_out(out)
@@ -683,27 +683,8 @@ def sdp_attnblock_forward(self, x):
 
 
 def sdp_no_mem_attnblock_forward(self, x):
-    h_ = x
-    h_ = self.norm(h_)
-    q = self.q(h_)
-    k = self.k(h_)
-    v = self.v(h_)
-    b, c, h, w = q.shape
-    # 4-D layout as in sdp_attnblock_forward; flash only takes 4-D input (and head_dim <= 256, else this stays on math).
-    q, k, v = (rearrange(t, 'b c h w -> b 1 (h w) c') for t in (q, k, v))
-    dtype = q.dtype
-    upcast = shared.opts.upcast_attn
-    if upcast:
-        q, k, v = q.float(), k.float(), v.float()
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    with devices.without_autocast(disable=not upcast):
-        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override="flash,math")
-    out = out.to(dtype)
-    out = rearrange(out, 'b 1 (h w) c -> b c h w', h=h)
-    out = self.proj_out(out)
-    return x + out
+    # Flash takes only the 4-D layout sdp_attnblock_forward builds, and head_dim <= 256; larger heads stay on math.
+    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
 
 
 def sub_quad_attnblock_forward(self, x):
