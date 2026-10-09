@@ -1432,10 +1432,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     # The snapshot helper ignores interrupted/cancelled and empty results, so those
     # cannot replace the last completed generation.
     from modules import generation_last
-    try:
-        generation_last.capture_completed_generation(p, res)
-    except Exception:
-        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+    generation_last.capture_or_report(p, res)
 
     return res
 

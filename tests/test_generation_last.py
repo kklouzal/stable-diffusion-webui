@@ -16,6 +16,16 @@ from PIL import Image
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "generation_last.py"
 
 
+def load_script_arg_range():
+    """modules.scripts.script_arg_range itself, compiled without importing the webui runtime."""
+    path = MODULE_PATH.parent / "scripts.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "script_arg_range"]
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace["script_arg_range"]
+
+
 def load_generation_last(data_path: Path):
     modules_pkg = types.ModuleType("modules")
     modules_pkg.__path__ = []
@@ -24,11 +34,15 @@ def load_generation_last(data_path: Path):
     shared = types.ModuleType("modules.shared")
     shared.opts = types.SimpleNamespace(CLIP_stop_at_last_layers=2)
     shared.state = types.SimpleNamespace(interrupted=False, stopping_generation=False)
+    scripts = types.ModuleType("modules.scripts")
+    scripts.script_arg_range = load_script_arg_range()
 
-    previous = {name: sys.modules.get(name) for name in ("modules", "modules.paths", "modules.shared", "modules.persistent_artifact_cache", "modules.generation_last")}
+    previous = {name: sys.modules.get(name) for name in ("modules", "modules.paths", "modules.shared", "modules.scripts", "modules.persistent_artifact_cache", "modules.generation_last")}
     sys.modules["modules"] = modules_pkg
     sys.modules["modules.paths"] = paths
     sys.modules["modules.shared"] = shared
+    sys.modules["modules.scripts"] = scripts
+    modules_pkg.scripts = scripts
     # Stdlib-only dependency: load the real module so the file runs in isolation.
     cache_spec = importlib.util.spec_from_file_location("modules.persistent_artifact_cache", MODULE_PATH.parent / "persistent_artifact_cache.py")
     artifact_cache = importlib.util.module_from_spec(cache_spec)
@@ -180,6 +194,19 @@ class GenerationLastTests(unittest.TestCase):
         self.assertEqual(path, Path(self.temp.name) / "generation-last" / "generation-last.json")
         self.assertTrue(path.is_file())
         self.assertEqual(list(path.parent.glob(".*")), [])  # no temporary left behind
+
+    def test_capture_or_report_reports_a_failed_snapshot_without_failing_the_generation(self):
+        reports = []
+        errors = types.ModuleType("modules.errors")
+        errors.report = lambda message, exc_info=False: reports.append((message, exc_info))
+        with patch.dict(sys.modules, {"modules.errors": errors}), patch.object(self.module, "persist_snapshot", side_effect=OSError("disk full")):
+            self.assertIsNone(self.module.capture_or_report(StableDiffusionProcessingTxt2Img(), self.processed))
+        self.assertEqual(reports, [("Failed to persist the last-generation snapshot", True)])
+
+        p = StableDiffusionProcessingTxt2Img()
+        self.module.capture_or_report(p, self.processed)
+        self.assertTrue(p._generation_last_captured)
+        self.assertEqual(len(reports), 1)
 
     def test_cancelled_generation_does_not_replace_previous_snapshot(self):
         p = StableDiffusionProcessingTxt2Img()

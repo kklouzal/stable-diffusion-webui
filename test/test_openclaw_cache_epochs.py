@@ -285,35 +285,37 @@ def test_api_generation_regions_lock_queue_before_opaque_owner():
         for item in node.items
         if with_name(item) == "openclaw_cache_epochs.generation_owner"
     ]
-    assert len(owner_contexts) == 2
+    assert len(owner_contexts) == 1
 
-    for method_name, processing_class in (
-        ("text2imgapi", "StableDiffusionProcessingTxt2Img"),
-        ("img2imgapi", "StableDiffusionProcessingImg2Img"),
-    ):
-        method = next(
-            node
-            for node in api.body
-            if isinstance(node, ast.FunctionDef) and node.name == method_name
+    methods = {node.name: node for node in api.body if isinstance(node, ast.FunctionDef)}
+    run_task = methods["_run_generation_task"]
+    queue_contexts = [
+        node
+        for node in ast.walk(run_task)
+        if isinstance(node, ast.With)
+        and any(with_name(item) == "self.queue_lock" for item in node.items)
+    ]
+    assert len(queue_contexts) == 1
+    owner_context = next(
+        node
+        for node in queue_contexts[0].body
+        if isinstance(node, ast.With)
+        and any(
+            with_name(item) == "openclaw_cache_epochs.generation_owner"
+            for item in node.items
         )
-        queue_contexts = [
+    )
+    assert any(
+        isinstance(node, ast.Name) and node.id == "processing_class"
+        for node in ast.walk(owner_context)
+    )
+    names = {node.id for node in ast.walk(run_task) if isinstance(node, ast.Name)}
+    assert {"StableDiffusionProcessingTxt2Img", "StableDiffusionProcessingImg2Img"} <= names
+
+    for method_name in ("text2imgapi", "img2imgapi"):
+        calls = [
             node
-            for node in ast.walk(method)
-            if isinstance(node, ast.With)
-            and any(with_name(item) == "self.queue_lock" for item in node.items)
+            for node in ast.walk(methods[method_name])
+            if isinstance(node, ast.Call) and attribute_name(node.func) == "self._run_generation_task"
         ]
-        assert len(queue_contexts) == 1
-        queue_context = queue_contexts[0]
-        owner_context = next(
-            node
-            for node in queue_context.body
-            if isinstance(node, ast.With)
-            and any(
-                with_name(item) == "openclaw_cache_epochs.generation_owner"
-                for item in node.items
-            )
-        )
-        assert any(
-            isinstance(node, ast.Name) and node.id == processing_class
-            for node in ast.walk(owner_context)
-        )
+        assert len(calls) == 1

@@ -36,7 +36,7 @@ from modules import devices
 from typing import Any
 from contextlib import closing
 from modules import progress as progress_module
-from modules.progress import create_task_id, add_task_to_queue, start_task, finish_task, pending_tasks
+from modules.progress import create_task_id, start_task, finish_task
 
 
 _precision_map_cache_key = None
@@ -409,10 +409,6 @@ def build_precision_map():
     return result
 
 
-class ScriptArgsList(list):
-    pass
-
-
 def _set_script_arg(script_args, index, value):
     """Set a script arg, extending sparse API arg vectors when needed."""
     if index >= len(script_args):
@@ -420,15 +416,16 @@ def _set_script_arg(script_args, index, value):
     script_args[index] = value
 
 
-def _assign_script_args(script_args, script, values, *, exact=False):
-    """Keep fixed extension slots intact; isolate variable-length API arguments."""
+def _assign_script_args(script_args, ranges, script, values, *, exact=False):
+    """Keep fixed extension slots intact; isolate variable-length API arguments at the end of script_args and record
+    their (start, end) in ranges by id(script) (p.openclaw_script_arg_ranges, read through scripts.script_arg_range)."""
     capacity = script.args_to - script.args_from
     for index, value in enumerate(values[:capacity]):
         _set_script_arg(script_args, script.args_from + index, value)
     if len(values) > capacity or (exact and len(values) != capacity):
         start = len(script_args)
         script_args.extend(values)
-        script_args.openclaw_script_arg_ranges[id(script)] = (start, len(script_args))
+        ranges[id(script)] = (start, len(script_args))
 
 
 def api_field_value_type(annotation):
@@ -996,17 +993,6 @@ class Api:
             return func(*args, **kwargs)
 
     @staticmethod
-    def _clear_pending_task_unless_finished(task_id, task_finished):
-        if not task_finished:
-            pending_tasks.pop(task_id, None)
-
-    @staticmethod
-    def _finish_generation_task(task_id):
-        finish_task(task_id)
-        shared.state.end()
-        shared.total_tqdm.clear()
-
-    @staticmethod
     def _create_response(info):
         return models.CreateResponse(info=info)
 
@@ -1123,8 +1109,10 @@ class Api:
             _set_script_arg(default_script_args, script.args_from + idx, value)
 
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
-        script_args = ScriptArgsList(default_script_args.copy())
-        script_args.openclaw_script_arg_ranges = {}
+        """(script_args, ranges): the request's script argument vector and the isolated ranges of variable-length
+        arguments (see _assign_script_args)."""
+        script_args = default_script_args.copy()
+        ranges = {}
 
         if input_script_args is not None:
             for index, value in input_script_args.items():
@@ -1132,7 +1120,7 @@ class Api:
 
         # position 0 in script_arg is the idx+1 of the selectable script that is going to be run when using scripts.scripts_*2img.run()
         if selectable_scripts:
-            _assign_script_args(script_args, selectable_scripts, request.script_args, exact=True)
+            _assign_script_args(script_args, ranges, selectable_scripts, request.script_args, exact=True)
             script_args[0] = selectable_idx + 1
 
         # Now check for always on scripts
@@ -1150,9 +1138,9 @@ class Api:
                     if not isinstance(requested_args, list):
                         raise HTTPException(status_code=422, detail=f"always on script {alwayson_script_name} args must be a list")
 
-                    _assign_script_args(script_args, alwayson_script, requested_args)
+                    _assign_script_args(script_args, ranges, alwayson_script, requested_args)
                     self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
-        return script_args
+        return script_args, ranges
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
         """Processes `infotext` field from the `request`, and sets other fields of the `request` according to what's in infotext.
@@ -1243,22 +1231,46 @@ class Api:
             args.pop(field, None)
         _normalize_controlnet_remote_aliases(args)
 
-        script_args = self.init_script_args(request, default_script_args, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
-        script_arg_ranges = getattr(script_args, "openclaw_script_arg_ranges", {})
+        script_args, script_arg_ranges = self.init_script_args(request, default_script_args, selectable_scripts, selectable_script_idx, script_runner, input_script_args=infotext_script_args)
 
         send_images = args.pop('send_images', True)
         args.pop('save_images', None)
 
         return args, send_images, selectable_scripts, script_args, script_arg_ranges
 
-    @staticmethod
-    def _run_generation_with_scripts(p, script_runner, selectable_scripts, script_args):
-        if selectable_scripts is not None:
-            p.script_args = script_args
-            return script_runner.run(p, *p.script_args) # Need to pass args as list here
+    def _run_generation_task(self, task_id, tabname, args, script_runner, selectable_scripts, script_args, script_arg_ranges, *, configure=None):
+        """Run one "txt2img" or "img2img" API generation as progress task task_id and return its Processed.
 
-        p.script_args = tuple(script_args) # Need to pass args as tuple here
-        return process_images(p)
+        Under queue_lock (one generation at a time: models, shared.state and process-wide script state such as
+        TeaCache's) and the opaque cache owner, builds p from args, lets configure(p) add request state, then runs the
+        selected script or process_images. Both capture the last-generation snapshot of a successful run."""
+        img2img = tabname == "img2img"
+        processing_class = StableDiffusionProcessingImg2Img if img2img else StableDiffusionProcessingTxt2Img
+        controlnet_remote_args = _pop_controlnet_remote_args(args)
+        with self.queue_lock:
+            with openclaw_cache_epochs.generation_owner():
+                with closing(processing_class(sd_model=shared.sd_model, **args)) as p:
+                    _attach_controlnet_remote_args(p, controlnet_remote_args)
+                    if configure is not None:
+                        configure(p)
+                    p.is_api = True
+                    p.scripts = script_runner
+                    p.openclaw_script_arg_ranges = script_arg_ranges
+                    p.outpath_grids = opts.outdir_img2img_grids if img2img else opts.outdir_txt2img_grids
+                    p.outpath_samples = opts.outdir_img2img_samples if img2img else opts.outdir_txt2img_samples
+
+                    try:
+                        shared.state.begin(job=f"scripts_{tabname}")
+                        start_task(task_id)
+                        if selectable_scripts is not None:
+                            p.script_args = script_args
+                            return script_runner.run(p, *p.script_args)  # Need to pass args as list here
+                        p.script_args = tuple(script_args)  # Need to pass args as tuple here
+                        return process_images(p)
+                    finally:
+                        finish_task(task_id)
+                        shared.state.end()
+                        shared.total_tqdm.clear()
 
     @decode_inline_images_once
     def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
@@ -1273,35 +1285,7 @@ class Api:
             self.default_script_arg_txt2img,
         )
 
-        controlnet_remote_args = _pop_controlnet_remote_args(args)
-
-        add_task_to_queue(task_id)
-        task_finished = False
-
-        try:
-            with self.queue_lock:
-                with openclaw_cache_epochs.generation_owner():
-                    with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
-                        _attach_controlnet_remote_args(p, controlnet_remote_args)
-                        p.is_api = True
-                        p.scripts = script_runner
-                        p.openclaw_script_arg_ranges = script_arg_ranges
-                        p.outpath_grids = opts.outdir_txt2img_grids
-                        p.outpath_samples = opts.outdir_txt2img_samples
-
-                        try:
-                            shared.state.begin(job="scripts_txt2img")
-                            start_task(task_id)
-                            processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
-                            try:
-                                generation_last.capture_completed_generation(p, processed)
-                            except Exception:
-                                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
-                        finally:
-                            self._finish_generation_task(task_id)
-                            task_finished = True
-        finally:
-            self._clear_pending_task_unless_finished(task_id, task_finished)
+        processed = self._run_generation_task(task_id, "txt2img", args, script_runner, selectable_scripts, script_args, script_arg_ranges)
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
@@ -1331,43 +1315,18 @@ class Api:
         )
 
         api_timing_start = time.perf_counter()
-        controlnet_remote_args = _pop_controlnet_remote_args(args)
         decoded_init_images = [decode_base64_to_image(x) for x in init_images]
         api_after_decode = time.perf_counter()
 
-        add_task_to_queue(task_id)
-        task_finished = False
+        def configure(p):
+            p.init_images = decoded_init_images
+            # generation_last can retain these inline PNGs instead of re-encoding (never URLs).
+            p.openclaw_api_init_image_sources = [
+                (image, source) for image, source in zip(decoded_init_images, init_images)
+                if not source.startswith(("http://", "https://"))
+            ]
 
-        try:
-            with self.queue_lock:
-                with openclaw_cache_epochs.generation_owner():
-                    with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
-                        _attach_controlnet_remote_args(p, controlnet_remote_args)
-                        p.init_images = decoded_init_images
-                        # generation_last can retain these inline PNGs instead of re-encoding (never URLs).
-                        p.openclaw_api_init_image_sources = [
-                            (image, source) for image, source in zip(decoded_init_images, init_images)
-                            if not source.startswith(("http://", "https://"))
-                        ]
-                        p.is_api = True
-                        p.scripts = script_runner
-                        p.openclaw_script_arg_ranges = script_arg_ranges
-                        p.outpath_grids = opts.outdir_img2img_grids
-                        p.outpath_samples = opts.outdir_img2img_samples
-
-                        try:
-                            shared.state.begin(job="scripts_img2img")
-                            start_task(task_id)
-                            processed = self._run_generation_with_scripts(p, script_runner, selectable_scripts, script_args)
-                            try:
-                                generation_last.capture_completed_generation(p, processed)
-                            except Exception:
-                                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
-                        finally:
-                            self._finish_generation_task(task_id)
-                            task_finished = True
-        finally:
-            self._clear_pending_task_unless_finished(task_id, task_finished)
+        processed = self._run_generation_task(task_id, "img2img", args, script_runner, selectable_scripts, script_args, script_arg_ranges, configure=configure)
 
         api_after_process = time.perf_counter()
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []

@@ -558,6 +558,12 @@ def script_control_api_arg(control):
     return arg_info
 
 
+def script_arg_range(p, script):
+    """(start, end) of script's arguments in p.script_args: the range the API isolated for a variable-length argument
+    list (p.openclaw_script_arg_ranges, see api._assign_script_args), else the script's fixed args_from:args_to slots."""
+    return getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+
+
 class ScriptRunner:
     def __init__(self):
         self.scripts = []
@@ -750,7 +756,7 @@ class ScriptRunner:
         if script is None:
             return None
 
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = script_arg_range(p, script)
         script_args = args[start:end]
         processed = script.run(p, *script_args)
 
@@ -758,10 +764,7 @@ class ScriptRunner:
         # process_images(). Capture that successful UI/API result as well.
         if processed is not None:
             from modules import generation_last
-            try:
-                generation_last.capture_completed_generation(p, processed)
-            except Exception:
-                errors.report("Failed to persist the last-generation snapshot", exc_info=True)
+            generation_last.capture_or_report(p, processed)
 
         shared.total_tqdm.clear()
 
@@ -808,7 +811,7 @@ class ScriptRunner:
 
     @staticmethod
     def _script_args_for(p, script):
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = script_arg_range(p, script)
         return p.script_args[start:end]
 
     @staticmethod

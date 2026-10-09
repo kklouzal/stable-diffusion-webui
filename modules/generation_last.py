@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from modules import paths, persistent_artifact_cache, shared
+from modules import paths, persistent_artifact_cache, scripts, shared
 
 
 SCHEMA_VERSION = 3
@@ -364,7 +364,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
     alwayson = {}
     for script in getattr(runner, "alwayson_scripts", []) or []:
         title = script.title()
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = scripts.script_arg_range(p, script)
         raw_values = list(script_args[start:end])
         if title.casefold() == "controlnet":
             values = [
@@ -389,7 +389,7 @@ def _capture_script_parameters(p, parameters: dict[str, Any], limitations: list[
             _limitation(limitations, "The selected script index is no longer available for replay.")
             return
         script = selectable[selected - 1]
-        start, end = getattr(p, "openclaw_script_arg_ranges", {}).get(id(script), (script.args_from, script.args_to))
+        start, end = scripts.script_arg_range(p, script)
         values = _safe_json(list(script_args[start:end]), limitations, f"script.{script.title()}.args")
         if values is _OMIT:
             return
@@ -647,6 +647,16 @@ def persist_snapshot(snapshot: dict[str, Any], path: Path | None = None) -> None
     if len(payload.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
         raise ValueError(f"last-generation snapshot exceeds the {_MAX_SNAPSHOT_BYTES}-byte retention limit")
     persistent_artifact_cache.atomic_write(path, payload.encode("utf-8"))
+
+
+def capture_or_report(p, processed) -> None:
+    """capture_completed_generation for a generation path: a snapshot that cannot be persisted is reported and never
+    fails the generation it describes."""
+    try:
+        capture_completed_generation(p, processed)
+    except Exception:
+        from modules import errors  # not at the top: the tests load this module without the webui runtime
+        errors.report("Failed to persist the last-generation snapshot", exc_info=True)
 
 
 def capture_completed_generation(p, processed) -> dict[str, Any] | None:

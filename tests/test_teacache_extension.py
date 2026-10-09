@@ -281,15 +281,15 @@ def test_global_session_accessors_are_lock_guarded():
 
 def test_api_generation_paths_hold_queue_lock_for_teacache_global_state():
     source = Path(__file__).resolve().parents[1].joinpath("modules/api/api.py").read_text()
+    run_task = source[source.index("    def _run_generation_task"):source.index("    def text2imgapi")]
     text2img = source[source.index("    def text2imgapi"):source.index("    def img2imgapi")]
     img2img = source[source.index("    def img2imgapi"):source.index("    def _run_extras")]
 
-    assert "with self.queue_lock:" in text2img
-    assert "processed = self._run_generation_with_scripts" in text2img
-    assert text2img.index("with self.queue_lock:") < text2img.index("processed = self._run_generation_with_scripts")
-    assert "with self.queue_lock:" in img2img
-    assert "processed = self._run_generation_with_scripts" in img2img
-    assert img2img.index("with self.queue_lock:") < img2img.index("processed = self._run_generation_with_scripts")
+    locked = run_task.index("with self.queue_lock:")
+    assert locked < run_task.index("return script_runner.run(p, *p.script_args)")
+    assert locked < run_task.index("return process_images(p)")
+    assert "processed = self._run_generation_task(" in text2img
+    assert "processed = self._run_generation_task(" in img2img
 
 
 
