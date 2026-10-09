@@ -41,7 +41,7 @@ import cv2
 import numpy as np
 import torch
 
-from PIL import Image, ImageOps
+from PIL import Image
 from scripts.lvminthin import lvmin_thin, nake_nms
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
 from scripts.hook import restore_secondary_hijacks
@@ -77,35 +77,21 @@ def prepare_mask(
     mask: Image.Image, p: processing.StableDiffusionProcessingImg2Img
 ) -> Image.Image:
     """
-    Prepare an img2img inpaint mask for ControlNet the way StableDiffusionProcessingImg2Img.init prepares the
-    core's: create_binary_mask (an RGBA mask with transparency is its alpha channel, thresholded at 128 when
-    `p.mask_round` is set; any other mask becomes grayscale, mode "L"), invert it when `p.inpainting_mask_invert`
-    is set, then the separable Gaussian blur (`p.mask_blur_x` horizontally, `p.mask_blur_y` vertically; 0 disables
-    an axis).
+    The img2img inpaint mask exactly as StableDiffusionProcessingImg2Img.init prepares the core's
+    (processing.prepare_image_mask): binary, stretched onto the init image `p.init_images[0]` when its size differs,
+    inverted when `p.inpainting_mask_invert`, then blurred by `p.mask_blur_x`/`p.mask_blur_y`. The result has the
+    init image's size, so a crop region computed on it is in the core's (init image) coordinates.
 
     Args:
         mask (Image.Image): The input mask as a PIL Image object.
         p: The img2img processing object (the only kind that carries an inpaint mask).
 
     Returns:
-        mask (Image.Image): The prepared mask as a PIL Image object.
+        mask (Image.Image): The prepared mask, mode "L", of the init image's size.
     """
-    mask = processing.create_binary_mask(mask, round=p.mask_round)
-    if getattr(p, "inpainting_mask_invert", False):
-        mask = ImageOps.invert(mask)
-
-    if getattr(p, "mask_blur_x", 0) > 0:
-        np_mask = np.array(mask)
-        kernel_size = 2 * int(2.5 * p.mask_blur_x + 0.5) + 1
-        np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), p.mask_blur_x)
-        mask = Image.fromarray(np_mask)
-    if getattr(p, "mask_blur_y", 0) > 0:
-        np_mask = np.array(mask)
-        kernel_size = 2 * int(2.5 * p.mask_blur_y + 0.5) + 1
-        np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), p.mask_blur_y)
-        mask = Image.fromarray(np_mask)
-
-    return mask
+    return processing.prepare_image_mask(
+        mask, p.init_images[0].size, mask_round=p.mask_round, invert=p.inpainting_mask_invert,
+        blur_x=p.mask_blur_x, blur_y=p.mask_blur_y)
 
 
 def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:

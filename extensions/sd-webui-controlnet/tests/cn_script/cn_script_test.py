@@ -20,7 +20,7 @@ from modules import processing, shared
 
 class TestPrepareMask(unittest.TestCase):
     def test_prepare_mask(self):
-        p = processing.StableDiffusionProcessingImg2Img()
+        p = processing.StableDiffusionProcessingImg2Img(init_images=[Image.new("RGB", (10, 10))])
         p.inpainting_mask_invert = True
         p.mask_blur_x = p.mask_blur_y = 5
 
@@ -64,7 +64,8 @@ class TestPrepareMask(unittest.TestCase):
             for mask_round in (True, False):
                 for invert in (False, True):
                     with self.subTest(mode=mask.mode, mask_round=mask_round, invert=invert):
-                        p = processing.StableDiffusionProcessingImg2Img(mask_round=mask_round, inpainting_mask_invert=invert)
+                        p = processing.StableDiffusionProcessingImg2Img(
+                            mask_round=mask_round, inpainting_mask_invert=invert, init_images=[Image.new("RGB", mask.size)])
                         p.mask_blur_x = p.mask_blur_y = 0
                         expected = processing.create_binary_mask(mask, round=mask_round)
                         if invert:
@@ -76,17 +77,34 @@ class TestPrepareMask(unittest.TestCase):
                             gray = np.asarray(mask.convert("L"))
                             np.testing.assert_array_equal(np.asarray(processed), 255 - gray if invert else gray)
         # The transparent mask is its alpha channel, not the (black) color channels.
-        p = processing.StableDiffusionProcessingImg2Img()
+        p = processing.StableDiffusionProcessingImg2Img(init_images=[Image.new("RGB", (50, 40))])
         p.mask_blur_x = p.mask_blur_y = 0
         self.assertEqual(prepare_mask(Image.fromarray(alpha, "RGBA"), p).getbbox(), (5, 10, 30, 20))
+
+    def test_mask_of_another_size_is_stretched_onto_the_init_image_first(self):
+        """The core stretches (bilinear) a mask of another size onto the init image before invert and blur."""
+        alpha = np.zeros((45, 60, 4), np.uint8)
+        alpha[10:25, 15:40, 3] = 255
+        mask = Image.fromarray(alpha, "RGBA")
+        p = processing.StableDiffusionProcessingImg2Img(init_images=[Image.new("RGB", (120, 90))], inpainting_mask_invert=True)
+        p.mask_blur_x, p.mask_blur_y = 3, 2
+        # Independent oracle: the core's steps written out.
+        expected = processing.create_binary_mask(mask, round=True).resize((120, 90), resample=Image.Resampling.BILINEAR)
+        expected = np.asarray(ImageOps.invert(expected))
+        expected = cv2.GaussianBlur(expected, (2 * int(2.5 * 3 + 0.5) + 1, 1), 3)
+        expected = cv2.GaussianBlur(expected, (1, 2 * int(2.5 * 2 + 0.5) + 1), 2)
+        processed = prepare_mask(mask, p)
+        self.assertEqual((processed.mode, processed.size), ("L", (120, 90)))
+        np.testing.assert_array_equal(np.asarray(processed), expected)
 
 
 class TestCropWithA1111Mask(unittest.TestCase):
     """Inpaint "Only masked" crops the ControlNet input image to the core's crop region."""
 
-    def processing(self, mask):
+    def processing(self, mask, init_size=None):
         p = processing.StableDiffusionProcessingImg2Img(
-            width=64, height=32, inpaint_full_res=True, inpaint_full_res_padding=4, mask=mask)
+            width=64, height=32, inpaint_full_res=True, inpaint_full_res_padding=4, mask=mask,
+            init_images=[Image.new("RGB", init_size or mask.size)])
         p.mask_blur_x = p.mask_blur_y = 0
         p.extra_generation_params = {}
         return p
@@ -105,6 +123,26 @@ class TestCropWithA1111Mask(unittest.TestCase):
         core_mask = processing.create_binary_mask(p.image_mask, round=p.mask_round)
         region = masking.expand_crop_region(
             masking.get_crop_region_v2(core_mask, p.inpaint_full_res_padding), p.width, p.height, 120, 90)
+        expected = np.stack([
+            np.asarray(images.resize_image(ResizeMode.OUTER_FIT.int_value(), Image.fromarray(image[:, :, i]).crop(region), p.width, p.height))[:, :, 0]
+            for i in range(3)
+        ], axis=2)
+        np.testing.assert_array_equal(self.crop(p, image), expected)
+
+    def test_mask_of_another_size_crops_in_init_image_coordinates(self):
+        """A half-size mask: the core's crop region is in init image (120x90) coordinates, not the mask's."""
+        from modules import images, masking
+
+        image = np.random.default_rng(5).integers(0, 256, (90, 120, 3), dtype=np.uint8)
+        alpha = np.zeros((45, 60, 4), np.uint8)
+        alpha[15:25, 20:35, 3] = 255
+        p = self.processing(Image.fromarray(alpha, "RGBA"), init_size=(120, 90))
+        p.mask_blur_x = 2
+        core_mask = processing.create_binary_mask(p.image_mask, round=p.mask_round).resize((120, 90), resample=Image.Resampling.BILINEAR)
+        core_mask = Image.fromarray(cv2.GaussianBlur(np.asarray(core_mask), (2 * int(2.5 * 2 + 0.5) + 1, 1), 2))
+        region = masking.expand_crop_region(
+            masking.get_crop_region_v2(core_mask, p.inpaint_full_res_padding), p.width, p.height, 120, 90)
+        self.assertGreaterEqual(region[2], 70)  # init image coordinates: the masked x range is 40..70
         expected = np.stack([
             np.asarray(images.resize_image(ResizeMode.OUTER_FIT.int_value(), Image.fromarray(image[:, :, i]).crop(region), p.width, p.height))[:, :, 0]
             for i in range(3)
