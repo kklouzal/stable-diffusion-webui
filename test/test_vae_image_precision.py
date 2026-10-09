@@ -81,3 +81,32 @@ def test_single_sample_to_image_accepts_bf16_decoder_output(monkeypatch):
     expected = np.rint(np.clip(decoded[0].double().numpy() * 0.5 + 0.5, 0.0, 1.0) * 255.0).astype(np.uint8)
     assert image.mode == "RGB"
     assert np.array_equal(np.asarray(image), expected.transpose(1, 2, 0))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_vae_encode_input_is_rounded_once_to_the_vae_dtype(monkeypatch, dtype):
+    # The img2img/hires callers pass float32 [0, 1] images; [-1, 1] is computed in float32 and cast once. Casting
+    # first rounded u / 255 to the VAE dtype and 2x - 1 again (up to half a code off).
+    seen = []
+    model = type("Model", (), {})()
+    model.first_stage_model = torch.nn.Identity()
+    model.encode_first_stage = lambda image: seen.append(image) or image
+    model.get_first_stage_encoding = lambda encoded: encoded
+    monkeypatch.setattr(sd_samplers_common.devices, "dtype_vae", dtype)
+    monkeypatch.setattr(sd_samplers_common.shared, "device", torch.device("cpu"), raising=False)
+
+    codes = torch.arange(256, dtype=torch.float32).reshape(1, 1, 16, 16)
+    image = processing._image_to_chw_float32_array(np.repeat(codes.reshape(16, 16, 1).numpy().astype(np.uint8), 3, axis=2))
+    sd_samplers_common.images_tensor_to_samples(torch.from_numpy(image)[None], 0, model)
+
+    [encoded] = seen
+    assert encoded.dtype == dtype
+    exact = torch.from_numpy(np.arange(256, dtype=np.float64).reshape(16, 16) / 255.0 * 2 - 1)
+    assert torch.equal(encoded[0, 0].double(), exact.to(dtype).double())  # one rounding of the exact value
+    double_rounded = (torch.from_numpy(image[0]).to(dtype) * 2 - 1).double()
+    assert not torch.equal(double_rounded, exact.to(dtype).double())  # the old order differed
+
+    # a caller that already passes the VAE dtype gets the previous result
+    seen.clear()
+    sd_samplers_common.images_tensor_to_samples(torch.from_numpy(image)[None].to(dtype), 0, model)
+    assert torch.equal(seen[0], torch.from_numpy(image)[None].to(dtype) * 2 - 1)

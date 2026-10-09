@@ -118,8 +118,9 @@ def images_tensor_to_samples(image, approximation=None, model=None):
             model = shared.sd_model
         model.first_stage_model.to(devices.dtype_vae)
 
-        image = image.to(shared.device, dtype=devices.dtype_vae)
-        image = image * 2 - 1
+        # [0, 1] -> [-1, 1] in the caller's dtype, then one cast to the VAE's: in a 16-bit VAE dtype the affine rounded
+        # twice (u / 255 and then 2x - 1), off by up to half a code. A caller passing the VAE dtype gets the old result.
+        image = (image.to(shared.device) * 2 - 1).to(dtype=devices.dtype_vae)
         if len(image) > 1:
             try:
                 x_latent = model.get_first_stage_encoding(model.encode_first_stage(image))

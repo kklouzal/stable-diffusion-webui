@@ -1585,8 +1585,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             else:
                 image = _image_to_chw_float32_array(self.firstpass_image)
-                image = torch.from_numpy(np.expand_dims(image, axis=0))
-                image = image.to(shared.device, dtype=devices.dtype_vae)
+                image = torch.from_numpy(np.expand_dims(image, axis=0)).to(shared.device)  # float32: see images_tensor_to_samples
 
                 self.add_vae_encoder_generation_param()
 
@@ -1673,14 +1672,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 image = images.resize_image(0, image, target_width, target_height, upscaler_name=self.hr_upscaler)
                 batch_images.append(_image_to_chw_float32_array(image))
 
-            decoded_samples = torch.from_numpy(np.array(batch_images))
-            decoded_samples = decoded_samples.to(shared.device, dtype=devices.dtype_vae)
+            decoded_samples = torch.from_numpy(np.array(batch_images)).to(shared.device)  # float32: see images_tensor_to_samples
 
             self.add_vae_encoder_generation_param()
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
 
             # Image conditioning reads [-1, 1] sources, as on the latent path (decode_first_stage) and in img2img.
-            source_image = decoded_samples * 2 - 1 if self.img2img_image_conditioning_reads_source() else None
+            source_image = (decoded_samples * 2 - 1).to(devices.dtype_vae) if self.img2img_image_conditioning_reads_source() else None
             image_conditioning = self.img2img_image_conditioning(source_image, samples)
 
         shared.state.nextjob()
@@ -2174,8 +2172,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         # A single image stays a strided view (its NHWC memory layout reaches the VAE unchanged).
         batch_images = np.expand_dims(imgs[0], axis=0) if len(imgs) == 1 else np.array(imgs)
 
-        image = torch.from_numpy(batch_images)
-        image = image.to(shared.device, dtype=devices.dtype_vae)
+        # float32: images_tensor_to_samples maps it to [-1, 1] before its one cast to the VAE dtype
+        image = torch.from_numpy(batch_images).to(shared.device)
 
         self.init_latent = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
 
@@ -2202,7 +2200,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             elif self.inpainting_fill == 3:
                 self.init_latent = self.init_latent * self.mask
 
-        self.image_conditioning = self.img2img_image_conditioning(image * 2 - 1, self.init_latent, image_mask, self.mask_round)
+        self.image_conditioning = self.img2img_image_conditioning((image * 2 - 1).to(devices.dtype_vae), self.init_latent, image_mask, self.mask_round)
         self._store_img2img_init_cache(init_cache_key, init_cache_started, cache_extra_generation_params, add_color_corrections)
 
     def close(self):
