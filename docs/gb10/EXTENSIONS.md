@@ -83,7 +83,8 @@ What the patches do:
   - Tiled VAE results: exact group-norm statistics in non-fast mode (pooled over each tile's own region), float32
     normalize, encoder tiles on the 8-pixel latent grid; fast mode keeps its estimated statistics
   - noise inversion: this batch's prompts with extra networks parsed out, SDXL size conditioning, and an
-    inverted-noise cache that never outlives a request and is reused only for exact matches
+    inverted-noise cache that never outlives a request and is reused only for exact matches (Tiled Diffusion and
+    DemoFusion)
   - region prompt control on SDXL/SD3 fails before any work instead of with a TypeError mid-sampling
 - **`patch-ultimate-upscale-state-lifecycle.py`** fixes how Ultimate Upscale handles job state and reports results:
   - The request's job owns the shared state; there is no nested `state.begin()`/`end()`, so an interrupt sent while
