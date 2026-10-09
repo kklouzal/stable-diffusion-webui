@@ -5,7 +5,6 @@ patcher in test_gb10_multidiffusion_performance_patcher.py and the run.sh order 
 """
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import subprocess
 import sys
@@ -13,6 +12,8 @@ import types
 from pathlib import Path
 
 import pytest
+
+from test.helpers import load_source, module
 
 ROOT = Path(__file__).parents[1]
 GB10 = ROOT / "gb10"
@@ -28,17 +29,10 @@ def installed_extension(name: str) -> Path | None:
 INSTALLED_UU = installed_extension("ultimate-upscale-for-automatic1111")
 
 
-def load_patcher(path: Path, name: str):
-    if str(GB10) not in sys.path:
-        sys.path.insert(0, str(GB10))  # the patchers import patchlib as a sibling module, as under run.sh
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-UU_MODULE = load_patcher(UU_PATCHER, "gb10_patch_ultimate_upscale_state_lifecycle")
-SUBCANVAS_MODULE = load_patcher(SUBCANVAS_PATCHER, "gb10_patch_ultimate_upscale_subcanvas_for_lifecycle")
+# The patchers import patchlib as a sibling module, as under run.sh.
+PATCHLIB = {"patchlib": load_source("patchlib", GB10 / "patchlib.py")}
+UU_MODULE = load_source("gb10_patch_ultimate_upscale_state_lifecycle", UU_PATCHER, PATCHLIB)
+SUBCANVAS_MODULE = load_source("gb10_patch_ultimate_upscale_subcanvas_for_lifecycle", SUBCANVAS_PATCHER, PATCHLIB)
 
 
 def run_patcher(patcher: Path, target: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -101,43 +95,20 @@ class _State:
         self.events.append("end")
 
 
-def load_usdu_module(path: Path, state: _State, monkeypatch):
-    modules_pkg = types.ModuleType("modules")
-    modules_pkg.__path__ = []
-    modules_pkg.devices = types.SimpleNamespace(device="cpu")
-    modules_pkg.scripts = types.SimpleNamespace(Script=object)
-    shared_mod = types.ModuleType("modules.shared")
-    shared_mod.state = state
-    shared_mod.opts = types.SimpleNamespace()
-    shared_mod.sd_upscalers = [types.SimpleNamespace(name="fixture", scaler=types.SimpleNamespace(upscale=lambda image, scale, data_path: image), data_path="")]
-    processing_mod = types.ModuleType("modules.processing")
-    processing_mod.StableDiffusionProcessing = object
-    processing_mod.Processed = object
-    images_mod = types.ModuleType("modules.images")
-    images_mod.save_image = lambda *args, **kwargs: None
-    gradio_mod = types.ModuleType("gradio")
-    gradio_mod.Blocks = object
-    gradio_mod.Dropdown = object
-    gradio_mod.Slider = object
-    gradio_mod.Accordion = object
-    gradio_mod.Checkbox = object
-    gradio_mod.HTML = object
-    gradio_mod.Row = object
-    gradio_mod.Radio = object
-
-    # monkeypatch restores the real webui modules for later tests.
-    monkeypatch.setitem(sys.modules, "modules", modules_pkg)
-    monkeypatch.setitem(sys.modules, "modules.shared", shared_mod)
-    monkeypatch.setitem(sys.modules, "modules.processing", processing_mod)
-    monkeypatch.setitem(sys.modules, "modules.images", images_mod)
-    monkeypatch.setitem(sys.modules, "gradio", gradio_mod)
-
-    spec = importlib.util.spec_from_file_location("ultimate_upscale_fixture", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "ultimate_upscale_fixture", module)
-    spec.loader.exec_module(module)
-    return module
+def load_usdu_module(path: Path, state: _State):
+    return load_source("ultimate_upscale_fixture", path, {
+        "modules": module("modules", package=True, devices=types.SimpleNamespace(device="cpu"), scripts=types.SimpleNamespace(Script=object)),
+        "modules.shared": module(
+            "modules.shared",
+            state=state,
+            opts=types.SimpleNamespace(),
+            sd_upscalers=[types.SimpleNamespace(name="fixture", scaler=types.SimpleNamespace(upscale=lambda image, scale, data_path: image), data_path="")],
+        ),
+        "modules.processing": module("modules.processing", StableDiffusionProcessing=object, Processed=object),
+        "modules.images": module("modules.images", save_image=lambda *args, **kwargs: None),
+        "gradio": module(
+            "gradio", Blocks=object, Dropdown=object, Slider=object, Accordion=object, Checkbox=object, HTML=object, Row=object, Radio=object),
+    })
 
 
 def make_usdu(module, *, redraw_enabled: bool = False, seams_enabled: bool = False, fail: bool = False):
@@ -176,10 +147,10 @@ def make_usdu(module, *, redraw_enabled: bool = False, seams_enabled: bool = Fal
     return usdu
 
 
-def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: Path, monkeypatch):
+def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: Path):
     module_path = ultimate_copy / "scripts" / "ultimate-upscale.py"
     state = _State()
-    module = load_usdu_module(module_path, state, monkeypatch)
+    module = load_usdu_module(module_path, state)
     usdu = make_usdu(module, redraw_enabled=True, fail=True)
 
     with pytest.raises(RuntimeError, match="redraw boom"):
@@ -188,7 +159,7 @@ def test_ultimate_upscale_fixture_leaves_state_open_on_exception(ultimate_copy: 
     assert state.events == ["begin"]
 
 
-def test_ultimate_upscale_patcher_idempotent_success_and_exception_lifecycle(ultimate_copy: Path, monkeypatch):
+def test_ultimate_upscale_patcher_idempotent_success_and_exception_lifecycle(ultimate_copy: Path):
     module_path = ultimate_copy / "scripts" / "ultimate-upscale.py"
     first = run_patcher(UU_PATCHER, ultimate_copy)
     patched = module_path.read_text(encoding="utf-8")
@@ -201,12 +172,12 @@ def test_ultimate_upscale_patcher_idempotent_success_and_exception_lifecycle(ult
     assert "finally:\n            state.end()" in patched
 
     success_state = _State()
-    module = load_usdu_module(module_path, success_state, monkeypatch)
+    module = load_usdu_module(module_path, success_state)
     make_usdu(module).process()
     assert success_state.events == ["begin", "end"]
 
     exception_state = _State()
-    module = load_usdu_module(module_path, exception_state, monkeypatch)
+    module = load_usdu_module(module_path, exception_state)
     usdu = make_usdu(module, redraw_enabled=True, fail=True)
     with pytest.raises(RuntimeError, match="redraw boom"):
         usdu.process()

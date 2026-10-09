@@ -15,12 +15,11 @@ from pathlib import Path
 
 import pytest
 
-GB10 = Path(__file__).parents[1] / "gb10"
-if str(GB10) not in sys.path:
-    sys.path.insert(0, str(GB10))  # the patchers import patchlib as a sibling module, as under `python3 gb10/patch-x.py`
+from test.helpers import load_source
 
-import patchlib  # noqa: E402
-from patchlib import Block, apply_blocks  # noqa: E402
+GB10 = Path(__file__).parents[1] / "gb10"
+patchlib = load_source("patchlib", GB10 / "patchlib.py")
+Block, apply_blocks = patchlib.Block, patchlib.apply_blocks
 
 LABEL = "Fixture"
 BLOCKS = [Block("A", "a = 1\n", "a = 2\n"), Block("B", "b = 1\n", "b = 2  # gb10\n", sentinel="# gb10")]

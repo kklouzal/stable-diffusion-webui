@@ -7,8 +7,6 @@ the init latent, nmask and image conditioning.
 """
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import random
 import shutil
 import subprocess
@@ -18,31 +16,22 @@ from pathlib import Path
 
 import pytest
 
+from test.helpers import init_shared, load_source
+
 ROOT = Path(__file__).parents[1]
 GB10 = ROOT / "gb10"
 PATCHER = GB10 / "patch-ultimate-upscale-subcanvas.py"
 EXTENSION = "ultimate-upscale-for-automatic1111"
 # The host deploy root, or the same checkout where run.sh mounts it inside a webui container.
 INSTALLED_UU = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensions") / EXTENSION, ROOT / "extensions" / EXTENSION) if path.is_dir()), None)
-MODULE_NAMES = ("modules", "modules.shared", "modules.processing", "modules.images", "modules.devices", "modules.scripts", "modules.masking")
-# Other tests replace these sys.modules entries with stubs and never restore them; keep the real objects we see.
-_REAL_MODULES = {name: sys.modules[name] for name in MODULE_NAMES if getattr(sys.modules.get(name), "__file__", None)}
 
 
 def run_patcher(target: Path, *extra: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(PATCHER), str(target), *extra], check=check, capture_output=True, text=True)
 
 
-def _load_patcher():
-    if str(GB10) not in sys.path:
-        sys.path.insert(0, str(GB10))  # the patcher imports patchlib as a sibling module, as under run.sh
-    spec = importlib.util.spec_from_file_location("gb10_patch_ultimate_upscale_subcanvas", PATCHER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-PATCHER_MODULE = _load_patcher()
+# The patcher imports patchlib as a sibling module, as under run.sh.
+PATCHER_MODULE = load_source("gb10_patch_ultimate_upscale_subcanvas", PATCHER, {"patchlib": load_source("patchlib", GB10 / "patchlib.py")})
 
 
 @pytest.fixture()
@@ -138,20 +127,8 @@ class _StubModel:
 
 @pytest.fixture()
 def real_modules(monkeypatch):
-    monkeypatch.setenv("IGNORE_CMD_ARGS_ERRORS", "1")
-    for name in MODULE_NAMES:
-        if name in _REAL_MODULES:
-            monkeypatch.setitem(sys.modules, name, _REAL_MODULES[name])
-        elif name in sys.modules and not getattr(sys.modules[name], "__file__", None):
-            monkeypatch.delitem(sys.modules, name)
-    from modules import shared, shared_init
-    if getattr(shared, "opts", None) is None:
-        shared_init.initialize()
+    shared = init_shared()
     from modules import processing, sd_samplers
-    for name in MODULE_NAMES:
-        _REAL_MODULES[name] = importlib.import_module(name)
-    if "gradio" not in sys.modules and importlib.util.find_spec("gradio") is None:
-        monkeypatch.setitem(sys.modules, "gradio", types.ModuleType("gradio"))
     for key, value in {
         "sd_vae_encode_method": "Full",
         "img2img_color_correction": False,
@@ -170,19 +147,12 @@ def real_modules(monkeypatch):
     return types.SimpleNamespace(processing=processing, shared=shared, model=model)
 
 
-def load_usdu(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 @pytest.fixture()
 def usdu_pair(usdu_source: Path, tmp_path: Path, real_modules):
     patched_path = tmp_path / "patched-ultimate-upscale.py"
     shutil.copyfile(usdu_source, patched_path)
     run_patcher(patched_path)
-    return load_usdu(usdu_source, "usdu_unpatched_fixture"), load_usdu(patched_path, "usdu_patched_fixture")
+    return load_source("usdu_unpatched_fixture", usdu_source), load_source("usdu_patched_fixture", patched_path)
 
 
 class Recorder:

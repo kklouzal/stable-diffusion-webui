@@ -11,7 +11,7 @@ import ast
 import contextlib
 import copy
 import functools
-import importlib.util
+import importlib
 import math
 import re
 import resource
@@ -26,6 +26,9 @@ import pytest
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from test.helpers import load_source, stub_modules
+from test.helpers import module as stub
+
 ROOT = Path(__file__).parents[1]
 GB10 = ROOT / "gb10"
 PATCHER = GB10 / "patch-multidiffusion-performance.py"
@@ -37,16 +40,8 @@ UTILS = "tile_utils/utils.py"
 TERMINAL_HELPER = "def _gb10_terminal_tile_origins"
 
 
-def load_patcher():
-    if str(GB10) not in sys.path:
-        sys.path.insert(0, str(GB10))  # the patcher imports patchlib as a sibling module, as under run.sh
-    spec = importlib.util.spec_from_file_location("gb10_patch_multidiffusion_performance", PATCHER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-PATCHER_MODULE = load_patcher()
+# The patcher imports patchlib as a sibling module, as under run.sh.
+PATCHER_MODULE = load_source("gb10_patch_multidiffusion_performance", PATCHER, {"patchlib": load_source("patchlib", "gb10/patchlib.py")})
 TARGETS = list(PATCHER_MODULE.BLOCKS)
 
 
@@ -306,15 +301,6 @@ def webui_stubs(monkeypatch):
     calls = {"torch_gc": 0, "approx": 0, "sdpa": []}
     cpu = torch.device("cpu")
 
-    def stub(name, **attrs):
-        module = types.ModuleType(name)
-        module.__dict__.update(attrs)
-        monkeypatch.setitem(sys.modules, name, module)
-        parent, _, child = name.rpartition(".")
-        if parent:
-            setattr(sys.modules[parent], child, module)
-        return module
-
     def torch_gc():
         calls["torch_gc"] += 1
 
@@ -334,41 +320,48 @@ def webui_stubs(monkeypatch):
         calls.setdefault("sdpa_dtypes", []).append((q.dtype, torch.is_autocast_enabled("cpu")))
         return fork_run_sdpa(q, k, v, **kwargs)
 
-    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
-    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"))
-    shared = types.SimpleNamespace(state=state, opts=types.SimpleNamespace(upcast_attn=False), sd_model=sd_model)
-
-    stub("gradio")
-    stub("gradio.components", Component=object)
-    stub("modules", __path__=[])
-    stub("modules.scripts", Script=object, AlwaysVisible=object())
     def without_autocast(disable=False):
         # modules.devices.without_autocast, for the CPU autocast these tests can run under.
         return torch.autocast("cpu", enabled=False) if torch.is_autocast_enabled("cpu") and not disable else contextlib.nullcontext()
 
-    stub("modules.devices", device=cpu, cpu=cpu, get_optimal_device=lambda: cpu, get_optimal_device_name=lambda: "cpu",
-         torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException,
-         without_autocast=without_autocast)
-    stub("modules.shared", state=state, opts=shared.opts, sd_model=sd_model, cmd_opts=types.SimpleNamespace())
-    stub("modules.ui", gr_show=lambda *_args, **_kwargs: None)
-    stub("modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object)
-    stub("modules.sd_vae_approx", cheap_approximation=cheap_approximation)
-    stub("modules.sd_hijack", model_hijack=types.SimpleNamespace(optimization_method="none"))
-    stub("modules.sd_hijack_optimizations", get_available_vram=lambda: 2**40, get_xformers_flash_attention_op=lambda *_args: None,
-         sub_quad_attention=None, run_scaled_dot_product_attention=run_scaled_dot_product_attention)
-    stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object)
-    stub("modules.extra_networks", ExtraNetworkParams=object)
-    stub("modules.sd_samplers_common")
-    stub("modules.sd_samplers_kdiffusion", KDiffusionSampler=type("KDiffusionSampler", (), {}), CFGDenoiser=object, CFGDenoiserKDiffusion=object)
-    stub("modules.sd_samplers_timesteps", CompVisSampler=type("CompVisSampler", (), {}), CFGDenoiserTimesteps=object,
-         CompVisTimestepsDenoiser=object, CompVisTimestepsVDenoiser=object)
-    stub("modules.shared_state", State=object)
-    for package in ("ldm", "ldm.modules", "ldm.modules.diffusionmodules", "ldm.models", "ldm.models.diffusion", "k_diffusion"):
-        stub(package, __path__=[])
-    stub("ldm.modules.diffusionmodules.model", AttnBlock=object, MemoryEfficientAttnBlock=object)
-    stub("ldm.models.diffusion.ddpm", LatentDiffusion=type("LatentDiffusion", (), {"apply_model": lambda *_args: None}))
-    stub("k_diffusion.external", CompVisDenoiser=object, CompVisVDenoiser=object)
-    return types.SimpleNamespace(state=state, calls=calls, shared=sys.modules["modules.shared"], hijack=sys.modules["modules.sd_hijack"])
+    state = types.SimpleNamespace(interrupted=False, sampling_step=0, sampling_steps=4)
+    sd_model = types.SimpleNamespace(cond_stage_key="txt", model=types.SimpleNamespace(conditioning_key="crossattn"))
+    shared = stub("modules.shared", state=state, opts=types.SimpleNamespace(upcast_attn=False), sd_model=sd_model, cmd_opts=types.SimpleNamespace())
+    hijack = stub("modules.sd_hijack", model_hijack=types.SimpleNamespace(optimization_method="none"))
+    packages = ("modules", "ldm", "ldm.modules", "ldm.modules.diffusionmodules", "ldm.models", "ldm.models.diffusion", "k_diffusion")
+    stubs = {
+        **{name: stub(name, package=True) for name in packages},
+        "gradio": stub("gradio"),
+        "gradio.components": stub("gradio.components", Component=object),
+        "modules.scripts": stub("modules.scripts", Script=object, AlwaysVisible=object()),
+        "modules.devices": stub(
+            "modules.devices", device=cpu, cpu=cpu, get_optimal_device=lambda: cpu, get_optimal_device_name=lambda: "cpu",
+            torch_gc=torch_gc, autocast=contextlib.nullcontext, test_for_nans=test_for_nans, NansException=NansException,
+            without_autocast=without_autocast),
+        "modules.shared": shared,
+        "modules.ui": stub("modules.ui", gr_show=lambda *_args, **_kwargs: None),
+        "modules.processing": stub("modules.processing", opt_f=8, StableDiffusionProcessing=object, StableDiffusionProcessingImg2Img=object, Processed=object),
+        "modules.sd_vae_approx": stub("modules.sd_vae_approx", cheap_approximation=cheap_approximation),
+        "modules.sd_hijack": hijack,
+        "modules.sd_hijack_optimizations": stub(
+            "modules.sd_hijack_optimizations", get_available_vram=lambda: 2**40, get_xformers_flash_attention_op=lambda *_args: None,
+            sub_quad_attention=None, run_scaled_dot_product_attention=run_scaled_dot_product_attention),
+        "modules.prompt_parser": stub("modules.prompt_parser", MulticondLearnedConditioning=object, ScheduledPromptConditioning=object),
+        "modules.extra_networks": stub("modules.extra_networks", ExtraNetworkParams=object),
+        "modules.sd_samplers_common": stub("modules.sd_samplers_common"),
+        "modules.sd_samplers_kdiffusion": stub(
+            "modules.sd_samplers_kdiffusion", KDiffusionSampler=type("KDiffusionSampler", (), {}), CFGDenoiser=object, CFGDenoiserKDiffusion=object),
+        "modules.sd_samplers_timesteps": stub(
+            "modules.sd_samplers_timesteps", CompVisSampler=type("CompVisSampler", (), {}), CFGDenoiserTimesteps=object,
+            CompVisTimestepsDenoiser=object, CompVisTimestepsVDenoiser=object),
+        "modules.shared_state": stub("modules.shared_state", State=object),
+        "ldm.modules.diffusionmodules.model": stub("ldm.modules.diffusionmodules.model", AttnBlock=object, MemoryEfficientAttnBlock=object),
+        "ldm.models.diffusion.ddpm": stub("ldm.models.diffusion.ddpm", LatentDiffusion=type("LatentDiffusion", (), {"apply_model": lambda *_args: None})),
+        "k_diffusion.external": stub("k_diffusion.external", CompVisDenoiser=object, CompVisVDenoiser=object),
+    }
+    # Installed for the whole test: the extension imports some of them lazily.
+    with stub_modules(stubs):
+        yield types.SimpleNamespace(state=state, calls=calls, shared=shared, hijack=hijack)
 
 
 def evict_extension_modules():
@@ -387,12 +380,9 @@ def import_extension(webui_stubs):
             modules = []
             for name in names:
                 if name.startswith("scripts/"):
-                    spec = importlib.util.spec_from_file_location(f"md_{root.name}_{Path(name).stem}", root / name)
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
+                    modules.append(load_source(f"md_{root.name}_{Path(name).stem}", root / name))
                 else:
-                    module = importlib.import_module(name)
-                modules.append(module)
+                    modules.append(importlib.import_module(name))
             return modules
         finally:
             sys.path.remove(str(root))
