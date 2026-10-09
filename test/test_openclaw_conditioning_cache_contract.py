@@ -37,7 +37,7 @@ def test_conditioning_key_covers_parser_tokenization_and_effective_network_state
         "opts.use_old_emphasis_implementation",
         "opts.comma_padding_backtrack",
         "required_prompts",
-        "extra_network_data",
+        "_conditioning_extra_network_data(extra_network_data)",
     }
     assert required <= elements
 
@@ -145,7 +145,7 @@ def test_conditioning_key_tracks_dependency_epochs_and_effective_network_state(p
 
 def test_effective_network_state_is_the_published_lora_identity(processing, monkeypatch):
     p = processing.StableDiffusionProcessingTxt2Img.__new__(processing.StableDiffusionProcessingTxt2Img)
-    monkeypatch.setitem(sys.modules, "networks", SimpleNamespace(current_network_state_identity=lambda: ("published", "alpha")))
+    monkeypatch.setitem(sys.modules, "networks", SimpleNamespace(current_text_encoder_state_identity=lambda: ("published", "alpha")))
     assert p.active_lora_cond_signature() == ("published", "alpha")
     monkeypatch.setitem(sys.modules, "networks", None)  # the Lora extension is not loaded
     assert p.active_lora_cond_signature() == ()

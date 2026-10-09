@@ -169,6 +169,16 @@ def _record_cache_stats_miss(stats, started_at):
     stats["compute_seconds"] = round(float(stats.get("compute_seconds") or 0.0) + (time.perf_counter() - started_at), 3)
 
 
+# Extra networks whose effect on the conditioning the cond cache key holds otherwise: LoRA through the published text
+# encoder state (active_lora_cond_signature); hypernetworks act on the U-Net's cross-attention only.
+_COND_KEY_COVERED_EXTRA_NETWORKS = frozenset(("lora", "lyco", "hypernet"))
+
+
+def _conditioning_extra_network_data(extra_network_data):
+    """The prompt's extra-network parameters the conditioning may depend on: those of networks it does not cover."""
+    return {name: params for name, params in (extra_network_data or {}).items() if name not in _COND_KEY_COVERED_EXTRA_NETWORKS}
+
+
 # color_corrections is cached separately: only when the request computed it (a caller's preset value is its own).
 _IMG2IMG_INIT_CACHE_ATTRS = ("init_latent", "image_conditioning", "mask", "nmask", "mask_for_overlay", "overlay_images", "paste_to")
 
@@ -553,10 +563,10 @@ class StableDiffusionProcessing:
         self.main_negative_prompt = self.all_negative_prompts[0]
 
     def active_lora_cond_signature(self):
-        """Return the canonical atomically-published effective network state."""
+        """Return the published LoRA state the text encoders run with (networks.current_text_encoder_state_identity)."""
         try:
             import networks
-            return networks.current_network_state_identity()
+            return networks.current_text_encoder_state_identity()
         except (ImportError, AttributeError):
             return ()
 
@@ -579,7 +589,7 @@ class StableDiffusionProcessing:
             opts.sdxl_clip_l_skip,
             shared.sd_model.sd_checkpoint_info,
             effective_network_state,
-            extra_network_data,
+            _conditioning_extra_network_data(extra_network_data),
             opts.sdxl_crop_left,
             opts.sdxl_crop_top,
             self.width,

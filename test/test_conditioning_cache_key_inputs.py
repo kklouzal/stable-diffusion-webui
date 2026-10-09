@@ -116,3 +116,16 @@ def test_failed_conditioning_keeps_existing_infotext(p, monkeypatch):
     with pytest.raises(RuntimeError, match="encoder failed"):
         p.get_conds_with_caching("c", fail, prompt_parser.SdConditioning(["x"]), 20, [None, None], None)
     assert processing.model_hijack.extra_generation_params == {"TI hashes": "a: h"}
+
+
+def test_key_ignores_extra_network_tags_it_covers_otherwise(p):
+    # LoRA reaches the key through the published text encoder state; hypernetworks act on the U-Net only. Tags of
+    # other extra networks still key the conditioning.
+    from modules.extra_networks import ExtraNetworkParams
+
+    prompts = prompt_parser.SdConditioning(["a"], width=1024, height=1024)
+    base = p.cached_params("c", prompts, 20, {})
+    covered = {"lora": [ExtraNetworkParams(["detail", "1", "0.4"])], "lyco": [ExtraNetworkParams(["x"])], "hypernet": [ExtraNetworkParams(["h", "0.5"])]}
+    assert p.cached_params("c", prompts, 20, covered) == base
+    assert p.cached_params("c", prompts, 20, {**covered, "other": [ExtraNetworkParams(["o"])]}) != base
+

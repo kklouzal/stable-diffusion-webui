@@ -334,10 +334,28 @@ def network_applied_state_key(networks_to_apply):
     return (ordered, _execution_identity(), _application_mode(), LORA_APPLIED_IMPLEMENTATION_REVISION)
 
 
-def current_network_state_identity():
-    """Return the atomically published effective LoRA state, not its transition history."""
+def current_text_encoder_state_identity():
+    """The part of the published LoRA state the text encoders run with, which the conditioning cache keys on: the
+    ordered networks that have text encoder layers, each with its source, te multiplier, dyn dim and those layers, plus
+    how the published state was applied (execution identity, merged/functional, implementation revision).
+
+    Networks without text encoder layers, unet multipliers and U-Net layers leave every text encoder weight as it is
+    (each layer sums only the deltas of the networks that touch it, in application order). Bundled embeddings are
+    covered by the textual_inversion_epoch their publication bumps."""
     with _network_application_lock:
-        return _applied_state_key or network_applied_state_key(())
+        applied_key = _applied_state_key or network_applied_state_key(())
+        published = tuple(loaded_networks)
+    ordered = []
+    for net in published:
+        text_encoder_layers = tuple(sorted(key for key in getattr(net, "modules", {}) if network.is_text_encoder_key(key)))
+        if text_encoder_layers:
+            ordered.append((
+                getattr(net, "source_key", network_source_key(getattr(net, "network_on_disk", None), getattr(net, "source_signature", None))),
+                float(getattr(net, "te_multiplier", 1.0)).hex(),
+                getattr(net, "dyn_dim", None),
+                text_encoder_layers,
+            ))
+    return (tuple(ordered), *applied_key[1:])
 
 
 def _apply_loaded_state_to_model():
