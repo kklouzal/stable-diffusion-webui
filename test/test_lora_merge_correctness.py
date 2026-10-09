@@ -9,10 +9,9 @@ import dataclasses
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from modules.torchao_weight_quant import NVFP4
-
-torch = pytest.importorskip("torch")
 
 
 def _net(networks, name, multiplier=1.0):
