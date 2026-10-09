@@ -331,44 +331,32 @@ def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(mon
     ]
 
 
-def test_openclaw_runtime_defaults_apply_env_values_without_raising(monkeypatch):
+def test_openclaw_runtime_defaults_apply_the_sdpa_env_value_without_raising(monkeypatch):
     api_class = load_api_control_class()
     calls = []
 
-    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "math")
-    monkeypatch.setenv("OPENCLAW_CUDA_GRAPHS", "true")
-
     sdpa_stub = SimpleNamespace(set_sdpa_backend=lambda value: calls.append(("sdpa", value)))
-    errors_stub = SimpleNamespace(report=lambda *args, **kwargs: calls.append(("error", args, kwargs)))
-
-    class CudaGraphs:
-        @staticmethod
-        def set_enabled(enabled, clear=False):
-            calls.append(("graphs", enabled, clear))
-
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        return real_import(name, globals, locals, fromlist, level)
-
+    errors_stub = SimpleNamespace(report=lambda *args, **kwargs: calls.append(("error", args[0])))
     monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__, "sd_hijack_optimizations", sdpa_stub)
     monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__, "errors", errors_stub)
-    monkeypatch.setitem(api_class.apply_openclaw_runtime_defaults.__globals__["__builtins__"], "__import__", fake_import)
 
     api = api_class.__new__(api_class)
+    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "math")
     api.apply_openclaw_runtime_defaults()
+    assert calls == [("sdpa", "math")]
 
-    assert calls == [("sdpa", "math"), ("graphs", True, True)]
-    monkeypatch.setenv("OPENCLAW_CUDA_GRAPHS", "off")
     calls.clear()
+    monkeypatch.delenv("OPENCLAW_SDPA_BACKEND")
     api.apply_openclaw_runtime_defaults()
-    assert calls == [("sdpa", "math"), ("graphs", False, True)]
-    monkeypatch.delenv("OPENCLAW_CUDA_GRAPHS")
-    calls.clear()
+    assert calls == []  # unset leaves the attention backend untouched
+
+    def failing(value):
+        raise ValueError(value)
+
+    sdpa_stub.set_sdpa_backend = failing
+    monkeypatch.setenv("OPENCLAW_SDPA_BACKEND", "bogus")
     api.apply_openclaw_runtime_defaults()
-    assert calls == [("sdpa", "math")]  # unset leaves the graph runtime untouched
+    assert calls == [("error", "Failed to apply OpenClaw SDPA backend default from environment")]
 
 
 def test_get_memory_preserves_ram_and_cuda_response_shape(monkeypatch):

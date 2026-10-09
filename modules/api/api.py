@@ -907,14 +907,6 @@ class Api:
             except Exception:
                 errors.report("Failed to apply OpenClaw SDPA backend default from environment", exc_info=True)
 
-        cuda_graphs_enabled = openclaw_env.env_bool("OPENCLAW_CUDA_GRAPHS", None)
-        if cuda_graphs_enabled is not None:
-            try:
-                from modules import openclaw_cuda_graphs
-                openclaw_cuda_graphs.set_enabled(cuda_graphs_enabled, clear=True)
-            except Exception:
-                errors.report("Failed to apply OpenClaw CUDA graph default from environment", exc_info=True)
-
     def add_api_route(self, path: str, endpoint, **kwargs):
         if shared.cmd_opts.api_auth:
             return self.app.add_api_route(path, endpoint, dependencies=[Depends(self.auth)], **kwargs)
