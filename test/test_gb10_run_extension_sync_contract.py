@@ -18,6 +18,14 @@ def test_owned_extension_sync_protects_runtime_data_contents():
 
 def test_owned_extension_sync_does_not_deploy_tool_caches():
     source = Path("gb10/run.sh").read_text()
-    excludes = re.findall(r"--exclude '([^']+)'", source[source.index("rsync -a --checksum --delete"):])
+    excludes = re.findall(r"--exclude '([^']+)'", source[source.index("rsync -a --delete --delete-excluded"):])
     for cache in (".git/", "__pycache__/", "*.pyc", ".ruff_cache/", ".pytest_cache/"):
         assert cache in excludes
+
+
+def test_owned_extension_sync_does_not_hash_every_file_while_production_is_down():
+    # The sync runs while no container serves. --checksum read every file on both sides (ControlNet's models included);
+    # -a keeps the checkout's mtimes on the target, so rsync's size+mtime check finds every changed file.
+    source = Path("gb10/run.sh").read_text()
+    assert "--checksum" not in source
+    assert "sudo rsync -a --delete --delete-excluded" in source

@@ -159,7 +159,9 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
   # placed only on the host survives). The /*** form protects the directory AND its contents: 'P /data/' alone
   # protects only the directory entry, so when the checkout has its own (git-ignored, empty) data/ directory rsync
   # descends into it and deletes the saved files. Tool caches are excluded and so removed from the target.
-  sudo rsync -a --checksum --delete --delete-excluded \
+  # rsync's size+mtime check decides what to copy: -a keeps the checkout's mtimes on the target, so a changed source
+  # file differs in one of them.
+  sudo rsync -a --delete --delete-excluded \
     --filter 'P /data/***' \
     --filter 'P /annotator/downloads/***' \
     --filter 'P /models/***' \
