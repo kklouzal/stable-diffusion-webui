@@ -1,48 +1,26 @@
-import importlib.util
-import sys
 import types
 
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def restore_module_stubs():
-    saved = {name: module for name, module in sys.modules.items() if name == "modules" or name.startswith("modules.")}
-    yield
-
-    for name in [name for name in sys.modules if name == "modules" or name.startswith("modules.")]:
-        if name not in saved:
-            sys.modules.pop(name, None)
-
-    for name, module in saved.items():
-        sys.modules[name] = module
+from test.helpers import load_source, module
 
 
 def load_extensions_module(tmp_path):
-    errors = types.SimpleNamespace(report=lambda *args, **kwargs: None)
-    cache = types.SimpleNamespace(cached_data_for_file=lambda *args, **kwargs: args[-1]())
-    scripts = types.SimpleNamespace(ScriptFile=lambda basedir, filename, path: (basedir, filename, path))
-    shared = types.SimpleNamespace(
-        cmd_opts=types.SimpleNamespace(disable_all_extensions=False, disable_extra_extensions=False),
-        opts=types.SimpleNamespace(disable_all_extensions="none", disabled_extensions=[]),
-    )
-
-    sys.modules["modules"] = types.ModuleType("modules")
-    sys.modules["modules.shared"] = shared
-    sys.modules["modules.errors"] = errors
-    sys.modules["modules.cache"] = cache
-    sys.modules["modules.scripts"] = scripts
-    sys.modules["modules.gitpython_hack"] = types.SimpleNamespace(Repo=object)
-    sys.modules["modules.paths_internal"] = types.SimpleNamespace(
-        extensions_dir=str(tmp_path / "extensions"),
-        extensions_builtin_dir=str(tmp_path / "extensions-builtin"),
-    )
-
-    spec = importlib.util.spec_from_file_location("extensions_under_test", "modules/extensions.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_source("extensions_under_test", "modules/extensions.py", {
+        "modules": module("modules"),
+        "modules.shared": module(
+            "modules.shared",
+            cmd_opts=types.SimpleNamespace(disable_all_extensions=False, disable_extra_extensions=False),
+            opts=types.SimpleNamespace(disable_all_extensions="none", disabled_extensions=[]),
+        ),
+        "modules.errors": module("modules.errors", report=lambda *args, **kwargs: None),
+        "modules.cache": module("modules.cache", cached_data_for_file=lambda *args, **kwargs: args[-1]()),
+        "modules.scripts": module("modules.scripts", ScriptFile=lambda basedir, filename, path: (basedir, filename, path)),
+        "modules.gitpython_hack": module("modules.gitpython_hack", Repo=object),
+        "modules.paths_internal": module(
+            "modules.paths_internal",
+            extensions_dir=str(tmp_path / "extensions"),
+            extensions_builtin_dir=str(tmp_path / "extensions-builtin"),
+        ),
+    })
 
 
 def write_metadata(path, name):

@@ -9,6 +9,7 @@ import pytest
 
 import modules
 from modules import initialize
+from test.helpers import module
 
 
 @pytest.fixture
@@ -21,10 +22,7 @@ def frozen_before():
 
 def _fake_model_data(monkeypatch, loaded_sd_models):
     # freeze_startup_heap only reads model_data.loaded_sd_models; the real sd_models drags in ldm/sgm.
-    fake = types.ModuleType("modules.sd_models")
-    fake.model_data = types.SimpleNamespace(loaded_sd_models=loaded_sd_models)
-    # Some tests in this session leave a stub in sys.modules["modules"]; resolve against the real package.
-    monkeypatch.setitem(sys.modules, "modules", modules)
+    fake = module("modules.sd_models", model_data=types.SimpleNamespace(loaded_sd_models=loaded_sd_models))
     monkeypatch.setitem(sys.modules, "modules.sd_models", fake)
     monkeypatch.setattr(modules, "sd_models", fake, raising=False)
 

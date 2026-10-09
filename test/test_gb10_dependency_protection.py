@@ -7,18 +7,7 @@ import zipfile
 
 import pytest
 
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_script_module(name: str, relative_path: str):
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(name, ROOT / relative_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from test.helpers import ROOT, load_source
 
 
 def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
@@ -81,7 +70,7 @@ def test_protected_resolver_stubs_preserve_versions_without_base_dependencies(tm
 
 
 def test_stack_checker_treats_every_named_base_package_as_protected():
-    checker = load_script_module("check_protected_stack", "docker/check-protected-stack.py")
+    checker = load_source("check_protected_stack", "docker/check-protected-stack.py")
 
     assert checker.is_protected("numpy", {"numpy"})
     data = {
@@ -242,7 +231,7 @@ def test_base_snapshot_rejects_inherited_packages_changed_before_protection(tmp_
 def test_stack_checker_validates_released_floors_and_declared_requirements(tmp_path: Path, monkeypatch):
     import importlib.metadata as md
 
-    checker = load_script_module("check_protected_stack_released", "docker/check-protected-stack.py")
+    checker = load_source("check_protected_stack_released", "docker/check-protected-stack.py")
     site = tmp_path / "site"
     dists = [
         md.PathDistribution(make_dist(site, "gb10-released", "2.5")),
@@ -322,7 +311,7 @@ def make_wheel(directory: Path, name: str, version: str, requires: list[str]) ->
 
 
 def test_headless_opencv_wheel_override_rewrites_only_the_opencv_requirement(tmp_path: Path):
-    patcher = load_script_module("patch_headless_opencv_wheels", "docker/patch-headless-opencv-wheels.py")
+    patcher = load_source("patch_headless_opencv_wheels", "docker/patch-headless-opencv-wheels.py")
     source = make_wheel(tmp_path / "src", "depth_anything_v2", "2024.7.1.0", ["opencv-python", "torch", "torchvision"])
     target = tmp_path / patcher.patched_wheel_name(source)
     assert target.name == "depth_anything_v2-2024.7.1.0-1gb10opencvheadless-py2.py3-none-any.whl"
@@ -345,7 +334,7 @@ def test_headless_opencv_wheel_override_rewrites_only_the_opencv_requirement(tmp
 
 
 def test_headless_opencv_override_matches_requirement_names_exactly():
-    patcher = load_script_module("patch_headless_opencv_wheels_names", "docker/patch-headless-opencv-wheels.py")
+    patcher = load_source("patch_headless_opencv_wheels_names", "docker/patch-headless-opencv-wheels.py")
 
     assert patcher.requirement_name("depth_anything @ https://x/depth_anything-2024.1.22.0-py2.py3-none-any.whl#sha256=00") == "depth-anything"
     assert patcher.requirement_name("depth_anything_v2 @ https://x/y.whl") == "depth-anything-v2"

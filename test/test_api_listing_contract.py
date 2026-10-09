@@ -1,8 +1,9 @@
 import ast
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
+
+from test.helpers import module
 
 
 def load_script_listing_api_class():
@@ -151,8 +152,7 @@ def test_model_metadata_listing_shapes_match_response_models(monkeypatch):
     )
     api_globals["find_checkpoint_config_near_filename"] = lambda checkpoint: checkpoint.config_path
 
-    sd_models_stub = types.ModuleType("modules.sd_models")
-    sd_models_stub.checkpoints_list = {
+    sd_models_stub = module("modules.sd_models", checkpoints_list={
         "ckpt": SimpleNamespace(
             title="Model Title",
             model_name="model",
@@ -161,13 +161,9 @@ def test_model_metadata_listing_shapes_match_response_models(monkeypatch):
             filename="/models/model.safetensors",
             config_path="/models/model.yaml",
         )
-    }
-    sd_vae_stub = types.ModuleType("modules.sd_vae")
-    sd_vae_stub.vae_dict = {"vae": "/models/vae.pt"}
-    modules_stub = types.ModuleType("modules")
-    modules_stub.sd_models = sd_models_stub
-    modules_stub.sd_vae = sd_vae_stub
-    monkeypatch.setitem(sys.modules, "modules", modules_stub)
+    })
+    sd_vae_stub = module("modules.sd_vae", vae_dict={"vae": "/models/vae.pt"})
+    monkeypatch.setitem(sys.modules, "modules", module("modules", sd_models=sd_models_stub, sd_vae=sd_vae_stub))
     monkeypatch.setitem(sys.modules, "modules.sd_models", sd_models_stub)
     monkeypatch.setitem(sys.modules, "modules.sd_vae", sd_vae_stub)
 
@@ -347,14 +343,8 @@ def test_extensions_list_preserves_public_git_metadata_shape(monkeypatch):
     def list_extensions():
         events.append(("list", None))
 
-    extensions_stub = types.ModuleType("modules.extensions")
-    extensions_stub.Extension = Extension
-    extensions_stub.extensions = [remote_extension, local_extension]
-    extensions_stub.list_extensions = list_extensions
-
-    modules_stub = types.ModuleType("modules")
-    modules_stub.extensions = extensions_stub
-    monkeypatch.setitem(sys.modules, "modules", modules_stub)
+    extensions_stub = module("modules.extensions", Extension=Extension, extensions=[remote_extension, local_extension], list_extensions=list_extensions)
+    monkeypatch.setitem(sys.modules, "modules", module("modules", extensions=extensions_stub))
     monkeypatch.setitem(sys.modules, "modules.extensions", extensions_stub)
 
     assert api_class().get_extensions_list() == [

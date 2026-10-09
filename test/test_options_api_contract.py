@@ -1,20 +1,16 @@
-import importlib.util
 import json
-import sys
 import threading
 import types
 
 import pytest
 
+from test.helpers import load_source, module
+
 
 @pytest.fixture
-def options_module(monkeypatch):
+def options_module():
     cmd_opts = types.SimpleNamespace(freeze_settings=False, freeze_settings_in_sections=None, freeze_specific_settings=None, hide_ui_dir_config=False)
-    monkeypatch.setitem(sys.modules, "modules.shared_cmd_options", types.SimpleNamespace(cmd_opts=cmd_opts))
-    spec = importlib.util.spec_from_file_location("options_under_test", "modules/options.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_source("options_under_test", "modules/options.py", {"modules.shared_cmd_options": module("modules.shared_cmd_options", cmd_opts=cmd_opts)})
 
 
 def make_opts(module):

@@ -1,4 +1,3 @@
-import importlib.util
 import shutil
 import subprocess
 from pathlib import Path
@@ -6,16 +5,11 @@ from pathlib import Path
 import pytest
 import torch
 
+from test.helpers import load_source
+
 PATCH = Path("patches/generative-models/0011-openai-wrapper-skip-empty-concat.patch").resolve()
 WRAPPERS = Path("sgm/modules/diffusionmodules/wrappers.py")
 BAKED = Path("repositories/generative-models")
-
-
-def _load(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.fixture
@@ -36,7 +30,7 @@ def old_and_new_wrappers(tmp_path):
     else:
         subprocess.run([*apply, "--check", str(PATCH)], cwd=trees["new"], check=True)
         subprocess.run([*apply, str(PATCH)], cwd=trees["new"], check=True)
-    return _load(trees["old"] / WRAPPERS, "wrappers_old"), _load(trees["new"] / WRAPPERS, "wrappers_new")
+    return load_source("wrappers_old", trees["old"] / WRAPPERS), load_source("wrappers_new", trees["new"] / WRAPPERS)
 
 
 class _Recorder(torch.nn.Module):

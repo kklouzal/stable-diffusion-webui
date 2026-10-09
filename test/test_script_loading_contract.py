@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from modules import script_loading
+from test.helpers import stub_modules
 
 
 def _write(path: Path, body: str) -> Path:
@@ -51,18 +52,15 @@ def test_load_module_failure_removes_registration(tmp_path):
     assert str(path) not in script_loading.loaded_scripts
 
 
-def test_load_module_failure_restores_previous_registration(tmp_path):
+def test_load_module_failure_restores_previous_registration(tmp_path, monkeypatch):
     path = _write(tmp_path / "broken.py", "raise RuntimeError('boom')\n")
     name = script_loading.module_name_for_path(path)
     sentinel = object()
-    sys.modules[name] = sentinel
-    try:
-        with pytest.raises(RuntimeError, match="boom"):
-            script_loading.load_module(path)
-        assert sys.modules[name] is sentinel
-        assert str(path) not in script_loading.loaded_scripts
-    finally:
-        sys.modules.pop(name, None)
+    monkeypatch.setitem(sys.modules, name, sentinel)
+    with pytest.raises(RuntimeError, match="boom"):
+        script_loading.load_module(path)
+    assert sys.modules[name] is sentinel
+    assert str(path) not in script_loading.loaded_scripts
 
 
 def test_load_module_failure_preserves_replacement_made_by_script(tmp_path):
@@ -74,12 +72,10 @@ def test_load_module_failure_preserves_replacement_made_by_script(tmp_path):
         f"sys.modules[{name!r}] = 'replacement'\n"
         "raise RuntimeError('boom')\n",
     )
-    try:
+    with stub_modules({name: None}):  # drops the script's replacement afterwards
         with pytest.raises(RuntimeError, match="boom"):
             script_loading.load_module(path)
         assert sys.modules[name] == "replacement"
-    finally:
-        sys.modules.pop(name, None)
 
 
 def test_load_module_reload_replaces_module_and_clears_stale_names(tmp_path):
@@ -93,15 +89,12 @@ def test_load_module_reload_replaces_module_and_clears_stale_names(tmp_path):
     assert sys.modules[second.__name__] is second
 
 
-def test_load_module_supports_package_relative_imports(tmp_path):
+def test_load_module_supports_package_relative_imports(tmp_path, monkeypatch):
     package = tmp_path / "fixture_package"
     _write(package / "__init__.py", "VALUE = 40\n")
     script = _write(package / "script.py", "from . import VALUE\nRESULT = VALUE + 2\n")
-    sys.path.insert(0, str(tmp_path))
-    try:
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with stub_modules({"fixture_package": None}):  # drops the package the relative import loads afterwards
         module = script_loading.load_module(script)
         assert module.RESULT == 42
         assert module.__package__ == "fixture_package"
-    finally:
-        sys.path.remove(str(tmp_path))
-        sys.modules.pop("fixture_package", None)

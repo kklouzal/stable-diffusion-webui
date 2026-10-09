@@ -1,20 +1,10 @@
-import importlib.util
-import sys
-from pathlib import Path
+from test.helpers import load_source
 
 
 def load_headless_ui():
-    # The module registers itself as `gradio` in sys.modules; undo that so other tests are unaffected.
-    before = set(sys.modules)
-    spec = importlib.util.spec_from_file_location("headless_ui_contract", Path("modules/headless_ui.py"))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        for name in set(sys.modules) - before:
-            del sys.modules[name]
-    return module
+    # The module registers itself as `gradio` and `gradio.components` (sys.modules.setdefault): hide those names while
+    # it executes and restore them afterwards, so other tests are unaffected.
+    return load_source("headless_ui_contract", "modules/headless_ui.py", {"gradio": None, "gradio.components": None})
 
 
 def test_components_accept_the_event_methods_quicksettings_wiring_calls():
