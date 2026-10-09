@@ -229,7 +229,8 @@ def test_for_nans(x, where):
     if shared.cmd_opts.disable_nan_check:
         return
 
-    if not torch.isnan(x[(0, ) * len(x.shape)]):
+    # Any element: a NaN confined to one image of the batch or one region never reaches element [0, ..., 0].
+    if not torch.isnan(x).any():
         return
 
     if where == "unet":

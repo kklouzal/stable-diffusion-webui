@@ -257,6 +257,7 @@ def test_img2imgalt_reuses_noise_inversion_only_within_a_request_for_the_same_la
                                     sample_img2img=lambda p, x, noise, *args, **kwargs: noise)
     namespace = _definitions("scripts/img2imgalt.py", {
         "namedtuple": collections.namedtuple, "torch": torch,
+        "prompt_parser": types.SimpleNamespace(SdConditioning=lambda prompts, **kwargs: prompts),
         "shared": types.SimpleNamespace(state=types.SimpleNamespace(job_count=0)),
         "processing": types.SimpleNamespace(process_images=process_images, create_random_tensors=lambda shape, **kwargs: torch.zeros(shape)),
         "sd_samplers": types.SimpleNamespace(create_sampler=lambda name, model: sampler),
@@ -266,7 +267,7 @@ def test_img2imgalt_reuses_noise_inversion_only_within_a_request_for_the_same_la
 
     def request(*latents):
         p = types.SimpleNamespace(
-            latents=latents, init_latent=None, batch_size=1, sampler_name="Euler", steps=4, seed=1, subseed_strength=0.0,
+            latents=latents, init_latent=None, batch_size=1, width=64, height=64, sampler_name="Euler", steps=4, seed=1, subseed_strength=0.0,
             seed_resize_from_h=0, seed_resize_from_w=0, image_conditioning=None, extra_generation_params={},
             sd_model=types.SimpleNamespace(get_learned_conditioning=lambda prompts: prompts),
         )

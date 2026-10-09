@@ -5,10 +5,20 @@ from tqdm import trange
 import modules.scripts as scripts
 from modules import headless_ui as gr
 
-from modules import processing, shared, sd_samplers, sd_samplers_common
+from modules import processing, prompt_parser, shared, sd_samplers, sd_samplers_cfg_denoiser, sd_samplers_common
 
 import torch
 import k_diffusion as K
+
+
+def cfg_conditioning(p, cond, uncond):
+    """The [uncond, cond] CFG batch in the layout CFGDenoiser sends the model: SD-XL's dict conditioning (crossattn,
+    vector) with c_concat added, tensor conditioning as c_crossattn/c_concat."""
+    image_conditioning = torch.cat([p.image_conditioning] * 2)
+    if isinstance(cond, dict):
+        return {**sd_samplers_cfg_denoiser.catenate_conds([uncond, cond]), "c_concat": [image_conditioning]}
+    return {"c_concat": [image_conditioning], "c_crossattn": [torch.cat([uncond, cond])]}
+
 
 def find_noise_for_image(p, cond, uncond, cfg_scale, steps):
     x = p.init_latent
@@ -29,10 +39,7 @@ def find_noise_for_image(p, cond, uncond, cfg_scale, steps):
 
         x_in = torch.cat([x] * 2)
         sigma_in = torch.cat([sigmas[i] * s_in] * 2)
-        cond_in = torch.cat([uncond, cond])
-
-        image_conditioning = torch.cat([p.image_conditioning] * 2)
-        cond_in = {"c_concat": [image_conditioning], "c_crossattn": [cond_in]}
+        cond_in = cfg_conditioning(p, cond, uncond)
 
         c_out, c_in = [K.utils.append_dims(k, x_in.ndim) for k in dnw.get_scalings(sigma_in)[skip:]]
         t = dnw.sigma_to_t(sigma_in)
@@ -81,10 +88,7 @@ def find_noise_for_image_sigma_adjustment(p, cond, uncond, cfg_scale, steps):
 
         x_in = torch.cat([x] * 2)
         sigma_in = torch.cat([sigmas[i - 1] * s_in] * 2)
-        cond_in = torch.cat([uncond, cond])
-
-        image_conditioning = torch.cat([p.image_conditioning] * 2)
-        cond_in = {"c_concat": [image_conditioning], "c_crossattn": [cond_in]}
+        cond_in = cfg_conditioning(p, cond, uncond)
 
         c_out, c_in = [K.utils.append_dims(k, x_in.ndim) for k in dnw.get_scalings(sigma_in)[skip:]]
 
@@ -186,8 +190,9 @@ class Script(scripts.Script):
                 rec_noise = noise_cache.noise
             else:
                 shared.state.job_count += 1
-                cond = p.sd_model.get_learned_conditioning(p.batch_size * [original_prompt])
-                uncond = p.sd_model.get_learned_conditioning(p.batch_size * [original_negative_prompt])
+                # As processing builds them: SD-XL embeds the image size, and zeroes an empty negative prompt.
+                cond = p.sd_model.get_learned_conditioning(prompt_parser.SdConditioning(p.batch_size * [original_prompt], width=p.width, height=p.height))
+                uncond = p.sd_model.get_learned_conditioning(prompt_parser.SdConditioning(p.batch_size * [original_negative_prompt], width=p.width, height=p.height, is_negative_prompt=True))
                 if sigma_adjustment:
                     rec_noise = find_noise_for_image_sigma_adjustment(p, cond, uncond, cfg, st)
                 else:

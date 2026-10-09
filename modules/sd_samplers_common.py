@@ -4,6 +4,7 @@ from collections import namedtuple
 import torch
 from PIL import Image
 from modules import devices, images, sd_vae_approx, sd_vae_taesd, shared
+from modules.sd_unet_row_memo import tensor_version
 from modules.shared import opts, state
 import k_diffusion.sampling
 
@@ -65,7 +66,7 @@ def samples_to_images_tensor(sample, approximation=None, model=None):
         if model is None:
             model = shared.sd_model
         with torch.no_grad(), devices.without_autocast(): # fixes an issue with unstable VAEs that are flaky even in fp32
-            x_sample = model.decode_first_stage(sample.to(model.first_stage_model.dtype))
+            x_sample = model.decode_first_stage(vae_decode_input(model, sample))
 
     return x_sample
 
@@ -87,8 +88,16 @@ def single_sample_to_image(sample, approximation=None):
     return Image.fromarray(float_images_to_uint8(x_sample).cpu().numpy())
 
 
+def vae_decode_input(model, x):
+    """The latent x as model.decode_first_stage takes it. SDXL's (sd_models_xl.decode_first_stage) scales it in float32
+    and rounds it to the VAE dtype once, so it gets x unrounded; the others scale in the VAE dtype they are given."""
+    if getattr(model, "decode_first_stage_takes_float32", False):
+        return x.float()
+    return x.to(model.first_stage_model.dtype)
+
+
 def decode_first_stage(model, x):
-    x = x.to(devices.dtype_vae)
+    x = x.float() if getattr(model, "decode_first_stage_takes_float32", False) else x.to(devices.dtype_vae)
     approx_index = approximation_indexes.get(opts.sd_vae_decode_method, 0)
     from modules import openclaw_vae_decode_graphs
     decoded = openclaw_vae_decode_graphs.run(model, x, approx_index)
@@ -181,20 +190,40 @@ def replace_torchsde_browinan():
 replace_torchsde_browinan()
 
 
+def cpu_sigmas(model_wrap):
+    """The k-diffusion wrapper's sigma table (model_wrap.sigmas, on the device) as a CPU tensor, copied once per table.
+
+    One wrapper is built per sampling run (and per refiner switch), so get_sigmas, its schedule cache key and the
+    refiner switch read the table without a device-to-host copy and synchronization on every call. A replaced table,
+    or one mutated in place where the version counter is tracked, is copied again. Generation's inference tensors have
+    no version counter; nothing mutates a wrapper's table in place inside inference mode (per-request schedule options
+    build a new wrapper; see openclaw_cuda_graphs._schedule_signature)."""
+    sigmas = model_wrap.sigmas
+    version = tensor_version(sigmas)
+    cached = getattr(model_wrap, "openclaw_cpu_sigmas", None)
+    if cached is None or cached[0] is not sigmas or cached[1] != version:
+        cached = (sigmas, version, sigmas.detach().to(devices.cpu))
+        model_wrap.openclaw_cpu_sigmas = cached
+    return cached[2]
+
+
 def apply_refiner(cfg_denoiser, sigma=None):
     if opts.refiner_switch_by_sample_steps or sigma is None:
         completed_ratio = cfg_denoiser.step / cfg_denoiser.total_steps
         cfg_denoiser.p.extra_generation_params["Refiner switch by sampling steps"] = True
 
-    elif cfg_denoiser.p.refiner_checkpoint_info is None:
-        return False  # no refiner: skip the per-step sigma argmin, which only feeds the switch decision
+    elif cfg_denoiser.p.refiner_checkpoint_info is None or shared.sd_model.sd_checkpoint_info == cfg_denoiser.p.refiner_checkpoint_info:
+        return False  # no refiner, or switched to it already: skip reading sigma, which only feeds the switch decision
 
     else:
-        # torch.max(sigma) only to handle rare case where we might have different sigmas in the same batch
+        # torch.max(sigma) only to handle rare case where we might have different sigmas in the same batch. Read once
+        # to the host and matched against the CPU copy of the table: the same float32 arithmetic as on the device.
         try:
-            timestep = torch.argmin(torch.abs(cfg_denoiser.inner_model.sigmas.to(sigma.device) - torch.max(sigma)))
+            sigmas = cpu_sigmas(cfg_denoiser.inner_model)
         except AttributeError:  # for samplers that don't use sigmas (DDIM) sigma is actually the timestep
             timestep = torch.max(sigma).to(dtype=int)
+        else:
+            timestep = torch.argmin(torch.abs(sigmas - torch.max(sigma).to(devices.cpu)))
         completed_ratio = (999 - timestep) / 1000
 
     refiner_switch_at = cfg_denoiser.p.refiner_switch_at
@@ -256,6 +285,33 @@ class TorchHijack:
         return self.rng.next()
 
 
+sigma_params_defaults = {'s_churn': 0.0, 's_tmin': 0.0, 's_tmax': float('inf'), 's_noise': 1.0}
+"""k-diffusion's defaults for its stochasticity parameters: a sampler function is called with these when not given."""
+
+sigma_params_infotext = {'s_churn': 'Sigma churn', 's_tmin': 'Sigma tmin', 's_tmax': 'Sigma tmax', 's_noise': 'Sigma noise'}
+
+
+def sigma_params_kwargs(p, param_names):
+    """Keyword arguments for the stochasticity parameters (s_churn, s_tmin, s_tmax, s_noise) a sampler function takes.
+
+    The values are p's: the request's, else the settings' (StableDiffusionProcessing.fill_fields_from_opts; s_tmax 0 is
+    infinity). A value is passed, and recorded in infotext, only where it differs from k-diffusion's default, so the
+    default call stays exactly the sampler function's own."""
+    kwargs = {}
+    for name in param_names:
+        value = getattr(p, name, None)
+        if value is None:
+            value = getattr(opts, name)
+        if name == 's_tmax':
+            value = value or float('inf')
+
+        if value != sigma_params_defaults[name]:
+            kwargs[name] = value
+            p.extra_generation_params[sigma_params_infotext[name]] = value
+
+    return kwargs
+
+
 class Sampler:
     def __init__(self, funcname):
         self.funcname = funcname
@@ -266,10 +322,6 @@ class Sampler:
         self.config: SamplerData = None  # set by the function calling the constructor
         self.last_latent = None
         self.s_min_uncond = None
-        self.s_churn = 0.0
-        self.s_tmin = 0.0
-        self.s_tmax = float('inf')
-        self.s_noise = 1.0
 
         self.eta_option_field = 'eta_ancestral'
         self.eta_infotext_field = 'Eta'
@@ -321,39 +373,14 @@ class Sampler:
 
         k_diffusion.sampling.torch = TorchHijack(p)
 
-        extra_params_kwargs = {}
-        for param_name in self.extra_params:
-            if hasattr(p, param_name) and param_name in inspect.signature(self.func).parameters:
-                extra_params_kwargs[param_name] = getattr(p, param_name)
+        parameters = inspect.signature(self.func).parameters
+        extra_params_kwargs = sigma_params_kwargs(p, [name for name in self.extra_params if name in parameters])
 
-        if 'eta' in inspect.signature(self.func).parameters:
+        if 'eta' in parameters:
             if self.eta != self.eta_default:
                 p.extra_generation_params[self.eta_infotext_field] = self.eta
 
             extra_params_kwargs['eta'] = self.eta
-
-        if len(self.extra_params) > 0:
-            s_churn = getattr(opts, 's_churn', p.s_churn)
-            s_tmin = getattr(opts, 's_tmin', p.s_tmin)
-            s_tmax = getattr(opts, 's_tmax', p.s_tmax) or self.s_tmax # 0 = inf
-            s_noise = getattr(opts, 's_noise', p.s_noise)
-
-            if 's_churn' in extra_params_kwargs and s_churn != self.s_churn:
-                extra_params_kwargs['s_churn'] = s_churn
-                p.s_churn = s_churn
-                p.extra_generation_params['Sigma churn'] = s_churn
-            if 's_tmin' in extra_params_kwargs and s_tmin != self.s_tmin:
-                extra_params_kwargs['s_tmin'] = s_tmin
-                p.s_tmin = s_tmin
-                p.extra_generation_params['Sigma tmin'] = s_tmin
-            if 's_tmax' in extra_params_kwargs and s_tmax != self.s_tmax:
-                extra_params_kwargs['s_tmax'] = s_tmax
-                p.s_tmax = s_tmax
-                p.extra_generation_params['Sigma tmax'] = s_tmax
-            if 's_noise' in extra_params_kwargs and s_noise != self.s_noise:
-                extra_params_kwargs['s_noise'] = s_noise
-                p.s_noise = s_noise
-                p.extra_generation_params['Sigma noise'] = s_noise
 
         return extra_params_kwargs
 

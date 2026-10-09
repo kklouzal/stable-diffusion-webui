@@ -35,8 +35,47 @@ def test_original_emphasis_matches_fp64_mean_restoration():
     emphasis.after_transformers()
 
     z64 = z.double() * multipliers.double()[..., None]
-    expected = z64 * (z.double().mean() / z64.mean())
+    expected = z64 * (z.double().mean(dim=(1, 2), keepdim=True) / z64.mean(dim=(1, 2), keepdim=True))
     assert (emphasis.z.double() - expected).abs().max() <= 1e-5 * expected.abs().max()
+
+
+def _original_emphasis(z, multipliers):
+    from modules import sd_emphasis
+
+    emphasis = sd_emphasis.EmphasisOriginal()
+    emphasis.z = z
+    emphasis.multipliers = multipliers
+    emphasis.after_transformers()
+    return emphasis.z
+
+
+def test_original_emphasis_row_does_not_depend_on_its_batch():
+    g = torch.Generator().manual_seed(2)
+    z = (torch.randn(3, 77, 768, generator=g) + 0.3).to(torch.bfloat16)
+    multipliers = torch.ones(3, 77)
+    multipliers[0, 5:9] = 1.5
+    multipliers[2, 40:50] = 0.7
+
+    batched = _original_emphasis(z, multipliers)
+
+    for row in range(3):
+        assert torch.equal(batched[row], _original_emphasis(z[row:row + 1], multipliers[row:row + 1])[0])
+    assert torch.equal(batched[1], z[1].float())  # the unemphasized prompt is left exactly as encoded
+
+
+@pytest.mark.parametrize("width", [768, 1280])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_original_emphasis_single_row_is_bit_identical_to_the_whole_tensor_mean(width, dtype):
+    """One prompt per encode (the production batch): the row mean is computed exactly as the old whole-tensor mean."""
+    g = torch.Generator().manual_seed(width)
+    for seed in range(8):
+        z = (torch.randn(1, 77 * (1 + seed % 3), width, generator=g) * 2 + 0.2).to(dtype)
+        multipliers = 1 + torch.rand(1, z.shape[1], generator=g)
+        zf = z.float()
+        weighted = zf * multipliers[..., None]
+        old = weighted * (zf.mean() / weighted.mean())
+
+        assert torch.equal(_original_emphasis(z, multipliers), old)
 
 
 class _Tokenizing:

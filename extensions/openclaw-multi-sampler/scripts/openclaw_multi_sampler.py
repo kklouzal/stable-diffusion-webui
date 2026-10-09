@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 
 import k_diffusion.sampling
 from modules import script_callbacks, script_loading, scripts, sd_samplers, sd_samplers_common, sd_samplers_kdiffusion, sd_schedulers, shared
-from modules.shared import opts, state
+from modules.shared import state
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EXT_ROOT / "data"
@@ -33,6 +33,8 @@ _DENOISE_RAMP_FUNC = None
 _DENOISE_RAMP_FUNC_LOADED = False
 _SIGNATURE_PARAM_CACHE: dict[int, set[str]] = {}
 _SAMPLER_FUNC_CACHE: dict[str, tuple[Any, str]] = {}
+# The schedule labels the core get_sigmas records; a scheduler chain records its stage schedulers itself.
+_SCHEDULE_LABEL_KEYS = ("Schedule type", "Hires schedule type")
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +67,20 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _slug(text: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(text or "").strip()).strip("-._")
     return slug[:80] or "multi-sampler"
+
+
+def _confined_snapshot_dir(value: Any) -> Path:
+    """The snapshot directory a request names, resolved inside SNAPSHOT_ROOT.
+
+    Requests (API alwayson script args) choose it, and snapshots create it and write PNGs into it, so it must not
+    reach anywhere else: a relative path is taken under SNAPSHOT_ROOT, and a path that resolves outside it (through
+    "..", an absolute path elsewhere or a symlink) is rejected."""
+    root = SNAPSHOT_ROOT.resolve()
+    path = Path(str(value))
+    resolved = (path if path.is_absolute() else root / path).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"Multi-sampler snapshot directory must be inside {root}: {value}")
+    return resolved
 
 
 def _k_sampler_names() -> list[str]:
@@ -324,19 +340,30 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.extra_params = []
 
     def _sigmas_for_scheduler(self, p, steps: int, sampler_name: str, scheduler_name: str) -> torch.Tensor:
+        """The full schedule of one stage's scheduler, from the core get_sigmas.
+
+        get_sigmas reads the scheduler from p.hr_scheduler in the hires pass and from p.scheduler otherwise; the stage
+        scheduler goes into that field for the call. Its infotext stays, except the schedule label: "Schedule type" /
+        "Hires schedule type" would name whichever stage ran last, while "Sampler chain schedulers" records them all,
+        so those two keys keep the values they had before the call."""
+        scheduler_field = "hr_scheduler" if getattr(p, "is_hr_pass", False) else "scheduler"
         old_config = self.config
-        old_scheduler = getattr(p, "scheduler", None)
-        old_extra_generation_params = dict(getattr(p, "extra_generation_params", {}) or {})
+        old_scheduler = getattr(p, scheduler_field, None)
+        params = getattr(p, "extra_generation_params", None)
+        old_labels = {key: params[key] for key in _SCHEDULE_LABEL_KEYS if key in params} if params is not None else {}
         try:
             self.config = _k_sampler_config(sampler_name)
-            p.scheduler = _normalize_scheduler_name(scheduler_name)
+            setattr(p, scheduler_field, _normalize_scheduler_name(scheduler_name))
             return super().get_sigmas(p, steps)
         finally:
             self.config = old_config
-            p.scheduler = old_scheduler
-            if hasattr(p, "extra_generation_params"):
-                p.extra_generation_params.clear()
-                p.extra_generation_params.update(old_extra_generation_params)
+            setattr(p, scheduler_field, old_scheduler)
+            if params is not None:
+                for key in _SCHEDULE_LABEL_KEYS:
+                    if key in old_labels:
+                        params[key] = old_labels[key]
+                    else:
+                        params.pop(key, None)
 
     def _base_sigmas(self, p, steps: int) -> torch.Tensor:
         sampler_names = _chain_sampler_names(self.definition)
@@ -385,22 +412,10 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             stages.append((sampler_name, scheduler_name, stage_sigmas, start, end))
         return stages
 
-    def _build_stage_kwargs(self, *, p, func, funcname: str, config, x, sigmas: torch.Tensor, stage_steps: int) -> dict[str, Any]:
+    def _build_stage_kwargs(self, *, p, func, funcname: str, config, sigmas: torch.Tensor, stage_steps: int, noise_sampler=None) -> dict[str, Any]:
         params = _signature_param_names(func)
-        kwargs: dict[str, Any] = {}
-        for param_name in _stage_extra_params(funcname):
-            if param_name not in params:
-                continue
-            value = getattr(p, param_name, None)
-            if param_name == "s_churn":
-                value = getattr(opts, "s_churn", getattr(p, "s_churn", 0.0))
-            elif param_name == "s_tmin":
-                value = getattr(opts, "s_tmin", getattr(p, "s_tmin", 0.0))
-            elif param_name == "s_tmax":
-                value = getattr(opts, "s_tmax", getattr(p, "s_tmax", float("inf"))) or float("inf")
-            elif param_name == "s_noise":
-                value = getattr(opts, "s_noise", getattr(p, "s_noise", 1.0))
-            kwargs[param_name] = value
+        # The request's s_* over the settings', passed and recorded like a single sampler's (Sampler.initialize).
+        kwargs: dict[str, Any] = sd_samplers_common.sigma_params_kwargs(p, [name for name in _stage_extra_params(funcname) if name in params])
         if "eta" in params:
             kwargs["eta"] = self.eta
         if "n" in params:
@@ -414,15 +429,25 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         if "sigmas" in params:
             kwargs["sigmas"] = sigmas
         if config.options.get("brownian_noise", False):
-            # Match upstream k-diffusion sampler semantics: the Brownian tree
-            # noise interval should be derived from the exact sigma schedule
-            # passed to this sampler call, not a broader multi-stage schedule.
-            # Mixed scheduler chains can otherwise seed/sample noise over the
-            # wrong sigma range for later stages.
-            kwargs["noise_sampler"] = self.create_noise_sampler(x, sigmas, p)
+            kwargs["noise_sampler"] = noise_sampler
         if config.options.get("solver_type", None) == "heun":
             kwargs["solver_type"] = "heun"
         return kwargs
+
+    def _chain_noise_sampler(self, x, stages, p):
+        """The Brownian noise sampler shared by every Brownian stage of the chain, over the union of their sigmas.
+
+        A Brownian tree's noise for (sigma, sigma_next) is fixed by its seeds and its interval: separate trees with the
+        same seeds over different stage intervals draw correlated noise, so a later Brownian stage partly replayed the
+        earlier one's. One tree over the union gives every stage step its own increment of the same Brownian path,
+        and the interval holds every sigma the stages query. With one Brownian stage the union is that stage's
+        schedule, so it gets the sampler it always got."""
+        brownian_sigmas = [
+            stage_sigmas
+            for sampler_name, _scheduler_name, stage_sigmas, start, end in stages
+            if end > start and _k_sampler_config(sampler_name).options.get("brownian_noise", False)
+        ]
+        return self.create_noise_sampler(x, torch.cat(brownian_sigmas), p)
 
     def _snapshot_config(self, p) -> dict[str, Any]:
         raw = getattr(p, "openclaw_multi_sampler_snapshots", None)
@@ -441,7 +466,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         out_dir_value = str(cfg.get("dir") or "").strip()
         if not out_dir_value:
             return
-        out_dir = Path(out_dir_value).expanduser()
+        out_dir = _confined_snapshot_dir(out_dir_value)
         out_dir.mkdir(parents=True, exist_ok=True)
         approximation = cfg.get("approximation")
         if approximation in ("Full", "full", 0, "0"):
@@ -522,14 +547,20 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             scheduler = _sampler_data_for(self.definition).options.get("scheduler")
             if scheduler:
                 p.extra_generation_params["Sampler chain scheduler"] = scheduler
+        noise_sampler = None
+        noise_sampler_created = False
         try:
             for sampler_name, _scheduler_name, stage_sigmas, offset, end in stages:
                 stage_steps = max(0, end - offset)
                 if stage_steps <= 0:
                     continue
                 config = _k_sampler_config(sampler_name)
+                if config.options.get("brownian_noise", False) and not noise_sampler_created:
+                    # Created where the first Brownian stage starts, as the per-stage sampler was.
+                    noise_sampler = self._chain_noise_sampler(x, stages, p)
+                    noise_sampler_created = True
                 func, stage_funcname = _sampler_func_for(sampler_name)
-                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, x=x, sigmas=stage_sigmas, stage_steps=stage_steps)
+                kwargs = self._build_stage_kwargs(p=p, func=func, funcname=stage_funcname, config=config, sigmas=stage_sigmas, stage_steps=stage_steps, noise_sampler=noise_sampler)
                 # A one-step final stage [sigma, 0] is valid for every sampler: modules/sd_samplers_extra.py makes the
                 # DPM++ 2M/3M SDE functions run it as their denoising step.
                 x = func(self.model_wrap_cfg, x, extra_args=self.sampler_extra_args, disable=shared.cmd_opts.disable_console_progressbars, callback=self._callback(p, offset=offset), **kwargs)
@@ -666,7 +697,8 @@ class OpenClawMultiSamplerScript(scripts.Script):
         if enabled and snapshot_dir:
             p.openclaw_multi_sampler_snapshots = {
                 "enabled": True,
-                "dir": str(snapshot_dir),
+                # Fails the request before sampling when the directory is outside SNAPSHOT_ROOT.
+                "dir": str(_confined_snapshot_dir(snapshot_dir)),
                 "every": _safe_int(every, 1) or 1,
                 "max_count": _safe_int(max_count, 0),
                 "approximation": approximation or "Approx cheap",

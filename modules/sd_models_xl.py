@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 import sgm.models.diffusion
 import sgm.modules.autoencoding.regularizers
 import sgm.modules.diffusionmodules.denoiser_scaling
 import sgm.modules.diffusionmodules.discretizer
+import sgm.util
 from modules import devices, shared, prompt_parser
 from modules import torch_utils
 
@@ -35,7 +38,7 @@ def get_learned_conditioning(self: sgm.models.diffusion.DiffusionEngine, batch: 
     force_zero_negative_prompt = is_negative_prompt and all(x == '' for x in batch)
     c = self.conditioner(sdxl_conds, force_zero_embeddings=['txt'] if force_zero_negative_prompt else [])
 
-    return c
+    return prompt_parser.ZeroedTextConditioning(c) if force_zero_negative_prompt else c
 
 
 def apply_model(self: sgm.models.diffusion.DiffusionEngine, x, t, cond):
@@ -51,9 +54,35 @@ def get_first_stage_encoding(self, x):  # SDXL's encode_first_stage does everyth
     return x
 
 
+@torch.no_grad()
+def decode_first_stage(self: sgm.models.diffusion.DiffusionEngine, z):
+    """sgm's DiffusionEngine.decode_first_stage with the latent scaled in float32 and rounded to the VAE dtype once.
+
+    Upstream scales the latent in the dtype it is given. Callers used to hand it over already cast to the VAE dtype,
+    so a bf16 VAE decoded round_bf16(1/scale_factor * round_bf16(z)): two roundings, a quarter of the elements one
+    bf16 ulp off round_bf16(1/scale_factor * z). Callers now pass the sampled latent as it is (float32;
+    sd_samplers_common.vae_decode_input). Chunking and autocast are upstream's. A float32 VAE is unchanged bitwise."""
+    z = (1.0 / self.scale_factor * z.float()).to(self.first_stage_model.dtype)
+    n_samples = sgm.util.default(self.en_and_decode_n_samples_a_time, z.shape[0])
+
+    n_rounds = math.ceil(z.shape[0] / n_samples)
+    all_out = []
+    with torch.autocast("cuda", enabled=not self.disable_first_stage_autocast):
+        for n in range(n_rounds):
+            if isinstance(self.first_stage_model.decoder, sgm.models.diffusion.VideoDecoder):
+                kwargs = {"timesteps": len(z[n * n_samples : (n + 1) * n_samples])}
+            else:
+                kwargs = {}
+            out = self.first_stage_model.decode(z[n * n_samples : (n + 1) * n_samples], **kwargs)
+            all_out.append(out)
+    return torch.cat(all_out, dim=0)
+
+
 sgm.models.diffusion.DiffusionEngine.get_learned_conditioning = get_learned_conditioning
 sgm.models.diffusion.DiffusionEngine.apply_model = apply_model
 sgm.models.diffusion.DiffusionEngine.get_first_stage_encoding = get_first_stage_encoding
+sgm.models.diffusion.DiffusionEngine.decode_first_stage = decode_first_stage
+sgm.models.diffusion.DiffusionEngine.decode_first_stage_takes_float32 = True  # see sd_samplers_common.vae_decode_input
 
 
 def encode_embedding_init_text(self: sgm.modules.GeneralConditioner, init_text, nvpt):

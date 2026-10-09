@@ -30,8 +30,10 @@ def copy_condition_dict(cond):
 
 
 def pad_cond(tensor, repeats, empty):
+    """Appends `repeats` copies of `empty` (one [1, tokens, channels] padding for every row, or one per row) to the
+    cross-attention tokens of `tensor`."""
     if not isinstance(tensor, dict):
-        return torch.cat([tensor, empty.repeat((tensor.shape[0], repeats, 1))], axis=1)
+        return torch.cat([tensor, empty.expand(tensor.shape[0], -1, -1).repeat((1, repeats, 1))], axis=1)
 
     padded = copy_condition_dict(tensor)
     padded['crossattn'] = pad_cond(tensor['crossattn'], repeats, empty)
@@ -141,6 +143,10 @@ class CFGDenoiser(torch.nn.Module):
             cond = pad_cond(cond, -num_repeats, empty)
             self.padded_cond_uncond = True
         elif num_repeats > 0:
+            # A zeroed uncond row (SD-XL's empty negative prompt) is all zeros: its padding is zeros too.
+            zeroed = getattr(uncond, "zeroed_text_rows", ())
+            if any(zeroed):
+                empty = torch.cat([torch.zeros_like(empty) if row_zeroed else empty for row_zeroed in zeroed])
             uncond = pad_cond(uncond, num_repeats, empty)
             self.padded_cond_uncond = True
 

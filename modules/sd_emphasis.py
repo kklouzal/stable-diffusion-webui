@@ -41,12 +41,21 @@ class EmphasisOriginal(Emphasis):
         # In float32: a bf16 original_mean is rounded (up to 2**-9 relative), which rescaled every chunk even when
         # all multipliers are 1. The result was already float32 through promotion with the float32 multipliers.
         z = self.z.float()
-        original_mean = z.mean()
+        original_mean = row_means(z)
         z = z * self.multipliers.reshape(self.multipliers.shape + (1,))
 
         # restoring original mean is likely not correct, but it seems to work well to prevent artifacts that happen otherwise
-        new_mean = z.mean()
+        new_mean = row_means(z)
         self.z = z * (original_mean / new_mean)
+
+
+def row_means(z):
+    """The mean of each row (prompt) of z, shaped to broadcast against z.
+
+    Each prompt gets its own mean back: a mean over the whole batch rescaled one prompt by the emphasis of the others.
+    Each row is reduced on its own, exactly as the whole-tensor mean of a one-prompt batch, so a prompt's conditioning is
+    bit-identical whatever it is batched with (a batched reduction over the row dims sums in a different order)."""
+    return torch.stack([row.mean() for row in z]).reshape((-1,) + (1,) * (z.dim() - 1))
 
 
 class EmphasisOriginalNoNorm(EmphasisOriginal):

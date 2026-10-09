@@ -275,8 +275,8 @@ def webui_stubs(monkeypatch):
         calls["torch_gc"] += 1
 
     def test_for_nans(x, where):
-        # Same contract as modules.devices.test_for_nans: only element [0, ..., 0] is inspected.
-        if torch.isnan(x[(0,) * x.ndim]):
+        # Same contract as modules.devices.test_for_nans: a NaN anywhere raises.
+        if torch.isnan(x).any():
             raise NansException(f"A tensor with NaNs was produced in {where}.")
 
     def cheap_approximation(sample):
@@ -480,9 +480,8 @@ def test_tiled_vae_interrupt_returns_the_same_lazily_built_approximation(tilevae
     ("mid.attn_1.proj_out", (0, 0, 1, 1)),
     ("up.2.upsample.conv", (0, 31, 0, 0)),
     ("up.0.block.0.conv2", (0, 0, 0, 0)),
-    # Spreads to [0,0,0,0] through the next group norm and conv.
     ("up.0.block.0.conv2", (0, 9, 4, 4)),
-    # The last op before the final norm: [0,0,0,0] stays finite, so neither version disables fast mode.
+    # The last op before the final norm.
     ("up.0.block.1.conv2", (0, 9, 4, 4)),
     (None, None),
 ])
@@ -506,11 +505,8 @@ def test_tiled_vae_fast_mode_nan_decision_is_unchanged(tilevae_pair, webui_stubs
         hook = module.VAEHook(decoder, 16, is_decoder=True, fast_decoder=True, fast_encoder=True, color_fix=False)
         queue = module.clone_task_queue(module.build_task_queue(decoder, True))
         decisions.append(hook.estimate_group_norm(z.clone(), queue, color_fix=False))
-    assert decisions[0] == decisions[1]
-    if position == (0, 0, 0, 0) or module_path == "up.0.block.0.conv2":
-        assert decisions == [False, False]
-    if module_path in (None, "up.0.block.1.conv2"):
-        assert decisions == [True, True]
+    # A NaN anywhere in the estimate disables fast mode, in both versions.
+    assert decisions == ([True, True] if module_path is None else [False, False])
 
 
 def test_tiled_vae_main_loop_nan_check_still_raises(tilevae_pair, webui_stubs):

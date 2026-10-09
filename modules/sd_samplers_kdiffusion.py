@@ -33,16 +33,20 @@ samplers_data_k_diffusion = [
     if callable(funcname) or hasattr(k_diffusion.sampling, funcname)
 ]
 
+# Keyed by the sampler function's __name__; restart_sampler is ours (sd_samplers_extra), the rest are k-diffusion's.
 sampler_extra_params = {
     'sample_euler': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
+    'sample_euler_ancestral': ['s_noise'],
     'sample_heun': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
     'sample_dpm_2': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
     'sample_dpm_fast': ['s_noise'],
+    'sample_dpm_adaptive': ['s_noise'],
     'sample_dpm_2_ancestral': ['s_noise'],
     'sample_dpmpp_2s_ancestral': ['s_noise'],
     'sample_dpmpp_sde': ['s_noise'],
     'sample_dpmpp_2m_sde': ['s_noise'],
     'sample_dpmpp_3m_sde': ['s_noise'],
+    'restart_sampler': ['s_noise'],
 }
 
 k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
@@ -63,18 +67,18 @@ def _checkpoint_cache_key(checkpoint_info):
     )
 
 
-def _sigmas_cache_key(sigmas):
-    """Value key of a schedule tensor. Samplers and wrappers mutate schedule tensors in place, so object identity or a
-    partial (first/last) value is not a safe key: every value can change the pixels."""
+def _sigmas_cache_key(model_wrap):
+    """Value key of the wrapper's sigma table: every value can change the pixels, so object identity or a partial
+    (first/last) value is not a safe key. Built from the table's CPU copy (sd_samplers_common.cpu_sigmas)."""
+    sigmas = getattr(model_wrap, "sigmas", None)
     if not torch.is_tensor(sigmas) or sigmas.numel() == 0:
         return None
 
-    detached = sigmas.detach()
     return (
-        tuple(detached.shape),
-        str(detached.dtype),
-        str(detached.device),
-        tuple(detached.to(device=devices.cpu).contiguous().reshape(-1).tolist()),
+        tuple(sigmas.shape),
+        str(sigmas.dtype),
+        str(sigmas.device),
+        tuple(sd_samplers_common.cpu_sigmas(model_wrap).reshape(-1).tolist()),
     )
 
 
@@ -86,7 +90,7 @@ def _model_schedule_cache_signature(sd_model, model_wrap):
         bool(getattr(sd_model, "is_sdxl", False)),
         bool(getattr(sd_model, "is_sd2", False)),
         getattr(sd_model, "parameterization", None),
-        _sigmas_cache_key(getattr(model_wrap, "sigmas", None)),
+        _sigmas_cache_key(model_wrap),
         # DiscreteSchedule.sigma_to_t snaps to table indices when quantize is set (opts.enable_quantization when the
         # wrapper was built); sgm_uniform, normal and beta start from sigma_to_t.
         bool(model_wrap.quantize),
@@ -112,7 +116,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
     def __init__(self, funcname, sd_model, options=None):
         super().__init__(funcname)
 
-        self.extra_params = sampler_extra_params.get(funcname, [])
+        self.extra_params = sampler_extra_params.get(funcname if isinstance(funcname, str) else funcname.__name__, [])
 
         self.options = options or {}
         self.func = funcname if callable(funcname) else getattr(k_diffusion.sampling, self.funcname)
@@ -135,7 +139,8 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
 
         scheduler = sd_schedulers.schedulers_map.get(scheduler_name)
 
-        m_sigma_min, m_sigma_max = self.model_wrap.sigmas[0].item(), self.model_wrap.sigmas[-1].item()
+        model_sigmas = sd_samplers_common.cpu_sigmas(self.model_wrap)
+        m_sigma_min, m_sigma_max = model_sigmas[0].item(), model_sigmas[-1].item()
         sigma_min, sigma_max = (0.1, 10) if opts.use_old_karras_scheduler_sigmas else (m_sigma_min, m_sigma_max)
 
         if p.sampler_noise_scheduler_override:
@@ -171,6 +176,11 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             if scheduler.label == 'Beta':
                 p.extra_generation_params["Beta schedule alpha"] = opts.beta_dist_alpha
                 p.extra_generation_params["Beta schedule beta"] = opts.beta_dist_beta
+
+        elif p.is_hr_pass and p.extra_generation_params.get("Schedule type"):
+            # The hires pass runs on the model's own schedule (its sampler has no default scheduler). Unrecorded, the
+            # first pass's "Schedule type" would read back as the hires one; "Automatic" reads back as this schedule.
+            p.extra_generation_params["Hires schedule type"] = "Automatic"
 
         def make_sigmas():
             if sigmas_kwargs is None:
@@ -281,8 +291,9 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             extra_params_kwargs['n'] = steps
 
         if 'sigma_min' in parameters:
-            extra_params_kwargs['sigma_min'] = self.model_wrap.sigmas[0].item()
-            extra_params_kwargs['sigma_max'] = self.model_wrap.sigmas[-1].item()
+            model_sigmas = sd_samplers_common.cpu_sigmas(self.model_wrap)
+            extra_params_kwargs['sigma_min'] = model_sigmas[0].item()
+            extra_params_kwargs['sigma_max'] = model_sigmas[-1].item()
 
         if 'sigmas' in parameters:
             extra_params_kwargs['sigmas'] = sigmas

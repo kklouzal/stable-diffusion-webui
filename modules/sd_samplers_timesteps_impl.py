@@ -42,7 +42,8 @@ def _ddim(model, x, timesteps, extra_args, callback, disable, eta, cfgpp):
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones((x.shape[0]))
     s_x = x.new_ones((x.shape[0], 1, 1, 1))
-    for i in tqdm.trange(len(timesteps) - 1, disable=disable):
+    # Every timestep, as ldm's DDIMSampler/PLMSSampler: the last one (index 0) steps to alphas_cumprod[0], near x0.
+    for i in tqdm.trange(len(timesteps), disable=disable):
         index = len(timesteps) - 1 - i
 
         e_t = model(x, _model_timestep(timesteps, index, s_in), **extra_args)
@@ -102,7 +103,8 @@ def plms(model, x, timesteps, extra_args=None, callback=None, disable=None):
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt
         return x_prev, pred_x0
 
-    for i in tqdm.trange(len(timesteps) - 1, disable=disable):
+    # Every timestep, as ldm's DDIMSampler/PLMSSampler: the last one (index 0) steps to alphas_cumprod[0], near x0.
+    for i in tqdm.trange(len(timesteps), disable=disable):
         index = len(timesteps) - 1 - i
         ts = _model_timestep(timesteps, index, s_in)
         t_next = _model_timestep(timesteps, max(index - 1, 0), s_in)

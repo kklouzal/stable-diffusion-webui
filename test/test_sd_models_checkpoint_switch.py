@@ -6,6 +6,7 @@ channels_last. The CPU round trip is the oracle. On a CUDA host the same differe
 resident on the GPU, which is the case the in-place path exists for.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,15 @@ def _environment(monkeypatch, device, *, unified, limit=1, keep_in_cpu=True):
     monkeypatch.setattr(sd_models.script_callbacks, "model_loaded_callback", recorder("model_loaded_callback"))
     monkeypatch.setattr(sd_models.openclaw_cuda_graphs, "note_model_loaded", recorder("note_model_loaded"))
     monkeypatch.setattr(sd_models.sd_models_config, "find_checkpoint_config", lambda _state_dict, _info: "tiny.yaml")
+
+    def get_empty_cond(model):
+        recorder.events.append("get_empty_cond")
+        assert not torch.is_grad_enabled()
+        assert sd_models.model_data.sd_model is model  # extra_networks.activate in the real one reads shared.sd_model
+        return empty_prompt_of(model)
+
+    monkeypatch.setattr(sd_models, "get_empty_cond", get_empty_cond)
+    monkeypatch.setattr(devices, "autocast", contextlib.nullcontext)  # CUDA autocast; the CPU stand-in needs none
     monkeypatch.setattr(openclaw_lifecycle_epochs, "publish_checkpoint_commit", recorder("publish_checkpoint_commit"))
 
     original_send_model_to_cpu = sd_models.send_model_to_cpu
@@ -102,6 +112,11 @@ def _environment(monkeypatch, device, *, unified, limit=1, keep_in_cpu=True):
 
     monkeypatch.setattr(sd_models, "_model_acceleration_boundary", boundary)
     return recorder
+
+
+def empty_prompt_of(model):
+    """A stand-in for the text encoder's empty-prompt encoding: a function of its current weights."""
+    return model.cond_stage_model[0].weight.detach().float().sum().reshape(1, 1, 1)
 
 
 def _loaded_model():
@@ -165,7 +180,24 @@ def test_in_place_switch_keeps_lifecycle_order(monkeypatch):
     _, events, _ = _switch(monkeypatch, torch.device("cpu"), unified=True)
 
     assert events[:5] == ["apply_unet", "boundary:model_reload_in_place", "torch_gc", "undo_hijack", "load_vae"]
-    assert events[5:] == ["hijack", "boundary:model_to_device", "model_loaded_callback", "apply_unet", "note_model_loaded", "publish_checkpoint_commit"]
+    assert events[5:] == ["hijack", "boundary:model_to_device", "model_loaded_callback", "get_empty_cond", "apply_unet", "note_model_loaded", "publish_checkpoint_commit"]
+
+
+@pytest.mark.parametrize("unified", [False, True], ids=["cpu-round-trip", "in-place"])
+def test_switch_recomputes_the_empty_prompt_padding(monkeypatch, unified):
+    """pad_cond_uncond pads with cond_stage_model_empty_prompt: after a same-config switch it must be the new text
+    encoder's, not the previous checkpoint's."""
+    _environment(monkeypatch, torch.device("cpu"), unified=unified)
+    model, _ = _loaded_model()
+    model.cond_stage_model_empty_prompt = empty_prompt_of(model)
+    before = model.cond_stage_model_empty_prompt
+    alternate_info, alternate_state_dict = _checkpoint("alternate", 2)
+    monkeypatch.setattr(sd_models, "get_checkpoint_state_dict", lambda info, _timer: {key: value.clone() for key, value in alternate_state_dict.items()})
+
+    sd_models.reload_model_weights(model, alternate_info)
+
+    assert torch.equal(model.cond_stage_model_empty_prompt, empty_prompt_of(model))
+    assert not torch.equal(model.cond_stage_model_empty_prompt, before)
 
 
 @pytest.mark.parametrize(("unified", "limit", "lowvram", "torchao"), [

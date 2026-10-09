@@ -241,7 +241,8 @@ class OpenClawDeviceDtypeTests(unittest.TestCase):
             callbacks = []
             sampler(FakeModel(), x.clone(), timesteps, extra_args={}, callback=callbacks.append, disable=True)
 
-            self.assertEqual([payload["i"] for payload in callbacks], [0, 1, 2])
+            # One step per timestep, the last one down to alphas_cumprod[0] (the ldm reference loops).
+            self.assertEqual([payload["i"] for payload in callbacks], [0, 1, 2, 3])
 
     def test_unipc_wrapper_callback_count_matches_solver_steps(self):
         sd_samplers_timesteps_impl = load_timesteps_impl_module()

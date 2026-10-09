@@ -17,6 +17,21 @@ REPO_ROOT = EXT_ROOT.parents[1]
 SCRIPT_PATH = EXT_ROOT / "scripts" / "openclaw_multi_sampler.py"
 
 
+def _core_source(names, namespace):
+    """Top-level definitions `names` of modules/sd_samplers_common.py, compiled alone into `namespace` (the harness
+    stubs that module, but the chain must run the core's own code for these)."""
+    path = REPO_ROOT / "modules" / "sd_samplers_common.py"
+    tree = ast.parse(path.read_text(encoding="utf8"))
+    body = [
+        node for node in tree.body
+        if (isinstance(node, ast.FunctionDef) and node.name in names)
+        or (isinstance(node, ast.Assign) and any(getattr(target, "id", None) in names for target in node.targets))
+    ]
+    assert len(body) == len(names)
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace
+
+
 def _install_a1111_stubs(monkeypatch) -> None:
     """Minimal A1111/k-diffusion surface the script imports; monkeypatch restores sys.modules after each test."""
 
@@ -82,8 +97,11 @@ def _install_a1111_stubs(monkeypatch) -> None:
     module("modules.script_callbacks", on_app_started=lambda _callback: None)
     module("modules.script_loading", loaded_scripts={})
     module("modules.scripts", Script=object, AlwaysVisible=object())
+    opts = types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=0.0, s_noise=1.0, sgm_noise_multiplier=False)
+    core = _core_source(("sigma_params_defaults", "sigma_params_infotext", "sigma_params_kwargs"), {"opts": opts})
     module(
         "modules.sd_samplers_common",
+        sigma_params_kwargs=core["sigma_params_kwargs"],
         SamplerData=SamplerData,
         InterruptedException=type("InterruptedException", (Exception,), {}),
         setup_img2img_steps=lambda p, steps=None: (steps or p.steps, getattr(p, "t_enc", steps or p.steps)),
@@ -97,7 +115,7 @@ def _install_a1111_stubs(monkeypatch) -> None:
     )
     module(
         "modules.shared",
-        opts=types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, sgm_noise_multiplier=False),
+        opts=opts,
         cmd_opts=types.SimpleNamespace(disable_console_progressbars=True),
         state=types.SimpleNamespace(sampling_step=0, sampling_steps=0),
         total_tqdm=types.SimpleNamespace(update=lambda: None),
@@ -114,7 +132,7 @@ def _install_a1111_stubs(monkeypatch) -> None:
         k_diffusion_samplers_map=sampler_configs,
         sampler_extra_params={
             "sample_euler": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
-            "sample_dpmpp_2m_sde": [],
+            "sample_dpmpp_2m_sde": ["s_noise"],
             "sample_heun": [],
             "sample_dpm_2": [],
         },
@@ -248,24 +266,94 @@ def test_stage_sigma_validation_rejects_rising_or_non_finite_sigmas(multi):
         multi._validate_stage_sigmas(torch.tensor([1.0, float("nan"), 0.0]), 0, 2, "Euler", None)
 
 
-def test_brownian_noise_sampler_uses_stage_sigmas_not_full_chain(multi):
+def _brownian_chain(multi, monkeypatch, samplers, switch_ats, sigmas):
+    """Run a chain whose stage functions record the noise sampler they get; create_noise_sampler records its sigmas."""
+    created, received = [], []
     sampler = object.__new__(multi.MultiKDiffusionSampler)
-    stage_sigmas = torch.tensor([3.0, 2.0, 0.0])
-    seen = []
-    sampler.create_noise_sampler = lambda _x, sigmas, _p: seen.append(sigmas) or "noise"
+    sampler.definition = {"name": "Multi: brownian", "samplers": samplers, "switch_ats": switch_ats}
+    sampler.last_latent = None
+    sampler.model_wrap_cfg = types.SimpleNamespace()
+    sampler.stop_at = None
+    sampler.eta = 1.0
+    sampler.create_noise_sampler = lambda _x, noise_sigmas, _p: created.append(noise_sigmas) or f"tree{len(created)}"
 
-    kwargs = sampler._build_stage_kwargs(
-        p=types.SimpleNamespace(),
-        func=lambda *args, **inner_kwargs: None,
-        funcname="sample_dpmpp_2m_sde",
-        config=types.SimpleNamespace(options={"brownian_noise": True}),
-        x=torch.zeros(1),
-        sigmas=stage_sigmas,
-        stage_steps=2,
-    )
+    def stage(name):
+        def run(_model, x, sigmas=None, noise_sampler=None, **_kwargs):
+            received.append((name, sigmas.tolist(), noise_sampler))
+            return x
+        return run
 
-    assert kwargs["noise_sampler"] == "noise"
-    assert seen[0] is stage_sigmas
+    for funcname in ("sample_euler", "sample_dpmpp_2m_sde", "sample_heun"):
+        monkeypatch.setattr(multi.k_diffusion.sampling, funcname, stage(funcname))
+    p = types.SimpleNamespace(extra_generation_params={})
+    sampler._run_chain(p, torch.zeros(1), "cond", "uncond", sigmas=torch.tensor(sigmas), steps=len(sigmas) - 1)
+    return created, received
+
+
+def _per_stage_interval(sigmas):
+    """The interval Sampler.create_noise_sampler derives from the sigmas it is given."""
+    sigmas = torch.as_tensor(sigmas)
+    return sigmas[sigmas > 0].min(), sigmas.max()
+
+
+def test_single_brownian_stage_gets_the_noise_sampler_of_its_own_schedule(multi, monkeypatch):
+    # "Multi: oi2"-shaped: one Brownian stage between two non-Brownian ones.
+    sigmas = [14.6, 9.1, 5.2, 3.0, 1.7, 0.9, 0.42, 0.2, 0.0]
+    created, received = _brownian_chain(multi, monkeypatch, ["Euler", "DPM++ 2M SDE", "Euler"], [3, 6], sigmas)
+
+    assert len(created) == 1
+    stage_sigmas = torch.tensor(sigmas[3:7])
+    # Bit-identical interval to the old per-stage construction from that stage's own sigmas.
+    for union_end, stage_end in zip(_per_stage_interval(created[0]), _per_stage_interval(stage_sigmas)):
+        assert union_end.dtype == stage_end.dtype and torch.equal(union_end, stage_end)
+    assert [(name, noise) for name, _sigmas, noise in received] == [("sample_euler", None), ("sample_dpmpp_2m_sde", "tree1"), ("sample_euler", None)]
+
+
+def test_brownian_stages_share_one_noise_sampler_over_their_union(multi, monkeypatch):
+    sigmas = [14.6, 9.1, 5.2, 3.0, 1.7, 0.9, 0.42, 0.2, 0.0]
+    created, received = _brownian_chain(multi, monkeypatch, ["DPM++ 2M SDE", "Euler", "DPM++ 2M SDE"], [2, 5], sigmas)
+
+    assert len(created) == 1
+    low, high = _per_stage_interval(created[0])
+    assert (float(low), float(high)) == (float(torch.tensor(0.2)), float(torch.tensor(14.6)))
+    brownian = [(stage_sigmas, noise) for name, stage_sigmas, noise in received if name == "sample_dpmpp_2m_sde"]
+    assert [noise for _sigmas, noise in brownian] == ["tree1", "tree1"]
+    # Every sigma a Brownian stage queries lies in the shared tree's interval (no torchsde out-of-range query).
+    queried = [sigma for stage_sigmas, _noise in brownian for sigma in stage_sigmas if sigma > 0]
+    assert all(float(low) <= sigma <= float(high) for sigma in queried)
+
+
+def test_brownian_stages_get_independent_noise_from_the_shared_tree(monkeypatch):
+    """With the real k-diffusion BrownianTreeNoiseSampler: per-stage trees with the same seed replay correlated noise
+    in the later stage; one tree over the union does not."""
+    from test.helpers import add_repositories_to_sys_path
+    add_repositories_to_sys_path("k-diffusion")
+    sampling = pytest.importorskip("k_diffusion.sampling")
+    if not hasattr(sampling, "BrownianTreeNoiseSampler"):  # the harness stub is installed by the `multi` fixture only
+        pytest.skip("k-diffusion not available")
+    # The tree's entropy source, seeded as webui's replacement (devices.randn_local) seeds it, independent of whichever
+    # modules.devices other tests left that replacement bound to.
+    brownian_interval = pytest.importorskip("torchsde._brownian.brownian_interval")
+    monkeypatch.setattr(brownian_interval, "_randn", lambda size, dtype, device, seed: torch.randn(size, generator=torch.Generator().manual_seed(int(seed))).to(device=device, dtype=dtype))
+    x = torch.zeros(1, 4, 32, 32)
+    full = sampling.get_sigmas_exponential(15, 0.0292, 14.6146)
+    first, second = full[:8], full[7:]
+
+    def tree(sigmas):
+        return sampling.BrownianTreeNoiseSampler(x, *_per_stage_interval(sigmas), seed=[12345])
+
+    def noise(sampler, sigmas):
+        return [sampler(sigmas[i], sigmas[i + 1]).flatten() for i in range(len(sigmas) - 2)]
+
+    def max_correlation(a, b):
+        return max(abs(torch.corrcoef(torch.stack([u, v]))[0, 1].item()) for u in a for v in b)
+
+    per_stage = max_correlation(noise(tree(first), first), noise(tree(second), second))
+    shared = tree(torch.cat([first, second]))
+    union = max_correlation(noise(shared, first), noise(shared, second))
+
+    assert per_stage > 0.5
+    assert union < 0.1
 
 
 def test_multi_sampler_data_propagates_penultimate_sigma_discard(multi):
@@ -284,7 +372,7 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
         return x
 
     def sample_dpmpp_2m_sde(model, x, extra_args=None, disable=False, callback=None, sigmas=None, **kwargs):
-        calls.append(("DPM++ 2M SDE", list(sigmas), extra_args))
+        calls.append(("DPM++ 2M SDE", sigmas.tolist(), extra_args))
         return "denoised"
 
     monkeypatch.setattr(multi.k_diffusion.sampling, "sample_euler", sample_euler)
@@ -301,7 +389,8 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
     sampler.model_wrap_cfg = FakeModelWrapCfg()
     sampler.stop_at = None
 
-    result = sampler._run_chain(p, "latent", "cond", "uncond", sigmas=[2, 1, 0], steps=2, image_conditioning="image_cond")
+    sampler.create_noise_sampler = lambda _x, _sigmas, _p: None
+    result = sampler._run_chain(p, "latent", "cond", "uncond", sigmas=torch.tensor([2.0, 1.0, 0.0]), steps=2, image_conditioning="image_cond")
 
     assert result == "denoised"
     assert sampler.last_latent == "denoised"
@@ -314,12 +403,7 @@ def test_terminal_one_step_dpmpp_2m_sde_stage_runs_the_sampler_function(multi, m
 
 def _float_images_to_uint8():
     """modules.sd_samplers_common.float_images_to_uint8, compiled alone (the harness stubs that module)."""
-    path = REPO_ROOT / "modules" / "sd_samplers_common.py"
-    tree = ast.parse(path.read_text(encoding="utf8"))
-    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "float_images_to_uint8"]
-    namespace = {"torch": torch}
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
-    return namespace["float_images_to_uint8"]
+    return _core_source(("float_images_to_uint8",), {"torch": torch})["float_images_to_uint8"]
 
 
 def test_snapshots_round_to_uint8_like_generated_images(multi, monkeypatch, tmp_path):
@@ -330,6 +414,7 @@ def test_snapshots_round_to_uint8_like_generated_images(multi, monkeypatch, tmp_
     saved = []
     image = types.SimpleNamespace(save=lambda path: saved.append(path))
     monkeypatch.setattr(multi, "Image", types.SimpleNamespace(fromarray=lambda array: saved.append(array) or image))
+    monkeypatch.setattr(multi, "SNAPSHOT_ROOT", tmp_path)
     sampler = object.__new__(multi.MultiKDiffusionSampler)
     p = types.SimpleNamespace(openclaw_multi_sampler_snapshots={"enabled": True, "dir": str(tmp_path)})
 
@@ -394,3 +479,127 @@ def test_custom_sampler_mutating_routes_hold_registration_lock():
     assert "with _LOCK:" in preview_block
     assert "_TRANSIENT_DEFS[PREVIEW_NAME] = definition" in preview_block
     assert preview_block.index("with _LOCK:") < preview_block.index("_TRANSIENT_DEFS[PREVIEW_NAME] = definition")
+
+
+def _recording_core_get_sigmas(multi, monkeypatch):
+    """The core get_sigmas contract the chain relies on: it reads p.hr_scheduler in the hires pass and p.scheduler
+    otherwise, and records the schedule label plus option-derived schedule keys."""
+    used = []
+
+    def get_sigmas(self, p, steps):
+        scheduler = p.hr_scheduler if p.is_hr_pass else p.scheduler
+        used.append(scheduler)
+        p.extra_generation_params["Hires schedule type" if p.is_hr_pass else "Schedule type"] = scheduler
+        p.extra_generation_params["Schedule rho"] = 5.0
+        return torch.linspace(float(steps), 0.0, steps + 1)
+
+    monkeypatch.setattr(multi.sd_samplers_kdiffusion.KDiffusionSampler, "get_sigmas", get_sigmas)
+    return used
+
+
+@pytest.mark.parametrize("is_hr_pass", [False, True])
+def test_stage_scheduler_applies_in_both_passes_and_keeps_the_request_schedulers(multi, monkeypatch, is_hr_pass):
+    used = _recording_core_get_sigmas(multi, monkeypatch)
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.config = "base config"
+    p = types.SimpleNamespace(is_hr_pass=is_hr_pass, scheduler="Karras", hr_scheduler="Normal", extra_generation_params={})
+
+    sampler._sigmas_for_scheduler(p, 4, "Euler", "Exponential")
+
+    assert used == ["Exponential"]
+    assert (p.scheduler, p.hr_scheduler, sampler.config) == ("Karras", "Normal", "base config")
+
+
+def test_stage_schedule_calls_keep_schedule_keys_but_not_the_stage_label(multi, monkeypatch):
+    _recording_core_get_sigmas(multi, monkeypatch)
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.config = None
+    first = types.SimpleNamespace(is_hr_pass=False, scheduler="Automatic", hr_scheduler=None, extra_generation_params={"Seed": 1})
+    hires = types.SimpleNamespace(is_hr_pass=True, scheduler="Automatic", hr_scheduler="Automatic",
+                                  extra_generation_params={"Schedule type": "Karras", "Hires schedule type": None, "Seed": 1})
+
+    sampler._sigmas_for_scheduler(first, 4, "Euler", "Exponential")
+    sampler._sigmas_for_scheduler(hires, 4, "Euler", "Exponential")
+
+    # The option-derived schedule key survives; the stage label neither replaces nor adds the request's.
+    assert first.extra_generation_params == {"Seed": 1, "Schedule rho": 5.0}
+    assert hires.extra_generation_params == {"Schedule type": "Karras", "Hires schedule type": None, "Seed": 1, "Schedule rho": 5.0}
+    assert list(hires.extra_generation_params) == ["Schedule type", "Hires schedule type", "Seed", "Schedule rho"]
+
+
+def _stage_kwargs(multi, p, funcname, func):
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    sampler.eta = 1.0
+    return sampler._build_stage_kwargs(p=p, func=func, funcname=funcname, config=types.SimpleNamespace(options={}),
+                                       sigmas=torch.tensor([2.0, 1.0, 0.0]), stage_steps=2)
+
+
+def test_stage_sigma_params_take_the_request_over_the_settings_and_are_recorded(multi, monkeypatch):
+    monkeypatch.setattr(multi.shared.opts, "s_churn", 0.3)
+    monkeypatch.setattr(multi.shared.opts, "s_noise", 0.8)
+    p = types.SimpleNamespace(s_churn=0.5, s_tmin=0.0, s_tmax=float("inf"), s_noise=0.9, extra_generation_params={})
+
+    euler = _stage_kwargs(multi, p, "sample_euler", lambda model, x, sigmas=None, s_churn=0., s_tmin=0., s_tmax=float("inf"), s_noise=1.: x)
+    sde = _stage_kwargs(multi, p, "sample_dpmpp_2m_sde", lambda model, x, sigmas=None, eta=1., s_noise=1., noise_sampler=None: x)
+
+    assert {key: euler[key] for key in ("s_churn", "s_noise")} == {"s_churn": 0.5, "s_noise": 0.9}
+    assert "s_tmin" not in euler and "s_tmax" not in euler
+    assert sde["s_noise"] == 0.9
+    assert p.extra_generation_params == {"Sigma churn": 0.5, "Sigma noise": 0.9}
+
+
+def test_stage_sigma_params_at_the_defaults_pass_nothing(multi):
+    """Production settings (s_noise 1, s_churn/s_tmin/s_tmax 0): the stage functions run on their own defaults."""
+    p = types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, extra_generation_params={})
+
+    kwargs = _stage_kwargs(multi, p, "sample_euler", lambda model, x, sigmas=None, s_churn=0., s_tmin=0., s_tmax=float("inf"), s_noise=1.: x)
+
+    assert not {"s_churn", "s_tmin", "s_tmax", "s_noise"} & set(kwargs)
+    assert p.extra_generation_params == {}
+
+
+@pytest.fixture
+def snapshot_root(multi, monkeypatch, tmp_path):
+    root = tmp_path / "data" / "snapshots"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(multi, "SNAPSHOT_ROOT", root)
+    return root.resolve()
+
+
+def _process_snapshot_dir(multi, snapshot_dir):
+    p = types.SimpleNamespace()
+    multi.OpenClawMultiSamplerScript().process(p, enabled=True, snapshot_dir=snapshot_dir)
+    return p.openclaw_multi_sampler_snapshots["dir"]
+
+
+def test_snapshot_dir_inside_the_root_is_accepted(multi, snapshot_root):
+    # The preview route hands out SNAPSHOT_ROOT / run_id; relative names are taken under the root.
+    assert _process_snapshot_dir(multi, str(snapshot_root / "run-1")) == str(snapshot_root / "run-1")
+    assert _process_snapshot_dir(multi, "run-2/sub") == str(snapshot_root / "run-2" / "sub")
+
+
+@pytest.mark.parametrize("escape", ["../outside", "run/../../outside", "/tmp/elsewhere", "{root}/../outside", "link/inside"])
+def test_snapshot_dir_outside_the_root_fails_the_request(multi, snapshot_root, tmp_path, escape):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (snapshot_root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must be inside"):
+        _process_snapshot_dir(multi, escape.format(root=snapshot_root))
+    assert list(outside.iterdir()) == []
+
+
+def test_snapshot_writes_recheck_the_directory(multi, snapshot_root, tmp_path):
+    outside = tmp_path / "outside"
+    sampler = object.__new__(multi.MultiKDiffusionSampler)
+    p = types.SimpleNamespace(openclaw_multi_sampler_snapshots={"enabled": True, "dir": str(outside)})
+
+    with pytest.raises(ValueError, match="must be inside"):
+        sampler._save_snapshot(p, torch.zeros(1, 4, 1, 1), step=0, final=True)
+    assert not outside.exists()
+
+
+def test_disabled_snapshots_ignore_the_directory(multi, snapshot_root):
+    p = types.SimpleNamespace()
+    multi.OpenClawMultiSamplerScript().process(p, enabled=False, snapshot_dir="/tmp/elsewhere")
+    assert p.openclaw_multi_sampler_snapshots == {"enabled": False}
