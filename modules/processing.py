@@ -101,8 +101,7 @@ def create_binary_mask(image, round=True):
 
 
 def _resize_latent_mask(image, size, round=True):
-    resampling = Image.Resampling.BOX if hasattr(Image, "Resampling") else Image.BOX
-    latmask = image.convert('L').resize(size, resample=resampling)
+    latmask = image.convert('L').resize(size, resample=Image.Resampling.BOX)
     latmask = np.asarray(latmask, dtype=np.float32) / 255.0
 
     if round:
@@ -509,7 +508,13 @@ class StableDiffusionProcessing:
             StableDiffusionProcessing.cached_uc = [None, None]
             if cleared:
                 openclaw_cache_epochs.observe("E05", "invalidate", reason="cache_disabled", count=cleared)
-            openclaw_cache_epochs.set_size("E05", current_size=0, capacity=4)
+            self._publish_cond_cache_occupancy()
+
+    @staticmethod
+    def _publish_cond_cache_occupancy():
+        """E05 telemetry size: the filled slots of the four process-wide conditioning caches."""
+        slots = (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc)
+        openclaw_cache_epochs.set_size("E05", current_size=sum(1 for item in slots if item[0] is not None), capacity=len(slots))
 
     def get_token_merging_ratio(self, for_hr=False):
         if for_hr:
@@ -650,11 +655,7 @@ class StableDiffusionProcessing:
                 cache[:] = [cached_params, computed, infotext]
                 _record_cache_stats_miss(stats, started)
                 openclaw_cache_epochs.observe("E05", "publish", reason="published", semantic_key=semantic_key)
-                openclaw_cache_epochs.set_size(
-                    "E05",
-                    current_size=sum(1 for item in (StableDiffusionProcessing.cached_c, StableDiffusionProcessing.cached_uc, StableDiffusionProcessingTxt2Img.cached_hr_c, StableDiffusionProcessingTxt2Img.cached_hr_uc) if item[0] is not None),
-                    capacity=4,
-                )
+                self._publish_cond_cache_occupancy()
                 return computed
 
     def setup_conds(self):
@@ -816,40 +817,32 @@ def decoded_images_device():
     return devices.cpu if lowvram.is_enabled(shared.sd_model) else shared.device
 
 
-def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
+def decode_latent_batch(model, batch):
+    """Decode a latent batch with the VAE onto decoded_images_device(), checking the UNet output and the decode for
+    NaNs (a NaN decode retries once in the auto_vae_precision dtype; an OOM decodes one sample at a time)."""
+    target_device = decoded_images_device()
+
     def decode_single_samples(current_batch):
         samples = DecodedSamples()
 
         for i in range(current_batch.shape[0]):
             sample = decode_first_stage(model, current_batch[i:i + 1])[0]
-
-            if check_for_nans:
-                devices.test_for_nans(sample, "vae")
-
-            if target_device is not None:
-                sample = sample.to(target_device)
-
-            samples.append(sample)
+            devices.test_for_nans(sample, "vae")
+            samples.append(sample.to(target_device))
 
         return samples
 
-    if check_for_nans:
-        devices.test_for_nans(batch, "unet")
+    devices.test_for_nans(batch, "unet")
 
     try:
         decoded = decode_first_stage(model, batch)
-
-        if check_for_nans:
-            devices.test_for_nans(decoded, "vae")
+        devices.test_for_nans(decoded, "vae")
 
     except torch.cuda.OutOfMemoryError:
         devices.torch_gc()
         return decode_single_samples(batch)
 
     except devices.NansException as e:
-        if not check_for_nans:
-            raise e
-
         if shared.opts.auto_vae_precision_bfloat16 and devices.dtype_vae != torch.bfloat16:
             autofix_dtype = torch.bfloat16
             autofix_dtype_text = "bfloat16"
@@ -876,14 +869,9 @@ def decode_latent_batch(model, batch, target_device=None, check_for_nans=False):
         model.first_stage_model.to(devices.dtype_vae)
         batch = batch.to(devices.dtype_vae)
         decoded = decode_first_stage(model, batch)
+        devices.test_for_nans(decoded, "vae")
 
-        if check_for_nans:
-            devices.test_for_nans(decoded, "vae")
-
-    if target_device is not None:
-        decoded = decoded.to(target_device)
-
-    return DecodedSamples(decoded)
+    return DecodedSamples(decoded.to(target_device))
 
 
 def get_fixed_seed(seed):
@@ -1270,7 +1258,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
                 if opts.sd_vae_decode_method != 'Full':
                     p.extra_generation_params['VAE Decoder'] = opts.sd_vae_decode_method
-                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim, target_device=decoded_images_device(), check_for_nans=True)
+                x_samples_ddim = decode_latent_batch(p.sd_model, samples_ddim)
 
             x_samples_ddim = torch.stack(x_samples_ddim).float()
             x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
@@ -1624,7 +1612,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 return samples
 
             if self.latent_scale_mode is None:
-                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)).to(dtype=torch.float32)
+                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples)).to(dtype=torch.float32)
             else:
                 decoded_samples = None
 
@@ -1732,7 +1720,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         self.sampler = None
 
-        decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=decoded_images_device(), check_for_nans=True)
+        decoded_samples = decode_latent_batch(self.sd_model, samples)
 
         self.is_hr_pass = False
         return decoded_samples
@@ -1744,6 +1732,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         if not opts.persistent_cond_cache:
             StableDiffusionProcessingTxt2Img.cached_hr_uc = [None, None]
             StableDiffusionProcessingTxt2Img.cached_hr_c = [None, None]
+            self._publish_cond_cache_occupancy()
 
     def setup_prompts(self):
         super().setup_prompts()
@@ -2078,8 +2067,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         latent_mask = self.latent_mask if self.latent_mask is not None else image_mask
 
         add_color_corrections = opts.img2img_color_correction and self.color_corrections is None
-        if add_color_corrections:
-            self.color_corrections = []
 
         # Without a mask, and when resize_image cannot run an upscaler, the prepared image is a
         # pure function of the raw init image and fields already in the init cache key, so the

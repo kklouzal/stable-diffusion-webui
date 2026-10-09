@@ -45,7 +45,7 @@ def test_c_uc_namespaces_and_bounded_atomic_cache_contract_are_explicit():
     assert 'get_conds_with_caching("c"' in source
     assert "conditioning_cache_lock = threading.RLock()" in source
     assert "with openclaw_cache_epochs.epoch_transaction():" in source
-    assert "capacity=4" in source
+    assert "capacity=len(slots)" in source and source.count("self._publish_cond_cache_occupancy()") == 3
     assert "cache[:] = [cached_params, computed, infotext]" in source
 
 

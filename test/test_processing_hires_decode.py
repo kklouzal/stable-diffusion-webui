@@ -131,9 +131,10 @@ def test_every_generation_decode_uses_decoded_images_device():
     tree = ast.parse((Path(processing.__file__)).read_text(encoding="utf-8"))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "decode_latent_batch"]
     assert len(calls) == 3
-    for call in calls:
-        target = next(keyword.value for keyword in call.keywords if keyword.arg == "target_device")
-        assert ast.unparse(target) == "decoded_images_device()"
+    assert all(len(call.args) == 2 and not call.keywords for call in calls)
+    decode = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "decode_latent_batch")
+    assert [ast.unparse(arg) for arg in decode.args.args] == ["model", "batch"]
+    assert any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "decoded_images_device" for node in ast.walk(decode))
 
 
 @pytest.mark.parametrize("kind", ["sdxl", "sdxl_inpaint", "inpaint"])
