@@ -436,6 +436,22 @@ def _publish_applied_state(new_networks, emb_db=None):
             return True
 
 
+def network_layer_for_key(layer_mapping, key):
+    """(layer name, layer) of the converted LoRA key `key` in `layer_mapping`; (key, None) when no layer has it.
+
+    LoRAs name CLIP text encoder layers in the text_model layout (`..._transformer_text_model_encoder_...`). The
+    CLIPTextModel of transformers 5 holds its embeddings/encoder/final_layer_norm directly (no text_model submodule;
+    sd_models remaps checkpoints the same way), so its layers are mapped as `..._transformer_encoder_...`.
+    """
+    layer = layer_mapping.get(key)
+    if layer is None and "transformer_text_model_" in key:
+        flat = key.replace("transformer_text_model_", "transformer_", 1)
+        layer = layer_mapping.get(flat)
+        if layer is not None:
+            return flat, layer
+    return key, layer
+
+
 def load_network(name, network_on_disk):
     net = network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
@@ -449,7 +465,8 @@ def load_network(name, network_on_disk):
         assign_network_names_to_compvis_modules(shared.sd_model)
 
     keys_failed_to_match = {}
-    is_sd2 = 'model_transformer_resblocks' in shared.sd_model.network_layer_mapping
+    layer_mapping = shared.sd_model.network_layer_mapping
+    is_sd2 = 'model_transformer_resblocks' in layer_mapping
     if hasattr(shared.sd_model, 'diffusers_weight_map'):
         diffusers_weight_map = shared.sd_model.diffusers_weight_map
     elif hasattr(shared.sd_model, 'diffusers_weight_mapping'):
@@ -484,38 +501,33 @@ def load_network(name, network_on_disk):
         if diffusers_weight_map:
             key = diffusers_weight_map.get(key_network_without_network_parts, key_network_without_network_parts)
         else:
-            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2, shared.sd_model.network_layer_mapping)
+            key = convert_diffusers_name_to_compvis(key_network_without_network_parts, is_sd2, layer_mapping)
 
-        sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+        key, sd_module = network_layer_for_key(layer_mapping, key)
 
         if sd_module is None:
             m = re_x_proj.match(key)
             if m:
-                sd_module = shared.sd_model.network_layer_mapping.get(m.group(1), None)
+                sd_module = layer_mapping.get(m.group(1), None)
 
         # SDXL loras seem to already have correct compvis keys, so only need to replace "lora_unet" with "diffusion_model"
         if sd_module is None and "lora_unet" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_unet", "diffusion_model"))
         elif sd_module is None and "lora_te1_text_model" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model"))
 
             # some SD1 Loras also have correct compvis keys
             if sd_module is None:
-                key = key_network_without_network_parts.replace("lora_te1_text_model", "transformer_text_model")
-                sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+                key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("lora_te1_text_model", "transformer_text_model"))
 
         # kohya_ss OFT module
         elif sd_module is None and "oft_unet" in key_network_without_network_parts:
-            key = key_network_without_network_parts.replace("oft_unet", "diffusion_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key, sd_module = network_layer_for_key(layer_mapping, key_network_without_network_parts.replace("oft_unet", "diffusion_model"))
 
         # KohakuBlueLeaf OFT module
         if sd_module is None and "oft_diag" in key:
-            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model")
-            key = key_network_without_network_parts.replace("lora_te1_text_model", "0_transformer_text_model")
-            sd_module = shared.sd_model.network_layer_mapping.get(key, None)
+            key = key_network_without_network_parts.replace("lora_unet", "diffusion_model").replace("lora_te1_text_model", "0_transformer_text_model")
+            key, sd_module = network_layer_for_key(layer_mapping, key)
 
         if sd_module is None:
             keys_failed_to_match[key_network] = key

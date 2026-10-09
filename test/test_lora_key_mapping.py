@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import safetensors.torch
 import torch
+import transformers
 
 
 def _layer_mapping(**roots):
@@ -67,3 +68,16 @@ def test_diffusers_upsampler_keys_resolve_to_the_upsampler_of_either_unet_layout
     assert sorted(net.modules) == sorted([first, "diffusion_model_output_blocks_5_2_conv"])
     assert net.modules[first].sd_module is mapping[first]
 
+
+def test_text_model_layout_keys_resolve_to_the_flat_transformers_clip_layers(load, tmp_path):
+    config = transformers.CLIPTextConfig(vocab_size=16, hidden_size=4, intermediate_size=8, num_hidden_layers=1, num_attention_heads=2, max_position_embeddings=8)
+    clip_l = transformers.CLIPTextModel(config)
+    mapping = _layer_mapping(**{"0": torch.nn.ModuleDict({"transformer": clip_l})})
+    flat = not hasattr(clip_l, "text_model")  # transformers 5: the encoder sits directly under the model
+    on_disk = _lora_file(tmp_path, ["lora_te1_text_model_encoder_layers_0_self_attn_q_proj", "lora_te1_text_model_encoder_layers_0_mlp_fc1"])
+    net = load(mapping, on_disk)
+
+    prefix = "0_transformer_" if flat else "0_transformer_text_model_"
+    q_proj = f"{prefix}encoder_layers_0_self_attn_q_proj"
+    assert sorted(net.modules) == sorted([q_proj, f"{prefix}encoder_layers_0_mlp_fc1"])
+    assert net.modules[q_proj].sd_module is mapping[q_proj]
