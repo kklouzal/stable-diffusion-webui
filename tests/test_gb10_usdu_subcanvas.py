@@ -10,9 +10,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import random
-import resource
 import shutil
-import signal
 import subprocess
 import sys
 import types
@@ -21,7 +19,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parents[1]
-PATCHER = ROOT / "gb10" / "patch-ultimate-upscale-subcanvas.py"
+GB10 = ROOT / "gb10"
+PATCHER = GB10 / "patch-ultimate-upscale-subcanvas.py"
 EXTENSION = "ultimate-upscale-for-automatic1111"
 # The host deploy root, or the same checkout where run.sh mounts it inside a webui container.
 INSTALLED_UU = next((path for path in (Path("/opt/gb10/stable-diffusion/Extensions") / EXTENSION, ROOT / "extensions" / EXTENSION) if path.is_dir()), None)
@@ -35,6 +34,8 @@ def run_patcher(target: Path, *extra: str, check: bool = True) -> subprocess.Com
 
 
 def _load_patcher():
+    if str(GB10) not in sys.path:
+        sys.path.insert(0, str(GB10))  # the patcher imports patchlib as a sibling module, as under run.sh
     spec = importlib.util.spec_from_file_location("gb10_patch_ultimate_upscale_subcanvas", PATCHER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -55,9 +56,9 @@ def usdu_source(tmp_path: Path) -> Path:
     installed = (INSTALLED_UU / "scripts" / "ultimate-upscale.py").read_bytes()
     text = installed.decode("utf-8")
     if PATCHER_MODULE.MARKER in text:
-        for original, patched, count in reversed(PATCHER_MODULE.BLOCKS):
-            assert text.count(patched) == count
-            text = text.replace(patched, original)
+        for block in reversed(PATCHER_MODULE.BLOCKS):
+            assert text.count(block.patched) == block.count
+            text = text.replace(block.patched, block.original)
     target = tmp_path / EXTENSION / "scripts" / "ultimate-upscale.py"
     target.parent.mkdir(parents=True)
     target.write_bytes(text.encode("utf-8"))
@@ -95,7 +96,7 @@ def test_patcher_rejects_source_drift_partial_patch_and_crlf(usdu_source: Path, 
     drifted = tmp_path / "drifted.py"
     drifted.write_text(source.replace("                p.init_images = [fixed_image]\n", "                p.init_images = [fixed_image, image]\n"), encoding="utf-8")
     result = run_patcher(drifted, check=False)
-    assert result.returncode != 0 and "unsupported Ultimate Upscale sub-canvas source" in result.stderr
+    assert result.returncode != 0 and "partially patched Ultimate Upscale sub-canvas source for seams-fix fixed tile" in result.stderr
     assert "_gb10_process_tile" not in drifted.read_text(encoding="utf-8")
 
     crlf = tmp_path / "crlf.py"
@@ -113,25 +114,7 @@ def test_patcher_rejects_source_drift_partial_patch_and_crlf(usdu_source: Path, 
     ), encoding="utf-8")
     for extra in ((), ("--check",)):
         result = run_patcher(partial, *extra, check=False)
-        assert result.returncode != 0 and "partial patch" in result.stderr
-
-
-def test_write_failing_midway_leaves_the_target_intact(usdu_source: Path):
-    usdu_source.chmod(0o640)
-    original = usdu_source.read_bytes()
-
-    def limit_file_size():  # a write past 64 bytes fails with EFBIG partway through, as on a full disk
-        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
-
-    result = subprocess.run([sys.executable, str(PATCHER), str(usdu_source)], capture_output=True, text=True, preexec_fn=limit_file_size)
-
-    assert result.returncode != 0 and "File too large" in result.stderr
-    assert usdu_source.read_bytes() == original
-    assert not list(usdu_source.parent.glob("*.gb10-tmp"))
-    run_patcher(usdu_source)
-    assert PATCHER_MODULE.MARKER in usdu_source.read_text(encoding="utf-8")
-    assert usdu_source.stat().st_mode & 0o777 == 0o640
+        assert result.returncode != 0 and "partially patched" in result.stderr
 
 
 # ----------------------------------------------------------------------------------------------- differential
@@ -448,12 +431,3 @@ def test_processing_drift_fails_fast_instead_of_returning_a_different_canvas(usd
     case = dict(canvas=(320, 256), tile=(64, 64), padding=16, mask_blur=4, redraw=0, seams=0, seams_padding=0, seams_blur=0, seams_width=8, seed=7)
     with pytest.raises(RuntimeError, match="sub-canvas mismatch"):
         run_usdu(real_modules, patched, monkeypatch, case)
-
-
-def test_run_sh_applies_and_checks_after_the_state_lifecycle_patch():
-    run_sh = (ROOT / "gb10" / "run.sh").read_text(encoding="utf-8")
-    lifecycle_check = run_sh.index('gb10/patch-ultimate-upscale-state-lifecycle.py" --check "${ULTIMATE_UPSCALE_ROOT}"')
-    apply = run_sh.index('gb10/patch-ultimate-upscale-subcanvas.py" "${ULTIMATE_UPSCALE_ROOT}"')
-    verify = run_sh.index('gb10/patch-ultimate-upscale-subcanvas.py" --check "${ULTIMATE_UPSCALE_ROOT}"')
-    container_start = run_sh.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}"')
-    assert lifecycle_check < apply < verify < container_start

@@ -3,10 +3,7 @@
 target-version = "py312"
 line-length = 88
 extend-exclude = [
-	".venv",
-	".ruff_cache",
 	"extensions",
-	"extensions-disabled",
 ]
 
 [tool.ruff.lint]
@@ -14,32 +11,23 @@ extend-exclude = [
 extend-select = [
   "B",
   "C",
-  "I",
   "W",
 ]
 
 ignore = [
-	"E501", # Line too long
 	"E721", # Do not compare types, use `isinstance`
 	"E731", # Do not assign a `lambda` expression, use a `def`
-	
-	"I001", # Import block is un-sorted or un-formatted
+
 	"C901", # Function is too complex
 	"C408", # Rewrite as a literal
 	"B905", # Keep legacy implicit zip truncation behavior unless callsites opt in to strictness.
-	"W605", # invalid escape sequence, messes with some docstrings
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"webui.py" = ["E402"]  # Module level import not at top of file
 "extensions-builtin/Lora/networks.py" = ["B007"]  # LoRA merge loops keep tuple shape aligned with paired error handling.
-"extensions/openclaw-clear-cond-cache/scripts/openclaw_clear_cond_cache.py" = ["PLC0415", "PLW0603"]  # WebUI callback hooks need lazy optional imports and shared extension state.
 "modules/processing.py" = ["F811"]  # Dataclass constructor compatibility fields are backed by same-name properties.
 "modules/scripts_postprocessing.py" = ["E402"]  # Late import avoids a scripts <-> scripts_postprocessing cycle.
 
 [tool.ruff.lint.flake8-bugbear]
 # Allow default arguments like, e.g., `data: List[str] = fastapi.Query(None)`.
 extend-immutable-calls = ["fastapi.Depends", "fastapi.security.HTTPBasic"]
-
-[tool.pytest.ini_options]
-base_url = "http://127.0.0.1:7860"

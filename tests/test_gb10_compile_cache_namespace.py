@@ -53,5 +53,5 @@ def test_namespace_no_longer_tracks_the_a1111_commit_and_old_namespaces_are_kept
     source = RUN_SH.read_text(encoding="utf8")
 
     assert "${A1111_COMMIT_HASH}" not in block.split("\n", 1)[1]
-    assert "rm -rf" not in source[source.index("COMPILE_CACHE_NAMESPACE_PATHS=("):source.index("DOCKER_ARGS=(")]
+    assert "rm -rf" not in source[source.index("COMPILE_CACHE_NAMESPACE_PATHS=("):source.index("TARGET_IMAGE_ID=")]
     assert "other namespace dirs hold" in source

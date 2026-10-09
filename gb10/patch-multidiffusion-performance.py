@@ -1,90 +1,83 @@
 #!/usr/bin/env python3
-"""Patch and verify the GB10 performance changes to the mounted MultiDiffusion / Tiled VAE extension.
+"""Patch and verify the GB10 changes to the mounted MultiDiffusion / Tiled VAE extension.
 
-Each change is an exact ORIGINAL -> PATCHED text block. ORIGINAL blocks match the host checkout as deployed: upstream
-plus the 0001-modern-attention-fallbacks commit (5022f68) and patch-multidiffusion-terminal-tiles.py.
-- A target file must be either fully original (it gets patched) or fully patched (it is left alone), or hold an
-  earlier version of some patched blocks (SUPERSEDED) with every other block patched (those blocks are upgraded).
-- Anything else aborts the deploy: unknown upstream text, a partial patch, CRLF line endings.
-- Every target is validated, and its patched text verified (every block patched, valid Python), before any file is
-  written. Each file is replaced atomically, keeping its mode and owner.
-- --check writes nothing and fails unless every target is fully patched.
-
-Exactness of each change is argued next to the code it patches and tested on CPU against the unpatched extension
-(tests/test_gb10_multidiffusion_performance_patcher.py).
+Each change is an exact ORIGINAL -> PATCHED text block (gb10/patchlib.py: a target is either fully original and gets
+patched, or fully patched and is left alone; anything else, CRLF included, aborts the deploy; nothing is written until
+every target verifies; --check writes nothing). ORIGINAL is upstream origin/main 22798f6, so a fresh install patches
+cleanly. The blocks:
+- MD terminal tile origins (tile_utils/utils.py): upstream spreads origins as int(col * (w - tile_w) / (cols - 1));
+  the float floor can leave the last latent column or row uncovered (weight 0). The replacement steps by
+  tile - overlap and appends the terminal origin. Its tile count equals upstream's, but the origins differ from
+  upstream for most extents, not only for the uncovered ones.
+- TV-FB: the former local commit "Modernize Tiled VAE attention fallbacks" (5022f68): xformers is optional and falls
+  back to SDP, and the sage2/sage3 method names map to SDP. Its torch.nn.attention import is no longer used since
+  TV-ATTN; it is kept, like the sage names, so the deployed bytes stay unchanged.
+- TV-*, MD-W1: performance changes. Exactness of each is argued next to the code it patches and tested on CPU against
+  the unpatched extension (tests/test_gb10_multidiffusion_performance_patcher.py).
+A checkout holding only the former 0001 commit (upstream + TV-FB, nothing else) is not accepted: reset it to upstream.
 """
 from __future__ import annotations
 
-import argparse
-import os
-import tempfile
-from pathlib import Path
+from patchlib import Block, apply_blocks, parse_cli
 
+LABEL = "MultiDiffusion"
 TILEVAE = "scripts/tilevae.py"
 
-# tile_utils/attn.py TV-ATTN blocks. *_V1 is the text deployed before the upcast/autocast fix: a file holding it is
-# upgraded in place (see SUPERSEDED), never treated as unknown drift.
-TV_ATTN_IMPORT_V1 = 'from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, run_scaled_dot_product_attention, sub_quad_attention\n'
-TV_ATTN_IMPORT = 'from modules.devices import without_autocast\n' + TV_ATTN_IMPORT_V1.replace('sub_quad_attention\n', 'sub_quad_attention  # gb10: TV-ATTN\n')
-TV_ATTN_SDPA_V1 = r"""def sdp_no_mem_attnblock_forward(self, x):
-    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+BLOCKS: dict[str, list[Block]] = {
+    "tile_utils/utils.py": [
+        Block(
+            "MD terminal tile origins",
+            '''def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
+    cols = math.ceil((w - overlap) / (tile_w - overlap))
+    rows = math.ceil((h - overlap) / (tile_h - overlap))
+    dx = (w - tile_w) / (cols - 1) if cols > 1 else 0
+    dy = (h - tile_h) / (rows - 1) if rows > 1 else 0
 
-def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
-    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
-    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
-    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
-    # different valid kernel: numerically equivalent.
-    q = self.q(h_)
-    k = self.k(h_)
-    v = self.v(h_)
-    b, c, h, w = q.shape
-    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
-    dtype = q.dtype
-    if shared.opts.upcast_attn:
-        q, k, v = q.float(), k.float(), v.float()
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
-    out = out.to(dtype)
-    out = out.transpose(-1, -2).reshape(b, c, h, w)
-    out = self.proj_out(out)
-    return out
-"""
-TV_ATTN_SDPA = r"""def sdp_no_mem_attnblock_forward(self, x):
-    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+    bbox_list: List[BBox] = []
+    weight = torch.zeros((1, 1, h, w), device=devices.device, dtype=torch.float32)
+    for row in range(rows):
+        y = min(int(row * dy), h - tile_h)
+        for col in range(cols):
+            x = min(int(col * dx), w - tile_w)
 
-def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
-    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
-    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
-    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
-    # different valid kernel: numerically equivalent. Upcasting (upcast_attn) also turns autocast off for the kernel:
-    # CUDA autocast runs scaled_dot_product_attention in its lower-precision dtype and would cast the float32 q/k/v
-    # straight back (same fix as modules/sd_hijack_optimizations.py); without upcast_attn it is a no-op.
-    q = self.q(h_)
-    k = self.k(h_)
-    v = self.v(h_)
-    b, c, h, w = q.shape
-    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
-    dtype = q.dtype
-    upcast = shared.opts.upcast_attn
-    if upcast:
-        q, k, v = q.float(), k.float(), v.float()
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    with without_autocast(disable=not upcast):
-        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
-    out = out.to(dtype)
-    out = out.transpose(-1, -2).reshape(b, c, h, w)
-    out = self.proj_out(out)
-    return out
-"""
+            bbox = BBox(x, y, tile_w, tile_h)
+            bbox_list.append(bbox)
+            weight[bbox.slicer] += init_weight
+
+    return bbox_list, weight
+''',
+            '''def _gb10_terminal_tile_origins(extent:int, tile:int, overlap:int) -> List[int]:
+    if extent <= 0 or tile <= 0:
+        raise ValueError(f"extent and tile must be positive, got extent={extent}, tile={tile}")
+    terminal = max(0, extent - tile)
+    if terminal == 0:
+        return [0]
+    stride = max(1, tile - overlap)
+    origins = list(range(0, terminal + 1, stride))
+    if origins[-1] != terminal:
+        origins.append(terminal)
+    return origins
 
 
-BLOCKS: dict[str, list[tuple[str, str, str]]] = {
+def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
+    x_origins = _gb10_terminal_tile_origins(w, tile_w, overlap)
+    y_origins = _gb10_terminal_tile_origins(h, tile_h, overlap)
+
+    bbox_list: List[BBox] = []
+    weight = torch.zeros((1, 1, h, w), device=devices.device, dtype=torch.float32)
+    for y in y_origins:
+        for x in x_origins:
+            bbox = BBox(x, y, tile_w, tile_h)
+            bbox_list.append(bbox)
+            weight[bbox.slicer] += init_weight
+
+    return bbox_list, weight
+''',
+            sentinel="def _gb10_terminal_tile_origins",
+        ),
+    ],
     TILEVAE: [
-        (
+        Block(
             "TV-GC perfcount",
             r"""        if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(devices.device)
@@ -108,7 +101,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
         if torch.cuda.is_available():
 """,
         ),
-        (
+        Block(
             "TV-NAN estimation check",
             r"""        # estimate until the last group norm
         for i in range(last_id + 1):
@@ -189,7 +182,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
         raise IndexError('Should not reach here')
 """,
         ),
-        (
+        Block(
             "TV-CPU input tiles",
             r"""        tiles = []
         for input_bbox in in_bboxes:
@@ -205,7 +198,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
             tiles.append(tile)
 """,
         ),
-        (
+        Block(
             "TV-APX lazy approximation",
             r"""        # Dummy result
         result = None
@@ -223,7 +216,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
         # before any tile finished, so it is now only built then, at the end.
 """,
         ),
-        (
+        Block(
             "TV-CPU residuals",
             r"""                        res = task[1](tile)
                         if not self.fast_mode or task[0] == 'store_res_cpu':
@@ -234,7 +227,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
                         res = task[1](tile)
 """,
         ),
-        (
+        Block(
             "TV-RES result dtype",
             r"""                    if result is None:      # NOTE: dim C varies from different cases, can only be inited dynamically
                         result = torch.zeros((N, tile.shape[1], height * 8 if is_decoder else height // 8, width * 8 if is_decoder else width // 8), device=device, requires_grad=False)
@@ -246,7 +239,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
                         result = torch.zeros((N, tile.shape[1], height * 8 if is_decoder else height // 8, width * 8 if is_decoder else width // 8), device=device, dtype=result_dtype, requires_grad=False)
 """,
         ),
-        (
+        Block(
             "TV-CPU parked tiles",
             r"""                else:
                     tiles[i] = tile.cpu()
@@ -257,7 +250,7 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
                     del tile
 """,
         ),
-        (
+        Block(
             "TV-APX return",
             r"""        # Done!
         pbar.close()
@@ -274,16 +267,68 @@ BLOCKS: dict[str, list[tuple[str, str, str]]] = {
         ),
     ],
     "tile_utils/attn.py": [
-        (
-            "TV-ATTN import",
-            r"""from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, sub_quad_attention
+        Block(
+            "TV-ATTN imports",
+            r"""import torch
+
+from modules import shared, sd_hijack
+from einops import rearrange
+from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, sub_quad_attention
 """,
-            TV_ATTN_IMPORT,
+            r"""import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from modules import shared, sd_hijack
+from einops import rearrange
+from modules.devices import without_autocast
+from modules.sd_hijack_optimizations import get_available_vram, get_xformers_flash_attention_op, run_scaled_dot_product_attention, sub_quad_attention  # gb10: TV-ATTN
+""",
         ),
-        (
+        Block(
+            "TV-FB optional xformers",
+            r"""    import xformers.ops
+except ImportError:
+    pass
+""",
+            r"""    import xformers.ops
+except ImportError:
+    xformers = None
+""",
+        ),
+        Block(
+            "TV-FB method names",
+            r"""    # ['none', 'sdp-no-mem', 'sdp', 'xformers', ''sub-quadratic', 'v1', 'invokeai', 'doggettx']
+    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
+""",
+            r"""    # ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']
+    if method not in ['none', 'sdp-no-mem', 'sdp', 'xformers', 'sage2', 'sage3', 'sub-quadratic', 'v1', 'invokeai', 'doggettx']:
+""",
+        ),
+        Block(
+            "TV-FB method fallbacks",
+            r"""    elif method == 'xformers':
+        return xformers_attnblock_forward
+    elif method == 'sdp-no-mem':
+        return sdp_no_mem_attnblock_forward
+    elif method == 'sdp':
+        return sdp_attnblock_forward
+""",
+            r"""    elif method == 'xformers':
+        if xformers is None:
+            print("[Tiled VAE] Warning: xformers attention requested but xformers is unavailable; falling back to SDP.")
+            return sdp_attnblock_forward
+        return xformers_attnblock_forward
+    elif method == 'sdp-no-mem':
+        return sdp_no_mem_attnblock_forward
+    elif method in {'sdp', 'sage2', 'sage3'}:
+        # SageAttention A1111 backends do not expose a Tiled VAE AttnBlock path; SDP is the safest fast decode fallback.
+        return sdp_attnblock_forward
+""",
+        ),
+        Block(
             "TV-ATTN 4-D SDPA",
             r"""def sdp_no_mem_attnblock_forward(self, x):
-    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=False):
         return sdp_attnblock_forward(self, x)
 
 def sdp_attnblock_forward(self, h_):
@@ -304,11 +349,39 @@ def sdp_attnblock_forward(self, h_):
     out = self.proj_out(out)
     return out
 """,
-            TV_ATTN_SDPA,
+            r"""def sdp_no_mem_attnblock_forward(self, x):
+    return sdp_attnblock_forward(self, x, sdpa_backend_override="flash,math")
+
+def sdp_attnblock_forward(self, h_, sdpa_backend_override=None):
+    # gb10 (TV-ATTN): one head of 4-D [b, 1, hw, c] q/k/v. PyTorch's fused SDPA kernels need 4-D inputs, so the
+    # old 3-D [b, hw, c] call always fell back to the math kernel and materialized the hw x hw scores (about 12 GB
+    # bf16 for one 278x278 decoder tile). webui's helper also applies its SDPA backend policy. Same attention,
+    # different valid kernel: numerically equivalent. Upcasting (upcast_attn) also turns autocast off for the kernel:
+    # CUDA autocast runs scaled_dot_product_attention in its lower-precision dtype and would cast the float32 q/k/v
+    # straight back (same fix as modules/sd_hijack_optimizations.py); without upcast_attn it is a no-op.
+    q = self.q(h_)
+    k = self.k(h_)
+    v = self.v(h_)
+    b, c, h, w = q.shape
+    q, k, v = (t.reshape(b, 1, c, h * w).transpose(-1, -2) for t in (q, k, v))
+    dtype = q.dtype
+    upcast = shared.opts.upcast_attn
+    if upcast:
+        q, k, v = q.float(), k.float(), v.float()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    with without_autocast(disable=not upcast):
+        out = run_scaled_dot_product_attention(q, k, v, is_causal=False, sdpa_backend_override=sdpa_backend_override)
+    out = out.to(dtype)
+    out = out.transpose(-1, -2).reshape(b, c, h, w)
+    out = self.proj_out(out)
+    return out
+""",
         ),
     ],
     "tile_methods/mixtureofdiffusers.py": [
-        (
+        Block(
             "MD-W1 precompute",
             r"""                self.custom_weights[bbox_id] *= self.rescale_factor[bbox.slicer]
 
@@ -324,7 +397,7 @@ def sdp_attnblock_forward(self, h_):
     def get_tile_weights(self) -> Tensor:
 """,
         ),
-        (
+        Block(
             "MD-W1 use",
             # The upstream comment line ends with a space.
             "                for i, bbox in enumerate(bboxes):\n"
@@ -340,103 +413,14 @@ def sdp_attnblock_forward(self, h_):
 }
 
 
-# Earlier PATCHED texts of a block, keyed by (target, block name). A deployed file holding them is upgraded to the
-# current PATCHED text; --check fails until it is.
-SUPERSEDED: dict[tuple[str, str], tuple[str, ...]] = {
-    ("tile_utils/attn.py", "TV-ATTN import"): (TV_ATTN_IMPORT_V1,),
-    ("tile_utils/attn.py", "TV-ATTN 4-D SDPA"): (TV_ATTN_SDPA_V1,),
-}
-
-
-def block_states(relative: str, source: str) -> list[tuple[str, str, str]]:
-    """(state, current text, patched text) per block: state is "original", "patched" or "superseded".
-
-    Exactly one of the block's known texts must occur, exactly once; anything else raises SystemExit."""
-    if "\r" in source:
-        raise SystemExit(f"unsupported MultiDiffusion source (CRLF line endings): {relative}")
-    states = []
-    for name, original, patched in BLOCKS[relative]:
-        known = [("original", original), ("patched", patched)] + [("superseded", text) for text in SUPERSEDED.get((relative, name), ())]
-        counts = [source.count(text) for _state, text in known]
-        found = [entry for entry, count in zip(known, counts) if count]
-        if len(found) != 1 or sum(counts) != 1:
-            raise SystemExit(f"unsupported MultiDiffusion source for {name} (original/patched/superseded x{counts}): {relative}")
-        states.append((found[0][0], found[0][1], patched))
-    return states
-
-
-def file_state(relative: str, source: str) -> str:
-    """Return "original", "patched" or "superseded" (every block patched or superseded, at least one superseded)
-    for a target file's text, or raise SystemExit for anything else (unknown text, a partial patch, CRLF)."""
-    states = {state for state, _current, _patched in block_states(relative, source)}
-    if states == {"original"} or states == {"patched"}:
-        return states.pop()
-    if "original" not in states:
-        return "superseded"
-    raise SystemExit(f"partially patched MultiDiffusion source: {relative}")
-
-
-def verify_patched(relative: str, source: str, path: Path) -> None:
-    """Post-condition of a patch, checked before anything is written: every block of the file holds its current
-    PATCHED text exactly once (and no original or superseded text), and the file is valid Python."""
-    if file_state(relative, source) != "patched":
-        raise SystemExit(f"MultiDiffusion performance patch verification failed (not fully patched): {path}")
-    try:
-        compile(source, str(path), "exec", dont_inherit=True)
-    except SyntaxError as exc:
-        raise SystemExit(f"MultiDiffusion performance patch verification failed (invalid Python): {path}: {exc}") from exc
-
-
-def replace_atomically(path: Path, text: str) -> None:
-    """Write text (UTF-8, newlines untranslated) to a temporary file next to path, fsync it, give it path's mode
-    (and owner when run as root, as run.sh does) and os.replace() path with it: a failure at any point leaves path
-    untouched and removes the temporary file. A symlinked path is written through, as an in-place write would."""
-    path = Path(os.path.realpath(path))
-    stat = path.stat()
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".gb10-tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp:
-            tmp.write(text)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.chmod(tmp_name, stat.st_mode & 0o7777)
-        if os.geteuid() == 0:
-            os.chown(tmp_name, stat.st_uid, stat.st_gid)
-        os.replace(tmp_name, path)
-    except BaseException as exc:
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup:
-            exc.add_note(f"could not remove the temporary file {tmp_name}: {cleanup}")
-        raise
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("root", type=Path, help="multidiffusion-upscaler-for-automatic1111 checkout")
-    parser.add_argument("--check", action="store_true", help="verify that every target is fully patched; write nothing")
-    args = parser.parse_args()
-
-    pending: dict[Path, str] = {}
-    for relative in BLOCKS:
-        path = args.root / relative
-        if not path.is_file():
-            raise SystemExit(f"MultiDiffusion source not found: {path}")
-        source = path.read_bytes().decode("utf-8")
-        state = file_state(relative, source)
-        if args.check and state != "patched":
-            raise SystemExit(f"MultiDiffusion performance patch {'outdated' if state == 'superseded' else 'missing'}: {path}")
-        if state != "patched":
-            for _state, current, patched in block_states(relative, source):
-                source = source.replace(current, patched, 1)
-            verify_patched(relative, source, path)
-            pending[path] = source
-
-    for path, text in pending.items():
-        replace_atomically(path, text)
-        print(f"Patched MultiDiffusion performance changes: {path}")
-    if not pending:
-        print(f"MultiDiffusion performance changes {'verified' if args.check else 'already patched'}: {args.root}")
+    args = parse_cli(__doc__.splitlines()[0])
+    targets = {args.path / relative: blocks for relative, blocks in BLOCKS.items()}
+    written = apply_blocks(targets, label=LABEL, check=args.check)
+    for path in written:
+        print(f"Patched MultiDiffusion changes: {path}")
+    if not written:
+        print(f"MultiDiffusion changes {'verified' if args.check else 'already patched'}: {args.path}")
     return 0
 
 

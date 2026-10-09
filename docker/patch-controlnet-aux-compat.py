@@ -16,7 +16,6 @@ def main() -> int:
     replacements = {
         '@torch.jit.script\n': '',
         '@register_tiny_vit_model\n': '',
-        'register_model(fn)': 'return fn',
         'from timm.models.layers import ': 'from timm.layers import ',
         'from timm.models.registry import ': 'from timm.models import ',
         'from scipy.ndimage.filters import ': 'from scipy.ndimage import ',
@@ -26,10 +25,6 @@ def main() -> int:
         patched = text
         for old, new in replacements.items():
             patched = patched.replace(old, new)
-        if path.name == 'tiny_vit_sam.py' and 'Overwriting tiny_vit_' in patched and 'gb10 scoped duplicate tiny_vit registry filter' not in patched:
-            marker = 'import torch\n'
-            inject = 'import torch\nimport warnings\n# gb10 scoped duplicate tiny_vit registry filter: controlnet_aux registers private TinyViT names that timm may already know.\nwarnings.filterwarnings("ignore", message="Overwriting tiny_vit_.*", category=UserWarning)\n'
-            patched = patched.replace(marker, inject, 1)
         if patched != text:
             path.write_text(patched, encoding='utf-8')
             changed.append(str(path.relative_to(root)))

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+"""Turn the resolver dry-run report into name==version pins for the wheel build, failing the build if the
+resolved application closure contains any package the NVIDIA base owns."""
 import json
 import re
 from pathlib import Path
 
 REPORT = Path('/opt/build/report.json')
 TARGET = Path('/opt/build/requirements-resolved.txt')
-AUDIT = Path('/opt/build/requirements-resolved-protected-audit.json')
 PROTECTED_NAMES = {'torch', 'torchvision', 'torchaudio', 'triton'}
 PROTECTED_PREFIXES = ('nvidia-', 'cuda-')
 PROTECTED_NAMES_FILE = Path('/opt/build/base-python-protected-names.txt')
@@ -19,11 +20,10 @@ base_protected_names = {
     normalize(line)
     for line in PROTECTED_NAMES_FILE.read_text().splitlines()
     if line.strip() and not line.lstrip().startswith('#')
-} if PROTECTED_NAMES_FILE.exists() else set()
+}
 
 
-def protected(name: str) -> bool:
-    norm = normalize(name)
+def protected(norm: str) -> bool:
     return norm in PROTECTED_NAMES or norm in base_protected_names or norm.startswith(PROTECTED_PREFIXES)
 
 
@@ -37,21 +37,12 @@ for item in report.get('install', []):
     if name and version:
         norm = normalize(name)
         if protected(norm):
-            blocked.append({'name': name, 'normalized': norm, 'version': version})
+            blocked.append(f'{norm}=={version}')
             continue
         reqs.append(f'{name}=={version}')
 
-AUDIT.write_text(json.dumps({
-    'protected_names': sorted(PROTECTED_NAMES),
-    'base_protected_names_file': str(PROTECTED_NAMES_FILE),
-    'base_protected_names_count': len(base_protected_names),
-    'protected_prefixes': list(PROTECTED_PREFIXES),
-    'blocked_from_app_resolved_set': blocked,
-    'resolved_application_count': len(reqs),
-}, indent=2, sort_keys=True) + '\n')
 if blocked:
-    names = ', '.join(f"{item['normalized']}=={item['version']}" for item in blocked)
-    raise SystemExit(f'protected NVIDIA base packages resolved as app deps: {names}; audit={AUDIT}')
+    raise SystemExit(f'protected NVIDIA base packages resolved as app deps: {", ".join(blocked)}')
 
 TARGET.write_text('\n'.join(reqs) + '\n')
-print(f'resolved {len(reqs)} application packages into {TARGET}; protected audit={AUDIT}')
+print(f'resolved {len(reqs)} application packages into {TARGET}')
