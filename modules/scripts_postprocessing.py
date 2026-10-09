@@ -118,13 +118,17 @@ def wrap_call(func, filename, funcname, *args, default=None, **kwargs):
 
 
 def blend_with_original(original_image, processed_image, visibility):
-    if visibility >= 1.0:
-        return processed_image
-
+    """`processed_image` blended over `original_image` by `visibility`, in the original's size and mode. A processed
+    RGB image of an RGBA original (face restorers work on RGB) takes the original's alpha."""
     if original_image.size != processed_image.size:
         processed_image = processed_image.resize(original_image.size)
-    if original_image.mode != processed_image.mode:
+    if original_image.mode == "RGBA" and processed_image.mode == "RGB":
+        processed_image = Image.merge("RGBA", (*processed_image.split(), original_image.getchannel("A")))
+    elif original_image.mode != processed_image.mode:
         processed_image = processed_image.convert(original_image.mode)
+
+    if visibility >= 1.0:
+        return processed_image
 
     return Image.blend(original_image, processed_image, visibility)
 

@@ -165,9 +165,17 @@ def test_upscale_cache_keys_on_pixels_and_scaler_instance_returns_copies_and_evi
         def _guard(self):
             assert lock.held, "upscale cache used outside upscale_cache_lock"
 
-        def pop(self, *args):
+        def get(self, *args):
             self._guard()
-            return super().pop(*args)
+            return super().get(*args)
+
+        def move_to_end(self, *args):
+            self._guard()
+            return super().move_to_end(*args)
+
+        def clear(self):
+            self._guard()
+            return super().clear()
 
         def popitem(self, last=True):
             self._guard()
@@ -180,17 +188,19 @@ def test_upscale_cache_keys_on_pixels_and_scaler_instance_returns_copies_and_evi
     class Scaler:
         calls = 0
 
-        def upscale(self, image, scale, data_path):
+        def upscale(self, image, scale, data_path, *, target_size):
             Scaler.calls += 1
             return image.resize((image.width * scale, image.height * scale))
 
     lock, cache = Lock(), GuardedCache()
+    fingerprints = []
     pixel_fingerprint = _definitions("modules/images.py", {"hashlib": hashlib}, "pixel_fingerprint")["pixel_fingerprint"]
+    opts = types.SimpleNamespace(upscaling_max_images_in_cache=2)
     namespace = _definitions("scripts/postprocessing_upscale.py", {
-        "os": os, "Image": Image, "images": types.SimpleNamespace(pixel_fingerprint=pixel_fingerprint),
-        "shared": types.SimpleNamespace(opts=types.SimpleNamespace(upscaling_max_images_in_cache=2)),
-        "upscale_cache": cache, "upscale_cache_lock": lock,
-    }, "_upscaler_identity", methods={"ScriptPostprocessingUpscale": {"upscale"}})
+        "os": os, "Image": Image,
+        "images": types.SimpleNamespace(pixel_fingerprint=lambda image: (fingerprints.append(image), pixel_fingerprint(image))[1]),
+        "shared": types.SimpleNamespace(opts=opts), "upscale_cache": cache, "upscale_cache_lock": lock,
+    }, "_upscaler_identity", methods={"ScriptPostprocessingUpscale": {"upscale", "cached_upscale"}})
     script = namespace["ScriptPostprocessingUpscale"]()
     upscaler = types.SimpleNamespace(name="probe", data_path=None, scaler=Scaler())
 
@@ -217,6 +227,14 @@ def test_upscale_cache_keys_on_pixels_and_scaler_instance_returns_copies_and_evi
     assert Scaler.calls == 3
     upscale(solid((0, 255, 0)))
     assert Scaler.calls == 4
+
+    # Cache size 0: no pixel hash, no copy (the upscaler's own result comes back), and lowering it drops the entries.
+    opts.upscaling_max_images_in_cache = 0
+    fingerprints.clear()
+    results = []
+    upscaler.scaler.upscale = lambda image, scale, data_path, target_size: results.append(image.resize((8, 8))) or results[-1]
+    assert upscale(solid(red)) is results[-1]
+    assert not fingerprints and not cache
 
 
 def test_img2imgalt_reuses_noise_inversion_only_within_a_request_for_the_same_latent():

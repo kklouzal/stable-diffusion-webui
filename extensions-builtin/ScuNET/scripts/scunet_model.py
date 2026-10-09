@@ -19,7 +19,6 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
             self.scalers.append(modules.upscaler.UpscalerData(self.model_name2, self.model_url2, self))
 
     def do_upscale(self, img: PIL.Image.Image, selected_file):
-        devices.torch_gc()
         model = self.load_model_or_fail(selected_file)
 
         img = upscaler_utils.upscale_2(
@@ -30,7 +29,6 @@ class UpscalerScuNET(modules.upscaler.Upscaler):
             scale=1,  # ScuNET is a denoising model, not an upscaler
             desc='ScuNET',
         )
-        devices.torch_gc()
         return img
 
     def load_model(self, path: str):

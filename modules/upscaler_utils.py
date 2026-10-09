@@ -63,6 +63,20 @@ def upscale_pil_patch(model, img: Image.Image) -> Image.Image:
             return torch_bgr_to_pil_image(model(tensor))
 
 
+def _keeping_alpha(img: Image.Image, upscale_rgb: Callable[[Image.Image], Image.Image]) -> Image.Image:
+    """`upscale_rgb(img)`, except that an RGBA image keeps its alpha: models upscale colour only, so its RGB is
+    upscaled and its alpha resized (LANCZOS) to the result's size and re-attached. Other modes go to `upscale_rgb`
+    unchanged (it converts them to RGB). `upscale_rgb` returns its input when interrupted; then `img` comes back."""
+    if img.mode != "RGBA":
+        return upscale_rgb(img)
+    rgb = img.convert("RGB")
+    output = upscale_rgb(rgb)
+    if output is rgb:
+        return img
+    output.putalpha(img.getchannel("A").resize(output.size, resample=Image.Resampling.LANCZOS))
+    return output
+
+
 def upscale_with_model(
     model: Callable[[torch.Tensor], torch.Tensor],
     img: Image.Image,
@@ -71,6 +85,12 @@ def upscale_with_model(
     tile_overlap: int = 0,
     desc="tiled upscale",
 ) -> Image.Image:
+    """`img` upscaled by `model` (tiled through `images.Grid` unless `tile_size` <= 0); see `_keeping_alpha` for RGBA
+    images. An interrupted upscale returns `img`."""
+    return _keeping_alpha(img, lambda rgb: _upscale_rgb_with_model(model, rgb, tile_size=tile_size, tile_overlap=tile_overlap, desc=desc))
+
+
+def _upscale_rgb_with_model(model, img: Image.Image, *, tile_size: int, tile_overlap: int, desc: str) -> Image.Image:
     if tile_size <= 0:
         logger.debug("Upscaling %s without tiling", img)
         output = upscale_pil_patch(model, img)
@@ -118,7 +138,11 @@ def tiled_upscale_2(
     # Alternative implementation of `upscale_with_model` originally used by
     # SwinIR and ScuNET.  It differs from `upscale_with_model` in that tiling and
     # weighting is done in PyTorch space, as opposed to `images.Grid` doing it in
-    # Pillow space without weighting.
+    # Pillow space.  Each tile's weight ramps up linearly over the `tile_overlap`
+    # (times `scale`) output pixels along every edge it shares with another tile
+    # and is 1 elsewhere, so overlapping tiles are cross-faded instead of
+    # averaged evenly, which kept both tiles' border errors in the seam; with
+    # `tile_overlap` 0 every weight is 1, the former plain average.
     # Returns None when interrupted or skipped before every tile ran.
 
     b, c, h, w = img.size()
@@ -140,8 +164,22 @@ def tiled_upscale_2(
         device=device,
         dtype=img.dtype,
     )
-    # Per-pixel tile count; the same for every channel, so one channel broadcast over `result` suffices.
+    # Per-pixel weight sum; the same for every channel, so one channel broadcast over `result` suffices.
     weights = torch.zeros((1, 1, h * scale, w * scale), device=device, dtype=img.dtype)
+
+    def edge_ramp(starts_inside: bool, ends_inside: bool) -> torch.Tensor:
+        # min(1, distance in pixels from each shared edge / (ramp + 1)), in float64: never 0, so every output pixel
+        # gets a positive weight sum.
+        ramp = tile_overlap * scale
+        distance = torch.arange(1, tile_size * scale + 1, dtype=torch.float64)
+        weight = torch.ones_like(distance)
+        if starts_inside:
+            weight = torch.minimum(weight, distance / (ramp + 1))
+        if ends_inside:
+            weight = torch.minimum(weight, distance.flip(0) / (ramp + 1))
+        return weight
+
+    tile_weights = {}  # by which of the tile's edges are shared: at most 9 distinct tiles
     logger.debug("Upscaling %s to %s with tiles", img.shape, result.shape)
     with tqdm.tqdm(total=len(h_idx_list) * len(w_idx_list), desc=desc, disable=not shared.opts.enable_upscale_progressbar) as pbar:
         for h_idx in h_idx_list:
@@ -159,17 +197,23 @@ def tiled_upscale_2(
 
                 out_patch = model(in_patch)
 
+                edges = (h_idx > 0, h_idx + tile_size < h, w_idx > 0, w_idx + tile_size < w)
+                tile_weight = tile_weights.get(edges)
+                if tile_weight is None:
+                    tile_weight = torch.outer(edge_ramp(*edges[:2]), edge_ramp(*edges[2:])).to(device=device, dtype=img.dtype)
+                    tile_weights[edges] = tile_weight
+
                 result[
                     ...,
                     h_idx * scale : (h_idx + tile_size) * scale,
                     w_idx * scale : (w_idx + tile_size) * scale,
-                ].add_(out_patch)
+                ].addcmul_(out_patch, tile_weight)
 
                 weights[
                     ...,
                     h_idx * scale : (h_idx + tile_size) * scale,
                     w_idx * scale : (w_idx + tile_size) * scale,
-                ].add_(1)
+                ].add_(tile_weight)
 
                 pbar.update(1)
 
@@ -191,22 +235,26 @@ def upscale_2(
     Convenience wrapper around `tiled_upscale_2` that handles PIL images.
 
     Like `upscale_with_model`, the model runs in its own dtype even when the caller (hires fix) is inside the
-    sampler's autocast, and an interrupted or skipped upscale returns `img` unchanged.
+    sampler's autocast, an RGBA image keeps its alpha (`_keeping_alpha`), and an interrupted or skipped upscale
+    returns `img` unchanged.
     """
     param = torch_utils.get_param(model)
 
-    with torch.inference_mode(), devices.without_autocast():
-        # Uploaded once; bitwise the same tensor as the CPU float64 conversion followed by a per-tile copy.
-        tensor = pil_image_to_device_bgr(img, param.device, param.dtype)
-        output = tiled_upscale_2(
-            tensor,
-            model,
-            tile_size=tile_size,
-            tile_overlap=tile_overlap,
-            scale=scale,
-            desc=desc,
-            device=param.device,
-        )
-        if output is None:
-            return img
-        return torch_bgr_to_pil_image(output)
+    def upscale_rgb(rgb: Image.Image) -> Image.Image:
+        with torch.inference_mode(), devices.without_autocast():
+            # Uploaded once; bitwise the same tensor as the CPU float64 conversion followed by a per-tile copy.
+            tensor = pil_image_to_device_bgr(rgb, param.device, param.dtype)
+            output = tiled_upscale_2(
+                tensor,
+                model,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                scale=scale,
+                desc=desc,
+                device=param.device,
+            )
+            if output is None:
+                return rgb
+            return torch_bgr_to_pil_image(output)
+
+    return _keeping_alpha(img, upscale_rgb)

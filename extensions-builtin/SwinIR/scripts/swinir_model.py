@@ -1,12 +1,8 @@
-import logging
-
 import torch
 from PIL import Image
 
 from modules import devices, modelloader, script_callbacks, shared, upscaler_utils
 from modules.upscaler import Upscaler
-
-logger = logging.getLogger(__name__)
 
 
 class UpscalerSwinIR(Upscaler):
@@ -15,29 +11,13 @@ class UpscalerSwinIR(Upscaler):
     model_name = "SwinIR 4x"
 
     def __init__(self, dirname):
-        self._cached_model = None           # keep the model when SWIN_torch_compile is on to prevent re-compile every runs
-        self._cached_model_config = None    # to clear '_cached_model' when changing model (v1/v2) or settings
         self.user_path = dirname
         super().__init__()
         self.scalers = self.scalers_from_files([".pt", ".pth"])
 
     def do_upscale(self, img: Image.Image, model_file: str) -> Image.Image:
-        current_config = (
-            model_file,
-            shared.opts.SWIN_tile,
-            bool(getattr(shared.opts, 'SWIN_torch_compile', False)),
-            str(self._get_device()),
-            str(devices.dtype),
-        )
-
-        if self._cached_model_config == current_config:
-            model = self._cached_model
-        else:
-            model = self.load_model_or_fail(model_file)
-            self._cached_model = model
-            self._cached_model_config = current_config
-
-        img = upscaler_utils.upscale_2(
+        model = self.load_model_or_fail(model_file)
+        return upscaler_utils.upscale_2(
             img,
             model,
             tile_size=shared.opts.SWIN_tile,
@@ -45,22 +25,16 @@ class UpscalerSwinIR(Upscaler):
             scale=model.scale,
             desc="SwinIR",
         )
-        devices.torch_gc()
-        return img
 
     def load_model(self, path):
-        model_descriptor = modelloader.load_spandrel_model(
+        # The shared cache also keeps a compiled model, so SWIN_torch_compile compiles once per model file and device.
+        return modelloader.load_cached_spandrel_model(
             self.local_model_file(path, file_name=f"{self.model_name.replace(' ', '_')}.pth"),
             device=self._get_device(),
             prefer_half=(devices.dtype == torch.float16),
             expected_architecture="SwinIR",
+            compile_model=bool(getattr(shared.opts, 'SWIN_torch_compile', False)),
         )
-        if getattr(shared.opts, 'SWIN_torch_compile', False):
-            try:
-                model_descriptor.model.compile()
-            except Exception:
-                logger.warning("Failed to compile SwinIR model, fallback to JIT", exc_info=True)
-        return model_descriptor
 
     def _get_device(self):
         return devices.get_device_for('swinir')

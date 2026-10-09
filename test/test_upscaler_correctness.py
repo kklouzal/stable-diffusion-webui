@@ -138,6 +138,53 @@ def test_lanczos_upscaler_reaches_target_in_one_resample(env):
     assert np.array_equal(np.asarray(result), np.asarray(expected))
 
 
+def _model_upscaler(env, factor=2):
+    """An Upscaler whose `do_upscale` is a fixed `factor`x model (nearest), so its output is known exactly."""
+    class ModelUpscaler(env.upscaler.Upscaler):
+        name = "model"
+
+        def __init__(self):
+            super().__init__()
+            self.scalers = [env.upscaler.UpscalerData("model", None, self)]
+
+        def do_upscale(self, img, selected_model):
+            return img.resize((img.width * factor, img.height * factor), resample=Image.Resampling.NEAREST)
+
+        def load_model(self, path):
+            pass
+
+    return ModelUpscaler()
+
+
+@pytest.mark.parametrize("target", [(1331, 1331), (1164, 1000), (1597, 1203)])
+def test_resize_image_resamples_the_model_output_once(env, target):
+    upscaler = _model_upscaler(env, factor=4)
+    env.shared.sd_upscalers = upscaler.scalers
+    img = _random_image(400, 350, seed=4)
+
+    result = env.images.resize_image(0, img, *target, upscaler_name="model")
+
+    # Formerly 4x -> floored to a multiple of 8 (1328x1328, 1160x1000) -> target: two LANCZOS passes.
+    expected = img.resize((1600, 1400), resample=Image.Resampling.NEAREST).resize(target, resample=LANCZOS)
+    assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+def test_resize_image_with_lanczos_upscaler_equals_a_direct_resize(env):
+    env.shared.sd_upscalers = env.upscaler.UpscalerLanczos().scalers
+    img = _random_image(1024, 1024, seed=6)
+
+    result = env.images.resize_image(0, img, 1331, 1331, upscaler_name="Lanczos")
+
+    assert np.array_equal(np.asarray(result), np.asarray(img.resize((1331, 1331), resample=LANCZOS)))
+
+
+def test_upscale_without_target_size_keeps_the_multiple_of_8_floor(env):
+    # The extras "Scale by" output size and sd_upscale's tile grid rely on it.
+    result = _model_upscaler(env).upscale(_random_image(333, 101, seed=0), 1.5)
+
+    assert result.size == (496, 144)
+
+
 # --- upscale_with_model tiling ----------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("size", [(70, 45), (192, 100), (37, 191)])
@@ -167,8 +214,19 @@ def test_tile_taller_than_image_has_no_black_padding_in_rows(env):
 
 # --- upscale_2 (SwinIR / ScuNET) --------------------------------------------------------------------------------
 
-def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale):
-    """The former implementation: CPU float64 -> dtype tensor, per-tile copy, ones-tensor weights, no autocast."""
+def _feather(length, ramp, starts_inside, ends_inside):
+    """Per-axis tile weight: rises linearly over `ramp` pixels from each edge shared with another tile."""
+    position = np.arange(length, dtype=np.float64)
+    weight = np.ones(length)
+    if starts_inside:
+        weight = np.minimum(weight, (position + 1) / (ramp + 1))
+    if ends_inside:
+        weight = np.minimum(weight, (length - position) / (ramp + 1))
+    return weight
+
+
+def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale, feather=True):
+    """CPU float64 -> dtype tensor, per-tile copy, no autocast; `feather=False` is the former plain average."""
     param = next(model.parameters())
     arr = np.ascontiguousarray(np.transpose(np.array(img.convert("RGB"))[:, :, ::-1], (2, 0, 1))) / 255
     tensor = torch.from_numpy(arr).to(dtype=param.dtype).unsqueeze(0)
@@ -185,15 +243,23 @@ def _oracle_upscale_2(img, model, *, tile_size, tile_overlap, scale):
             for w_idx in w_idx_list:
                 out_patch = model(tensor[..., h_idx:h_idx + tile_size, w_idx:w_idx + tile_size])
                 region = (..., slice(h_idx * scale, (h_idx + tile_size) * scale), slice(w_idx * scale, (w_idx + tile_size) * scale))
-                result[region].add_(out_patch)
-                weights[region].add_(torch.ones_like(out_patch))
+                if feather:
+                    n, ramp = tile_size * scale, tile_overlap * scale
+                    weight = torch.from_numpy(np.outer(
+                        _feather(n, ramp, h_idx > 0, h_idx + tile_size < h), _feather(n, ramp, w_idx > 0, w_idx + tile_size < w),
+                    )).to(tensor.dtype)
+                    result[region].addcmul_(out_patch, weight)  # one rounding of out * weight + sum in bf16
+                    weights[region].add_(weight.expand_as(out_patch))
+                else:
+                    result[region].add_(out_patch)
+                    weights[region].add_(torch.ones_like(out_patch))
         output = result.div_(weights)
     arr = output.squeeze(0).float().clamp(0, 1).mul(255.0).round().to(torch.uint8).flip(0).permute(1, 2, 0).numpy()
     return Image.fromarray(np.ascontiguousarray(arr), "RGB")
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_upscale_2_matches_former_cpu_path(env, dtype):
+def test_upscale_2_matches_the_feathered_cpu_oracle(env, dtype):
     model = _ReplicatePadUpscaler().to(dtype).eval()
     img = _random_image(53, 41, seed=5)
 
@@ -201,6 +267,59 @@ def test_upscale_2_matches_former_cpu_path(env, dtype):
 
     expected = _oracle_upscale_2(img, model, tile_size=16, tile_overlap=5, scale=2)
     assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_upscale_2_without_overlap_is_the_former_plain_average(env, dtype):
+    # 53x41 in 16 px tiles: the last tile of each row and column still overlaps its neighbour.
+    model = _ReplicatePadUpscaler().to(dtype).eval()
+    img = _random_image(53, 41, seed=5)
+
+    result = env.upscaler_utils.upscale_2(img, model, tile_size=16, tile_overlap=0, scale=2, desc="t")
+
+    expected = _oracle_upscale_2(img, model, tile_size=16, tile_overlap=0, scale=2, feather=False)
+    assert np.array_equal(np.asarray(result), np.asarray(expected))
+
+
+class _BlurNet(torch.nn.Module):
+    """Four zero-padded 5x5 box blurs: like a conv net, its output near a tile edge depends on the missing context."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("kernel", torch.ones(3, 1, 5, 5) / 25)
+
+    def forward(self, x):
+        for _ in range(4):
+            x = torch.nn.functional.conv2d(x, self.kernel, padding=2, groups=3)
+        return x
+
+
+def test_feathered_tiles_approach_the_untiled_result_as_overlap_grows(env):
+    model = _BlurNet()
+    img = torch.rand(1, 3, 256, 256, generator=torch.Generator().manual_seed(0))
+    untiled = model(img)
+
+    def error(tile_overlap, plain=False):
+        if plain:  # the former plain average: what every tile_overlap gave before feathering
+            out = _oracle_tensor_plain_average(model, img, tile_size=96, tile_overlap=tile_overlap)
+        else:
+            out = env.upscaler_utils.tiled_upscale_2(img, model, tile_size=96, tile_overlap=tile_overlap, scale=1, device=torch.device("cpu"))
+        return (out - untiled).abs().max().item()
+
+    feathered = [error(overlap) for overlap in (8, 16, 32)]
+    assert feathered[0] > feathered[1] > feathered[2]
+    assert all(f < error(overlap, plain=True) / 2 for f, overlap in zip(feathered, (8, 16, 32)))
+
+
+def _oracle_tensor_plain_average(model, img, *, tile_size, tile_overlap):
+    _, _, h, w = img.shape
+    stride = tile_size - tile_overlap
+    result, count = torch.zeros_like(img), torch.zeros_like(img)
+    for y in list(range(0, h - tile_size, stride)) + [h - tile_size]:
+        for x in list(range(0, w - tile_size, stride)) + [w - tile_size]:
+            result[..., y:y + tile_size, x:x + tile_size] += model(img[..., y:y + tile_size, x:x + tile_size])
+            count[..., y:y + tile_size, x:x + tile_size] += 1
+    return result / count
 
 
 def test_upscale_2_runs_model_outside_sampler_autocast(env):
@@ -252,6 +371,43 @@ def test_interrupted_upscale_2_returns_input_unchanged(env, interrupt_after):
     assert len(calls) == interrupt_after
 
 
+# --- alpha (the extras run keeps RGBA input on purpose, modules/postprocessing.to_postprocessing_mode) ----------
+
+def _rgba_image(width, height, seed):
+    rng = np.random.default_rng(seed)
+    pixels = rng.integers(0, 256, size=(height, width, 4), dtype=np.uint8)
+    pixels[..., 3] = 0
+    pixels[height // 4:3 * height // 4, width // 4:3 * width // 4, 3] = 255  # opaque centre on transparent ground
+    return Image.fromarray(pixels, "RGBA")
+
+
+@pytest.mark.parametrize("upscale", [
+    lambda utils, model, img: utils.upscale_with_model(model, img, tile_size=0),
+    lambda utils, model, img: utils.upscale_with_model(model, img, tile_size=16, tile_overlap=4),
+    lambda utils, model, img: utils.upscale_2(img, model, tile_size=16, tile_overlap=4, scale=2, desc="t"),
+], ids=["untiled", "grid-tiled", "upscale_2"])
+def test_model_upscale_keeps_alpha(env, upscale):
+    model = _ReplicatePadUpscaler().eval()
+    img = _rgba_image(40, 36, seed=12)
+
+    result = upscale(env.upscaler_utils, model, img)
+
+    assert result.mode == "RGBA" and result.size == (80, 72)
+    # Colour exactly as for the RGB image (RGB inputs are unchanged), alpha resized once to the output size.
+    rgb = upscale(env.upscaler_utils, model, img.convert("RGB"))
+    assert rgb.mode == "RGB"
+    assert np.array_equal(np.asarray(result.convert("RGB")), np.asarray(rgb))
+    assert np.array_equal(np.asarray(result.getchannel("A")), np.asarray(img.getchannel("A").resize((80, 72), resample=LANCZOS)))
+
+
+def test_interrupted_rgba_upscale_returns_input_unchanged(env):
+    env.shared.state.interrupted = True
+    img = _rgba_image(40, 40, seed=2)
+
+    assert env.upscaler_utils.upscale_2(img, _ReplicatePadUpscaler().eval(), tile_size=16, tile_overlap=4, scale=2, desc="t") is img
+    assert env.upscaler_utils.upscale_with_model(_ReplicatePadUpscaler().eval(), img, tile_size=16) is img
+
+
 # --- model load failures --------------------------------------------------------------------------------------
 
 def _load_script(env, relative):
@@ -282,6 +438,22 @@ def test_scunet_uses_the_shared_model_cache(env):
 
     assert module.UpscalerScuNET(str(env.tmp_path)).load_model(str(model_path)) is descriptor
     assert env.loader_calls[-1][1]["expected_architecture"] == "SCUNet"
+
+
+@pytest.mark.parametrize("compile_option", [False, True])
+def test_swinir_uses_the_shared_model_cache(env, compile_option):
+    # Its former private cache was keyed by the path string: a model file replaced in place was never reloaded.
+    module = _load_script(env, "extensions-builtin/SwinIR/scripts/swinir_model.py")
+    descriptor = object()
+    env.modelloader.load_cached_spandrel_model = lambda path, **kwargs: (env.loader_calls.append((path, kwargs)), descriptor)[1]
+    env.shared.opts.SWIN_torch_compile = compile_option
+    model_path = env.tmp_path / "swinir.pth"
+    model_path.write_bytes(b"x")
+
+    assert module.UpscalerSwinIR(str(env.tmp_path)).load_model(str(model_path)) is descriptor
+    path, kwargs = env.loader_calls[-1]
+    assert path == str(model_path)
+    assert kwargs["expected_architecture"] == "SwinIR" and kwargs["compile_model"] is compile_option
 
 
 def test_scunet_url_model_reaches_the_loader_as_a_pth_file(env):
@@ -333,6 +505,48 @@ def test_crop_to_fit_fills_the_whole_target(env, pp_upscale, source, target):
     assert result.size == target
     assert np.asarray(result).min() > 50
     assert info["Postprocess crop to"] == f"{target[0]}x{target[1]}"
+
+
+def test_crop_to_fit_resamples_the_model_output_once(env, pp_upscale):
+    upscaler = _model_upscaler(env, factor=4)
+    upscaler_data = upscaler.scalers[0]
+    img = _random_image(300, 200, seed=9)
+
+    result = pp_upscale.ScriptPostprocessingUpscale().upscale(img, {}, upscaler_data, 1, 2.0, 0, 1001, 601, True)
+
+    # by = max(1001/300, 601/200) = 3.3367: the 1200x800 model output is resized once to 1001x667 and center-cropped
+    # (formerly 4x -> 1000x664, short of 1001 wide -> stretched again to 1001x668).
+    covering = img.resize((1200, 800), resample=Image.Resampling.NEAREST).resize((1001, 667), resample=LANCZOS)
+    assert np.array_equal(np.asarray(result), np.asarray(covering)[33:634])
+
+
+def test_crop_to_fit_keeps_alpha(env, pp_upscale):
+    upscaler = SimpleNamespace(name="Lanczos", data_path=None, scaler=env.upscaler.UpscalerLanczos())
+    img = _rgba_image(64, 64, seed=3)
+
+    result = pp_upscale.ScriptPostprocessingUpscale().upscale(img, {}, upscaler, 1, 2.0, 0, 128, 96, True)
+
+    # Formerly pasted onto an RGB canvas: the transparent ground became opaque.
+    assert result.mode == "RGBA" and result.size == (128, 96)
+    alpha = np.asarray(result.getchannel("A"))
+    assert alpha[0, 0] == 0 and alpha[48, 64] == 255
+
+
+def test_second_upscaler_blend_keeps_alpha(env, pp_upscale):
+    model = _model_upscaler(env)
+    network = _ReplicatePadUpscaler().eval()
+    model.do_upscale = lambda img, selected_model: env.upscaler_utils.upscale_with_model(network, img, tile_size=0)
+    lanczos = env.upscaler.UpscalerLanczos()
+    env.shared.sd_upscalers = [*model.scalers, *lanczos.scalers]
+    pp = SimpleNamespace(image=_rgba_image(64, 64, seed=7), info={})
+
+    pp_upscale.ScriptPostprocessingUpscale().process(
+        pp, upscale_mode=0, upscale_by=2.0, upscaler_1_name="model", upscaler_2_name="Lanczos", upscaler_2_visibility=0.5,
+    )
+
+    assert pp.image.mode == "RGBA" and pp.image.size == (128, 128)
+    alpha = np.asarray(pp.image.getchannel("A"))
+    assert alpha[0, 0] == 0 and alpha[64, 64] == 255
 
 
 def test_scale_by_target_is_not_a_pixel_short(env, pp_upscale):
