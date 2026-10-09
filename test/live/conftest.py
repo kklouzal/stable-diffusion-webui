@@ -11,8 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from test.helpers import TEST_FILES
+
 LIVE_DIR = Path(__file__).resolve().parent
-TEST_FILES = LIVE_DIR.parent / "test_files"
 
 
 def pytest_collection_modifyitems(config, items):

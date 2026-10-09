@@ -1,8 +1,8 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 from PIL import Image
+
+from test.helpers import TEST_FILES
 
 
 @pytest.mark.usefixtures("initialize")
@@ -20,7 +20,7 @@ def test_face_restorers(restorer_name, tmp_path):
         restorer = codeformer_model.codeformer.restore
     else:
         raise NotImplementedError("...")
-    img = Image.open(Path(__file__).parent / "test_files" / "two-faces.jpg")
+    img = Image.open(TEST_FILES / "two-faces.jpg")
     np_img = np.array(img, dtype=np.uint8)
     fixed_image = restorer(np_img)
     assert fixed_image.shape == np_img.shape

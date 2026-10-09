@@ -10,7 +10,7 @@ CPU tests:
 CUDA tests (GPU host): accuracy within torch's bf16 path at SDXL shapes and at any mean/std ratio, bitwise run-to-run
 and CUDA-graph replay identity, SDXL-sized blocks against the switch-off path:
     python -m pytest -q test/test_openclaw_nhwc_groupnorm.py -k cuda
-Timing: test/benchmark_nhwc_groupnorm.py.
+Timing: tools/benchmark_nhwc_groupnorm.py.
 """
 import copy
 import json
@@ -404,12 +404,12 @@ _INTERPRETER_CASES = {
 
 @pytest.fixture(scope="module")
 def interpreter_results():
-    """All cases in one fresh process (test/nhwc_groupnorm_interpreter_check.py) with TRITON_INTERPRET=1."""
+    """All cases in one fresh process (tools/nhwc_groupnorm_interpreter_check.py) with TRITON_INTERPRET=1."""
     pytest.importorskip("triton")
     env = {key: value for key, value in os.environ.items() if key != nhwc.ENV_NAME}
     env["TRITON_INTERPRET"] = "1"
     process = subprocess.run(
-        [sys.executable, str(_ROOT / "test" / "nhwc_groupnorm_interpreter_check.py"), json.dumps(_INTERPRETER_CASES)],
+        [sys.executable, str(_ROOT / "tools" / "nhwc_groupnorm_interpreter_check.py"), json.dumps(_INTERPRETER_CASES)],
         cwd=_ROOT, env=env, capture_output=True, text=True, timeout=900,
     )
     assert process.returncode == 0, process.stderr[-6000:]

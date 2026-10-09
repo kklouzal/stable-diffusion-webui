@@ -11,6 +11,8 @@ import numpy as np
 import pytest
 from PIL import Image, PngImagePlugin
 
+from test.helpers import TEST_FILES
+
 try:
     import cv2  # OpenCV's libpng decoder: an implementation independent of Pillow and zlib's Python binding
 except ImportError:
@@ -72,7 +74,7 @@ def synthetic(mode, width, height, seed=0):
 
 
 def real(mode):
-    with Image.open(ROOT / "test" / "test_files" / "two-faces.jpg") as photo:
+    with Image.open(TEST_FILES / "two-faces.jpg") as photo:
         image = photo.convert("RGB")
     if mode == "RGBA":
         image.putalpha(image.convert("L").transpose(Image.Transpose.FLIP_TOP_BOTTOM))
@@ -144,7 +146,7 @@ def test_photo_matches_pillow_and_size_stays_close(mode, piece_bytes, monkeypatc
 
 def test_images_opened_from_files_keep_pillow_behaviour():
     # srgb/gamma/dpi/Software in info: Pillow's writer does not copy them, neither does png_writer.
-    with Image.open(ROOT / "test" / "test_files" / "img2img_basic.png") as image:
+    with Image.open(TEST_FILES / "img2img_basic.png") as image:
         assert image.mode == "RGBA" and {"srgb", "gamma", "dpi"} <= set(image.info)
         assert_equivalent(image, text_info())
     rgba = synthetic("RGBA", 20, 10)

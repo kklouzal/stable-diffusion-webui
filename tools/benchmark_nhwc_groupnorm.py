@@ -9,7 +9,7 @@ Variants per shape (bf16 activations and weights, 32 groups):
   *_silu           the same followed by SiLU (ResBlock in/out layers, VAE ResnetBlock); the kernel fuses it
 Timing: CUDA events around every iteration, enqueued back to back after a warm-up, median over --iters.
 Error: max and mean |output - float64 reference| / rms(reference); the reference's own bf16 rounding is the floor.
-Usage (GPU host, inside the image): python test/benchmark_nhwc_groupnorm.py [--iters 100] [--json out.json]
+Usage (GPU host, inside the image): python tools/benchmark_nhwc_groupnorm.py [--iters 100] [--json out.json]
 """
 from __future__ import annotations
 

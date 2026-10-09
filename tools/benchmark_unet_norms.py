@@ -9,7 +9,7 @@ consumer-side work each path causes (autocast leaves fp32 outputs that every con
 - BasicTransformerBlock LayerNorm: norm1 feeds to_q/to_k/to_v (3 casts), norm2/norm3 feed one Linear (1 cast).
 Timing: CUDA events around every iteration, all enqueued back to back after a warm-up, median over --iters.
 Error: max |consumed output - float64 reference| / rms(reference), with the float64 reference's own bf16 rounding error
-as the floor. Usage (GPU host, inside the image): python test/benchmark_unet_norms.py [--iters 100] [--json out.json]
+as the floor. Usage (GPU host, inside the image): python tools/benchmark_unet_norms.py [--iters 100] [--json out.json]
 """
 from __future__ import annotations
 
