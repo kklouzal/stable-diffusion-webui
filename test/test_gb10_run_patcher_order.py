@@ -1,4 +1,4 @@
-"""gb10/run.sh ordering: everything that can fail runs while production still serves; the live container is removed
+"""gb10/run.sh ordering: everything that can fail runs while production still serves; the live container is stopped
 only right before the owned-extension sync, the third-party patchers and the new container start."""
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 RUN_SH = (ROOT / "gb10" / "run.sh").read_text(encoding="utf-8")
-TEARDOWN = 'sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}"'
+TEARDOWN = 'sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}"'
 
 
 def test_every_patcher_runs_exactly_once_per_pass_and_every_referenced_patcher_exists():
@@ -26,23 +26,27 @@ def test_every_patcher_runs_exactly_once_per_pass_and_every_referenced_patcher_e
 
 
 def test_failable_steps_precede_the_teardown_and_mutations_follow_it():
-    teardown = RUN_SH.index(TEARDOWN)
+    teardown = RUN_SH.rindex(TEARDOWN)  # the rollback function, defined earlier, stops the failed new container
     before = (
         "find \"${PROJECT_ROOT}/extensions\"",  # owned-extension discovery (fails on none)
-        "--entrypoint python \"${IMAGE_TAG}\"",  # image compile-stack probe
+        "--entrypoint python \"${TARGET_IMAGE_ID}\"",  # image compile-stack probe
         "cannot read the host NVIDIA driver version",
         "compile cache namespace is not writable",
         'image inspect "${IMAGE_TAG}"',
+        "carries no provenance labels",
+        "an earlier deploy did not finish",
         'patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}"',
     )
     for step in before:
         assert RUN_SH.index(step) < teardown, step
-    sync = RUN_SH.index("rsync -a --checksum --delete")
+    sync = RUN_SH.index('mirror_owned_extension "${PROJECT_ROOT}/extensions/${extension_name}"')
     patch = RUN_SH.index('patch_third_party_extensions "${HOST_ROOT}/Extensions"')
     chown = RUN_SH.index("sudo chown -R 2323:2323")
-    start = RUN_SH.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}"')
+    start = RUN_SH.index('sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" "${TARGET_IMAGE_ID}"')
     assert teardown < sync < patch < chown < start
-    # The rehearsal patches a scratch copy, never the live Extensions tree, and removes it on exit.
+    # The rehearsal patches a scratch copy, never the live Extensions tree, and the scratch root goes on exit.
     rehearsal = RUN_SH[RUN_SH.index("PATCH_REHEARSAL_ROOT=") : teardown]
-    assert "mktemp -d" in rehearsal and "trap 'sudo rm -rf -- \"${PATCH_REHEARSAL_ROOT}\"' EXIT" in rehearsal
+    assert 'SCRATCH_ROOT="$(mktemp -d' in RUN_SH and 'PATCH_REHEARSAL_ROOT="${SCRATCH_ROOT}/patch-rehearsal"' in rehearsal
+    on_exit = RUN_SH[RUN_SH.index("on_exit() {"):]
+    assert 'sudo rm -rf -- "${SCRATCH_ROOT}"' in on_exit[:on_exit.index("\n}\n")]
     assert '"${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"' in rehearsal

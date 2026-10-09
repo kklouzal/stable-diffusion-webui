@@ -28,7 +28,9 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 ### Images kept for rollback
 
-Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`.
+Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`. These images predate the provenance labels, so also set
+`A1111_COMMIT_HASH` and `A1111_VERSION_TAG` to the image's commit and that commit's `git describe --tags`
+([launch/README.md](launch/README.md#deploy-gb10runsh)).
 
 | Tag | Image ID | Contents |
 |---|---|---|

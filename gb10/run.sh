@@ -16,6 +16,12 @@ OPENCLAW_CUDA_GRAPH_CACHE_MAX="${OPENCLAW_CUDA_GRAPH_CACHE_MAX:-8}"
 OPENCLAW_VAE_DECODE_GRAPHS="${OPENCLAW_VAE_DECODE_GRAPHS:-1}"
 OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX="${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX:-4}"
 OPENCLAW_COMPILE_CACHE_ROOT="${OPENCLAW_COMPILE_CACHE_ROOT:-${HOST_ROOT}/Caches/compile}"
+# Seconds docker stop waits after SIGTERM before it kills the container.
+STOP_TIMEOUT="${STOP_TIMEOUT:-120}"
+# Seconds a started container gets to answer /sdapi/v1/progress (the API serves only once the startup model loaded).
+READY_TIMEOUT="${READY_TIMEOUT:-900}"
+# The container being replaced keeps this name, stopped, until the new one passed its checks.
+PREVIOUS_CONTAINER_NAME="${CONTAINER_NAME}-previous"
 
 # Host directory under HOST_ROOT -> path under the container's app directory. One table drives the host mkdir,
 # the ownership repair and the bind mounts, in this order. Caches/app holds the app's cache/ (hash and metadata
@@ -78,11 +84,48 @@ printf "Discovered owned extensions:"
 printf " %s" "${OWNED_EXTENSIONS[@]}"
 printf "\n"
 
-# Everything that can fail without touching the live container runs before it is removed, so a bad IMAGE_TAG, an
-# unreadable driver version, an unwritable cache namespace or an extension source a patcher rejects leaves
-# production running.
+# Everything that can fail without touching the live container runs before it is stopped, so a bad IMAGE_TAG, an
+# image without provenance, an unreadable driver version, an unwritable cache namespace or an extension source a
+# patcher rejects leaves production running.
 
-A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
+container_exists() {  # $1 container name
+  local names
+  names="$(sudo "${DOCKER_BIN}" ps -a --filter "name=^/${1}\$" --format '{{.Names}}')"
+  [[ "${names}" == "$1" ]]
+}
+
+if container_exists "${PREVIOUS_CONTAINER_NAME}"; then
+  echo "ERROR: ${PREVIOUS_CONTAINER_NAME} exists: an earlier deploy did not finish. It is the container that deploy" \
+    "replaced; restore it (docker rename ${PREVIOUS_CONTAINER_NAME} ${CONTAINER_NAME} && docker start ${CONTAINER_NAME})" \
+    "or remove it, then deploy again." >&2
+  exit 1
+fi
+for tool in curl "${PROJECT_ROOT}/gb10/smoke-test.sh"; do
+  if ! command -v "${tool}" >/dev/null; then
+    echo "ERROR: the post-start checks need ${tool}" >&2
+    exit 1
+  fi
+done
+
+# The tag is resolved once: every later step uses the image ID, so a tag moved meanwhile cannot change what is run.
+TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
+image_label() {  # $1 label; empty when the image does not carry it
+  sudo "$DOCKER_BIN" image inspect "${TARGET_IMAGE_ID}" --format "{{index .Config.Labels \"$1\"}}"
+}
+# The image has no .git: the version it reports comes from the provenance labels gb10/build.sh records (the commit,
+# and `git describe --tags` for the infotext Version), so a rollback image reports its own version. An image built
+# before those labels needs both values set explicitly; its inherited org.opencontainers.image.version is NGC's.
+IMAGE_REVISION="$(image_label org.opencontainers.image.revision)"
+if [[ -n "${IMAGE_REVISION}" ]]; then
+  A1111_COMMIT_HASH="${A1111_COMMIT_HASH:-${IMAGE_REVISION}}"
+  A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(image_label org.opencontainers.image.version)}"
+fi
+if [[ -z "${A1111_COMMIT_HASH:-}" || -z "${A1111_VERSION_TAG:-}" ]]; then
+  echo "ERROR: ${IMAGE_TAG} (${TARGET_IMAGE_ID}) carries no provenance labels (built before gb10/build.sh recorded" \
+    "them); set A1111_COMMIT_HASH and A1111_VERSION_TAG to the commit and \`git describe --tags\` it was built from." >&2
+  exit 1
+fi
+
 # Inductor/Triton/driver-JIT output depends on the image's compiler stack and the host driver, not on the
 # A1111 commit, so key the namespace by those: app-only deploys then start with warm caches. Each cache also
 # hashes its own inputs, so a shared namespace never serves a stale kernel.
@@ -91,11 +134,10 @@ if [[ -z "${OPENCLAW_COMPILE_CACHE_NAMESPACE:-}" ]]; then
     echo "ERROR: cannot read the host NVIDIA driver version from /sys/module/nvidia/version" >&2
     exit 1
   fi
-  IMAGE_COMPILE_STACK="$(sudo "$DOCKER_BIN" run --rm --network none --entrypoint python "${IMAGE_TAG}" -c 'import importlib.metadata as m, os; print("torch-" + m.version("torch") + "-triton-" + m.version("triton") + "-cuda-" + os.environ["CUDA_VERSION"])')"
+  IMAGE_COMPILE_STACK="$(sudo "$DOCKER_BIN" run --rm --network none --entrypoint python "${TARGET_IMAGE_ID}" -c 'import importlib.metadata as m, os; print("torch-" + m.version("torch") + "-triton-" + m.version("triton") + "-cuda-" + os.environ["CUDA_VERSION"])')"
   OPENCLAW_COMPILE_CACHE_NAMESPACE="${IMAGE_COMPILE_STACK}-driver-$(cat /sys/module/nvidia/version)"
   OPENCLAW_COMPILE_CACHE_NAMESPACE="${OPENCLAW_COMPILE_CACHE_NAMESPACE//[^a-zA-Z0-9_.-]/_}"
 fi
-A1111_VERSION_TAG="${A1111_VERSION_TAG:-$(git -C "${PROJECT_ROOT}" describe --tags 2>/dev/null || true)}"
 
 # Namespace creation is a host-side ownership boundary. install -d is idempotent,
 # preserves namespace contents, repairs only directory metadata, and prevents a
@@ -119,8 +161,6 @@ if (( ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} )); then
   echo "Compile cache: ${#OTHER_COMPILE_CACHE_NAMESPACES[@]} other namespace dirs hold $(sudo du -csh "${OTHER_COMPILE_CACHE_NAMESPACES[@]}" | tail -n 1 | cut -f 1) under ${OPENCLAW_COMPILE_CACHE_ROOT} (kept)"
 fi
 
-TARGET_IMAGE_ID="$(sudo "$DOCKER_BIN" image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
-
 # The owned extensions are mirrored from the tracked source below. The host-installed third-party extensions are
 # patched in place: each patcher (gb10/patchlib.py contract) patches upstream text or verifies already-patched text,
 # and fails on anything else, including a missing file. $1 is the Extensions directory to patch.
@@ -133,34 +173,14 @@ patch_third_party_extensions() {
   sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
 }
 
-# Rehearse the patchers on a scratch copy of the third-party checkouts while production still runs: nothing under
-# Extensions changes before the live container is gone, and a source a patcher rejects fails the deploy here.
-PATCH_REHEARSAL_ROOT="$(mktemp -d -t gb10-patch-rehearsal.XXXXXX)"
-trap 'sudo rm -rf -- "${PATCH_REHEARSAL_ROOT}"' EXIT
-echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
-for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
-  if [[ -d "${HOST_ROOT}/Extensions/${third_party_extension}" ]]; then
-    sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
-      "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"
-  fi
-done
-patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}" >/dev/null
-
-# Stop the bind-mounted live container before mutating Extensions underneath it.
-sudo "${DOCKER_BIN}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-
-for extension_name in "${OWNED_EXTENSIONS[@]}"; do
-  owned_extension_source="${PROJECT_ROOT}/extensions/${extension_name}"
-  owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
-  sudo mkdir -p "${owned_extension_target}"
-  # Mirror the repo source, but keep runtime data and model weights that live inside an extension's own
-  # directory: openclaw-multi-sampler's saved chains (data/), ControlNet's downloaded annotator weights
-  # (annotator/downloads/) and ControlNet models (models/; the checkout's git-ignored copies are mirrored, a model
-  # placed only on the host survives). The /*** form protects the directory AND its contents: 'P /data/' alone
-  # protects only the directory entry, so when the checkout has its own (git-ignored, empty) data/ directory rsync
-  # descends into it and deletes the saved files. Tool caches are excluded and so removed from the target.
-  # rsync's size+mtime check decides what to copy: -a keeps the checkout's mtimes on the target, so a changed source
-  # file differs in one of them.
+# Mirrors an owned extension tree $1 onto $2, keeping the runtime data and model weights that live inside an
+# extension's own directory: openclaw-multi-sampler's saved chains (data/), ControlNet's downloaded annotator weights
+# (annotator/downloads/) and ControlNet models (models/; the checkout's git-ignored copies are mirrored, a model placed
+# only on the host survives). The /*** form protects the directory AND its contents: 'P /data/' alone protects only
+# the directory entry, so when the checkout has its own (git-ignored, empty) data/ directory rsync descends into it and
+# deletes the saved files. Tool caches are excluded and so removed from the target. rsync's size+mtime check decides
+# what to copy: -a keeps the checkout's mtimes on the target, so a changed source file differs in one of them.
+mirror_owned_extension() {
   sudo rsync -a --delete --delete-excluded \
     --filter 'P /data/***' \
     --filter 'P /annotator/downloads/***' \
@@ -171,7 +191,134 @@ for extension_name in "${OWNED_EXTENSIONS[@]}"; do
     --exclude '.DS_Store' \
     --exclude '.ruff_cache/' \
     --exclude '.pytest_cache/' \
-    "${owned_extension_source}/" "${owned_extension_target}/"
+    "$1/" "$2/"
+}
+
+SCRATCH_ROOT="$(mktemp -d -t gb10-deploy.XXXXXX)"
+PATCH_REHEARSAL_ROOT="${SCRATCH_ROOT}/patch-rehearsal"
+EXTENSION_BACKUP_ROOT="${SCRATCH_ROOT}/extension-backup"
+mkdir "${PATCH_REHEARSAL_ROOT}" "${EXTENSION_BACKUP_ROOT}"
+
+# Rollback: from the moment the live container is stopped until the new one passed its checks (DEPLOY_PHASE=replacing),
+# any failure or interruption removes the new container, puts the owned extension sources back as they were and
+# restarts the replaced container (same image ID, same arguments). The third-party patches stay applied: every
+# patcher accepts its patched text. Images and tags are not touched.
+DEPLOY_PHASE=checks
+PREVIOUS_IMAGE_ID=""
+PREVIOUS_PORT="${PORT}"
+NEW_OWNED_EXTENSIONS=()
+NEW_CONTAINER_CREATED=0
+
+# Waits until container $1 answers /sdapi/v1/progress on port $2; fails when it stops, restarts or times out.
+wait_ready() {
+  local name="$1" port="$2" deadline=$((SECONDS + READY_TIMEOUT)) state initial_restarts
+  initial_restarts="$(sudo "${DOCKER_BIN}" inspect --format '{{.RestartCount}}' "${name}")" || return 1
+  while (( SECONDS < deadline )); do
+    state="$(sudo "${DOCKER_BIN}" inspect --format '{{.State.Status}} {{.RestartCount}}' "${name}")" || return 1
+    if [[ "${state}" != "running ${initial_restarts}" ]]; then
+      echo "ERROR: ${name} stopped or restarted before it was ready (status, restarts: ${state})" >&2
+      return 1
+    fi
+    if curl -fs --max-time 10 -o /dev/null "http://127.0.0.1:${port}/sdapi/v1/progress?skip_current_image=true"; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: ${name} did not answer /sdapi/v1/progress on port ${port} within ${READY_TIMEOUT} s" >&2
+  return 1
+}
+
+rollback() {
+  local ok=1 extension_name
+  echo "ERROR: deploy of ${IMAGE_TAG} (${TARGET_IMAGE_ID}) failed; rolling back" >&2
+  if (( NEW_CONTAINER_CREATED )) && container_exists "${CONTAINER_NAME}"; then
+    echo "--- last 200 log lines of the failed ${CONTAINER_NAME}:" >&2
+    sudo "${DOCKER_BIN}" logs --tail 200 "${CONTAINER_NAME}" >&2 || ok=0
+    echo "---" >&2
+    { sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}" >/dev/null && sudo "${DOCKER_BIN}" rm "${CONTAINER_NAME}" >/dev/null; } || ok=0
+  fi
+  for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+    if [[ -d "${EXTENSION_BACKUP_ROOT}/${extension_name}" ]]; then
+      mirror_owned_extension "${EXTENSION_BACKUP_ROOT}/${extension_name}" "${HOST_ROOT}/Extensions/${extension_name}" || ok=0
+    fi
+  done
+  # An owned extension this deploy added did not exist before: the replaced image never loaded it.
+  for extension_name in "${NEW_OWNED_EXTENSIONS[@]}"; do
+    sudo rm -rf -- "${HOST_ROOT:?}/Extensions/${extension_name:?}" || ok=0
+  done
+  if [[ -n "${PREVIOUS_IMAGE_ID}" ]]; then
+    # Interrupted between the stop and the rename, the replaced container still has its name.
+    if { ! container_exists "${PREVIOUS_CONTAINER_NAME}" || sudo "${DOCKER_BIN}" rename "${PREVIOUS_CONTAINER_NAME}" "${CONTAINER_NAME}"; } \
+      && sudo "${DOCKER_BIN}" start "${CONTAINER_NAME}" >/dev/null \
+      && wait_ready "${CONTAINER_NAME}" "${PREVIOUS_PORT}"; then
+      echo "Rolled back: ${CONTAINER_NAME} runs the previous image ${PREVIOUS_IMAGE_ID} again." >&2
+    else
+      ok=0
+    fi
+  else
+    echo "No container was running before this deploy; nothing to restart." >&2
+  fi
+  if (( ! ok )); then
+    echo "ERROR: the rollback did not complete; see the errors above." >&2
+  fi
+  if [[ -n "${PREVIOUS_IMAGE_ID}" && "${PREVIOUS_IMAGE_ID}" != "${TARGET_IMAGE_ID}" ]]; then
+    echo "NOTE: ${IMAGE_TAG} still names the failed image ${TARGET_IMAGE_ID}, and a later run.sh or recreate would" \
+      "deploy it again. To point the tag back at the image that runs: docker tag ${PREVIOUS_IMAGE_ID} ${IMAGE_TAG}" >&2
+  fi
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ "${DEPLOY_PHASE}" == replacing ]]; then
+    rollback
+    (( status )) || status=1
+  fi
+  sudo rm -rf -- "${SCRATCH_ROOT}"
+  exit "${status}"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Rehearse the patchers on a scratch copy of the third-party checkouts while production still runs: nothing under
+# Extensions changes before the live container is stopped, and a source a patcher rejects fails the deploy here.
+echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
+for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
+  if [[ -d "${HOST_ROOT}/Extensions/${third_party_extension}" ]]; then
+    sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
+      "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"
+  fi
+done
+patch_third_party_extensions "${PATCH_REHEARSAL_ROOT}" >/dev/null
+
+# Back up what the mirror replaces (the owned extension sources, without the protected data and model subtrees), so
+# a rollback can put it back.
+for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+  owned_extension_target="${HOST_ROOT}/Extensions/${extension_name}"
+  if [[ -d "${owned_extension_target}" ]]; then
+    sudo rsync -a --exclude '/data/' --exclude '/annotator/downloads/' --exclude '/models/' \
+      "${owned_extension_target}/" "${EXTENSION_BACKUP_ROOT}/${extension_name}/"
+  else
+    NEW_OWNED_EXTENSIONS+=("${extension_name}")
+  fi
+done
+
+# Stop the bind-mounted live container before mutating Extensions underneath it, and keep it for the rollback.
+if container_exists "${CONTAINER_NAME}"; then
+  PREVIOUS_IMAGE_ID="$(sudo "${DOCKER_BIN}" inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
+  PREVIOUS_PORT="$(sudo "${DOCKER_BIN}" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" | sed -n 's/^A1111_PORT=//p')"
+  PREVIOUS_PORT="${PREVIOUS_PORT:-${PORT}}"
+fi
+DEPLOY_PHASE=replacing
+if [[ -n "${PREVIOUS_IMAGE_ID}" ]]; then
+  sudo "${DOCKER_BIN}" stop -t "${STOP_TIMEOUT}" "${CONTAINER_NAME}" >/dev/null
+  sudo "${DOCKER_BIN}" rename "${CONTAINER_NAME}" "${PREVIOUS_CONTAINER_NAME}"
+fi
+
+for extension_name in "${OWNED_EXTENSIONS[@]}"; do
+  sudo mkdir -p "${HOST_ROOT}/Extensions/${extension_name}"
+  mirror_owned_extension "${PROJECT_ROOT}/extensions/${extension_name}" "${HOST_ROOT}/Extensions/${extension_name}"
 done
 
 patch_third_party_extensions "${HOST_ROOT}/Extensions"
@@ -213,8 +360,9 @@ DOCKER_ARGS+=(
   -v "${HOST_ROOT}/config/generation-last:/opt/stable-diffusion-webui/generation-last"
 )
 
-if ! sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
-  "${IMAGE_TAG}"; then
+# From here a container named CONTAINER_NAME is the new one: the replaced one was renamed above.
+NEW_CONTAINER_CREATED=1
+if ! sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" "${TARGET_IMAGE_ID}" >/dev/null; then
   observed_image_id="$(sudo "$DOCKER_BIN" inspect "${CONTAINER_NAME}" --format '{{.Image}}' 2>/dev/null || true)"
   observed_status="$(sudo "$DOCKER_BIN" inspect "${CONTAINER_NAME}" --format '{{.State.Status}}' 2>/dev/null || true)"
   if [[ "${observed_status}" == "running" && "${observed_image_id}" == "${TARGET_IMAGE_ID}" ]]; then
@@ -223,8 +371,20 @@ if ! sudo "$DOCKER_BIN" run "${DOCKER_ARGS[@]}" \
     exit 1
   fi
 fi
+echo "Started ${CONTAINER_NAME} from ${IMAGE_TAG} (${TARGET_IMAGE_ID}); waiting up to ${READY_TIMEOUT} s for the API"
 
-echo "Started ${CONTAINER_NAME} from ${IMAGE_TAG}"
+wait_ready "${CONTAINER_NAME}" "${PORT}"
+CONTAINER_NAME="${CONTAINER_NAME}" PORT="${PORT}" DOCKER_BIN="${DOCKER_BIN}" "${PROJECT_ROOT}/gb10/smoke-test.sh"
+
+DEPLOY_PHASE=deployed
+if [[ -n "${PREVIOUS_IMAGE_ID}" ]] && ! sudo "${DOCKER_BIN}" rm "${PREVIOUS_CONTAINER_NAME}" >/dev/null; then
+  echo "ERROR: ${CONTAINER_NAME} is deployed and passed its checks, but the replaced container" \
+    "${PREVIOUS_CONTAINER_NAME} could not be removed; remove it before the next deploy." >&2
+  exit 1
+fi
+
+echo "Deployed ${CONTAINER_NAME} from ${IMAGE_TAG} (${TARGET_IMAGE_ID}); replaced image: ${PREVIOUS_IMAGE_ID:-none}"
+echo "Version: ${A1111_VERSION_TAG} (commit ${A1111_COMMIT_HASH})"
 echo "CPU set: ${CPUSET_CPUS}"
 echo "Host data root: ${HOST_ROOT}"
 echo "Outputs symlink target: ${OUTPUTS_TARGET}"
@@ -232,5 +392,5 @@ echo "OpenClaw SDPA backend: ${OPENCLAW_SDPA_BACKEND}"
 echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"
 echo "OpenClaw VAE decode graphs: ${OPENCLAW_VAE_DECODE_GRAPHS} cache=${OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX}"
 echo "Compile/kernel cache namespace: ${OPENCLAW_COMPILE_CACHE_NAMESPACE} root=${OPENCLAW_COMPILE_CACHE_ROOT}"
-echo "API expectation: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
+echo "API: http://<GB10-LAN-IP>:${PORT}/sdapi/v1/progress (host networking)"
 echo "Browser UI has been removed; this image is API/headless only."
