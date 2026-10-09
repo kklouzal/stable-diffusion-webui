@@ -77,11 +77,12 @@ def test_postprocessing_runner_order_override_preserves_script_defaults(monkeypa
     ]
 
 
-def test_ui_batch_upload_skips_unreadable_files_before_job_count():
+def test_batch_mode_processes_every_decoded_image():
     from PIL import Image
 
     run_postprocessing = load_run_postprocessing()
-    valid_image = Image.new("RGB", (1, 1))
+    first, second = Image.new("RGB", (1, 1)), Image.new("RGB", (2, 2))
+    fixed = []
 
     class FakeState:
         interrupted = False
@@ -111,54 +112,30 @@ def test_ui_batch_upload_skips_unreadable_files_before_job_count():
             self.image = image
             self.extra_images = []
             self.info = {}
-            self.caption = None
-
-        def get_suffix(self, used_suffixes):
-            return ""
 
     state = FakeState()
 
-    def fake_read(path):
-        if path.endswith("bad.png"):
-            raise RuntimeError("unreadable")
-        return valid_image.copy()
-
     run_postprocessing.__globals__.update(
         Image=Image,
-        os=__import__("os"),
-        devices=SimpleNamespace(torch_gc=lambda: None),
         images=SimpleNamespace(
-            read=fake_read,
-            fix_image=lambda image: image,
+            fix_image=lambda image: fixed.append(image) or image,
             read_info_from_image=lambda image: ("", {}),
         ),
         scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
         scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=lambda pp, args, scripts_order=None: None)),
-        opts=SimpleNamespace(
-            outdir_samples="",
-            outdir_extras_samples="",
-            use_original_name_batch=False,
-            enable_pnginfo=False,
-            samples_format="png",
-        ),
-        shared=SimpleNamespace(
-            state=state,
-            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
-            listfiles=lambda input_dir: [],
-            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
-        ),
+        opts=SimpleNamespace(enable_pnginfo=False),
+        shared=SimpleNamespace(state=state),
         ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
         infotext_utils=SimpleNamespace(quote=lambda value: value),
     )
 
-    bad_upload = SimpleNamespace(name="/tmp/bad.png", orig_name="bad.png")
-    good_upload = SimpleNamespace(name="/tmp/good.png", orig_name="good.png")
+    outputs, html_info, html_log = run_postprocessing(1, None, [first, second])
 
-    outputs, html_info, html_log = run_postprocessing(1, None, [bad_upload, good_upload], "", "", True, save_output=False)
-
-    assert len(outputs) == 1
-    assert state.job_count == 1
-    assert state.nextjob_calls == 1
+    assert outputs == [first, second]
+    assert fixed == [first, second]
+    assert state.job_count == 2
+    assert state.nextjob_calls == 2
+    assert state.textinfo == ""
     assert html_info == ""
     assert html_log == ""
 
@@ -187,17 +164,14 @@ def test_failed_postprocessing_still_ends_the_extras_job():
 
     run_postprocessing.__globals__.update(
         Image=Image,
-        os=__import__("os"),
-        devices=SimpleNamespace(torch_gc=lambda: None),
         images=SimpleNamespace(read_info_from_image=lambda image: ("", {})),
         scripts_postprocessing=SimpleNamespace(PostprocessedImage=lambda image: SimpleNamespace(image=image)),
         scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=failing_run)),
-        opts=SimpleNamespace(outdir_samples="", outdir_extras_samples=""),
         shared=SimpleNamespace(state=FakeState()),
     )
 
     try:
-        run_postprocessing(0, Image.new("RGB", (1, 1)), None, "", "", True, save_output=False)
+        run_postprocessing(0, Image.new("RGB", (1, 1)), None)
     except RuntimeError as e:
         assert str(e) == "upscaler failed to load"
     else:
@@ -216,8 +190,8 @@ def test_run_extras_maps_upscale_first_to_postprocessing_order():
             observed.append(("create", scripts_order, scripts_args))
             return ["arg"]
 
-    def fake_run_postprocessing(*args, save_output=True, scripts_order=None):
-        observed.append(("run", scripts_order, save_output, args[-1]))
+    def fake_run_postprocessing(*args, scripts_order=None):
+        observed.append(("run", scripts_order, args[-1]))
         return "result"
 
     run_extras.__globals__["scripts"] = SimpleNamespace(scripts_postproc=FakeRunner())
@@ -228,9 +202,6 @@ def test_run_extras_maps_upscale_first_to_postprocessing_order():
         resize_mode=0,
         image="image",
         image_folder="",
-        input_dir="",
-        output_dir="",
-        show_extras_results=True,
         gfpgan_visibility=0.5,
         codeformer_visibility=0.25,
         codeformer_weight=0.75,
@@ -339,7 +310,7 @@ def test_api_progress_reports_live_current_task_reference():
     assert result["progress"] == 0.5
 
 
-def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
+def test_api_extras_drops_the_directory_gallery_toggle():
     set_upscalers = load_set_upscalers()
     req = SimpleNamespace(
         show_extras_results=False,
@@ -349,7 +320,8 @@ def test_api_extras_always_returns_images_despite_directory_gallery_toggle():
 
     result = set_upscalers(req)
 
-    assert result["show_extras_results"] is True
+    # A request field kept for schema compatibility; the API has no directory mode and always returns its images.
+    assert "show_extras_results" not in result
     assert result["extras_upscaler_1"] == "None"
     assert result["extras_upscaler_2"] == "None"
     assert "upscaler_1" not in result
@@ -436,10 +408,7 @@ def test_run_postprocessing_honors_skip_during_extra_image_output_loop():
             self.image = image
             self.extra_images = []
             self.info = {}
-            self.caption = None
 
-        def get_suffix(self, used_suffixes):
-            return ""
 
     state = FakeState()
 
@@ -448,32 +417,19 @@ def test_run_postprocessing_honors_skip_during_extra_image_output_loop():
 
     run_postprocessing.__globals__.update(
         Image=Image,
-        os=__import__("os"),
-        devices=SimpleNamespace(torch_gc=lambda: None),
         images=SimpleNamespace(
             fix_image=lambda image: image,
             read_info_from_image=lambda image: ("", {}),
         ),
         scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
         scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=fake_run)),
-        opts=SimpleNamespace(
-            outdir_samples="",
-            outdir_extras_samples="",
-            use_original_name_batch=False,
-            enable_pnginfo=False,
-            samples_format="png",
-        ),
-        shared=SimpleNamespace(
-            state=state,
-            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
-            listfiles=lambda input_dir: [],
-            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
-        ),
+        opts=SimpleNamespace(enable_pnginfo=False),
+        shared=SimpleNamespace(state=state),
         ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
         infotext_utils=SimpleNamespace(quote=lambda value: value),
     )
 
-    outputs, html_info, html_log = run_postprocessing(0, source, [], "", "", True, save_output=False)
+    outputs, html_info, html_log = run_postprocessing(0, source, [])
 
     assert outputs == [source]
     assert state.current_image is source
@@ -512,48 +468,29 @@ def test_run_postprocessing_gives_every_output_its_own_infotext():
             self.image = image
             self.extra_images = []
             self.info = info or {}
-            self.caption = None
 
-        def get_suffix(self, used_suffixes):
-            return ""
 
     def fake_run(pp, args, scripts_order=None):
         pp.info["Postprocess upscaler"] = "first"
         pp.extra_images.append(FakePostprocessedImage(extra, {"Split": "second"}))
 
-    saved = []
     run_postprocessing.__globals__.update(
         Image=Image,
-        os=__import__("os"),
-        devices=SimpleNamespace(torch_gc=lambda: None),
         images=SimpleNamespace(
             fix_image=lambda image: image,
             read_info_from_image=lambda image: ("prompt", {}),
-            save_image=lambda image, **kwargs: saved.append((image, dict(kwargs["existing_info"]))) or ("out.png", None),
         ),
         scripts_postprocessing=SimpleNamespace(PostprocessedImage=FakePostprocessedImage),
         scripts=SimpleNamespace(scripts_postproc=SimpleNamespace(run=fake_run)),
-        opts=SimpleNamespace(
-            outdir_samples="",
-            outdir_extras_samples="",
-            use_original_name_batch=False,
-            enable_pnginfo=True,
-            samples_format="png",
-        ),
-        shared=SimpleNamespace(
-            state=FakeState(),
-            cmd_opts=SimpleNamespace(hide_ui_dir_config=False),
-            listfiles=lambda input_dir: [],
-            opts=SimpleNamespace(postprocessing_existing_caption_action="Ignore"),
-        ),
+        opts=SimpleNamespace(enable_pnginfo=True),
+        shared=SimpleNamespace(state=FakeState()),
         ui_common=SimpleNamespace(plaintext_to_html=lambda text: text),
         infotext_utils=SimpleNamespace(quote=lambda value: value),
     )
 
-    outputs, _, _ = run_postprocessing(0, source, [], "", "", True, save_output=True)
+    outputs, _, _ = run_postprocessing(0, source, [])
 
     assert [image.info for image in outputs] == [
         {"parameters": "prompt", "postprocessing": "Postprocess upscaler: first"},
         {"parameters": "prompt", "postprocessing": "Split: second"},
     ]
-    assert [info for _, info in saved] == [image.info for image in outputs]  # saved files unchanged: same keys as before

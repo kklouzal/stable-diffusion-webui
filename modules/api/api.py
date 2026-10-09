@@ -502,9 +502,8 @@ def setUpscalers(req: dict):
     reqDict['extras_upscaler_1'] = reqDict.pop('upscaler_1', None)
     reqDict['extras_upscaler_2'] = reqDict.pop('upscaler_2', None)
 
-    # API extras endpoints never use directory mode, so always return images
-    # regardless of the UI-only batch-directory gallery toggle.
-    reqDict['show_extras_results'] = True
+    # A request field kept for schema compatibility: the API has no directory mode, so results are always returned.
+    reqDict.pop('show_extras_results', None)
     return reqDict
 
 
@@ -1389,7 +1388,7 @@ class Api:
         return models.ImageToImageResponse(images=b64images, parameters=_response_parameters(img2imgreq, include_images=bool(img2imgreq.include_init_images)), info=processed_js_with_image_paths(processed, {"openclaw_api_timings": openclaw_api_timings}))
 
     def _run_extras(self, *, extras_mode, image, image_folder, reqDict):
-        return self._call_with_queue_lock(postprocessing.run_extras, extras_mode=extras_mode, image=image, image_folder=image_folder, input_dir="", output_dir="", save_output=False, **reqDict)
+        return self._call_with_queue_lock(postprocessing.run_extras, extras_mode=extras_mode, image=image, image_folder=image_folder, **reqDict)
 
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)
