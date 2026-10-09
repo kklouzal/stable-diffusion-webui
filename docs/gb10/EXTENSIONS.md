@@ -92,9 +92,12 @@ What the patches do:
   - `override_settings` apply once around all tiles, so an `sd_vae` override no longer reloads the VAE twice per tile.
   - A pass that runs no tile (interrupted, or a single tile row or column) keeps the infotext and does not repeat the
     image.
-- **`patch-ultimate-upscale-subcanvas.py`** processes every tile at its crop region's own size:
+- **`patch-ultimate-upscale-subcanvas.py`** processes every tile at the size of its crop region:
   - The padding grows by 0-7 px to reach a multiple of 8, so tiles are no longer resampled down and back up and the
     band-pass seam is no longer stretched.
+  - Every tile of a pass runs at one size: a tile clipped by a canvas edge gets a larger padding, so its crop
+    shifts inward to the interior tile's size instead of shrinking. A pass then has one latent shape, and the CUDA
+    graphs (cached per shape, `OPENCLAW_CUDA_GRAPH_CACHE_MAX`) are not recaptured for edge and corner tiles.
   - Redraw tiles are exactly `tile_width x tile_height`.
   - Each tile gets a window of the canvas, bitwise identical to processing the whole canvas at those sizes.
   - This changes images on purpose compared with upstream and deploy10.

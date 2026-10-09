@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Patch and verify the Ultimate SD Upscale per-tile size and sub-canvas window (B-C2).
 
-Tile size: every tile is processed at its crop region's own size (see _gb10_tile_size), so img2img no longer
-resamples the crop to the upstream processing size and the result back; the band-pass seams fix no longer stretches
-its band when width + 2 * padding is not a multiple of 8. A redraw tile is tile_width x tile_height pixels (PIL
-rectangles include their end coordinates, so upstream drew each one a pixel wider and taller). These change the
-image, by design.
+Tile size: every tile is processed at the size of its crop region, so img2img no longer resamples the crop to the
+upstream processing size and the result back; the band-pass seams fix no longer stretches its band when width + 2 *
+padding is not a multiple of 8. All tiles of a pass that paste the same content (redraw tile, seam gradient) share
+one size: a tile clipped by a canvas edge gets a crop shifted inward rather than a smaller one, so a pass runs at one
+latent shape and the per-shape UNet/VAE CUDA graphs are captured once (see _gb10_tile_size). A redraw tile is
+tile_width x tile_height pixels (PIL rectangles include their end coordinates, so upstream drew each one a pixel wider
+and taller). These change the image, by design.
 
 Sub-canvas window: given the tile size, the window is exact:
 
@@ -121,44 +123,110 @@ def _gb10_blurred(p, mask, box):
     return Image.fromarray(np_mask)
 
 
-def _gb10_tile_size(p, mask):
-    """Set p.width/p.height (and p.inpaint_full_res_padding) so img2img processes the tile's crop at its own size.
-
-    "Only masked" img2img crops the blurred mask bbox grown by the padding, widens the crop to the aspect of
-    p.width x p.height and resizes it to that size, and the result back. Upstream sized p from the tile alone
-    (ceil((tile + padding) / 64) * 64, or the seam width + 2 * padding), never the crop's size (tile + 2 * (blur
-    reach + padding), for a seam whatever the gradient covers), so every tile was resampled and resampled back.
-    Here the padding grows by the fewest pixels (0-7) for which the crop, widened to the aspect of its size rounded
-    up to a multiple of 8 (latent stride), is exactly that size, and p gets that size: no resampling. When no padding
-    does (an odd interior bbox in both axes, a canvas side that is not a multiple of 8) p gets the size of the crop
-    with the requested padding rounded up to a multiple of 8, the smallest resample. A blank mask (img2img then
-    falls back to the whole image), an inverted mask or a non-integer padding keeps the caller's size.
-    """
-    pad = p.inpaint_full_res_padding
+def _gb10_blurred_bbox(p, mask):
+    """The bbox of mask blurred as StableDiffusionProcessingImg2Img.init blurs it, in mask coordinates, or None."""
     box = mask.getbbox()
-    if not p.inpaint_full_res or p.inpainting_mask_invert or type(pad) is not int or pad < 0 or box is None:
-        return
+    if box is None:
+        return None
     width, height = mask.size
     rx, ry = _gb10_blur_reach(p.mask_blur_x), _gb10_blur_reach(p.mask_blur_y)
     probe = (max(box[0] - rx - 1, 0), max(box[1] - ry - 1, 0), min(box[2] + rx + 1, width), min(box[3] + ry + 1, height))
     blurred = _gb10_blurred(p, mask, probe).getbbox()
     if blurred is None:
-        return
-    x1, y1, x2, y2 = blurred[0] + probe[0], blurred[1] + probe[1], blurred[2] + probe[0], blurred[3] + probe[1]
+        return None
+    return blurred[0] + probe[0], blurred[1] + probe[1], blurred[2] + probe[0], blurred[3] + probe[1]
 
-    def size_for(padding):
-        crop = (max(x1 - padding, 0), max(y1 - padding, 0), min(x2 + padding, width), min(y2 + padding, height))
-        size = (-(-(crop[2] - crop[0]) // 8) * 8, -(-(crop[3] - crop[1]) // 8) * 8)
-        return crop, size
 
+def _gb10_crop(bbox, padding, canvas):
+    """masking.get_crop_region_v2 of a blurred bbox: grown by padding, clamped to the canvas."""
+    return max(bbox[0] - padding, 0), max(bbox[1] - padding, 0), min(bbox[2] + padding, canvas[0]), min(bbox[3] + padding, canvas[1])
+
+
+def _gb10_round8(size):
+    return -(-size[0] // 8) * 8, -(-size[1] // 8) * 8
+
+
+def _gb10_cropped_size(crop, size, canvas):
+    """The size of the crop "Only masked" img2img takes for processing size `size`."""
+    x1, y1, x2, y2 = masking.expand_crop_region(crop, size[0], size[1], canvas[0], canvas[1])
+    return x2 - x1, y2 - y1
+
+
+def _gb10_own_size(bbox, pad, canvas):
+    """(processing size, padding) for a tile processed at its crop's own size: the padding grows by the fewest pixels
+    (0-7) for which the crop, widened to the aspect of its size rounded up to a multiple of 8 (latent stride), is
+    exactly that size. When none does (an odd interior bbox in both axes, a canvas side that is not a multiple of 8)
+    the requested padding and its crop's size rounded up to a multiple of 8, the smallest resample."""
     for padding in range(pad, pad + 8):
-        crop, size = size_for(padding)
-        ex1, ey1, ex2, ey2 = masking.expand_crop_region(crop, size[0], size[1], width, height)
-        if (ex2 - ex1, ey2 - ey1) == size:
-            p.inpaint_full_res_padding = padding
-            p.width, p.height = size
-            return
-    p.width, p.height = size_for(pad)[1]
+        crop = _gb10_crop(bbox, padding, canvas)
+        size = _gb10_round8((crop[2] - crop[0], crop[3] - crop[1]))
+        if _gb10_cropped_size(crop, size, canvas) == size:
+            return size, padding
+    crop = _gb10_crop(bbox, pad, canvas)
+    return _gb10_round8((crop[2] - crop[0], crop[3] - crop[1])), pad
+
+
+def _gb10_padding_for(bbox, pad, canvas, want, size):
+    """(padding, exact) for a tile processed at `size`: the smallest padding >= pad whose crop is exactly `want`
+    (exact), else the smallest whose crop is within 8 pixels of `size` in each axis, else None. Larger paddings only
+    grow the crop, and at a canvas edge expand_crop_region shifts the widened crop inward."""
+    near = None
+    padding = pad
+    while True:
+        crop = _gb10_crop(bbox, padding, canvas)
+        if crop[2] - crop[0] > want[0] or crop[3] - crop[1] > want[1]:
+            return near, False
+        cropped = _gb10_cropped_size(crop, size, canvas)
+        if cropped == want:
+            return padding, True
+        if near is None and 0 <= size[0] - cropped[0] < 8 and 0 <= size[1] - cropped[1] < 8:
+            near = padding
+        if crop == (0, 0, canvas[0], canvas[1]):
+            return near, False
+        padding += 1
+
+
+def _gb10_tile_size(p, mask, content):
+    """Set p.width/p.height (and p.inpaint_full_res_padding) so img2img processes the tile's crop unresampled, at
+    one size for every tile of the pass that pastes the same content.
+
+    "Only masked" img2img crops the blurred mask bbox grown by the padding (clamped to the canvas), widens the crop to
+    the aspect of p.width x p.height (shifted inward at a canvas edge), resizes it to that size, and the result back.
+    Upstream sized p from the tile alone (ceil((tile + padding) / 64) * 64, or the seam width + 2 * padding), never
+    the crop's size (tile + 2 * (blur reach + padding), for a seam whatever the gradient covers), so every tile was
+    resampled and resampled back.
+
+    The pass's size is that of `content` (the tile rectangle or seam gradient the pass pastes into the mask) away
+    from any canvas edge, processed at its crop's own size (_gb10_own_size), limited to the canvas. A tile clipped by
+    a canvas edge gets a larger padding instead of a smaller crop: its crop grows inward until, widened to that
+    aspect, it is exactly the pass's crop. Every tile then runs at one latent shape, which the UNet/VAE CUDA graphs and
+    compiled kernels are cached by. A canvas side that is not a multiple of 8 is resampled by less than 8 pixels. When
+    no padding reaches the pass's crop (the clipped axis needs more padding than the other axis takes, which takes an
+    odd blurred content extent), a tile its own crop size processes exactly runs at that size (unresampled, another
+    shape); otherwise the pass's size within 8 pixels, otherwise its own size within 8 pixels. A blank mask (img2img
+    then falls back to the whole image), an inverted mask or a non-integer padding keeps the caller's size.
+    """
+    pad = p.inpaint_full_res_padding
+    if not p.inpaint_full_res or p.inpainting_mask_invert or type(pad) is not int or pad < 0:
+        return
+    bbox = _gb10_blurred_bbox(p, mask)
+    if bbox is None:
+        return
+    canvas = mask.size
+    # The content alone on a canvas wide enough that neither its blur, the padding nor the widening reaches an edge.
+    margin = _gb10_blur_reach(max(p.mask_blur_x, p.mask_blur_y)) + pad + 16
+    free = Image.new("L", (content.width + 2 * margin, content.height + 2 * margin))
+    free.paste(content, (margin, margin))
+    free_size, _ = _gb10_own_size(_gb10_blurred_bbox(p, free), pad, free.size)
+    want = min(free_size[0], canvas[0]), min(free_size[1], canvas[1])
+    size = _gb10_round8(want)
+    padding, exact = _gb10_padding_for(bbox, pad, canvas, want, size)
+    if not exact:
+        own_size, own_padding = _gb10_own_size(bbox, pad, canvas)
+        if padding is None or _gb10_cropped_size(_gb10_crop(bbox, own_padding, canvas), own_size, canvas) == own_size:
+            size, padding = own_size, own_padding
+    p.width, p.height = size
+    p.inpaint_full_res_padding = padding
 
 
 def _gb10_subcanvas_plan(p, image, mask):
@@ -194,12 +262,13 @@ def _gb10_subcanvas_plan(p, image, mask):
     return window, crop, safe, blurred_safe
 
 
-def _gb10_process_tile(owner, p, image, mask):
-    """process_images() for one tile at its crop's own size; processed.images[0] is the full canvas either way.
+def _gb10_process_tile(owner, p, image, mask, content):
+    """process_images() for one tile at its pass's size (_gb10_tile_size); processed.images[0] is the full canvas
+    either way. `content` is what the pass pasted into the mask for this tile, before any canvas clipping.
 
     The tile's size and padding hold for this tile only; the caller's values are restored after it."""
     requested = p.width, p.height, p.inpaint_full_res_padding
-    _gb10_tile_size(p, mask)
+    _gb10_tile_size(p, mask, content)
     try:
         return _gb10_process_window(owner, p, image, mask)
     finally:
@@ -245,7 +314,7 @@ def _gb10_process_window(owner, p, image, mask):
 
 '''
 
-TILE_CALL = "processed = _gb10_process_tile(self, p, {image}, mask)\n"
+TILE_CALL = "processed = _gb10_process_tile(self, p, {image}, mask, {content})\n"
 
 
 def tile_block(indent: str, image: str) -> str:
@@ -256,8 +325,14 @@ def tile_block(indent: str, image: str) -> str:
     )
 
 
-# Blocks of the upstream source (the lifecycle patcher's blocks do not overlap them). Every block starts a line and is matched with its preceding newline, so a
-# 12-space block never matches inside a 16-space one.
+def tile_site(name: str, lead: str, indent: int, image: str, content: str, count: int = 1) -> Block:
+    """The process_images call after `lead` (the line that put the tile's content into the mask) routed through
+    _gb10_process_tile with that content."""
+    return Block(name, lead + tile_block(" " * indent, image), lead + " " * indent + TILE_CALL.format(image=image, content=content), count)
+
+
+# Blocks of the upstream source (the lifecycle patcher's blocks do not overlap them). Every block starts a line and is
+# matched with its preceding newline, so a 12-space block never matches inside a 16-space one.
 BLOCKS = [
     Block("imports", '\nfrom enum import Enum\n\nelem_id_prefix = "ultimateupscale"\n', '\nfrom enum import Enum\n' + IMPORTS + '\nelem_id_prefix = "ultimateupscale"\n'),
     Block(
@@ -275,16 +350,33 @@ BLOCKS = [
     Block(
         "redraw canvas owner",
         "\n    def init_draw(self, p, width, height):\n        p.inpaint_full_res = True\n",
-        "\n    def init_draw(self, p, width, height):\n        self._gb10_owned = None\n        p.inpaint_full_res = True\n",
+        "\n    def init_draw(self, p, width, height):\n        self._gb10_owned = None\n"
+        '        self._gb10_tile = Image.new("L", (self.tile_width, self.tile_height), "white")\n        p.inpaint_full_res = True\n',
     ),
     Block(
         "seams-fix canvas owner",
         "\n    def init_draw(self, p):\n        self.initial_info = None\n",
         "\n    def init_draw(self, p):\n        self._gb10_owned = None\n        self.initial_info = None\n",
     ),
-    Block("redraw tiles", "\n" + tile_block(" " * 16, "image"), "\n" + " " * 16 + TILE_CALL.format(image="image"), 5),
-    Block("seams-fix tiles", "\n" + tile_block(" " * 12, "image"), "\n" + " " * 12 + TILE_CALL.format(image="image"), 2),
-    Block("seams-fix fixed tile", "\n" + tile_block(" " * 16, "fixed_image"), "\n" + " " * 16 + TILE_CALL.format(image="fixed_image"), 1),
+    tile_site("redraw tiles", '\n                draw.rectangle(self.calc_rectangle(xi, yi), fill="white")\n', 16, "image", "self._gb10_tile", 3),
+    tile_site(
+        "half-tile row seams",
+        "\n                mask.paste(row_gradient, (xi*self.tile_width, yi*self.tile_height + self.tile_height//2))\n\n",
+        16, "image", "row_gradient",
+    ),
+    tile_site(
+        "half-tile column seams",
+        "\n                mask.paste(col_gradient, (xi*self.tile_width+self.tile_width//2, yi*self.tile_height))\n\n",
+        16, "image", "col_gradient",
+    ),
+    tile_site(
+        "intersection seams",
+        "\n                mask.paste(gradient, (xi*self.tile_width + self.tile_width//2,\n"
+        "                                      yi*self.tile_height + self.tile_height//2))\n\n",
+        16, "fixed_image", "gradient",
+    ),
+    tile_site("band-pass column seams", "\n            mask.paste(col_gradient, (xi * self.tile_width - self.width // 2, 0))\n\n", 12, "image", "col_gradient"),
+    tile_site("band-pass row seams", "\n            mask.paste(row_gradient, (0, yi * self.tile_height - self.width // 2))\n\n", 12, "image", "row_gradient"),
 ]
 TILE_SITES = 8  # every process_images call in USDURedraw and USDUSeamsFix
 
@@ -428,10 +520,20 @@ def _gb10_process_tile(owner, p, image, mask):
 
 
 '''
-(HELPERS_BLOCK,) = (block for block in BLOCKS if block.name == "helpers")
+DEPLOY10_TILE_CALL = "processed = _gb10_process_tile(self, p, {image}, mask)\n"
+(IMPORTS_BLOCK, HELPERS_BLOCK) = BLOCKS[:2]
 DEPLOY10 = [
+    IMPORTS_BLOCK,
     HELPERS_BLOCK._replace(patched=HELPERS_BLOCK.patched.replace(HELPERS, DEPLOY10_HELPERS)),
-    *(block for block in BLOCKS if block.name not in ("helpers", "redraw tile rectangle")),
+    Block(
+        "redraw canvas owner",
+        "\n    def init_draw(self, p, width, height):\n        p.inpaint_full_res = True\n",
+        "\n    def init_draw(self, p, width, height):\n        self._gb10_owned = None\n        p.inpaint_full_res = True\n",
+    ),
+    next(block for block in BLOCKS if block.name == "seams-fix canvas owner"),
+    Block("redraw tiles", "\n" + tile_block(" " * 16, "image"), "\n" + " " * 16 + DEPLOY10_TILE_CALL.format(image="image"), 5),
+    Block("seams-fix tiles", "\n" + tile_block(" " * 12, "image"), "\n" + " " * 12 + DEPLOY10_TILE_CALL.format(image="image"), 2),
+    Block("seams-fix fixed tile", "\n" + tile_block(" " * 16, "fixed_image"), "\n" + " " * 16 + DEPLOY10_TILE_CALL.format(image="fixed_image"), 1),
 ]
 
 
