@@ -275,3 +275,149 @@ def test_reload_inside_a_model_load_on_the_same_thread_does_not_deadlock(monkeyp
 
     with sd_models.model_data.lock:  # e.g. a model_loaded callback of a load reloading the checkpoint
         assert sd_models.reload_model_weights(model, base_info) is model
+
+
+_REAL_LOAD_VAE = sd_vae.load_vae
+
+
+def _vae_file(tmp_path, seed):
+    generator = torch.Generator().manual_seed(seed)
+    state_dict = {key: torch.randn(value.shape, generator=generator, dtype=torch.float32) * 3 for key, value in TinySD().first_stage_model.state_dict().items()}
+    path = tmp_path / f"vae{seed}.safetensors"
+    path.write_bytes(b"")  # load_vae checks the file exists; the stubbed reader serves state_dict
+    return str(path), state_dict
+
+
+def _switch_vae(monkeypatch, tmp_path, device, *, unified):
+    """reload_vae_weights to a VAE file and back to the checkpoint's own VAE, through the real load_vae."""
+    recorder = _environment(monkeypatch, device, unified=unified)
+    monkeypatch.setattr(sd_vae, "load_vae", _REAL_LOAD_VAE)
+    monkeypatch.setitem(shared.opts.data, "sd_vae_checkpoint_cache", 0)
+    monkeypatch.setattr(sd_vae, "vae_dict", {})
+    vae_file, vae_state_dict = _vae_file(tmp_path, 7)
+    monkeypatch.setattr(sd_vae, "load_vae_dict", lambda filename, map_location: {key: value.clone() for key, value in vae_state_dict.items()})
+    model, _ = _loaded_model()
+    pointers = {name: tensor.data_ptr() for name, tensor in model.state_dict().items()}
+    recorder.events.clear()
+    assert sd_vae.reload_vae_weights(model, vae_file=vae_file) is model
+    switched = {key: value.clone() for key, value in model.state_dict().items()}
+    sd_vae.reload_vae_weights(model, vae_file=None)  # restore the base VAE
+    return model, switched, recorder.events, pointers
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_in_place_vae_switch_matches_cpu_round_trip_bitwise(monkeypatch, tmp_path, device):
+    with monkeypatch.context() as patch:
+        oracle, oracle_switched, oracle_events, _ = _switch_vae(patch, tmp_path, device, unified=False)
+    with monkeypatch.context() as patch:
+        model, switched, events, pointers = _switch_vae(patch, tmp_path, device, unified=True)
+
+    assert oracle_events.count("send_model_to_cpu") == 2  # one CPU round trip per VAE switch
+    assert "send_model_to_cpu" not in events
+    # Captured graphs are dropped before each in-place load, as on the move.
+    assert events.count("boundary:model_reload_in_place") == 2
+    for key, expected in oracle_switched.items():
+        assert switched[key].dtype == expected.dtype and switched[key].device == expected.device, key
+        assert switched[key].stride() == expected.stride(), key
+        assert torch.equal(switched[key].cpu(), expected.cpu()), key
+    assert not torch.equal(switched["first_stage_model.0.weight"].cpu(), model.state_dict()["first_stage_model.0.weight"].cpu())
+    _assert_same_model_state(model, oracle)  # the base VAE is restored bit for bit
+    assert {name: tensor.data_ptr() for name, tensor in model.state_dict().items()} == pointers
+
+
+def test_vae_switch_keeps_cpu_round_trip_outside_unified_memory(monkeypatch, tmp_path):
+    _, _, events, _ = _switch_vae(monkeypatch, tmp_path, torch.device("cpu"), unified=False)
+
+    assert events[:3] == ["send_model_to_cpu", "boundary:model_to_cpu", "torch_gc"]
+    assert "boundary:model_reload_in_place" not in events
+
+
+@pytest.mark.parametrize(("lowvram", "torchao"), [(True, False), (False, True)])
+def test_in_place_weight_load_excludes_lowvram_and_torchao(monkeypatch, lowvram, torchao):
+    _environment(monkeypatch, torch.device("cpu"), unified=True, limit=2)
+    model = TinySD()
+    model.lowvram = lowvram
+    monkeypatch.setattr(sd_models, "model_has_torchao_quantization", lambda _model: torchao)
+
+    assert sd_models.weights_load_in_place_on_device(model) is False
+    assert sd_models.weights_load_in_place_on_device(None) is False
+
+
+def test_in_place_weight_load_does_not_depend_on_the_checkpoint_limit(monkeypatch):
+    # The checkpoint limit decides whether the outgoing checkpoint is cached; a VAE switch keeps the model either way.
+    _environment(monkeypatch, torch.device("cpu"), unified=True, limit=2)
+
+    assert sd_models.weights_load_in_place_on_device(TinySD()) is True
+    assert sd_models.checkpoint_switch_in_place_on_device(TinySD()) is False
+
+
+def _source_tensor(state_dict, key):
+    return state_dict[key].to(torch.float32)
+
+
+def test_text_encoder_keeps_the_checkpoint_weights_in_float32(monkeypatch):
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    model, _ = _loaded_model()
+    _, base_state_dict = _checkpoint("base", 1)
+
+    for name, tensor in model.cond_stage_model.state_dict().items():
+        assert tensor.dtype == torch.float32, name
+        assert torch.equal(tensor, _source_tensor(base_state_dict, f"cond_stage_model.{name}")), name
+    assert model.model.diffusion_model[0].weight.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_in_place_switch_restores_a_lower_precision_text_encoder_to_exact_float32(monkeypatch, device):
+    # A model loaded under another policy (fp8 storage or TorchAO conditioner coverage turned off since) holds a
+    # lower-precision text encoder; loading into it before the float32 cast would round the new checkpoint.
+    recorder = _environment(monkeypatch, device, unified=True)
+    model, _ = _loaded_model()
+    model.cond_stage_model.to(torch.bfloat16)
+    alternate_info, alternate_state_dict = _checkpoint("alternate", 2)
+    monkeypatch.setattr(sd_models, "get_checkpoint_state_dict", lambda info, _timer: {key: value.clone() for key, value in alternate_state_dict.items()})
+    recorder.events.clear()
+
+    sd_models.reload_model_weights(model, alternate_info)
+
+    assert "send_model_to_cpu" not in recorder.events
+    for name, tensor in model.cond_stage_model.state_dict().items():
+        assert tensor.dtype == torch.float32, name
+        assert torch.equal(tensor.cpu(), _source_tensor(alternate_state_dict, f"cond_stage_model.{name}")), name
+
+
+def test_fp8_storage_keeps_the_text_encoder_on_the_low_precision_path(monkeypatch):
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    monkeypatch.setitem(shared.opts.data, "fp8_storage", "Enable")
+    monkeypatch.setitem(shared.opts.data, "cache_fp16_weight", False)
+
+    model, _ = _loaded_model()
+
+    assert sd_models.float32_text_encoder_names(model) == ()
+    assert model.cond_stage_model[0].weight.dtype == torch.float8_e4m3fn
+    assert model.cond_stage_model[1].weight.dtype == torch.bfloat16  # LayerNorm: model.to(devices.dtype), as before
+
+
+@pytest.mark.parametrize(("coverage", "expected"), [(["unet_other"], ("cond_stage_model",)), (["unet_other", "conditioner"], ())])
+def test_torchao_conditioner_coverage_keeps_the_text_encoder_quantizable(monkeypatch, coverage, expected):
+    # TorchAO quantizes bfloat16 Linear weights only; a requested conditioner coverage keeps the text encoder there.
+    _environment(monkeypatch, torch.device("cpu"), unified=True)
+    monkeypatch.setattr(sd_models, "weight_quant_storage_enabled", lambda backend, _model: backend.name == "mxfp8")
+    monkeypatch.setattr(sd_models, "selected_linear_coverage", lambda _backend: set(coverage))
+
+    assert sd_models.float32_text_encoder_names(TinySD()) == expected
+
+
+class SD3Like(torch.nn.Module):
+    """SD3's model: cond_stage_model is a property over the text_encoders submodule."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_encoders = torch.nn.Linear(1, 1)
+
+    @property
+    def cond_stage_model(self):
+        return self.text_encoders
+
+
+def test_sd3_text_encoders_are_not_float32_text_encoders():
+    assert sd_models.float32_text_encoder_names(SD3Like()) == ()

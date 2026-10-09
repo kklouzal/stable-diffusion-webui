@@ -1,3 +1,4 @@
+import contextlib
 import math
 from collections import namedtuple
 
@@ -14,6 +15,31 @@ def clip_text_transformer_module(transformer):
 
 def clip_text_embeddings(transformer):
     return clip_text_transformer_module(transformer).embeddings
+
+
+@contextlib.contextmanager
+def text_encoder_precision(text_encoder):
+    """Run a float32 text encoder (sd_models.float32_text_encoder_names) in float32.
+
+    CUDA autocast is off and float32 matmuls are IEEE instead of the process-wide TF32 (devices.enable_tf32), whose
+    10-bit mantissa would give back most of the accuracy float32 weights buy. The matmul precision is process-wide
+    torch state, restored on exit; text encoding runs inside the one generation at a time, and another thread's
+    float32 matmul overlapping it only runs at the higher precision. A text encoder kept at a lower precision (fp8
+    or TorchAO storage) runs under the caller's autocast as before.
+    """
+    weight = next(text_encoder.parameters(), None)
+    if weight is None or weight.dtype != torch.float32:
+        yield
+        return
+
+    matmul = torch.backends.cuda.matmul
+    previous = matmul.fp32_precision
+    matmul.fp32_precision = "ieee"
+    try:
+        with devices.without_autocast():
+            yield
+    finally:
+        matmul.fp32_precision = previous
 
 
 class PromptChunk:
@@ -279,7 +305,8 @@ class TextConditionalModel(torch.nn.Module):
                 index = remade_batch_tokens[batch_pos].index(self.id_end)
                 tokens[batch_pos, index+1:tokens.shape[1]] = self.id_pad
 
-        z = self.encode_with_transformers(tokens)
+        with text_encoder_precision(self):
+            z = self.encode_with_transformers(tokens)
 
         pooled = getattr(z, 'pooled', None)
 

@@ -599,3 +599,29 @@ def test_functional_lora_forward_casts_file_dtype_factors_to_the_input(bf16_lora
 
     expected = y + torch.nn.functional.conv2d(torch.nn.functional.conv2d(x, down.bfloat16(), padding=1), up.bfloat16())
     assert out.dtype == torch.bfloat16 and torch.equal(out, expected)
+
+
+def test_functional_lora_keeps_float32_text_encoder_inputs_under_upcast_sampling(bf16_lora, monkeypatch):
+    # --upcast-sampling: cond_cast_unet casts layer inputs to the bf16 UNet dtype; a float32 text encoder layer
+    # (sd_models.float32_text_encoder_names) must get its float32 input, or F.linear sees mixed dtypes.
+    networks = bf16_lora
+    monkeypatch.setattr(networks.devices, "unet_needs_upcast", True)
+    monkeypatch.setattr(networks.devices, "dtype_unet", torch.bfloat16)
+    generator = torch.Generator().manual_seed(0)
+    layer = torch.nn.Linear(4, 4)
+    layer.network_layer_name = "transformer_text_model_encoder_layers_0_mlp_fc1"
+    up, down = _grid((4, 1), generator), _grid((1, 4), generator)
+    networks._set_loaded_networks([_lora(networks, layer, "te", up, down, 1.0, 0.5)])
+    x = torch.randn(3, 4, generator=generator)
+
+    with torch.no_grad():
+        y = networks.network_forward(layer, x, torch.nn.Linear.forward)
+        expected = x.double() @ layer.weight.double().T + layer.bias.double() + 0.5 * (x.double() @ down.double().T @ up.double().T)
+
+    assert y.dtype == torch.float32
+    torch.testing.assert_close(y.double(), expected, rtol=1e-6, atol=1e-6)
+
+    unet_layer = torch.nn.Linear(4, 4, dtype=torch.bfloat16)  # UNet layers still get the bf16 cast
+    unet_layer.network_layer_name = "diffusion_model_layer"
+    with torch.no_grad():
+        assert networks.network_forward(unet_layer, x, torch.nn.Linear.forward).dtype == torch.bfloat16

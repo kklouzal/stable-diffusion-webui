@@ -277,6 +277,9 @@ def reload_vae_weights(sd_model=None, vae_file=unspecified):
     try:
         if sd_model.lowvram:
             lowvram.send_everything_to_cpu()
+        elif sd_models.weights_load_in_place_on_device(sd_model):
+            # The VAE state dict loads into the device-resident VAE; captured graphs still go first.
+            sd_models.release_model_for_in_place_reload(sd_model)
         else:
             sd_models.send_model_to_cpu(sd_model)
 

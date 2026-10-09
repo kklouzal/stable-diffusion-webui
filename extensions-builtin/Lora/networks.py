@@ -965,7 +965,11 @@ def network_forward(org_module, input, original_forward):
     if len(loaded_networks) == 0:
         return original_forward(org_module, input)
 
-    input = devices.cond_cast_unet(input)
+    # cond_cast_unet casts to the UNet dtype; float32 text encoder layers (sd_models.float32_text_encoder_names)
+    # take their input as it is.
+    weight = org_module.in_proj_weight if isinstance(org_module, torch.nn.MultiheadAttention) else getattr(org_module, "weight", None)
+    if weight is None or weight.dtype != torch.float32:
+        input = devices.cond_cast_unet(input)
 
     network_restore_weights_from_backup(org_module)
     network_reset_cached_weight(org_module)

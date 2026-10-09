@@ -453,3 +453,18 @@ def test_sdxl_size_and_aesthetic_conditioning_values_stay_exact_float32(monkeypa
     }.items():
         assert captured[key].dtype == torch.float32, key
         assert torch.equal(captured[key], torch.tensor(expected)), key
+
+
+def test_open_clip_gelu_upcast_returns_the_input_dtype(monkeypatch):
+    # OpenCLIP's MLP activation under --upcast-sampling: a float32 text encoder (sd_models.float32_text_encoder_names)
+    # must get float32 back for its float32 c_proj; a bf16 one gets bf16 as before.
+    from modules import devices, sd_hijack_unet
+
+    monkeypatch.setattr(devices, "unet_needs_upcast", True)
+    monkeypatch.setattr(devices, "dtype_unet", torch.bfloat16)
+    gelu = sd_hijack_unet.GELUHijack()
+    x = torch.randn(4, 8)
+
+    assert gelu(x).dtype == torch.float32
+    torch.testing.assert_close(gelu(x), torch.nn.functional.gelu(x))
+    assert gelu(x.to(torch.bfloat16)).dtype == torch.bfloat16

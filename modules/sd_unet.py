@@ -2,7 +2,7 @@ import sys
 
 import torch.nn
 
-from modules import script_callbacks, shared, devices, sd_unet_row_memo
+from modules import script_callbacks, shared, devices, sd_unet_row_memo, openclaw_cuda_graphs
 
 unet_options = []
 current_unet_option = None
@@ -32,12 +32,19 @@ def get_unet_option(option=None):
 
 
 def apply_unet(option=None):
-    global current_unet_option
-    global current_unet
-
     new_option = get_unet_option(option)
     if new_option == current_unet_option:
         return
+
+    # Swapping the UNet implementation and moving diffusion_model must not overlap a captured UNet graph replay
+    # (it holds the native UNet's device storage); captured graphs are dropped first.
+    with openclaw_cuda_graphs.mutable_runtime_boundary("alternative_unet", new_option.label if new_option is not None else None):
+        _swap_unet(new_option)
+
+
+def _swap_unet(new_option):
+    global current_unet_option
+    global current_unet
 
     if current_unet is not None:
         print(f"Deactivating unet: {current_unet.option.label}")

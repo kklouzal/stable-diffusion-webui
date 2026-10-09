@@ -122,7 +122,11 @@ def _callable_identity(value: Any) -> tuple[Any, ...] | None:
 
 
 def _module_revision(module: Any) -> tuple[Any, ...]:
-    """Identity of the VAE module's parameters, buffers and hooks; in-place weight loads bump the version counters."""
+    """Identity of the VAE module's parameters, buffers, hooks and convolution padding modes.
+
+    In-place weight loads bump the version counters. Tiling (sd_hijack.model_hijack.apply_circular) switches every
+    Conv2d to circular padding without touching a tensor; a capture freezes the padding it ran.
+    """
     named_tensors = list(module.named_parameters(recurse=True)) + list(module.named_buffers(recurse=True))
     tensors = tuple(
         (
@@ -142,7 +146,12 @@ def _module_revision(module: Any) -> tuple[Any, ...]:
         values = getattr(module, attribute, None)
         if values:
             hooks.append((attribute, tuple((key, _callable_identity(value)) for key, value in values.items())))
-    return (id(module), type(module).__module__, type(module).__qualname__, bool(getattr(module, "training", False)), tensors, tuple(hooks))
+    padding_modes = tuple(
+        (name, submodule.padding_mode)
+        for name, submodule in module.named_modules()
+        if getattr(submodule, "padding_mode", "zeros") != "zeros"
+    )
+    return (id(module), type(module).__module__, type(module).__qualname__, bool(getattr(module, "training", False)), tensors, tuple(hooks), padding_modes)
 
 
 def _tensor_key(x: torch.Tensor) -> tuple[Any, ...]:

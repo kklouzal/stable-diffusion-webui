@@ -399,17 +399,22 @@ def _runtime_branch_key() -> tuple[Any, ...]:
     - lora_functional: the Lora extension's per-layer functional path instead of merged weights, and the UNet
       norms' bf16-native eligibility (sd_hijack_unet.bf16_native_norm_eligible).
     - the NHWC GroupNorm switch (modules/openclaw_nhwc_groupnorm.py): which GroupNorm kernels and layouts run.
+    - tiling: sd_hijack.model_hijack.apply_circular(p.tiling) sets every hijacked Conv2d's padding_mode, which picks
+      the padding a convolution runs (a captured graph freezes it). The hijack flag is the authoritative state of
+      that switch and costs no module walk per UNet call.
     Request override_settings set these without callbacks, so they must be part of the key.
     """
     shared = sys.modules.get("modules.shared")
     opts = getattr(shared, "opts", None)
     cross_attention = getattr(sys.modules.get("sgm.modules.attention"), "CrossAttention", None)
     nhwc_group_norm = sys.modules.get("modules.openclaw_nhwc_groupnorm")
+    model_hijack = getattr(sys.modules.get("modules.sd_hijack"), "model_hijack", None)
     return (
         getattr(cross_attention, "forward", None),
         bool(getattr(opts, "upcast_attn", False)),
         _lora_functional(),
         nhwc_group_norm.state_key() if nhwc_group_norm is not None else None,
+        bool(getattr(model_hijack, "circular_enabled", False)),
     )
 
 
@@ -499,6 +504,11 @@ def _graph_denoiser_bypass_reason(denoiser: Any | None, fn: Any | None = None) -
     # loaded set and each network's multiplier per call; a replay would apply the set that was loaded at capture.
     if getattr(sys.modules.get("modules.shared"), "loaded_hypernetworks", None):
         return "hypernetworks"
+
+    # An alternative UNet (sd_unet.apply_unet, e.g. a TensorRT engine) is extension Python that UNetModel.forward
+    # dispatches to per call while the native UNet sits on the CPU; neither its identity nor its state is keyed.
+    if getattr(sys.modules.get("modules.sd_unet"), "current_unet", None) is not None:
+        return "alternative_unet"
 
     models = _denoiser_models(fn, p)
     # A per-request instance override (Tiled Diffusion: MultiDiffusion/DemoFusion replace inner_model.forward or

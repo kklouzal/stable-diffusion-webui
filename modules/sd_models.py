@@ -383,6 +383,27 @@ def torchao_weight_quant_requested(model):
     return any(weight_quant_storage_enabled(backend, model) for backend in torchao_weight_quant.BACKENDS.values())
 
 
+FLOAT32_TEXT_ENCODER_MODULES = ("conditioner", "cond_stage_model")
+
+
+def float32_text_encoder_names(model):
+    """Names of `model`'s text encoder submodules that keep float32 weights under a lower-precision devices.dtype.
+
+    The SD1/SD2 cond_stage_model and the SDXL conditioner (CLIP-L, OpenCLIP-G) keep float32 weights and run with
+    autocast off (sd_hijack_clip.text_encoder_precision): with bfloat16 weights and residual stream their output
+    is ~1e-2 (CLIP-L) to 3e-2 (OpenCLIP-G penultimate) relative L2 off a float64 reference, against 1e-6..2e-5 in
+    float32. A low-precision weight storage that covers the text encoder keeps the devices.dtype path instead:
+    fp8 storage, or TorchAO quantization with the "conditioner" coverage (it quantizes bfloat16 weights only).
+    SD3's text encoders (text_encoders) keep their own precision handling.
+    """
+    if check_fp8(model) or any(
+        weight_quant_storage_enabled(backend, model) and torchao_weight_quant.LINEAR_COVERAGE_CONDITIONER in selected_linear_coverage(backend)
+        for backend in torchao_weight_quant.BACKENDS.values()
+    ):
+        return ()
+    return tuple(name for name in FLOAT32_TEXT_ENCODER_MODULES if name in model._modules)
+
+
 class DisableFastModelLoadingForTorchAOQuant:
     def __enter__(self):
         self.previous = None
@@ -650,6 +671,11 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         model.before_load_weights(state_dict)
 
     restore_torchao_quantized_linears_for_reload(model)
+    float32_text_encoders = float32_text_encoder_names(model) if devices.dtype != torch.float32 else ()
+    for name in float32_text_encoders:
+        # Before the load: copy_ into the lower-precision parameters a model loaded under another policy kept (or
+        # model.half() above) would round the checkpoint's weights.
+        getattr(model, name).float()
     model.load_state_dict(state_dict, strict=False)
     timer.record("apply weights to model")
 
@@ -691,12 +717,18 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         if shared.cmd_opts.upcast_sampling and depth_model:
             model.depth_model = None
 
+        text_encoders = {name: getattr(model, name) for name in float32_text_encoders}
+        for name in text_encoders:
+            setattr(model, name, None)
+
         alphas_cumprod = model.alphas_cumprod
         model.alphas_cumprod = None
         model.to(devices.dtype)
         model.alphas_cumprod = alphas_cumprod
         model.alphas_cumprod_original = alphas_cumprod
         model.first_stage_model = vae
+        for name, text_encoder in text_encoders.items():
+            setattr(model, name, text_encoder)
         if depth_model:
             model.depth_model = depth_model
 
@@ -1005,24 +1037,30 @@ def _device_has_unified_memory(device):
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
 
-def checkpoint_switch_in_place_on_device(m):
-    """Whether a checkpoint switch loads the new weights straight into the device-resident model `m`.
+def weights_load_in_place_on_device(m):
+    """Whether new weights for the device-resident model `m` load straight into it instead of a CPU round trip.
 
-    With sd_checkpoints_limit == 1 the outgoing model is never kept as a cached copy: it is either reused as the
-    container for the new weights or trashed. On unified memory, parking it on the CPU first frees no physical
-    memory; it costs a full device-to-host copy, a CPU-side load and a full host-to-device copy, briefly holding
-    both. Loading in place gives the same weights: copy_ from the CPU state_dict converts dtype on the CPU either
-    way, and the remaining load steps are layout changes, same-dtype no-ops, or round-to-nearest-even casts that
-    match the CPU bit for bit on non-NaN values. lowvram/medvram and TorchAO-quantized models keep their own
-    movement paths.
+    On unified memory, parking the model on the CPU to load weights frees no physical memory; it costs a full
+    device-to-host copy, a CPU-side load and a full host-to-device copy, briefly holding both. Loading in place
+    gives the same weights: copy_ from the CPU state_dict converts dtype on the CPU either way, and the remaining
+    load steps are layout changes, same-dtype no-ops, or round-to-nearest-even casts that match the CPU bit for bit
+    on non-NaN values. lowvram/medvram and TorchAO-quantized models keep their own movement paths.
     """
     return (
         m is not None
-        and shared.opts.sd_checkpoints_limit == 1
         and not m.lowvram
         and not model_has_torchao_quantization(m)
         and _device_has_unified_memory(devices.device)
     )
+
+
+def checkpoint_switch_in_place_on_device(m):
+    """Whether a checkpoint switch loads the new weights straight into the device-resident model `m`.
+
+    Only with sd_checkpoints_limit == 1: the outgoing model is then never kept as a cached copy, so it is either
+    reused as the container for the new weights or trashed. See weights_load_in_place_on_device.
+    """
+    return shared.opts.sd_checkpoints_limit == 1 and weights_load_in_place_on_device(m)
 
 
 def release_model_for_in_place_reload(m):
@@ -1227,6 +1265,9 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None, checkpoint_
         weight_dtype_conversion = {
             'first_stage_model': None,
             'alphas_cumprod': None,
+            # float32_text_encoder_names: the text encoders load as float32; where a low-precision storage covers
+            # them, load_model_weights then casts them to devices.dtype (the same single rounding of the source).
+            **{name: torch.float32 for name in FLOAT32_TEXT_ENCODER_MODULES},
             '': devices.dtype,
         }
 

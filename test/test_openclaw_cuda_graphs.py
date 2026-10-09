@@ -761,6 +761,14 @@ class CudaGraphRequestOverrideTests(GraphTestCase):
             shared.loaded_hypernetworks = []
             self.assertIsNone(self.reason())
 
+    def test_alternative_unet_bypasses(self):
+        # sd_unet.apply_unet routes UNetModel.forward to extension Python (current_unet) that no key part identifies.
+        sd_unet = module("modules.sd_unet", current_unet=object())
+        with stub_modules({"modules.sd_unet": sd_unet}):
+            self.assertEqual(self.reason(), "alternative_unet")
+            sd_unet.current_unet = None
+            self.assertIsNone(self.reason())
+
     def test_override_bypass_runs_eager_and_records_reason(self):
         openclaw_cuda_graphs.set_enabled(True, clear=True)
         try:
@@ -959,6 +967,19 @@ class CudaGraphCaptureContractTests(GraphTestCase):
             self.run_shape(fn, (1,))
         self.assertEqual(openclaw_cuda_graphs.status()["captures"], 3)
         self.assertEqual(openclaw_cuda_graphs.status()["replays"], 1)
+
+    def test_tiling_selects_its_own_graph(self):
+        # apply_circular(p.tiling) switches the UNet's Conv2d padding per request; a graph captured with one padding
+        # must never replay for the other (test_tiling_graph_keys.py drives the real apply_circular).
+        model_hijack = types.SimpleNamespace(circular_enabled=False)
+        calls = []
+        fn = self.make_fn(calls)
+        with stub_modules({"modules.sd_hijack": module("modules.sd_hijack", model_hijack=model_hijack)}):
+            for circular in (False, True, False, True):
+                model_hijack.circular_enabled = circular
+                self.run_shape(fn, (1,))
+        self.assertEqual(openclaw_cuda_graphs.status()["captures"], 2)
+        self.assertEqual(openclaw_cuda_graphs.status()["replays"], 2)
 
 
 class CudaGraphKeyTests(GraphTestCase):
