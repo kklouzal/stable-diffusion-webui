@@ -934,6 +934,19 @@ def flatten(img, bgcolor):
     return img.convert('RGB')
 
 
+def pixel_fingerprint(image):
+    """In-memory cache key of a PIL image's content: everything its pixel conversions read (mode, size, palette,
+    transparency and the raw pixel bytes)."""
+    palette = image.getpalette() if image.mode in ("P", "PA") else None
+    return (
+        image.mode,
+        image.size,
+        tuple(palette) if palette is not None else None,
+        image.info.get("transparency"),
+        hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest(),
+    )
+
+
 def read(fp, *, max_pixels=None, **kwargs):
     """Opens and decodes an image. An image of more than max_pixels pixels raises Image.DecompressionBombError once
     its header is read, before its pixel data is decoded."""

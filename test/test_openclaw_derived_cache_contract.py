@@ -117,7 +117,7 @@ def test_static_cache_reload_and_upscale_contracts():
     assert "@functools.cache" not in sampler
     register = multi[multi.index("def _register_definitions"):multi.index("def _upsert_custom")]
     assert "_SAMPLER_FUNC_CACHE.clear()" in register and "_SIGNATURE_PARAM_CACHE.clear()" in register
-    assert "hashlib.sha256(image.tobytes()).digest()" in upscale
+    assert "images.pixel_fingerprint(image)" in upscale
     assert "id(scaler)" in upscale
     assert "cached_image.copy()" in upscale and "image.copy()" in upscale
     assert "upscale_cache_lock" in upscale and "popitem(last=False)" in upscale

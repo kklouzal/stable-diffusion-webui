@@ -1,12 +1,11 @@
 import re
-import hashlib
 import os
 import threading
 from collections import OrderedDict
 
 from PIL import Image
 
-from modules import scripts_postprocessing, shared
+from modules import images, scripts_postprocessing, shared
 from modules.upscaler import scaled_size
 from modules import headless_ui as gr
 
@@ -20,10 +19,6 @@ upscale_cache_lock = threading.RLock()
 def _upscaler_identity(upscaler):
     scaler = upscaler.scaler
     return (upscaler.name, os.path.realpath(upscaler.data_path) if upscaler.data_path else None, type(scaler).__module__, type(scaler).__qualname__, id(scaler))
-
-
-def _image_identity(image):
-    return (image.mode, image.size, hashlib.sha256(image.tobytes()).digest())
 
 
 def limit_size_by_one_dimention(w, h, limit):
@@ -112,7 +107,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 upscale_by = max(upscale_to_width/image.width, upscale_to_height/image.height)
                 info["Max side length"] = max_side_length
 
-        cache_key = (_image_identity(image), _upscaler_identity(upscaler), upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop)
+        cache_key = (images.pixel_fingerprint(image), _upscaler_identity(upscaler), upscale_mode, upscale_by, upscale_to_width, upscale_to_height, upscale_crop)
         with upscale_cache_lock:
             cached_image = upscale_cache.pop(cache_key, None)
 

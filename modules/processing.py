@@ -119,20 +119,6 @@ def _latent_blend_masks(latmask, channels):
     return 1.0 - nmask, nmask
 
 
-def _image_cache_fingerprint(image):
-    """Identify a PIL image by everything its pixel conversions read: mode, size, palette, transparency and raw bytes."""
-    if image is None:
-        return None
-    palette = image.getpalette() if image.mode in ("P", "PA") else None
-    return (
-        image.mode,
-        image.size,
-        tuple(palette) if palette is not None else None,
-        image.info.get("transparency"),
-        hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest(),
-    )
-
-
 def _clone_cache_value(value):
     if torch.is_tensor(value):
         return value.detach().clone()
@@ -1937,17 +1923,17 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self._snapshot_img2img_init_cache_stats(last_hit=False, cached=True)
 
     def _img2img_init_cache_bypass_reason(self):
-        if not getattr(opts, "persistent_img2img_init_cache", True):
+        if not opts.persistent_img2img_init_cache:
             return "disabled"
         if not self.init_images:
             return "no_init_images"
-        if getattr(self, "image_mask", None) is not None or getattr(self, "latent_mask", None) is not None:
+        # Masked content, mask blur/rounding/inversion and "only masked" crops act only through a mask, so the key
+        # below holds none of them.
+        if self.image_mask is not None or self.latent_mask is not None:
             return "masked_request"
-        if self.inpainting_fill == 2:
-            return "latent_noise_fill_uses_seeded_random"
         return None
 
-    def _img2img_init_cache_key(self, key_images, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections):
+    def _img2img_init_cache_key(self, key_images, key_raw_images, repeat_init_latent, add_color_corrections):
         """key_images are the raw init images when key_raw_images, else the prepared (flattened/resized) ones."""
         reason = self._img2img_init_cache_bypass_reason()
         if reason is not None:
@@ -1961,13 +1947,16 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             getattr(checkpoint_info, "sha256", None),
         )
 
-        effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", getattr(opts, "inpainting_mask_weight", None))
+        effective_inpainting_mask_weight = getattr(self, "inpainting_mask_weight", opts.inpainting_mask_weight)
 
         return (
             "raw" if key_raw_images else "prepared",
-            tuple(_image_cache_fingerprint(image) for image in key_images),
-            _image_cache_fingerprint(image_mask),
-            _image_cache_fingerprint(latent_mask),
+            # Every committed checkpoint or VAE load bumps these, so a file replaced in place and reloaded under the
+            # same name misses (under --no-hashing the hashes below are None). The names stay: switching to an
+            # already-loaded checkpoint (sd_checkpoints_limit > 1) bumps no epoch. One atomic snapshot is enough:
+            # epochs only grow, so a bump while this request encodes leaves an entry no later key can match.
+            openclaw_cache_epochs.epoch_subset(("checkpoint_object_epoch", "vae_object_epoch", "vae_bytes_epoch")),
+            tuple(images.pixel_fingerprint(image) for image in key_images),
             checkpoint_key,
             self.sd_model_name,
             self.sd_model_hash,
@@ -1986,16 +1975,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.batch_size,
             bool(repeat_init_latent),
             bool(add_color_corrections),
-            self.mask_round,
-            self.inpainting_fill,
-            self.inpainting_mask_invert,
-            self.inpaint_full_res,
-            self.inpaint_full_res_padding,
-            self.mask_blur_x,
-            self.mask_blur_y,
-            getattr(opts, "sd_vae_encode_method", None),
+            opts.sd_vae_encode_method,
             effective_inpainting_mask_weight,
-            getattr(opts, "img2img_background_color", None),
+            opts.img2img_background_color,
             str(devices.dtype),
             str(devices.dtype_vae),
             str(shared.device),
@@ -2162,7 +2144,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if image_mask is not None and self.inpainting_fill == 3:
             self.extra_generation_params["Masked content"] = 'latent nothing'
 
-        init_cache_key = self._img2img_init_cache_key(imgs, key_raw_images, image_mask, latent_mask, repeat_init_latent, add_color_corrections)
+        init_cache_key = self._img2img_init_cache_key(imgs, key_raw_images, repeat_init_latent, add_color_corrections)
         init_cache_started = time.perf_counter()
         cache_extra_generation_params = {
             key: self.extra_generation_params[key]
@@ -2214,7 +2196,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def close(self):
         super().close()
-        if not getattr(opts, "persistent_img2img_init_cache", True):
+        if not opts.persistent_img2img_init_cache:
             self.clear_img2img_init_cache()
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
