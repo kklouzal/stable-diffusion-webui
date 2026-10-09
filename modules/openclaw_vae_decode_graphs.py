@@ -276,10 +276,10 @@ def _key(model: Any, x: torch.Tensor) -> tuple[Any, ...]:
 
 
 def _execute(model: Any, x: torch.Tensor) -> torch.Tensor:
-    from modules import devices
+    from modules import devices, sd_samplers_common
 
     with torch.no_grad(), devices.without_autocast():
-        return model.decode_first_stage(x.to(model.first_stage_model.dtype))
+        return model.decode_first_stage(sd_samplers_common.vae_decode_input(model, x))
 
 
 def _remember_failed_key_locked(key: tuple[Any, ...]) -> None:

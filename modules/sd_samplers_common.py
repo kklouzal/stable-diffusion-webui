@@ -65,7 +65,7 @@ def samples_to_images_tensor(sample, approximation=None, model=None):
         if model is None:
             model = shared.sd_model
         with torch.no_grad(), devices.without_autocast(): # fixes an issue with unstable VAEs that are flaky even in fp32
-            x_sample = model.decode_first_stage(sample.to(model.first_stage_model.dtype))
+            x_sample = model.decode_first_stage(vae_decode_input(model, sample))
 
     return x_sample
 
@@ -87,8 +87,16 @@ def single_sample_to_image(sample, approximation=None):
     return Image.fromarray(float_images_to_uint8(x_sample).cpu().numpy())
 
 
+def vae_decode_input(model, x):
+    """The latent x as model.decode_first_stage takes it. SDXL's (sd_models_xl.decode_first_stage) scales it in float32
+    and rounds it to the VAE dtype once, so it gets x unrounded; the others scale in the VAE dtype they are given."""
+    if getattr(model, "decode_first_stage_takes_float32", False):
+        return x.float()
+    return x.to(model.first_stage_model.dtype)
+
+
 def decode_first_stage(model, x):
-    x = x.to(devices.dtype_vae)
+    x = x.float() if getattr(model, "decode_first_stage_takes_float32", False) else x.to(devices.dtype_vae)
     approx_index = approximation_indexes.get(opts.sd_vae_decode_method, 0)
     from modules import openclaw_vae_decode_graphs
     decoded = openclaw_vae_decode_graphs.run(model, x, approx_index)
