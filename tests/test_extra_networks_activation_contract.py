@@ -6,15 +6,18 @@ from modules import extra_networks
 
 
 class RecordingNetwork(extra_networks.ExtraNetwork):
-    def __init__(self, name, events, error=None):
+    def __init__(self, name, events, error=None, reset_error=None):
         super().__init__(name)
         self.events = events
         self.error = error
+        self.reset_error = reset_error
 
     def activate(self, p, params_list):
         self.events.append((self.name, [params.items for params in params_list]))
         if params_list and self.error is not None:
             raise self.error
+        if not params_list and self.reset_error is not None:
+            raise self.reset_error
 
     def deactivate(self, p):
         self.events.append((self.name, "deactivate"))
@@ -60,5 +63,19 @@ def test_successful_activation_resets_unmentioned_networks(registry):
     _, data = extra_networks.parse_prompt("a cat <lora:detail:0.5>")
 
     extra_networks.activate(SimpleNamespace(scripts=None), data)
+
+    assert events == [("lora", [["detail", "0.5"]]), ("hypernet", [])]
+
+
+def test_failing_reset_of_an_unmentioned_network_fails_the_request(registry):
+    # Any network, not only LoRA: a hypernet reset can append opts.sd_hypernetwork to the prompts and then fail, which
+    # would name a hypernetwork in infotext that was never applied.
+    events = []
+    extra_networks.register_extra_network(RecordingNetwork("hypernet", events, reset_error=OSError("missing hypernetwork")))
+    extra_networks.register_extra_network(RecordingNetwork("lora", events))
+    _, data = extra_networks.parse_prompt("a cat <lora:detail:0.5>")
+
+    with pytest.raises(OSError, match="missing hypernetwork"):
+        extra_networks.activate(SimpleNamespace(scripts=None), data)
 
     assert events == [("lora", [["detail", "0.5"]]), ("hypernet", [])]

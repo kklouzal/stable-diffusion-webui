@@ -127,9 +127,10 @@ def activate(p, extra_network_data):
     """call activate for extra networks in extra_network_data in specified order, then call
     activate for all remaining registered networks with an empty argument list
 
-    An exception from a network named in the prompt propagates and fails the request: catching it generated the
-    image without the requested network (the reset pass below re-activated that network with an empty list).
-    processing.process_images still runs deactivate() for the request."""
+    An exception from either pass propagates and fails the request: catching it generated the image without the
+    requested network (the reset pass below re-activated that network with an empty list), or with a reset that did
+    not happen while infotext still named the network. processing.process_images still runs deactivate() for the
+    request."""
 
     activated = []
 
@@ -137,16 +138,11 @@ def activate(p, extra_network_data):
         extra_network.activate(p, extra_network_args)
         activated.append(extra_network)
 
-    for extra_network_name, extra_network in extra_network_registry.items():
+    for extra_network in extra_network_registry.values():
         if extra_network in activated:
             continue
 
-        try:
-            extra_network.activate(p, [])
-        except Exception as e:
-            if type(e).__name__ == "FatalLoraPreparationError":
-                raise
-            errors.display(e, f"activating extra network {extra_network_name}")
+        extra_network.activate(p, [])
 
     if p.scripts is not None:
         p.scripts.after_extra_networks_activate(p, batch_number=p.iteration, prompts=p.prompts, seeds=p.seeds, subseeds=p.subseeds, extra_network_data=extra_network_data)
