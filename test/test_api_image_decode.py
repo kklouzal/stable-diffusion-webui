@@ -30,7 +30,7 @@ class HTTPException(Exception):
 
 
 def read_image(fp, *, max_pixels=None):
-    """images.read's contract (test/test_c1_images_boundary.py tests the real one): the pixel budget is checked from
+    """images.read's contract (test/test_images_boundary.py tests the real one): the pixel budget is checked from
     the header, before decoding."""
     image = Image.open(fp)
     if max_pixels is not None and image.width * image.height > max_pixels:
