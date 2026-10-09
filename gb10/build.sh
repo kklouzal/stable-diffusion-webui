@@ -4,7 +4,6 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="${DOCKERFILE:-${PROJECT_ROOT}/Dockerfile}"
 BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.08-py3}"
-PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG:-cu134}"
 MSLK_REPO="${MSLK_REPO:-https://github.com/meta-pytorch/MSLK.git}"
 MSLK_COMMIT="${MSLK_COMMIT:-88d06bc2784f3b550d7ec851d4ca67a16a844fe2}"
 IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
@@ -56,7 +55,6 @@ cat <<EOM
 Project root:              ${PROJECT_ROOT}
 Dockerfile:                ${DOCKERFILE}
 Base image:                ${BASE_IMAGE}
-PyTorch nightly CUDA tag:  ${PYTORCH_NIGHTLY_CUDA_TAG}
 MSLK source repo:          ${MSLK_REPO}
 MSLK source commit:        ${MSLK_COMMIT}
 Image tag:                 ${IMAGE_TAG}
@@ -76,7 +74,6 @@ sudo env DOCKER_BUILDKIT="${DOCKER_BUILDKIT}" BUILDKIT_PROGRESS="${BUILDKIT_PROG
   -f "${DOCKERFILE}" \
   -t "${IMAGE_TAG}" \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
-  --build-arg PYTORCH_NIGHTLY_CUDA_TAG="${PYTORCH_NIGHTLY_CUDA_TAG}" \
   --build-arg MSLK_REPO="${MSLK_REPO}" \
   --build-arg MSLK_COMMIT="${MSLK_COMMIT}" \
   "${PROJECT_ROOT}"

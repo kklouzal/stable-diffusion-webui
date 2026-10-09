@@ -1,25 +1,22 @@
-.git
-.gitignore
-.dockerignore
-**/__pycache__/
+# Build context allowlist. Only what the image build reads is sent, so the image never depends on untracked
+# host state (config.json, params.txt, ui-config.json, styles.csv, cache/, config_states/, tmp/, outputs/,
+# logs, caches) or ships non-runtime tracked content (test/, tests/, docs/, gb10/, README, changelog, ...).
+# Patterns are relative to the context root. Add a new top-level runtime path here when the app gains one.
+*
+!webui.py
+!launch.py
+!modules
+!scripts
+!extensions-builtin
+!configs
+!html
+!textual_inversion_templates
+!requirements_versions.txt
+!LICENSE.txt
+# Build inputs copied by explicit COPY steps (the source stage drops them from the app tree).
+!docker
+!patches
+# Never from inside the allowed trees either.
+**/__pycache__
 **/*.pyc
-.claude/
-.venv/
-venv/
-.env
-.env.*
-out/
-outputs/
-models/
-embeddings/
-extensions/
-repositories/
-.cache/
-.pytest_cache/
-.ruff_cache/
-gb10/rebuild-*.log
-gb10/rebuild-*.meta
-gb10/rebuild-*.pid
-gb10/redeploy-*.log
-gb10/redeploy-*.meta
-gb10/redeploy-*.pid
+**/.DS_Store

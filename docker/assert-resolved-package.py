@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
+"""Assert what the resolver dry run (pip --dry-run --report) selected for one package: present at or above a
+version floor (optionally as a wheel), or absent. A package missing from the report fails unless --absent."""
 import argparse
-import importlib.metadata as md
 import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-import re
-
-
-def normalize(name: str) -> str:
-    return name.replace('_', '-').lower()
-
-
-def version_key(version: str) -> tuple:
-    # Good enough for the numeric stable-version floors this guard enforces
-    # (for example 5.7.0, 0.22.2, 1.13.0). Keep this script dependency-free
-    # because it runs before the resolved application closure is installed.
-    return tuple(int(part) for part in re.findall(r"\d+", version.split("+", 1)[0]))
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 
 def main() -> int:
@@ -24,19 +15,17 @@ def main() -> int:
     ap.add_argument('--report', default='/opt/build/report.json')
     ap.add_argument('--package', required=True)
     ap.add_argument('--min-version')
-    ap.add_argument('--max-version')
     ap.add_argument('--absent', action='store_true', help='fail if the package is present in the pip report')
     ap.add_argument('--require-wheel', action='store_true')
     args = ap.parse_args()
 
     report = json.loads(Path(args.report).read_text())
-    wanted = normalize(args.package)
-    matches = []
-    for item in report.get('install', []):
-        meta = item.get('metadata') or {}
-        name = meta.get('name')
-        if name and normalize(name) == wanted:
-            matches.append(item)
+    wanted = canonicalize_name(args.package)
+    matches = [
+        item
+        for item in report.get('install', [])
+        if (item.get('metadata') or {}).get('name') and canonicalize_name(item['metadata']['name']) == wanted
+    ]
 
     if args.absent:
         if matches:
@@ -45,32 +34,17 @@ def main() -> int:
         print(f'{args.package}: absent from pip report')
         return 0
 
-    if not matches:
-        try:
-            installed_version = md.version(args.package)
-        except md.PackageNotFoundError:
-            raise SystemExit(f'{args.package}: not present in pip report or installed environment') from None
-        if args.min_version and version_key(installed_version) < version_key(args.min_version):
-            raise SystemExit(f'{args.package}: installed {installed_version}, below required floor {args.min_version}')
-        if args.max_version and version_key(installed_version) > version_key(args.max_version):
-            raise SystemExit(f'{args.package}: installed {installed_version}, above required ceiling {args.max_version}')
-        print(f'{args.package}: already installed {installed_version}; artifact=<installed>')
-        return 0
     if len(matches) != 1:
-        raise SystemExit(f'{args.package}: expected one report entry, found {len(matches)}')
+        raise SystemExit(f'{args.package}: expected one pip report entry, found {len(matches)}')
 
     item = matches[0]
-    meta = item.get('metadata') or {}
-    version = meta.get('version')
+    version = (item.get('metadata') or {}).get('version')
     if not version:
         raise SystemExit(f'{args.package}: report entry has no version')
-
-    if args.min_version and version_key(version) < version_key(args.min_version):
+    if args.min_version and Version(version) < Version(args.min_version):
         raise SystemExit(f'{args.package}: resolved {version}, below required floor {args.min_version}')
-    if args.max_version and version_key(version) > version_key(args.max_version):
-        raise SystemExit(f'{args.package}: resolved {version}, above required ceiling {args.max_version}')
 
-    url = ((item.get('download_info') or {}).get('url') or '')
+    url = (item.get('download_info') or {}).get('url') or ''
     path = urlparse(url).path
     if args.require_wheel and not path.endswith('.whl'):
         raise SystemExit(f'{args.package}: resolved artifact is not a wheel: {url or "<missing url>"}')

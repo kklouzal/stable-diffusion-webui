@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+"""Build the resolver input: the app requirements plus the --include supplements, minus every package the
+NVIDIA base owns (the protected names file plus the fixed torch/CUDA names), which the resolver sees as stubs."""
 import argparse
-import json
 import re
 from pathlib import Path
 
-DEFAULT_PROTECTED_NAMES = ("torch", "torchvision", "torchaudio", "triton")
-DEFAULT_PROTECTED_PREFIXES = ("nvidia-", "cuda-")
+PROTECTED_NAMES = ("torch", "torchvision", "torchaudio", "triton")
+PROTECTED_PREFIXES = ("nvidia-", "cuda-")
 
 
 def normalize(name: str) -> str:
@@ -31,65 +32,49 @@ def main() -> int:
         default=[],
         help="Additional requirements files to append to the resolver input.",
     )
-    ap.add_argument("--audit", default="/opt/build/requirements-resolver-audit.json")
     ap.add_argument(
         "--protected-names-file",
+        required=True,
         help="Newline-delimited package names inherited from and owned by the base image.",
     )
-    ap.add_argument("--protected-name", action="append", default=list(DEFAULT_PROTECTED_NAMES))
-    ap.add_argument("--protected-prefix", action="append", default=list(DEFAULT_PROTECTED_PREFIXES))
     args = ap.parse_args()
 
     source = Path(args.source)
     target = Path(args.target)
     Path(args.wheel_dir).mkdir(parents=True, exist_ok=True)
 
-    protected_names = {normalize(name) for name in args.protected_name}
-    if args.protected_names_file:
-        protected_names.update(
-            normalize(name)
-            for name in Path(args.protected_names_file).read_text().splitlines()
-            if name.strip() and not name.lstrip().startswith("#")
-        )
-    protected_prefixes = tuple(normalize(prefix) for prefix in args.protected_prefix)
+    protected_names = {normalize(name) for name in PROTECTED_NAMES}
+    protected_names.update(
+        normalize(name)
+        for name in Path(args.protected_names_file).read_text().splitlines()
+        if name.strip() and not name.lstrip().startswith("#")
+    )
 
     emitted = []
-    removed = []
+    removed = set()
     sources = [(source, source.read_text().splitlines())]
-    included = []
     for include in args.include:
         include_path = Path(include)
         if not include_path.exists():
             raise FileNotFoundError(f"included requirements file not found: {include_path}")
         sources.append((include_path, include_path.read_text().splitlines()))
-        included.append(str(include_path))
 
     for src, lines in sources:
         if emitted:
             emitted.append(f"# requirements from {src}")
         for raw in lines:
             name = parse_req_name(raw)
-            if name and (name in protected_names or name.startswith(protected_prefixes)):
-                removed.append({"source": str(src), "name": name, "line": raw.strip(), "reason": "protected CUDA/PyTorch package boundary"})
+            if name and (name in protected_names or name.startswith(PROTECTED_PREFIXES)):
+                removed.add(name)
                 continue
             emitted.append(raw.rstrip())
 
     target.write_text("\n".join(line for line in emitted if line.strip()) + "\n")
-    audit = {
-        "source": str(source),
-        "included": included,
-        "target": str(target),
-        "protected_names_file": args.protected_names_file,
-        "protected_names": sorted(protected_names),
-        "protected_prefixes": list(protected_prefixes),
-        "removed": removed,
-    }
-    Path(args.audit).write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
+    included = [str(src) for src, _lines in sources[1:]]
     suffix = f" plus {included}" if included else ""
     print(f"wrote resolver input {target} from {source}{suffix}")
     if removed:
-        removed_names = ", ".join(sorted({item["name"] for item in removed}))
-        print(f"removed protected resolver inputs: {removed_names}; audit={args.audit}")
+        print(f"removed protected resolver inputs: {', '.join(sorted(removed))}")
     return 0
 
 

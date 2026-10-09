@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
+"""Write BUILD_MANIFEST.txt/.json: every installed Python distribution classified as base (protected NGC/torch
+stack), direct (repo-owned requirement) or indirect (pulled in by a direct one), with its installed version."""
 import importlib.metadata as md
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 
-BASE_CONSTRAINTS = Path(os.environ.get('BASE_CONSTRAINTS', '/opt/base-python-protected-constraints.txt'))
-RELEASED_FLOORS = Path(os.environ.get('RELEASED_FLOORS', '/opt/base-python-released-floors.txt'))
-DIRECT_REQUIREMENTS = Path(os.environ.get('DIRECT_REQUIREMENTS', '/opt/requirements-image.txt'))  # copied from repo requirements_versions.txt
-A1111_DIR = Path(os.environ.get('A1111_DIR', '/opt/stable-diffusion-webui'))
-OUTPUT_TEXT = Path(os.environ.get('OUTPUT_TEXT', str(A1111_DIR / 'BUILD_MANIFEST.txt')))
-OUTPUT_JSON = Path(os.environ.get('OUTPUT_JSON', str(A1111_DIR / 'BUILD_MANIFEST.json')))
-OUTPUT_LATEST_AUDIT = Path(os.environ.get('OUTPUT_LATEST_AUDIT', str(A1111_DIR / 'BUILD_MANIFEST_LATEST_AUDIT.json')))
-PYTORCH_NIGHTLY_INDEX_URL = os.environ.get('PYTORCH_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu134')
-PYTORCH_NIGHTLY_PKGS = {'torch', 'torchvision', 'torchaudio'}
-PYTORCH_NIGHTLY_OPTIONAL_ABSENT = {'torchaudio'}
+BASE_CONSTRAINTS = Path('/opt/build/base-python-protected-constraints.txt')
+RELEASED_FLOORS = Path('/opt/build/base-python-released-floors.txt')
+A1111_DIR = Path('/opt/stable-diffusion-webui')
+# Repo-owned direct requirements: the app closure plus the image's ControlNet supplement.
+DIRECT_REQUIREMENTS = (
+    A1111_DIR / 'requirements_versions.txt',
+    Path('/opt/build/requirements-sd-webui-controlnet-image.txt'),
+)
+OUTPUT_TEXT = A1111_DIR / 'BUILD_MANIFEST.txt'
+OUTPUT_JSON = A1111_DIR / 'BUILD_MANIFEST.json'
+NGC_PYTORCH_PKGS = {'torch', 'torchvision', 'torchaudio'}
+OPTIONAL_ABSENT = {'torchaudio'}
 TORCH_QUANTIZATION_PKGS = {'torchao', 'mslk'}
-MSLK_NIGHTLY_INDEX_URL = os.environ.get('MSLK_NIGHTLY_INDEX_URL', 'https://download.pytorch.org/whl/nightly/cu132')
 MSLK_SOURCE_COMMIT = os.environ.get('MSLK_SOURCE_COMMIT')
 EXTRA_DIRECT = {'clip'}
-LATEST_QUERY_MODE = os.environ.get('GB10_PACKAGE_LATEST_QUERIES', '0')
-latest_audit: list[dict] = []
 
 
 def normalize(name: str) -> str:
@@ -47,12 +47,13 @@ def load_constraint_map(path: Path) -> dict[str, str]:
     return data
 
 
-def load_req_map(path: Path) -> dict[str, str]:
+def load_req_map(paths) -> dict[str, str]:
     out: dict[str, str] = {}
-    for raw in path.read_text().splitlines():
-        name = parse_req_name(raw)
-        if name and name not in out:
-            out[name] = raw.strip()
+    for path in paths:
+        for raw in path.read_text().splitlines():
+            name = parse_req_name(raw)
+            if name and name not in out:
+                out[name] = raw.strip()
     return out
 
 
@@ -68,10 +69,7 @@ def load_floor_map(path: Path) -> dict[str, str]:
 
 base_pkgs = load_constraint_map(BASE_CONSTRAINTS)
 released_floors = load_floor_map(RELEASED_FLOORS)
-# DIRECT_REQUIREMENTS is the image copy of A1111_DIR/requirements_versions.txt (same file, unpatched).
 repo_direct_map = load_req_map(DIRECT_REQUIREMENTS)
-upstream_plain_map = load_req_map(A1111_DIR / 'requirements.txt')
-upstream_direct = (set(repo_direct_map) | set(upstream_plain_map)) - {'torch'}
 repo_direct = set(repo_direct_map) | EXTRA_DIRECT
 
 all_dists: dict[str, dict] = {}
@@ -122,61 +120,13 @@ def roots_for(pkg: str) -> list[str]:
     return out
 
 
-latest_cache: dict[tuple[str, str | None], str] = {}
-
-
-def latest_visible(name: str, extra_index_url: str | None = None) -> str:
-    key = (name, extra_index_url)
-    if key in latest_cache:
-        return latest_cache[key]
-    if name == 'clip':
-        latest_cache[key] = 'source-archive'
-        return latest_cache[key]
-    if LATEST_QUERY_MODE != '1':
-        latest_cache[key] = 'not checked (network query disabled)'
-        return latest_cache[key]
-    cmd = ['python', '-m', 'pip', 'index', 'versions', '--disable-pip-version-check', '--timeout', '8']
-    if extra_index_url:
-        cmd.extend(['--extra-index-url', extra_index_url])
-    cmd.append(name)
-    try:
-        out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as exc:
-        latest_cache[key] = 'latest-unavailable'
-        latest_audit.append({
-            'package': name,
-            'extra_index_url': extra_index_url,
-            'status': 'latest-unavailable',
-            'reason': f'pip index exited {exc.returncode}',
-            'output_tail': exc.output.splitlines()[-8:],
-        })
-        return latest_cache[key]
-    result = 'latest-unknown'
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith('Available versions:'):
-            vals = [x.strip() for x in line.split(':', 1)[1].split(',') if x.strip()]
-            result = vals[0] if vals else 'latest-unknown'
-            break
-    if result == 'latest-unknown':
-        latest_audit.append({
-            'package': name,
-            'extra_index_url': extra_index_url,
-            'status': 'latest-unknown',
-            'reason': 'pip index output did not include an Available versions line',
-            'output_tail': out.splitlines()[-8:],
-        })
-    latest_cache[key] = result
-    return result
-
-
 def released_tag(name: str) -> str:
     floor = released_floors.get(name)
     return f'|Released-From-NGC:{floor}' if floor else ''
 
 
 def direct_reason(name: str) -> str:
-    # Only called for explicit_direct names, i.e. 'clip' or a requirements_versions.txt entry.
+    # Only called for explicit_direct names, i.e. 'clip' or a DIRECT_REQUIREMENTS entry.
     hoisted = name in base_pkgs
     if name == 'clip':
         return 'Repo-Built-Wheel|Hoisted-Into-Base' if hoisted else 'Repo-Built-Wheel'
@@ -184,10 +134,10 @@ def direct_reason(name: str) -> str:
 
 
 def base_reason(name: str) -> str:
-    if name in PYTORCH_NIGHTLY_OPTIONAL_ABSENT and name not in all_dists:
-        return 'Base-Provided|PyTorch-Nightly|Optional-Absent-Allowed'
-    if name in PYTORCH_NIGHTLY_PKGS:
-        return 'Base-Provided|PyTorch-Nightly'
+    if name in OPTIONAL_ABSENT and name not in all_dists:
+        return 'Base-Provided|NGC-PyTorch|Optional-Absent-Allowed'
+    if name in NGC_PYTORCH_PKGS:
+        return 'Base-Provided|NGC-PyTorch'
     if name.startswith('nvidia-') or name.startswith('cuda-') or name == 'triton':
         return 'Base-Provided|Torch-CUDA-Stack'
     if name == 'mslk' and MSLK_SOURCE_COMMIT:
@@ -220,8 +170,6 @@ for name in sorted(all_dists):
         item['category'] = 'direct'
         item['source_reason'] = direct_reason(name) + released_tag(name)
         item['repo_direct_entry'] = repo_direct_map.get(name)
-        item['upstream_versions_entry'] = repo_direct_map.get(name)
-        item['upstream_requirements_entry'] = upstream_plain_map.get(name)
         sections['direct'].append(item)
     elif name in base_pkgs:
         item['category'] = 'base'
@@ -232,7 +180,7 @@ for name in sorted(all_dists):
         item['source_reason'] = indirect_reason(name) + released_tag(name)
         sections['indirect'].append(item)
 
-for name in sorted(PYTORCH_NIGHTLY_OPTIONAL_ABSENT):
+for name in sorted(OPTIONAL_ABSENT):
     if name not in all_dists:
         sections['base'].append({
             'name': name,
@@ -242,30 +190,14 @@ for name in sorted(PYTORCH_NIGHTLY_OPTIONAL_ABSENT):
             'category': 'base',
             'source_reason': base_reason(name),
             'optional_absent': True,
-            'latest': 'not-queried',
         })
-
-for items in sections.values():
-    for item in items:
-        if item.get('optional_absent'):
-            continue
-        if item['normalized'] in PYTORCH_NIGHTLY_PKGS:
-            extra = PYTORCH_NIGHTLY_INDEX_URL
-        elif item['normalized'] == 'mslk' and MSLK_SOURCE_COMMIT:
-            item['latest'] = f'source:{MSLK_SOURCE_COMMIT[:12]}'
-            continue
-        elif item['normalized'] == 'mslk':
-            extra = MSLK_NIGHTLY_INDEX_URL
-        else:
-            extra = None
-        item['latest'] = latest_visible(item['normalized'], extra)
 
 lines: list[str] = []
 lines.append('=== GB10 A1111 build manifest ===')
 lines.append('')
 lines.append('[classification summary]')
 lines.append('base-layer-provided = CUDA/PyTorch/base packages protected before A1111 app dependency installation')
-lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt; base matches stay protected')
+lines.append('a1111-direct = explicitly selected by repo-owned requirements_versions.txt or the ControlNet image supplement; base matches stay protected')
 lines.append('a1111-indirect = transitive dependencies pulled in under the direct set')
 lines.append('Released-From-NGC:<version> = NGC stock wheel released to the app resolver (docker/base-released-packages.txt); <version> is the NGC floor')
 lines.append('torchaudio = optional for the NGC CUDA 13.4 lane; absence is accepted unless a runtime import requirement is proven')
@@ -280,29 +212,14 @@ for key, title in (
 ):
     lines.append(title)
     for item in sections[key]:
-        line = f"{item['name']} ({item['installed']})"
-        latest = item.get('latest')
-        if latest and latest not in {item['installed'], 'not-queried'}:
-            line += f" --> Latest: {latest} [{item['source_reason']}]"
-        else:
-            line += f" [{item['source_reason']}]"
-        lines.append(line)
+        lines.append(f"{item['name']} ({item['installed']}) [{item['source_reason']}]")
     lines.append('')
 text = '\n'.join(lines).rstrip() + '\n'
 OUTPUT_TEXT.write_text(text)
 OUTPUT_JSON.write_text(json.dumps({
     'summary': {k: len(v) for k, v in sections.items()},
     'released_from_ngc': released_floors,
-    'pytorch_nightly_index_url': PYTORCH_NIGHTLY_INDEX_URL,
-    'mslk_nightly_index_url': MSLK_NIGHTLY_INDEX_URL,
-    'upstream_direct_count': len(upstream_direct),
     'repo_direct_count': len(repo_direct),
     'packages': sections,
-    'latest_audit_path': str(OUTPUT_LATEST_AUDIT),
 }, indent=2) + '\n')
-OUTPUT_LATEST_AUDIT.write_text(json.dumps({
-    'schema': 'gb10-a1111-build-manifest-latest-audit-v1',
-    'entries': latest_audit,
-}, indent=2, sort_keys=True) + '\n')
 print(text)
-print(f'latest-version lookup audit: {OUTPUT_LATEST_AUDIT} entries={len(latest_audit)}')

@@ -15,7 +15,7 @@ EXACT_PROTECTED = {"torch", "torchvision", "torchaudio", "triton"}
 PREFIX_PROTECTED = ("nvidia-", "cuda-")
 REQUIRED_PRESENT = {"torch", "torchvision", "triton"}
 OPTIONAL_ABSENT_OK = {"torchaudio"}
-DEFAULT_PROTECTED_NAMES_FILE = Path("/opt/base-python-protected-names.txt")
+DEFAULT_PROTECTED_NAMES_FILE = Path("/opt/build/base-python-protected-names.txt")
 
 
 def normalize(name: str) -> str:
@@ -171,9 +171,9 @@ def check_released(floors: dict[str, str]) -> tuple[dict, list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Snapshot/compare GB10 protected CUDA/PyTorch package boundary.")
-    ap.add_argument("--snapshot", help="write a baseline snapshot JSON")
+    ap.add_argument("--snapshot", help="write a baseline snapshot JSON here")
     ap.add_argument("--compare", help="compare the current environment to a previous snapshot JSON")
-    ap.add_argument("--out", help="write current snapshot/compare result JSON here")
+    ap.add_argument("--out", help="write the --compare result JSON here (default: stdout)")
     ap.add_argument(
         "--protected-names-file",
         default=str(DEFAULT_PROTECTED_NAMES_FILE),
@@ -181,6 +181,8 @@ def main() -> int:
     )
     ap.add_argument("--released-floors", help="name>=version floors of NGC packages released to the app resolver")
     args = ap.parse_args()
+    if args.snapshot and (args.compare or args.out):
+        ap.error("--snapshot writes a baseline; use --compare BEFORE [--out PATH] for a comparison")
 
     protected_names_file = Path(args.protected_names_file)
     base_protected_names = load_protected_names(protected_names_file)
@@ -202,18 +204,12 @@ def main() -> int:
         result["released"] = released
         result["problems"] = problems
 
-    out_path = Path(args.out or args.snapshot or "-")
-    if str(out_path) != "-":
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    out_path = args.snapshot or args.out
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
-
-    # Without --out the snapshot path was the output path above; write it separately only
-    # when --out sent the result elsewhere.
-    if args.snapshot and args.out:
-        Path(args.snapshot).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.snapshot).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     if problems:
         for problem in problems:

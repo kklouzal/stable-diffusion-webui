@@ -2,7 +2,6 @@
 
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3
 ARG PYTHON_VERSION=3.12
-ARG PYTORCH_NIGHTLY_CUDA_TAG=cu134
 ARG MSLK_REPO=https://github.com/meta-pytorch/MSLK.git
 ARG MSLK_COMMIT=88d06bc2784f3b550d7ec851d4ca67a16a844fe2
 ARG MSLK_PACKAGE_NAME=mslk
@@ -124,7 +123,6 @@ RUN python /opt/build/snapshot-base-packages.py --released /opt/build/base-relea
 
 FROM torch-base AS source
 
-ARG DEBIAN_FRONTEND=noninteractive
 ARG STABLE_DIFFUSION_REPO
 ARG STABLE_DIFFUSION_COMMIT
 ARG GENERATIVE_MODELS_REPO
@@ -137,12 +135,12 @@ ARG BLIP_COMMIT
 COPY patches /opt/build/patches
 COPY docker/apply-local-patches.py /opt/build/apply-local-patches.py
 
-SHELL ["/bin/bash", "-lc"]
-WORKDIR /opt/build
-
+# The build context is an allowlist (.dockerignore), so the app tree holds tracked runtime sources only.
+# docker/ and patches/ are build inputs that the steps here copy explicitly; drop them from the app tree.
 COPY . /opt/build/stable-diffusion-webui
 
 RUN cd stable-diffusion-webui \
+    && rm -rf docker patches \
     && mkdir -p repositories \
     && git clone --filter=blob:none "${STABLE_DIFFUSION_REPO}" repositories/stable-diffusion-stability-ai \
     && git -c advice.detachedHead=false -C repositories/stable-diffusion-stability-ai checkout --quiet "${STABLE_DIFFUSION_COMMIT}" \
@@ -152,9 +150,6 @@ RUN cd stable-diffusion-webui \
     && git -c advice.detachedHead=false -C repositories/k-diffusion checkout --quiet "${K_DIFFUSION_COMMIT}" \
     && git clone --filter=blob:none "${BLIP_REPO}" repositories/BLIP \
     && git -c advice.detachedHead=false -C repositories/BLIP checkout --quiet "${BLIP_COMMIT}" \
-    && ln -sfn repositories/generative-models ../generative-models \
-    && ln -sfn repositories/k-diffusion ../k-diffusion \
-    && ln -sfn repositories/BLIP ../BLIP \
     && python /opt/build/apply-local-patches.py
 
 FROM torch-base AS wheelbuilder
@@ -163,31 +158,20 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG CLIP_PACKAGE_URL
 ARG DCTORCH_VERSION
 
-SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/build/stable-diffusion-webui
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ccache \
     libssl-dev \
-    ninja-build \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup
 ENV CARGO_HOME=/opt/cargo
-ENV CCACHE_DIR=/root/.cache/ccache
 ENV CARGO_TARGET_DIR=/root/.cache/cargo-target
-ENV CC=gcc
-ENV CXX=g++
-ENV CUDAHOSTCXX=g++
 ENV PATH=/usr/lib/ccache:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --profile minimal --default-toolchain stable
 
-COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/build/base-python-protected-constraints.txt
-COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/build/base-python-protected-names.txt
-COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/build/base-python-released-floors.txt
 COPY requirements_versions.txt /opt/build/requirements-image.txt
 COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-sd-webui-controlnet-image.txt
 COPY docker/render-resolved-requirements.py /opt/build/render-resolved-requirements.py
@@ -254,10 +238,8 @@ FROM torch-base AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 ARG A1111_UID=2323
 ARG A1111_GID=2323
-ARG PYTORCH_NIGHTLY_CUDA_TAG
 ARG MSLK_COMMIT
 
-SHELL ["/bin/bash", "-lc"]
 WORKDIR /opt/stable-diffusion-webui
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -271,10 +253,7 @@ COPY --from=source /opt/build/stable-diffusion-webui /opt/stable-diffusion-webui
 COPY docker/hf-cache/openai-clip-vit-large-patch14 /opt/gb10/hf-cache/openai-clip-vit-large-patch14
 COPY --from=wheelbuilder /opt/wheels /opt/wheels
 COPY --from=wheelbuilder /opt/build/requirements-resolved.txt /opt/requirements-resolved.txt
-COPY --from=torch-base /opt/build/base-python-protected-constraints.txt /opt/base-python-protected-constraints.txt
-COPY --from=torch-base /opt/build/base-python-protected-names.txt /opt/base-python-protected-names.txt
-COPY --from=torch-base /opt/build/base-python-released-floors.txt /opt/base-python-released-floors.txt
-COPY requirements_versions.txt /opt/requirements-image.txt
+COPY docker/requirements-sd-webui-controlnet-image.txt /opt/build/requirements-sd-webui-controlnet-image.txt
 COPY docker/check-protected-stack.py /usr/local/bin/gb10-a1111-check-protected-stack
 COPY docker/render-build-manifest.py /usr/local/bin/gb10-a1111-render-build-manifest
 COPY docker/entrypoint.sh /usr/local/bin/gb10-a1111-entrypoint
@@ -300,12 +279,10 @@ RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked
     && python -m pip install --break-system-packages --no-deps --no-index --find-links=/opt/wheels /opt/wheels/clip-*.whl dctorch \
     && /usr/local/bin/gb10-a1111-patch-controlnet-aux-compat-v2 \
     && /usr/local/bin/gb10-a1111-patch-kornia-torch-jit-compat
-RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --released-floors /opt/base-python-released-floors.txt --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
+RUN /usr/local/bin/gb10-a1111-check-protected-stack --compare /opt/protected-packages-before.json --released-floors /opt/build/base-python-released-floors.txt --out /opt/stable-diffusion-webui/PROTECTED_PACKAGES.json
 RUN chmod +x /usr/local/bin/gb10-a1111-render-build-manifest \
-    && PYTORCH_NIGHTLY_INDEX_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_NIGHTLY_CUDA_TAG}" \
-       MSLK_SOURCE_COMMIT="${MSLK_COMMIT}" \
-       /usr/local/bin/gb10-a1111-render-build-manifest
-# Precompile the app's bytecode (forced: the build context can carry stale host __pycache__ files) so the
+    && MSLK_SOURCE_COMMIT="${MSLK_COMMIT}" /usr/local/bin/gb10-a1111-render-build-manifest
+# Precompile the app's bytecode (forced, so no stale bytecode can survive) so the
 # container never compiles at start. Timestamp pycs stay valid because nothing modifies these sources after
 # this layer; chown in the same step makes the runtime user own them.
 RUN rm -rf /opt/wheels /opt/requirements-resolved.txt /root/.cache/pip \
@@ -320,8 +297,6 @@ ENV A1111_HOME=/opt/stable-diffusion-webui
 ENV GB10_A1111_CLIP_VIT_LARGE_PATCH14_PATH=/opt/gb10/hf-cache/openai-clip-vit-large-patch14
 ENV A1111_RUN_AS_USER=a1111
 ENV COMMANDLINE_ARGS=
-ENV TORCH_COMMAND=true
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/local/bin/gb10-a1111-entrypoint"]

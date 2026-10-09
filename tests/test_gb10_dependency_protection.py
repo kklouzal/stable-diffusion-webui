@@ -25,9 +25,8 @@ def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
     target = tmp_path / "resolver.txt"
     protected = tmp_path / "protected.txt"
     protected.write_text("setuptools\nnumpy\n", encoding="utf-8")
-    audit = tmp_path / "audit.json"
 
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             str(ROOT / "docker" / "prepare-resolver-input.py"),
@@ -37,17 +36,16 @@ def test_prepare_resolver_excludes_all_nvidia_base_packages(tmp_path: Path):
             str(target),
             "--wheel-dir",
             str(tmp_path / "wheels"),
-            "--audit",
-            str(audit),
             "--protected-names-file",
             str(protected),
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
 
     assert target.read_text(encoding="utf-8") == "requests\n"
-    removed = {item["name"] for item in json.loads(audit.read_text())["removed"]}
-    assert removed == {"numpy", "setuptools", "torch"}
+    assert "removed protected resolver inputs: numpy, setuptools, torch\n" in result.stdout
 
 
 def test_protected_resolver_stubs_preserve_versions_without_base_dependencies(tmp_path: Path):
@@ -263,3 +261,46 @@ def test_stack_checker_validates_released_floors_and_declared_requirements(tmp_p
         "released package below NGC floor: gb10-floored 0.9 < 1.0",
         "released package is absent: gb10-absent",
     ]
+
+
+def run_assert_resolved(tmp_path: Path, install: list[dict], *args: str) -> subprocess.CompletedProcess:
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"install": install}), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(ROOT / "docker" / "assert-resolved-package.py"), "--report", str(report), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_assert_resolved_package_floors_wheels_and_absence(tmp_path: Path):
+    install = [
+        {"metadata": {"name": "Tokenizers", "version": "0.22.2"}, "download_info": {"url": "https://x/tokenizers-0.22.2-cp39-abi3-any.whl"}},
+        {"metadata": {"name": "depth_anything", "version": "2024.1.22.0"}, "download_info": {"url": "file:///o/depth_anything-2024.1.22.0.tar.gz"}},
+        {"metadata": {"name": "transformers", "version": "5.7.0rc1"}, "download_info": {"url": "https://x/transformers-5.7.0rc1-py3-none-any.whl"}},
+    ]
+
+    ok = run_assert_resolved(tmp_path, install, "--package", "tokenizers", "--min-version", "0.22.2", "--require-wheel")
+    assert ok.returncode == 0, ok.stderr
+    assert "tokenizers: resolved 0.22.2" in ok.stdout
+    # Names match canonically (case and '-'/'_'/'.').
+    assert run_assert_resolved(tmp_path, install, "--package", "Depth-Anything", "--min-version", "2024.1.22.0").returncode == 0
+    assert "not a wheel" in run_assert_resolved(tmp_path, install, "--package", "depth_anything", "--require-wheel").stderr
+    # A pre-release of the floor version is below the floor.
+    assert "below required floor" in run_assert_resolved(tmp_path, install, "--package", "transformers", "--min-version", "5.7.0").stderr
+    # Missing from the report fails unless absence is what is asserted.
+    missing = run_assert_resolved(tmp_path, install, "--package", "controlnet_aux", "--min-version", "0.0.9")
+    assert missing.returncode != 0 and "expected one pip report entry, found 0" in missing.stderr
+    assert run_assert_resolved(tmp_path, install, "--package", "opencv-python", "--absent").returncode == 0
+    assert "unexpectedly present" in run_assert_resolved(tmp_path, install, "--package", "tokenizers", "--absent").stderr
+
+
+def test_stack_checker_snapshot_is_its_own_output_path(tmp_path: Path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "docker" / "check-protected-stack.py"), "--snapshot", str(tmp_path / "a.json"), "--out", str(tmp_path / "b.json")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2 and "--snapshot writes a baseline" in result.stderr
+    assert not (tmp_path / "a.json").exists() and not (tmp_path / "b.json").exists()
+
