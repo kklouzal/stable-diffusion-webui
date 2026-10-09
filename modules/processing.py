@@ -2057,7 +2057,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     model_hijack.comments.append(massage)
                     logging.info(massage)
             else:
-                image_mask = images.resize_image(self.resize_mode, image_mask, self.width, self.height)
+                # resize_mode 3 stretches the init latent to the target size (bilinear), so the mask stretches too.
+                image_mask = images.resize_image(0 if self.resize_mode == 3 else self.resize_mode, image_mask, self.width, self.height)
                 np_mask = np.asarray(image_mask, dtype=np.float32)
                 np_mask = np.clip(np_mask * 2, 0, 255).astype(np.uint8)
                 self.mask_for_overlay = Image.fromarray(np_mask)
@@ -2081,10 +2082,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 image = images.resize_image(self.resize_mode, image, self.width, self.height)
 
             if image_mask is not None:
-                if self.mask_for_overlay.size != (image.width, image.height):
-                    self.mask_for_overlay = images.resize_image(self.resize_mode, self.mask_for_overlay, image.width, image.height)
-                image_masked = Image.new('RGBa', (image.width, image.height))
-                image_masked.paste(image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(self.mask_for_overlay.convert('L')))
+                # The overlay is composited onto the output: with resize_mode 3 the image stays at its own size for the
+                # VAE (its latent is stretched), so the overlay takes the image stretched to the output size.
+                overlay_image = image
+                if crop_region is None and self.resize_mode == 3 and image.size != (self.width, self.height):
+                    overlay_image = image.resize((self.width, self.height), resample=images.LANCZOS)
+                if self.mask_for_overlay.size != overlay_image.size:
+                    self.mask_for_overlay = images.resize_image(self.resize_mode, self.mask_for_overlay, overlay_image.width, overlay_image.height)
+                image_masked = Image.new('RGBa', overlay_image.size)
+                image_masked.paste(overlay_image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(self.mask_for_overlay.convert('L')))
 
                 self.overlay_images.append(image_masked.convert('RGBA'))
 
@@ -2095,7 +2101,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             if image_mask is not None:
                 if self.inpainting_fill != 1:
-                    image = masking.fill(image, latent_mask)
+                    # resize_mode 3 fills the image at its own size: the target-size mask is stretched back onto it
+                    fill_mask = latent_mask if latent_mask.size == image.size else latent_mask.resize(image.size, resample=images.LANCZOS)
+                    image = masking.fill(image, fill_mask)
 
                     if self.inpainting_fill == 0:
                         self.extra_generation_params["Masked content"] = 'fill'
