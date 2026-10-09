@@ -47,87 +47,6 @@ class MLPProjModelFaceId(torch.nn.Module):
         return clip_extra_context_tokens
 
 
-class FacePerceiverResampler(torch.nn.Module):
-    """Source: https://github.com/tencent-ailab/IP-Adapter/blob/main/ip_adapter/ip_adapter_faceid.py"""
-
-    def __init__(
-        self,
-        *,
-        dim=768,
-        depth=4,
-        dim_head=64,
-        heads=16,
-        embedding_dim=1280,
-        output_dim=768,
-        ff_mult=4,
-    ):
-        super().__init__()
-
-        self.proj_in = torch.nn.Linear(embedding_dim, dim)
-        self.proj_out = torch.nn.Linear(dim, output_dim)
-        self.norm_out = torch.nn.LayerNorm(output_dim)
-        self.layers = torch.nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                torch.nn.ModuleList(
-                    [
-                        PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
-                        FeedForward(dim=dim, mult=ff_mult),
-                    ]
-                )
-            )
-
-    def forward(self, latents, x):
-        x = self.proj_in(x)
-        for attn, ff in self.layers:
-            latents = attn(x, latents) + latents
-            latents = ff(latents) + latents
-        latents = self.proj_out(latents)
-        return self.norm_out(latents)
-
-
-class ProjModelFaceIdPlus(torch.nn.Module):
-    """Source: https://github.com/tencent-ailab/IP-Adapter/blob/main/ip_adapter/ip_adapter_faceid.py"""
-
-    def __init__(
-        self,
-        cross_attention_dim=768,
-        id_embeddings_dim=512,
-        clip_embeddings_dim=1280,
-        num_tokens=4,
-    ):
-        super().__init__()
-
-        self.cross_attention_dim = cross_attention_dim
-        self.num_tokens = num_tokens
-
-        self.proj = torch.nn.Sequential(
-            torch.nn.Linear(id_embeddings_dim, id_embeddings_dim * 2),
-            torch.nn.GELU(),
-            torch.nn.Linear(id_embeddings_dim * 2, cross_attention_dim * num_tokens),
-        )
-        self.norm = torch.nn.LayerNorm(cross_attention_dim)
-
-        self.perceiver_resampler = FacePerceiverResampler(
-            dim=cross_attention_dim,
-            depth=4,
-            dim_head=64,
-            heads=cross_attention_dim // 64,
-            embedding_dim=clip_embeddings_dim,
-            output_dim=cross_attention_dim,
-            ff_mult=4,
-        )
-
-    def forward(self, id_embeds, clip_embeds, scale=1.0, shortcut=False):
-        x = self.proj(id_embeds)
-        x = x.reshape(-1, self.num_tokens, self.cross_attention_dim)
-        x = self.norm(x)
-        out = self.perceiver_resampler(x, clip_embeds)
-        if shortcut:
-            out = x + scale * out
-        return out
-
-
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
 
@@ -171,7 +90,7 @@ def reshape_tensor(x, heads):
     x = x.view(bs, length, heads, -1)
     # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
     x = x.transpose(1, 2)
-    # (bs, n_heads, length, dim_per_head) --> (bs*n_heads, length, dim_per_head)
+    # same layout, made contiguous
     x = x.reshape(bs, heads, length, -1)
     return x
 
@@ -202,7 +121,7 @@ class PerceiverAttention(nn.Module):
         x = self.norm1(x)
         latents = self.norm2(latents)
 
-        b, l, _ = latents.shape  # noqa: E741
+        b, n_latents, _ = latents.shape
 
         q = self.to_q(latents)
         kv_input = torch.cat((x, latents), dim=-2)
@@ -220,7 +139,7 @@ class PerceiverAttention(nn.Module):
         weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
         out = weight @ v
 
-        out = out.permute(0, 2, 1, 3).reshape(b, l, -1)
+        out = out.permute(0, 2, 1, 3).reshape(b, n_latents, -1)
 
         return self.to_out(out)
 
@@ -270,64 +189,3 @@ class Resampler(nn.Module):
         latents = self.proj_out(latents)
         return self.norm_out(latents)
 
-
-class PuLIDEncoder(nn.Module):
-    def __init__(self, width=1280, context_dim=2048, num_token=5):
-        super().__init__()
-        self.num_token = num_token
-        self.context_dim = context_dim
-        h1 = min((context_dim * num_token) // 4, 1024)
-        h2 = min((context_dim * num_token) // 2, 1024)
-        self.body = nn.Sequential(
-            nn.Linear(width, h1),
-            nn.LayerNorm(h1),
-            nn.LeakyReLU(),
-            nn.Linear(h1, h2),
-            nn.LayerNorm(h2),
-            nn.LeakyReLU(),
-            nn.Linear(h2, context_dim * num_token),
-        )
-
-        for i in range(5):
-            setattr(
-                self,
-                f"mapping_{i}",
-                nn.Sequential(
-                    nn.Linear(1024, 1024),
-                    nn.LayerNorm(1024),
-                    nn.LeakyReLU(),
-                    nn.Linear(1024, 1024),
-                    nn.LayerNorm(1024),
-                    nn.LeakyReLU(),
-                    nn.Linear(1024, context_dim),
-                ),
-            )
-
-            setattr(
-                self,
-                f"mapping_patch_{i}",
-                nn.Sequential(
-                    nn.Linear(1024, 1024),
-                    nn.LayerNorm(1024),
-                    nn.LeakyReLU(),
-                    nn.Linear(1024, 1024),
-                    nn.LayerNorm(1024),
-                    nn.LeakyReLU(),
-                    nn.Linear(1024, context_dim),
-                ),
-            )
-
-    def forward(self, x, y):
-        # x shape [N, C]
-        x = self.body(x)
-        x = x.reshape(-1, self.num_token, self.context_dim)
-
-        hidden_states = ()
-        for i, emb in enumerate(y):
-            hidden_state = getattr(self, f"mapping_{i}")(emb[:, :1]) + getattr(
-                self, f"mapping_patch_{i}"
-            )(emb[:, 1:]).mean(dim=1, keepdim=True)
-            hidden_states += (hidden_state,)
-        hidden_states = torch.cat(hidden_states, dim=1)
-
-        return torch.cat([x, hidden_states], dim=1)

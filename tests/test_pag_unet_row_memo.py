@@ -98,6 +98,7 @@ def real_sgm_modules():
         sys.path.insert(0, str(LDM_ROOT))
         try:
             _REAL_MODULES["ldm.modules.diffusionmodules.util"] = importlib.import_module("ldm.modules.diffusionmodules.util")
+            _REAL_MODULES["ldm.modules.diffusionmodules.upscaling"] = importlib.import_module("ldm.modules.diffusionmodules.upscaling")
         finally:
             sys.path.remove(str(LDM_ROOT))
     try:
@@ -380,8 +381,9 @@ class Harness:
             "scripts.ipadapter": _package("scripts.ipadapter"),
             "scripts.ipadapter.plugable_ipadapter": _module("scripts.ipadapter.plugable_ipadapter", clear_all_ip_adapter=lambda: None),
             "scripts.ipadapter.ipadapter_model": _module("scripts.ipadapter.ipadapter_model", ImageEmbed=object),
-            "scripts.controlnet_sparsectrl": _module("scripts.controlnet_sparsectrl", SparseCtrl=type("SparseCtrl", (), {})),
             "modules.devices": self.modules["modules.devices"],
+            # The core's torch with a resizing cat; equal to torch for this harness's aligned shapes.
+            "modules.sd_hijack_unet": _module("modules.sd_hijack_unet", th=torch),
             "modules.lowvram": _module("modules.lowvram", send_everything_to_cpu=lambda: None),
             "modules.scripts": _module("modules.scripts", script_callbacks=self.script_callbacks),
             # cldm keeps ControlNet weights' layout with the NHWC GroupNorm switch (real module: torch-only, off here).
@@ -390,6 +392,7 @@ class Harness:
             "ldm.modules": _package("ldm.modules"),
             "ldm.modules.diffusionmodules": _package("ldm.modules.diffusionmodules"),
             "ldm.modules.diffusionmodules.util": ldm_util,
+            "ldm.modules.diffusionmodules.upscaling": real["ldm.modules.diffusionmodules.upscaling"],
             "ldm.modules.diffusionmodules.openaimodel": _module("ldm.modules.diffusionmodules.openaimodel", UNetModel=type("UNetModel", (), {})),
             "ldm.modules.attention": _module("ldm.modules.attention", BasicTransformerBlock=type("BasicTransformerBlock", (), {})),
             "ldm.models": _package("ldm.models"),
@@ -1124,16 +1127,16 @@ def test_controlnet_advanced_weighting_needs_one_weight_per_sdxl_residual(count)
 
 
 def test_controlnet_instantid_context_is_the_image_embed_rows_without_host_round_trips():
-    """InstantID's ControlNet context is ImageEmbed.eval(cond_mark) (cond embeds on cond rows, uncond embeds
-    on uncond rows); it is now selected on the device from embeds cast once, instead of eval() moving
-    cond_mark to the embeds' (CPU) device and back on every call."""
+    """InstantID's ControlNet context is cond_emb * cond_mark + uncond_emb * (1 - cond_mark) (cond embeds on cond
+    rows, uncond embeds on uncond rows), selected on the device from embeds cast once per request instead of
+    moving cond_mark to the embeds' (CPU) device and back on every call (the former ImageEmbed.eval)."""
     harness = Harness(mode="base")
     harness.install_controlnet()
     param = harness.control_param
     param.control_model_type = harness.enums.ControlModelType.InstantID
     gen = torch.Generator().manual_seed(21)
 
-    class Embed:  # ImageEmbed's fields only: eval() must not be called any more
+    class Embed:  # ImageEmbed's fields only
         cond_emb = torch.randn(1, 3, 16, generator=gen)
         uncond_emb = torch.randn(1, 3, 16, generator=gen)
 
@@ -1145,7 +1148,7 @@ def test_controlnet_instantid_context_is_the_image_embed_rows_without_host_round
         harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
         harness.sample(lambda: harness.unet(x, timesteps=timesteps, context=context, y=y))
     cond_mark = torch.tensor([1.0, 0.0])[:, None, None]
-    legacy = Embed.cond_emb * cond_mark + Embed.uncond_emb * (1 - cond_mark)  # ImageEmbed.eval
+    legacy = Embed.cond_emb * cond_mark + Embed.uncond_emb * (1 - cond_mark)  # the former ImageEmbed.eval
     assert len(contexts) == 2
     assert all(torch.equal(c, legacy) for c in contexts)
     assert param.control_context_device[0] is param.control_context_override

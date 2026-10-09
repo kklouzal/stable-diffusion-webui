@@ -204,8 +204,8 @@ class ControlNetUnit(BaseModel):
         assert isinstance(value, np.ndarray) or value is None
         return value
 
-    # The weight mode for PuLID.
-    # https://github.com/ToTheBeginning/PuLID
+    # The weight mode for PuLID (https://github.com/ToTheBeginning/PuLID). Inert: PuLID models and the
+    # ip-adapter_pulid preprocessor were removed; the field stays for the API schema.
     pulid_mode: PuLIDMode = PuLIDMode.FIDELITY
 
     # ControlNet control type for ControlNet union model.

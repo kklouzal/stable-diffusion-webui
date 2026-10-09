@@ -18,7 +18,6 @@ class LLLiteModule(torch.nn.Module):
         super().__init__()
         self.name = name
         self.is_conv2d = is_conv2d
-        self.is_first = False
 
         modules = []
         modules.append(torch.nn.Conv2d(3, cond_emb_dim // 2, kernel_size=4, stride=4, padding=0))  # to latent (from VAE) size*2
@@ -72,7 +71,6 @@ class LLLiteModule(torch.nn.Module):
 
     def forward(self, x, blk_shape):
         if self.cond_emb is None:
-            # print(f"cond_emb is None, {self.name}")
             cx = self.conditioning1(self.cond_image.to(x.device, dtype=x.dtype))
 
             if blk_shape is not None:
@@ -92,7 +90,6 @@ class LLLiteModule(torch.nn.Module):
             if self.is_conv2d:
                 cx = cx.repeat(x.shape[0] // cx.shape[0], 1, 1, 1)
             else:
-                # print("x.shape[0] != cx.shape[0]", x.shape[0], cx.shape[0])
                 cx = cx.repeat(x.shape[0] // cx.shape[0], 1, 1)
 
         cx = torch.cat([cx, self.down(x)], dim=1 if self.is_conv2d else 2)
@@ -120,7 +117,6 @@ def clear_all_lllite():
 class PlugableControlLLLite(torch.nn.Module):
     def __init__(self, state_dict):
         super().__init__()
-        self.cache = {}
 
         module_weights = {}
         for key, value in state_dict.items():
@@ -152,15 +148,12 @@ class PlugableControlLLLite(torch.nn.Module):
             module.load_state_dict(weights)
             modules[module_name] = module
             setattr(self, module_name, module)
-            if len(modules) == 1:
-                module.is_first = True
 
         self.modules = modules
         return
 
     def reset(self):
-        self.cache = {}
-        return
+        """No per-request state to clear (Script.controlnet_main_entry resets every loaded control model)."""
 
     @torch.no_grad()
     def hook(self, model, cond, weight, start, end):

@@ -20,7 +20,6 @@ from scripts import global_state, hook, external_code, controlnet_version, utils
 from scripts.controlnet_lora import bind_control_lora, unbind_control_lora
 from scripts.controlnet_lllite import clear_all_lllite
 from scripts.ipadapter.plugable_ipadapter import clear_all_ip_adapter
-from scripts.ipadapter.pulid_attn import PULID_SETTING_FIDELITY, PULID_SETTING_STYLE
 from scripts.utils import load_state_dict, get_unique_axis0, align_dim_latent
 from scripts.hook import ControlParams, UnetHook, HackedImageRNG
 from scripts.enums import (
@@ -28,7 +27,6 @@ from scripts.enums import (
     InputMode,
     StableDiffusionVersion,
     HiResFixOption,
-    PuLIDMode,
     ControlMode,
     ResizeMode,
 )
@@ -1017,12 +1015,6 @@ class Script(scripts.Script, metaclass=(
                     weight = param.weight
 
                 h, w, hr_y, hr_x = Script.get_target_dimensions(p)
-                if unit.pulid_mode == PuLIDMode.STYLE:
-                    pulid_attn_setting = PULID_SETTING_STYLE
-                else:
-                    assert unit.pulid_mode == PuLIDMode.FIDELITY
-                    pulid_attn_setting = PULID_SETTING_FIDELITY
-
                 param.control_model.hook(
                     model=unet,
                     preprocessor_outputs=param.hint_cond,
@@ -1033,7 +1025,6 @@ class Script(scripts.Script, metaclass=(
                     latent_width=w // 8,
                     latent_height=h // 8,
                     effective_region_mask=param.effective_region_mask,
-                    pulid_attn_setting=pulid_attn_setting,
                 )
             if param.control_model_type == ControlModelType.Controlllite:
                 param.control_model.hook(

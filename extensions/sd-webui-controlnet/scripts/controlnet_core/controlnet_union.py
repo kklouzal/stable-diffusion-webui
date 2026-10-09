@@ -1,36 +1,21 @@
 from collections import OrderedDict
 import torch
 import torch.nn as nn
+from sgm.modules.diffusionmodules.openaimodel import timestep_embedding
 
-try:
-    from sgm.modules.diffusionmodules.openaimodel import (
-        timestep_embedding,
+from scripts.adapter import QuickGELU
+
+
+def attention_pytorch(q, k, v, heads):
+    b, _, dim_head = q.shape
+    dim_head //= heads
+    q, k, v = map(
+        lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
+        (q, k, v),
     )
-
-    using_sgm = True
-except ImportError:
-    from ldm.modules.diffusionmodules.openaimodel import (
-        timestep_embedding,
-    )
-
-    using_sgm = False
-
-
-def attention_pytorch(
-    q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False
-):
-    if skip_reshape:
-        b, _, _, dim_head = q.shape
-    else:
-        b, _, dim_head = q.shape
-        dim_head //= heads
-        q, k, v = map(
-            lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
-            (q, k, v),
-        )
 
     out = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
+        q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
     )
     out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     return out
@@ -65,7 +50,7 @@ class ControlAddEmbedding(nn.Module):
 
 
 class OptimizedAttention(nn.Module):
-    def __init__(self, c, nhead, dropout=0.0, dtype=None, device=None, operations=None):
+    def __init__(self, c, nhead, dtype=None, device=None):
         super().__init__()
         self.heads = nhead
         self.c = c
@@ -80,17 +65,10 @@ class OptimizedAttention(nn.Module):
         return self.out_proj(out)
 
 
-class QuickGELU(nn.Module):
-    def forward(self, x: torch.Tensor):
-        return x * torch.sigmoid(1.702 * x)
-
-
 class ResBlockUnionControlnet(nn.Module):
-    def __init__(self, dim, nhead, dtype=None, device=None, operations=None):
+    def __init__(self, dim, nhead, dtype=None, device=None):
         super().__init__()
-        self.attn = OptimizedAttention(
-            dim, nhead, dtype=dtype, device=device, operations=operations
-        )
+        self.attn = OptimizedAttention(dim, nhead, dtype=dtype, device=device)
         self.ln_1 = nn.LayerNorm(dim, dtype=dtype, device=device)
         self.mlp = nn.Sequential(
             OrderedDict(

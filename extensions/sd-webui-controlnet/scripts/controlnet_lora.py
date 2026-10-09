@@ -177,15 +177,8 @@ def bind_control_lora(base_model, control_lora_model):
         recursive_bind_lora(control_lora_model, k, v)
 
 
-def torch_dfs(model: torch.nn.Module):
-    result = [model]
-    for child in model.children():
-        result += torch_dfs(child)
-    return result
-
-
 def unbind_control_lora(control_lora_model):
-    for m in torch_dfs(control_lora_model):
+    for m in control_lora_model.modules():
         if hasattr(m, 'unbind_lora'):
             m.unbind_lora()
     return

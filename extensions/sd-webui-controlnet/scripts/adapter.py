@@ -3,44 +3,7 @@ import torch.nn as nn
 from collections import OrderedDict
 
 from modules import devices
-cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
-
-
-class TorchHijackForUnet:
-    """
-    This is torch, but with cat that resizes tensors to appropriate dimensions if they do not match;
-    this makes it possible to create pictures with dimensions that are multiples of 8 rather than 64
-    """
-
-    def __getattr__(self, item):
-        if item == 'cat':
-            return self.cat
-
-        if hasattr(torch, item):
-            return getattr(torch, item)
-
-        raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, item))
-
-    def cat(self, tensors, *args, **kwargs):
-        if len(tensors) == 2:
-            a, b = tensors
-            if a.shape[-2:] != b.shape[-2:]:
-                a = torch.nn.functional.interpolate(a, b.shape[-2:], mode="nearest")
-
-            tensors = (a, b)
-
-        return torch.cat(tensors, *args, **kwargs)
-
-
-th = TorchHijackForUnet()
-
-
-def align(hint, size):
-    b, c, h1, w1 = hint.shape
-    h, w = size
-    if h != h1 or w != w1:
-         hint = th.nn.functional.interpolate(hint, size=size, mode="nearest")
-    return hint
+from sgm.modules.diffusionmodules.openaimodel import Downsample
 
 
 class PlugableAdapter(nn.Module):
@@ -67,7 +30,7 @@ class PlugableAdapter(nn.Module):
         tensors first)."""
         if self.control is None or hint is not self.hint_source:
             self.hint_source = hint
-            self.hint_cond = cond_cast_unet(hint)
+            self.hint_cond = devices.cond_cast_unet(hint)
             hint_in = self.hint_cond
 
             if hasattr(self.control_model, 'conv_in') and \
@@ -86,60 +49,6 @@ class PlugableAdapter(nn.Module):
         return
 
 
-def conv_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D convolution module.
-    """
-    if dims == 1:
-        return nn.Conv1d(*args, **kwargs)
-    elif dims == 2:
-        return nn.Conv2d(*args, **kwargs)
-    elif dims == 3:
-        return nn.Conv3d(*args, **kwargs)
-    raise ValueError(f"unsupported dimensions: {dims}")
-
-def avg_pool_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D average pooling module.
-    """
-    if dims == 1:
-        return nn.AvgPool1d(*args, **kwargs)
-    elif dims == 2:
-        return nn.AvgPool2d(*args, **kwargs)
-    elif dims == 3:
-        return nn.AvgPool3d(*args, **kwargs)
-    raise ValueError(f"unsupported dimensions: {dims}")
-
-
-class Downsample(nn.Module):
-    """
-    A downsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 downsampling occurs in the inner-two dimensions.
-    """
-
-    def __init__(self, channels, use_conv, dims=2, out_channels=None,padding=1):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        stride = 2 if dims != 3 else (1, 2, 2)
-        if use_conv:
-            self.op = conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding
-            )
-        else:
-            assert self.channels == self.out_channels
-            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
-
-    def forward(self, x):
-        assert x.shape[1] == self.channels
-        return self.op(x)
-
-
 class ResnetBlock(nn.Module):
     def __init__(self, in_c, out_c, down, ksize=3, sk=False, use_conv=True):
         super().__init__()
@@ -147,7 +56,6 @@ class ResnetBlock(nn.Module):
         if in_c != out_c or sk is False:
             self.in_conv = nn.Conv2d(in_c, out_c, ksize, 1, ps)
         else:
-            # print('n_in')
             self.in_conv = None
         self.block1 = nn.Conv2d(out_c, out_c, 3, 1, 1)
         self.act = nn.ReLU()
@@ -189,7 +97,6 @@ class Adapter(nn.Module):
             downsample_avoided = []
             downsample_layers = [3, 2, 1]
 
-        self.input_channels = cin // (self.pixel_shuffle * self.pixel_shuffle)
         self.channels = channels
         self.nums_rb = nums_rb
         self.body = []

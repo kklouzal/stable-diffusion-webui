@@ -8,7 +8,6 @@ from modules import devices
 from scripts.adapter import PlugableAdapter, Adapter, StyleAdapter, Adapter_light
 from scripts.controlnet_lllite import PlugableControlLLLite
 from scripts.cldm import PlugableControlModel
-from scripts.controlnet_sparsectrl import PlugableSparseCtrlModel
 from scripts.ipadapter.ipadapter_model import IPAdapterModel
 from scripts.ipadapter.plugable_ipadapter import PlugableIPAdapter
 from scripts.logging import logger
@@ -72,15 +71,6 @@ controlnet_sdxl_small_config = {'num_classes': 'sequential',
                                 'context_dim': 1,
                                 "global_average_pooling": False}
 
-t2i_adapter_config = {
-    'channels': [320, 640, 1280, 1280],
-    'nums_rb': 2,
-    'ksize': 1,
-    'sk': True,
-    'cin': 192,
-    'use_conv': False
-}
-
 t2i_adapter_light_config = {
     'channels': [320, 640, 1280, 1280],
     'nums_rb': 4,
@@ -97,14 +87,6 @@ t2i_adapter_style_config = {
 
 
 # Stolen from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/utils.py
-def state_dict_key_replace(state_dict, keys_to_replace):
-    for x in keys_to_replace:
-        if x in state_dict:
-            state_dict[keys_to_replace[x]] = state_dict.pop(x)
-    return state_dict
-
-
-# # Stolen from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/utils.py
 def state_dict_prefix_replace(state_dict, replace_prefix):
     for rp in replace_prefix:
         replace = list(map(lambda a: (a, "{}{}".format(replace_prefix[rp], a[len(rp):])), filter(lambda a: a.startswith(rp), state_dict.keys())))
@@ -134,20 +116,8 @@ def build_model_by_guess(state_dict, unet, model_path: str) -> ControlModel:
         network.to(devices.dtype_unet)
         return ControlModel(network, ControlModelType.ControlLoRA)
 
-    if "down_blocks.0.motion_modules.0.temporal_transformer.norm.weight" in state_dict: # sparsectrl
-        config = copy.deepcopy(controlnet_default_config)
-        if "input_hint_block.0.weight" in state_dict: # rgb
-            config['use_simplified_condition_embedding'] = True
-            config['conditioning_channels'] = 5
-        else: # scribble
-            config['use_simplified_condition_embedding'] = False
-            config['conditioning_channels'] = 4
-
-        config['use_fp16'] = devices.dtype_unet == torch.float16
-
-        network = PlugableSparseCtrlModel(config, state_dict)
-        network.to(devices.dtype_unet)
-        return ControlModel(network, ControlModelType.SparseCtrl)
+    if "down_blocks.0.motion_modules.0.temporal_transformer.norm.weight" in state_dict:
+        raise Exception('[ControlNet Error] SparseCtrl models need the AnimateDiff extension, which this build does not ship.')
 
     if "controlnet_cond_embedding.conv_in.weight" in state_dict:  # diffusers
         state_dict = convert_from_diffuser_state_dict(state_dict)
