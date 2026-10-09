@@ -12,7 +12,6 @@ import datetime
 import uvicorn
 import ipaddress
 import requests
-from modules import headless_ui as gr
 from threading import Lock
 from io import BytesIO
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request, Response
@@ -24,6 +23,7 @@ from secrets import compare_digest
 
 import modules.shared as shared
 from modules import sd_samplers, deepbooru, sd_hijack, sd_hijack_optimizations, images, scripts, headless_setup, postprocessing, errors, restart, shared_items, script_callbacks, infotext_utils, sd_models, sd_schedulers, openclaw_cache_epochs, generation_last, openclaw_env, torchao_weight_quant, options
+from modules import openclaw_cuda_graphs, openclaw_vae_decode_graphs, openclaw_nhwc_groupnorm, openclaw_generation_diagnostics
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -66,8 +66,9 @@ def _normalize_controlnet_remote_aliases(args: dict[str, Any]) -> None:
 
 
 def _controlnet_remote_api_keys():
+    # Alias keys never reach here: _normalize_controlnet_remote_aliases already moved them onto canonical keys.
     for suffix in ("", "2", "3"):
-        for name in (*models.CONTROL_NET_API_FIELD_TYPES, *models.CONTROL_NET_API_FIELD_ALIAS_TYPES):
+        for name in models.CONTROL_NET_API_FIELD_TYPES:
             yield f"control_net_{name}{suffix}"
 
 
@@ -97,7 +98,7 @@ def _response_parameters(request, *, include_images: bool) -> dict[str, Any]:
     if include_images:
         return params
     for suffix in ("", "2", "3"):
-        for name in ("image", "input_image", "mask", "mask_image"):
+        for name in ("image", "input_image"):
             key = f"control_net_{name}{suffix}"
             if params.get(key) is not None:
                 params[key] = None
@@ -202,16 +203,14 @@ def _precision_tensor_info(tensor):
         return None
 
     tensor_type = type(tensor)
-    tensor_name = tensor_type.__name__
-    tensor_module = tensor_type.__module__
-    is_mxfp8 = tensor_name == "MXTensor" and tensor_module.startswith("torchao.")
-    is_nvfp4 = tensor_name == "NVFP4Tensor" and tensor_module.startswith("torchao.")
+    is_mxfp8 = torchao_weight_quant.MXFP8.is_quant_tensor(tensor)
+    is_nvfp4 = torchao_weight_quant.NVFP4.is_quant_tensor(tensor)
     return {
         "dtype": str(getattr(tensor, "dtype", None)).replace("torch.", ""),
         "device": str(getattr(tensor, "device", "")),
         "shape": list(getattr(tensor, "shape", []) or []),
-        "tensor_type": tensor_name,
-        "tensor_module": tensor_module,
+        "tensor_type": tensor_type.__name__,
+        "tensor_module": tensor_type.__module__,
         "is_mxfp8": is_mxfp8,
         "is_nvfp4": is_nvfp4,
         "is_torchao_quantized": is_mxfp8 or is_nvfp4,
@@ -229,11 +228,11 @@ def _precision_name_from_info(weight_info):
 
 
 def _precision_module_source(name: str) -> str:
-    if name.startswith("conditioner.") or name.startswith("cond_stage_model."):
+    if name.startswith(("conditioner.", "cond_stage_model.")):
         return "text_conditioner"
     if name.startswith("first_stage_model."):
         return "vae"
-    if name.startswith("model.diffusion_model") or name.startswith("model."):
+    if name.startswith("model."):
         return "unet"
     return "base_model"
 
@@ -633,7 +632,7 @@ def decode_base64_to_image(encoding):
     (URLs are always fetched: the resource may change)."""
     max_pixels = int(opts.img_max_size_mp * 1_000_000)
 
-    if encoding.startswith("http://") or encoding.startswith("https://"):
+    if encoding.startswith(("http://", "https://")):
         if not opts.api_enable_requests:
             raise HTTPException(status_code=500, detail="Requests not allowed")
 
@@ -690,7 +689,6 @@ def processed_js_with_image_paths(processed, extra: dict | None = None):
     data = json.loads(processed.js())
     data["image_paths"] = [getattr(image, "already_saved_as", None) for image in processed.images]
     data["openclaw_cond_cache_stats"] = getattr(processed, "openclaw_cond_cache_stats", None)
-    data["openclaw_img2img_init_cache_stats"] = getattr(processed, "openclaw_img2img_init_cache_stats", None)
     data["openclaw_script_timings"] = getattr(processed, "openclaw_script_timings", None)
     data["openclaw_extension_timings"] = getattr(processed, "openclaw_extension_timings", None)
     if extra:
@@ -709,9 +707,8 @@ def encode_pil_to_base64(image):
                 if isinstance(key, str) and isinstance(value, str):
                     metadata.add_text(key, value)
                     use_metadata = True
-            # zlib level 1 is lossless like the default level 6 but ~5x faster on
-            # large images for ~18% more bytes; PNG ignores jpeg_quality.
-            image.save(output_bytes, format="PNG", pnginfo=(metadata if use_metadata else None), compress_level=1)
+            # PNG ignores jpeg_quality.
+            image.save(output_bytes, format="PNG", pnginfo=(metadata if use_metadata else None), compress_level=generation_last.API_PNG_COMPRESS_LEVEL)
 
         elif opts.samples_format.lower() in ("jpg", "jpeg", "webp"):
             if image.mode in ("RGBA", "P"):
@@ -862,24 +859,10 @@ class Api:
             self.add_api_route("/sdapi/v1/server-restart", self.restart_webui, methods=["POST"])
             self.add_api_route("/sdapi/v1/server-stop", self.stop_webui, methods=["POST"])
 
-        self.default_script_arg_txt2img = []
-        self.default_script_arg_img2img = []
-
-        txt2img_script_runner = scripts.scripts_txt2img
-        img2img_script_runner = scripts.scripts_img2img
-
-        if not txt2img_script_runner.scripts or not img2img_script_runner.scripts:
-            headless_setup.initialize_script_ui_state()
-
-        if not txt2img_script_runner.scripts:
-            txt2img_script_runner.initialize_scripts(False)
-        if not self.default_script_arg_txt2img:
-            self.default_script_arg_txt2img = self.init_default_script_args(txt2img_script_runner)
-
-        if not img2img_script_runner.scripts:
-            img2img_script_runner.initialize_scripts(True)
-        if not self.default_script_arg_img2img:
-            self.default_script_arg_img2img = self.init_default_script_args(img2img_script_runner)
+        # The Api is built once at startup, before anything else set up the script runners.
+        headless_setup.initialize_script_ui_state()
+        self.default_script_arg_txt2img = self.init_default_script_args(scripts.scripts_txt2img)
+        self.default_script_arg_img2img = self.init_default_script_args(scripts.scripts_img2img)
 
         self.apply_openclaw_runtime_defaults()
 
@@ -900,12 +883,9 @@ class Api:
     def get_openclaw_cache_telemetry(self):
         """Return a read-only, bounded and sanitized cache contract snapshot."""
         snapshot = openclaw_cache_epochs.snapshot()
-        try:
-            lora_networks = sys.modules.get("networks")
-            if lora_networks is not None:
-                snapshot["lora_steady_state"] = lora_networks.lora_steady_state_telemetry()
-        except Exception:
-            pass
+        lora_networks = sys.modules.get("networks")
+        if lora_networks is not None:
+            snapshot["lora_steady_state"] = lora_networks.lora_steady_state_telemetry()
         return snapshot
 
     def get_sdpa_backend(self):
@@ -922,35 +902,29 @@ class Api:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def get_cuda_graphs(self):
-        from modules import openclaw_cuda_graphs
         return openclaw_cuda_graphs.status()
 
     def set_cuda_graphs(self, req: dict[str, Any]):
-        from modules import openclaw_cuda_graphs
         enabled = _request_bool(req, "enabled", False)
         clear = _request_bool(req, "clear", False)
         with self.queue_lock:
             return openclaw_cuda_graphs.set_enabled(enabled, clear=clear)
 
     def get_vae_decode_graphs(self):
-        from modules import openclaw_vae_decode_graphs
         return openclaw_vae_decode_graphs.status()
 
     def set_vae_decode_graphs(self, req: dict[str, Any]):
-        from modules import openclaw_vae_decode_graphs
         enabled = _request_bool(req, "enabled", None)
         clear = _request_bool(req, "clear", False)
         with self.queue_lock:
             return openclaw_vae_decode_graphs.set_enabled(enabled, clear_cache=clear)
 
     def get_nhwc_groupnorm(self):
-        from modules import openclaw_nhwc_groupnorm
         return openclaw_nhwc_groupnorm.status()
 
     def set_nhwc_groupnorm(self, req: dict[str, Any]):
         """{"scopes": "all" | "" | "unet,silu,vae,controlnet" | [...], "reset_counters": bool}, each optional (missing
         scopes: unchanged); see modules/openclaw_nhwc_groupnorm.py. Applied between generations (queue_lock)."""
-        from modules import openclaw_nhwc_groupnorm
         if not isinstance(req, dict):
             raise HTTPException(status_code=422, detail="expected a JSON object")
         reset = _request_bool(req, "reset_counters", False)
@@ -973,7 +947,6 @@ class Api:
             return build_precision_map()
 
     def get_openclaw_generation_diagnostics(self):
-        from modules import openclaw_generation_diagnostics
         return openclaw_generation_diagnostics.last_generation_diagnostics() or {}
 
     def get_last_generation(self, settings_only: bool = False):
@@ -1093,11 +1066,10 @@ class Api:
         script_args[0] = 0
 
         # get default values
-        with gr.Blocks(): # will throw errors calling ui function without this
-            for script in script_runner.scripts:
-                ui_default_values = scripts.script_controls_default_values(script)
-                if ui_default_values:
-                    script_args[script.args_from:script.args_to] = ui_default_values
+        for script in script_runner.scripts:
+            ui_default_values = scripts.script_controls_default_values(script)
+            if ui_default_values:
+                script_args[script.args_from:script.args_to] = ui_default_values
         return script_args
 
     @staticmethod
@@ -1384,8 +1356,6 @@ class Api:
         return models.PNGInfoResponse(info=geninfo, items=items, parameters=params)
 
     def progressapi(self, req: models.ProgressRequest = Depends()):
-        # copy from check_progress_call of ui.py
-
         if shared.state.job_count == 0:
             return models.ProgressResponse(progress=0, eta_relative=0, state=shared.state.dict(), textinfo=shared.state.textinfo)
 

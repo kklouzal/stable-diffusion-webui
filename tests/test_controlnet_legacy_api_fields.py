@@ -46,7 +46,9 @@ def test_controlnet_legacy_remote_fields_are_explicit_api_model_fields():
     assert 'for suffix in ("", "2", "3")' in source
     assert 'f"control_net_{name}{suffix}"' in source
     assert 'name != "image"' not in source
-    assert source.count("*control_net_api_fields(),") == 2
+    # Both generation request models (txt2img and img2img) end with the shared tail that carries these fields.
+    assert source.count("*control_net_api_fields(),") == 1
+    assert source.count("*_GENERATION_API_TAIL_FIELDS,") == 2
 
 
 def test_generated_api_models_support_protected_pydantic_v2():

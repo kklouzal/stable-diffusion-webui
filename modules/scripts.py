@@ -546,10 +546,10 @@ def script_control_api_arg(control):
 
     arg_info = api_models.ScriptArg(label=control.label or "")
 
-    for field in ("value", "minimum", "maximum", "step"):
-        v = getattr(control, field, None)
+    for attr in ("value", "minimum", "maximum", "step"):
+        v = getattr(control, attr, None)
         if v is not None:
-            setattr(arg_info, field, v)
+            setattr(arg_info, attr, v)
 
     choices = getattr(control, 'choices', None)  # legacy component choices may be strings or tuples where the first item is the string
     if choices is not None:

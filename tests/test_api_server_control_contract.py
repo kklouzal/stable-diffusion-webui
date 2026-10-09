@@ -88,7 +88,6 @@ def _patch_minimal_init_globals(monkeypatch, api_class, *, api_server_stop=False
         ExtrasBatchImagesResponse=object,
         PNGInfoResponse=object,
         ProgressResponse=object,
-        OptionsModel=object,
         FlagsModel=object,
         SamplerItem=object,
         SchedulerItem=object,
@@ -113,7 +112,7 @@ def _patch_minimal_init_globals(monkeypatch, api_class, *, api_server_stop=False
     monkeypatch.setitem(api_class.__init__.__globals__, "shared", shared_stub)
     monkeypatch.setitem(api_class.__init__.__globals__, "scripts", scripts_stub)
     monkeypatch.setitem(api_class.__init__.__globals__, "models", models_stub)
-    monkeypatch.setitem(api_class.__init__.__globals__, "ui", SimpleNamespace(create_ui=lambda: None))
+    monkeypatch.setitem(api_class.__init__.__globals__, "headless_setup", SimpleNamespace(initialize_script_ui_state=lambda: None))
     monkeypatch.setattr(api_class, "init_default_script_args", lambda self, runner: [], raising=False)
     monkeypatch.setattr(api_class, "apply_openclaw_runtime_defaults", lambda self: None, raising=False)
 
@@ -300,16 +299,8 @@ def test_runtime_metadata_endpoints_preserve_delegation_and_public_fallbacks(mon
             calls.append("diagnostics")
             return cls.current
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        if name == "modules" and "openclaw_generation_diagnostics" in fromlist:
-            return SimpleNamespace(openclaw_generation_diagnostics=Diagnostics)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__, "openclaw_cuda_graphs", CudaGraphs)
+    monkeypatch.setitem(api_class.get_cuda_graphs.__globals__, "openclaw_generation_diagnostics", Diagnostics)
 
     api = api_class.__new__(api_class)
     lock_events = []
@@ -445,16 +436,8 @@ def test_runtime_switch_booleans_follow_the_env_grammar(monkeypatch):
             calls.append(("vae", enabled, clear_cache))
             return {}
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_cuda_graphs" in fromlist:
-            return SimpleNamespace(openclaw_cuda_graphs=CudaGraphs)
-        if name == "modules" and "openclaw_vae_decode_graphs" in fromlist:
-            return SimpleNamespace(openclaw_vae_decode_graphs=VaeGraphs)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__, "openclaw_cuda_graphs", CudaGraphs)
+    monkeypatch.setitem(api_class.set_cuda_graphs.__globals__, "openclaw_vae_decode_graphs", VaeGraphs)
     api = api_class.__new__(api_class)
     api.queue_lock = DummyLock([])
     api.set_vae_decode_graphs({"clear": True})  # no "enabled": reset the cache, keep the current state
@@ -492,14 +475,7 @@ def test_nhwc_groupnorm_switch_validates_and_applies_between_generations(monkeyp
         def status():
             return {"scopes": ["unet"]}
 
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "modules" and "openclaw_nhwc_groupnorm" in fromlist:
-            return SimpleNamespace(openclaw_nhwc_groupnorm=Switch)
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setitem(api_class.set_nhwc_groupnorm.__globals__["__builtins__"], "__import__", fake_import)
+    monkeypatch.setitem(api_class.set_nhwc_groupnorm.__globals__, "openclaw_nhwc_groupnorm", Switch)
     api = api_class.__new__(api_class)
     api.queue_lock = DummyLock(events)
     assert api.get_nhwc_groupnorm() == {"scopes": ["unet"]}

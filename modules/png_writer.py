@@ -42,10 +42,7 @@ _ADLER_BASE = 65521
 
 def available_threads() -> int:
     """CPUs this process may run on (the container's cpuset), not the host's count."""
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:  # no sched_getaffinity on this platform
-        return os.cpu_count() or 1
+    return len(os.sched_getaffinity(0))
 
 
 def _chunk(cid: bytes, data: bytes) -> list[bytes]:
