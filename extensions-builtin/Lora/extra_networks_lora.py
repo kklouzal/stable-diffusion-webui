@@ -12,15 +12,10 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
     def __init__(self):
         super().__init__('lora')
 
-        self.errors = {}
-        """mapping of network names to the number of errors the network had during operation"""
-
     remove_symbols = str.maketrans('', '', ":,")
 
     def activate(self, p, params_list):
         additional = shared.opts.sd_lora
-
-        self.errors.clear()
 
         if additional != "None" and additional in networks.available_networks and not any(x for x in params_list if x.items[0] == additional):
             p.all_prompts = [x + f"<lora:{additional}:{shared.opts.extra_networks_default_multiplier}>" for x in p.all_prompts]
@@ -63,8 +58,18 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                 p.comment(f"{backend.label} LoRA preparation failed; generation stopped to avoid slow per-step fallback. {error}")
                 raise FatalLoraPreparationError(error)
 
+        # loaded_networks holds the requested networks in request order.
+        is_hr_pass = getattr(p, "is_hr_pass", False)
+        if not is_hr_pass or not hasattr(p, "lora_errors"):
+            p.lora_errors = {}
+        for name, item in zip(names, networks.loaded_networks):
+            if item.unmatched_keys:
+                p.lora_errors[name.translate(self.remove_symbols)] = f"{len(item.unmatched_keys)} unmatched keys"
+        if p.lora_errors:
+            p.extra_generation_params["Lora errors"] = ', '.join(f'{k}: {v}' for k, v in p.lora_errors.items())
+
         if shared.opts.lora_add_hashes_to_infotext:
-            if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):
+            if not is_hr_pass or not hasattr(p, "lora_hashes"):
                 p.lora_hashes = {}
 
             for item in networks.loaded_networks:
@@ -78,7 +83,4 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         # Retain the physically published state across requests. The next activation
         # always calls load_networks, including for an empty desired state, so real
         # semantic changes and clear still reconcile before sampling.
-        if self.errors:
-            p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
-
-        self.errors.clear()
+        pass

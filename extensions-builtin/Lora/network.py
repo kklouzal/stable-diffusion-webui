@@ -83,6 +83,9 @@ class Network:  # LoraModule
         self.mentioned_name = None
         """the text that was used to add the network to prompt - can be either name or an alias"""
 
+        self.unmatched_keys = ()
+        """state dict keys of the file that name no layer of the model it was loaded for (networks.load_network)"""
+
 
 class ModuleType:
     def create_module(self, net: Network, weights: NetworkWeights) -> Network | None:

@@ -916,7 +916,6 @@ def test_mha_lifecycle_restores_qkv_and_applies_out_proj_exactly_once(lora_netwo
 def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch):
     torch = pytest.importorskip("torch")
     networks = lora_networks
-    monkeypatch.setattr(networks, "extra_network_lora", SimpleNamespace(errors={}))
     mha = torch.nn.MultiheadAttention(4, 1, bias=False, batch_first=True)
     mha.network_layer_name = "1_model_transformer_resblocks_0_attn"
     base_qkv = mha.in_proj_weight.detach().clone()
@@ -930,9 +929,10 @@ def test_mha_failed_reactivation_restores_exact_base(lora_networks, monkeypatch)
     })
     monkeypatch.setattr(networks, "loaded_networks", [net])
     monkeypatch.setattr(networks, "network_wanted_names", lambda: (("broken", 1.0, 1.0, None),))
-    networks.network_apply_weights(mha)
+    with pytest.raises(RuntimeError, match="LoRA broken cannot be applied to layer 1_model_transformer_resblocks_0_attn_k_proj: injected failure"):
+        networks.network_apply_weights(mha)
     assert torch.equal(mha.in_proj_weight, base_qkv)
-    assert mha.network_current_names == (("broken", 1.0, 1.0, None),)
+    assert mha.network_current_names == ()  # the layer holds its base weights, which the next apply sees
 
 
 def test_model_level_apply_includes_mha_and_deduplicates_out_proj(lora_networks, monkeypatch):
@@ -1131,3 +1131,46 @@ def test_lora_activation_errors_stop_generation_instead_of_dropping_every_lora(l
         with pytest.raises(extra_networks_lora.FatalLoraPreparationError):
             lora.activate(p, [extra_networks.ExtraNetworkParams(items=items)])
     assert loaded == []
+
+
+def _activation(networks, monkeypatch, parsed):
+    import extra_networks_lora
+    from modules import extra_networks
+
+    monkeypatch.setattr(networks, "network_file_signature", lambda _filename: ("sha256", "a"))
+    monkeypatch.setattr(networks, "load_network", lambda *_args: parsed)
+    monkeypatch.setattr(networks, "_apply_loaded_state_to_model", lambda: None)
+    monkeypatch.setattr(networks.shared.opts, "lora_add_hashes_to_infotext", True, raising=False)
+    lora = extra_networks_lora.ExtraNetworkLora()
+
+    def activate(name, p=None, is_hr_pass=False):
+        p = p or SimpleNamespace(all_prompts=["x"], extra_generation_params={})
+        p.is_hr_pass = is_hr_pass
+        lora.activate(p, [extra_networks.ExtraNetworkParams(items=[name, "0.5"])])
+        return p
+    return activate
+
+
+def test_unmatched_lora_keys_are_reported_on_every_activation(lora_networks, monkeypatch):
+    """Keys that name no model layer cannot be applied; the request reports them ("Lora errors"), also when the
+    applied state is reused (no parse, no merge) and when the hires pass activates again."""
+    networks = lora_networks
+    parsed = networks.network.Network("alpha", networks.available_networks["alpha"])
+    parsed.unmatched_keys = ("lora_te2_text_projection.alpha", "lora_te2_text_projection.lora_down.weight", "lora_te2_text_projection.lora_up.weight")
+    activate = _activation(networks, monkeypatch, parsed)
+
+    first = activate("alpha")
+    assert first.extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+
+    loads = []
+    real_load_networks = networks.load_networks
+    monkeypatch.setattr(networks, "load_networks", lambda *args: loads.append(real_load_networks(*args)))
+    second = activate("alpha")
+    assert loads == [False]  # the applied state was reused
+    assert second.extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+    assert activate("alpha", p=second, is_hr_pass=True).extra_generation_params["Lora errors"] == "alpha: 3 unmatched keys"
+
+    parsed.unmatched_keys = ()
+    networks.loaded_networks.clear()
+    monkeypatch.setattr(networks, "_applied_state_key", None)
+    assert "Lora errors" not in activate("alpha").extra_generation_params

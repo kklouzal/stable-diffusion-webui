@@ -497,6 +497,7 @@ def load_network(name, network_on_disk):
             else:
                 emb_dict[vec_name] = weight
             bundle_embeddings[emb_name] = emb_dict
+            continue
 
         if diffusers_weight_map:
             key = diffusers_weight_map.get(key_network_without_network_parts, key_network_without_network_parts)
@@ -558,6 +559,9 @@ def load_network(name, network_on_disk):
         embeddings[emb_name] = embedding
 
     net.bundle_embeddings = embeddings
+    # Keys that name no layer of the loaded model: their weights cannot be applied. ExtraNetworkLora.activate reports
+    # them in the "Lora errors" infotext of every request that uses the network (cached parses included).
+    net.unmatched_keys = tuple(sorted(keys_failed_to_match))
 
     if keys_failed_to_match:
         logging.debug(f"Network {network_on_disk.filename} didn't match keys: {keys_failed_to_match}")
@@ -773,6 +777,8 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
 
     if current_names != wanted_names:
         network_restore_weights_from_backup(self)
+        # The layer holds its base weights until the merge below completes; a merge that raises leaves it so.
+        self.network_current_names = ()
 
         target = self.in_proj_weight if isinstance(self, torch.nn.MultiheadAttention) else self.weight
         # Forwards, and with them these lazy merges, run under bf16 autocast, which would round the float32
@@ -796,8 +802,9 @@ def network_merge_loaded_deltas(self, network_layer_name):
     Each network's delta is added to a float32 copy of the restored base (the fp16 master when fp8 storage keeps
     one) and the caller rounds the sum to the stored dtype once, as reference merges do (diffusers fuse_lora,
     kohya-ss merge_lora, ComfyUI). Adding each delta into the bf16/fp8 weight in turn rounded W + delta once per
-    network, which swamps the small deltas of stacked LoRAs. A network that fails on this layer is skipped and
-    counted in extra_network_lora.errors. Callers hold no_grad and disable autocast.
+    network, which swamps the small deltas of stacked LoRAs. A network that cannot be applied to this layer raises
+    (network_layer_delta): generating with some of a requested network's layers silently left out is never an
+    option. Callers hold no_grad and disable autocast.
     """
     merged_weight = None
     merged_bias = None
@@ -805,53 +812,71 @@ def network_merge_loaded_deltas(self, network_layer_name):
     for net in loaded_networks:
         module = net.modules.get(network_layer_name, None)
         if module is not None and hasattr(self, 'weight') and not isinstance(module, modules.models.sd3.mmdit.QkvLinear):
-            try:
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
-                updown, ex_bias = module.calc_updown(weight)
-
-                if len(weight.shape) == 4 and weight.shape[1] == 9:
-                    # inpainting model. zero pad updown to make channel[1]  4 to 9
-                    updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
-
-                merged_weight = weight + updown
-                if ex_bias is not None and hasattr(self, 'bias'):
-                    bias = merged_bias if merged_bias is not None else network_merge_base(self, 'bias')
-                    merged_bias = ex_bias.float() if bias is None else bias + ex_bias
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
+            weight = merged_weight if merged_weight is not None else network_merge_base(self, 'weight')
+            updown, ex_bias = network_layer_delta(net, network_layer_name, module, weight)
+            merged_weight = weight + updown
+            if ex_bias is not None and hasattr(self, 'bias'):
+                bias = merged_bias if merged_bias is not None else network_merge_base(self, 'bias')
+                if bias is not None and ex_bias.shape != bias.shape:
+                    raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: bias delta shape {tuple(ex_bias.shape)} != bias shape {tuple(bias.shape)}")
+                merged_bias = ex_bias.float() if bias is None else bias + ex_bias
             continue
 
-        module_q = net.modules.get(network_layer_name + "_q_proj", None)
-        module_k = net.modules.get(network_layer_name + "_k_proj", None)
-        module_v = net.modules.get(network_layer_name + "_v_proj", None)
-        if isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)) and module_q and module_k and module_v:
-            try:
-                # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
-                # separately mapped Linear module) or SD3 QkvLinear's weight.
-                field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
-                weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
-                qw, kw, vw = weight.chunk(3, 0)
-                updown_q, _ = module_q.calc_updown(qw)
-                updown_k, _ = module_k.calc_updown(kw)
-                updown_v, _ = module_v.calc_updown(vw)
-                del qw, kw, vw
-                merged_weight = weight + torch.vstack([updown_q, updown_k, updown_v])
-
-            except RuntimeError as e:
-                logging.debug(f"Network {net.name} layer {network_layer_name}: {e}")
-                extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-
+        projections = network_qkv_projections(net, network_layer_name)
+        if any(projections):
+            if not isinstance(self, (torch.nn.MultiheadAttention, modules.models.sd3.mmdit.QkvLinear)):
+                raise RuntimeError(f"LoRA {net.name}: q/k/v projection keys for layer {network_layer_name}, which is a {type(self).__name__}, not a combined q/k/v projection")
+            # Combined Q/K/V weight: MHA's in_proj_weight (its out_proj is applied exactly once through its
+            # separately mapped Linear module) or SD3 QkvLinear's weight.
+            field = 'in_proj_weight' if isinstance(self, torch.nn.MultiheadAttention) else 'weight'
+            weight = merged_weight if merged_weight is not None else network_merge_base(self, field)
+            merged_weight = weight + network_qkv_delta(net, network_layer_name, projections, weight)
             continue
 
         if module is None:
             continue
 
-        logging.debug(f"Network {net.name} layer {network_layer_name}: couldn't find supported operation")
-        extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        raise RuntimeError(f"LoRA {net.name}: no supported way to apply {type(module).__name__} to layer {network_layer_name} ({type(self).__name__})")
 
     return merged_weight, merged_bias
+
+
+def network_layer_delta(net, network_layer_name, module, weight):
+    """(weight delta, extra bias or None) of network module `module` for the float32 layer weight `weight`.
+
+    Raises naming the network and layer when the delta cannot be computed or does not have weight's shape: adding a
+    broadcastable delta of another shape (an SD1 LoRA's 768-wide cross-attention on SDXL's 2048) applies a wrong
+    update, and skipping the layer silently drops part of the requested network.
+    """
+    try:
+        updown, ex_bias = module.calc_updown(weight)
+    except Exception as e:
+        raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: {e}") from e
+
+    if len(weight.shape) == 4 and weight.shape[1] == 9 and updown.shape[1] == 4:
+        # inpainting model. zero pad updown to make channel[1]  4 to 9
+        updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+
+    if updown.shape != weight.shape:
+        raise RuntimeError(f"LoRA {net.name} cannot be applied to layer {network_layer_name}: delta shape {tuple(updown.shape)} != weight shape {tuple(weight.shape)}")
+    return updown, ex_bias
+
+
+def network_qkv_projections(net, network_layer_name):
+    """The q, k and v projection modules `net` has for the combined q/k/v layer `network_layer_name` (None when absent)."""
+    return tuple(net.modules.get(f"{network_layer_name}_{projection}_proj", None) for projection in "qkv")
+
+
+def network_qkv_delta(net, network_layer_name, projections, weight):
+    """Delta of the combined [q; k; v] float32 weight `weight`. A LoRA may train only some projections (commonly q
+    and v); the others get a zero delta."""
+    deltas = []
+    for projection, module, chunk in zip("qkv", projections, weight.chunk(3, 0)):
+        if module is None:
+            deltas.append(torch.zeros_like(chunk))
+        else:
+            deltas.append(network_layer_delta(net, f"{network_layer_name}_{projection}_proj", module, chunk)[0])
+    return torch.vstack(deltas)
 
 
 def network_merge_base(self, field):
@@ -1174,13 +1199,11 @@ def network_quant_lora_ops_for_layer(self, network_layer_name):
             ops.append(("direct", net, module))
             continue
 
-        module_q = net.modules.get(network_layer_name + "_q_proj", None)
-        module_k = net.modules.get(network_layer_name + "_k_proj", None)
-        module_v = net.modules.get(network_layer_name + "_v_proj", None)
+        module_q, module_k, module_v = projections = network_qkv_projections(net, network_layer_name)
         module_out = net.modules.get(network_layer_name + "_out_proj", None)
 
-        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and module_q and module_k and module_v and module_out is None:
-            ops.append(("qkv", net, (module_q, module_k, module_v)))
+        if isinstance(self, modules.models.sd3.mmdit.QkvLinear) and any(projections) and module_out is None:
+            ops.append(("qkv", net, projections))
             continue
 
         if module_q or module_k or module_v or module_out:
@@ -1216,23 +1239,14 @@ def network_apply_quant_merged_lora(backend, self, quantize_config=None, quantiz
             with torch.autocast(devices.device.type, enabled=False):
                 for op_kind, net, payload in ops_for_layer:
                     if op_kind == "direct":
-                        module = payload
-                        updown, ex_bias = module.calc_updown(weight)
-                        if len(weight.shape) == 4 and weight.shape[1] == 9:
-                            updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
+                        updown, ex_bias = network_layer_delta(net, network_layer_name, payload, weight)
                         weight = weight + updown
                         if ex_bias is not None:
                             bias = ex_bias.to(device=devices.device, dtype=torch.float32) if bias is None else bias + ex_bias
                         continue
 
                     if op_kind == "qkv":
-                        module_q, module_k, module_v = payload
-                        qw, kw, vw = weight.chunk(3, 0)
-                        updown_q, _ = module_q.calc_updown(qw)
-                        updown_k, _ = module_k.calc_updown(kw)
-                        updown_v, _ = module_v.calc_updown(vw)
-                        del qw, kw, vw
-                        weight = weight + torch.vstack([updown_q, updown_k, updown_v])
+                        weight = weight + network_qkv_delta(net, network_layer_name, payload, weight)
                         continue
 
                     raise RuntimeError(f"unsupported {label} LoRA operation kind: {op_kind}")
@@ -1256,11 +1270,7 @@ def network_apply_quant_merged_lora(backend, self, quantize_config=None, quantiz
         # Restore the pre-call quantized/base state before reporting preparation
         # failure so callers never see partially merged effective weights.
         network_quant_restore_state(backend, original_snapshot)
-        logging.debug(f"Network {network_layer_name}: {label} merged LoRA failed: {e}", exc_info=True)
-        for op_kind, net, _payload in ops_for_layer:
-            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
-        for net, _parts in unsupported_ops:
-            extra_network_lora.errors[net.name] = extra_network_lora.errors.get(net.name, 0) + 1
+        logging.warning(f"Network {network_layer_name}: {label} merged LoRA failed: {e}", exc_info=True)
         return False
 
 
