@@ -2014,6 +2014,13 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             # but we still want to support binary masks.
             image_mask = create_binary_mask(image_mask, round=self.mask_round)
 
+            # The mask covers the init image: "only masked" crops in its coordinates and the other paths resize both the
+            # same way, so a mask of another size is stretched onto the image first. Bilinear does not ring, so the
+            # masked area (and the crop around it) grows by at most a pixel.
+            init_size = self.init_images[0].size
+            if image_mask.size != init_size:
+                image_mask = image_mask.resize(init_size, resample=Image.Resampling.BILINEAR)
+
             if self.inpainting_mask_invert:
                 image_mask = ImageOps.invert(image_mask)
                 self.extra_generation_params["Mask mode"] = "Inpaint not masked"
