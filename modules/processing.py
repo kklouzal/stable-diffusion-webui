@@ -1832,6 +1832,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     init_img_hash: str = field(default=None, init=False)
     mask_for_overlay: Image = field(default=None, init=False)
     init_latent: torch.Tensor = field(default=None, init=False)
+    # "latent noise" fill: (unfilled init latent, seeds of the noise filled into init_latent); sample() refills per batch.
+    latent_noise_fill: tuple = field(default=None, init=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -2157,9 +2159,12 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             latmask = _resize_latent_mask(init_mask, (self.init_latent.shape[3], self.init_latent.shape[2]), self.mask_round)
             self.mask, self.nmask = _latent_blend_masks(latmask, self.init_latent.shape[1])
 
-            # this needs to be fixed to be done in sample() using actual seeds for batches
             if self.inpainting_fill == 2:
-                self.init_latent = self.init_latent * self.mask + create_random_tensors(self.init_latent.shape[1:], all_seeds[0:self.init_latent.shape[0]]) * self.nmask
+                # Filled here with the first batch's seeds (what sample() would draw for it); sample() refills each later
+                # batch with its own seeds.
+                seeds = tuple(all_seeds[0:self.init_latent.shape[0]])
+                self.latent_noise_fill = (self.init_latent, seeds)
+                self.init_latent = self._latent_noise_filled(self.init_latent, seeds)
                 self.extra_generation_params["Masked content"] = 'latent noise'
 
             elif self.inpainting_fill == 3:
@@ -2173,7 +2178,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         if not opts.persistent_img2img_init_cache:
             self.clear_img2img_init_cache()
 
+    def _latent_noise_filled(self, init_latent, seeds):
+        return init_latent * self.mask + create_random_tensors(init_latent.shape[1:], list(seeds)) * self.nmask
+
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
+        if self.latent_noise_fill is not None and tuple(seeds) != self.latent_noise_fill[1]:
+            unfilled = self.latent_noise_fill[0]
+            self.latent_noise_fill = (unfilled, tuple(seeds))
+            self.init_latent = self._latent_noise_filled(unfilled, seeds)
+
         x = self.rng.next()
 
         if self.initial_noise_multiplier != 1.0:
