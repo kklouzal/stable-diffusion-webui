@@ -70,10 +70,16 @@ def run_modelmerger(id_task, primary_model_name, secondary_model_name, tertiary_
     element and tests that prefix.
     """
     shared.state.begin(job="model-merge")
+    try:
+        return _merge_checkpoints(primary_model_name, secondary_model_name, tertiary_model_name, interp_method, multiplier, save_as_half, custom_name, checkpoint_format, config_source, bake_in_vae, discard_weights, save_metadata, add_merge_recipe, copy_metadata_fields, metadata_json)
+    finally:
+        # Also when the merge raises: /progress must not keep reporting a running job, and end() frees cached device memory.
+        shared.state.end()
 
+
+def _merge_checkpoints(primary_model_name, secondary_model_name, tertiary_model_name, interp_method, multiplier, save_as_half, custom_name, checkpoint_format, config_source, bake_in_vae, discard_weights, save_metadata, add_merge_recipe, copy_metadata_fields, metadata_json):
     def fail(message):
         shared.state.textinfo = message
-        shared.state.end()
         return [message]
 
     def weighted_sum(theta0, theta1, alpha):
@@ -308,6 +314,5 @@ def run_modelmerger(id_task, primary_model_name, secondary_model_name, tertiary_
 
     print(f"Checkpoint saved to {output_modelname}.")
     shared.state.textinfo = "Checkpoint saved"
-    shared.state.end()
 
     return ["Checkpoint saved to " + output_modelname]

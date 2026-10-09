@@ -20,25 +20,6 @@ class PostprocessedImage:
         self.disable_processing = False
         self.caption = None
 
-    def get_suffix(self, used_suffixes=None):
-        used_suffixes = {} if used_suffixes is None else used_suffixes
-        suffix = "-".join(self.nametags)
-        if suffix:
-            suffix = "-" + suffix
-
-        if suffix not in used_suffixes:
-            used_suffixes[suffix] = 1
-            return suffix
-
-        for i in range(1, 100):
-            proposed_suffix = suffix + "-" + str(i)
-
-            if proposed_suffix not in used_suffixes:
-                used_suffixes[proposed_suffix] = 1
-                return proposed_suffix
-
-        return suffix
-
     def create_copy(self, new_image, *, nametags=None, disable_processing=False):
         pp = PostprocessedImage(new_image)
         pp.shared = self.shared

@@ -13,7 +13,6 @@ _CUDA_GRAPH_COUNTERS = ("captures", "replays", "fallbacks", "bypasses", "failure
 _OPENCLAW_PARAM_PREFIXES = (
     "PAG ",
     "SEG ",
-    "CFG Interval ",
     "Dynamic thresholding",
     "Mimic ",
     "CFG mode",

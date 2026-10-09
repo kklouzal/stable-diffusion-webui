@@ -65,3 +65,21 @@ def test_weighted_sum_saves_the_merge_rescans_checkpoints_and_returns_the_saved_
     assert torch.equal(merged["alphas"], a["alphas"])  # only keys containing "model" are interpolated
     assert rescans == [True]
     assert events == [("begin", "model-merge"), ("end",)]
+
+
+def test_a_merge_that_raises_still_ends_the_job(monkeypatch, tmp_path):
+    # A failure past the request checks (here: an unreadable checkpoint) used to skip state.end(), so /progress kept
+    # reporting a running "model-merge" job and the merge's cached device memory was never released.
+    events = []
+    monkeypatch.setattr(shared, "state", RecordingState(events))
+    monkeypatch.setattr(sd_models, "checkpoints_list", {
+        name: SimpleNamespace(name=f"{name}.safetensors", model_name=name, filename=str(tmp_path / f"missing-{name}.safetensors"), metadata={})
+        for name in ("a", "b")})
+
+    try:
+        merge(primary="a", secondary="b")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("merging an unreadable checkpoint must raise")
+    assert events == [("begin", "model-merge"), ("end",)]
