@@ -22,7 +22,7 @@ DOCKER_BUILDKIT=1
 # boot-isolated with isolcpus=domain the kernel does not load-balance between them and
 # every parallel compile job would share one core, so the slice is used only when none
 # of its CPUs are domain-isolated.
-BUILD_CGROUP_PARENT="${BUILD_CGROUP_PARENT:-gb10build.slice}"
+BUILD_CGROUP_PARENT="${BUILD_CGROUP_PARENT-gb10build.slice}"  # set and empty: default placement
 expand_cpus() {  # "5-9 15-19" or "5-9,15-19" -> one CPU number per line, sorted as text for comm
   local part
   for part in ${1//,/ }; do seq "${part%-*}" "${part#*-}"; done | sort
