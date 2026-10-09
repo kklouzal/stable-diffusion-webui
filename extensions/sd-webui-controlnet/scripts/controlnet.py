@@ -507,7 +507,11 @@ class Script(scripts.Script, metaclass=(
                         all_edge_count = np.where(x > 127)[0].shape[0]
                         is_one_pixel_edge = one_pixel_edge_count * 2 > all_edge_count
 
-                if 2 < unique_color_count < 200:
+                # Few colors means a segmentation/color-coded map: keep the labels exact. A gray map (all channels
+                # equal) is an intensity map instead, e.g. a smooth low-contrast depth map with under 200 levels,
+                # which nearest-neighbour scaling would turn into visible steps.
+                is_gray = bool((x[:, :, 0] == x[:, :, 1]).all() and (x[:, :, 0] == x[:, :, 2]).all())
+                if 2 < unique_color_count < 200 and not is_gray:
                     interpolation = cv2.INTER_NEAREST
                 elif new_size_is_smaller:
                     interpolation = cv2.INTER_AREA

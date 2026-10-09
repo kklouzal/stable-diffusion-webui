@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 from PIL import Image, ImageOps
+import cv2
 import numpy as np
 
 import importlib
@@ -114,6 +115,19 @@ class TestCropWithA1111Mask(unittest.TestCase):
         for mask in (Image.new("L", (120, 90)), Image.new("RGBA", (120, 90))):
             with self.subTest(mode=mask.mode):
                 self.assertIs(self.crop(self.processing(mask), image), image)
+
+
+class TestDetectmapResizeInterpolation(unittest.TestCase):
+    def test_gray_maps_with_few_levels_are_not_resized_nearest(self):
+        rng = np.random.default_rng(4)
+        gray = np.repeat(np.linspace(90, 140, 48)[:, None], 40, axis=1).astype(np.uint8)  # smooth, 51 levels
+        _, up = Script.detectmap_proc(gray, "depth_zoe", ResizeMode.RESIZE, 96, 80)
+        np.testing.assert_array_equal(up, cv2.resize(np.stack([gray] * 3, axis=2), (80, 96), interpolation=cv2.INTER_CUBIC))
+
+        palette = rng.integers(0, 256, (12, 3), dtype=np.uint8)
+        seg = palette[rng.integers(0, 12, (6, 5))].repeat(8, axis=0).repeat(8, axis=1)
+        _, up = Script.detectmap_proc(seg, "seg_anime_face", ResizeMode.RESIZE, 96, 80)
+        np.testing.assert_array_equal(up, cv2.resize(seg, (80, 96), interpolation=cv2.INTER_NEAREST))
 
 
 class TestSetNumpySeed(unittest.TestCase):
