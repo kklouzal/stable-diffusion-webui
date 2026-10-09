@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import py_compile
 from pathlib import Path
 
 path = Path("/usr/local/lib/python3.12/dist-packages/torchao/utils.py")
@@ -21,3 +22,6 @@ new = '''def register_as_pytree_constant(cls):
 if old not in text:
     raise RuntimeError("TorchAO register_as_pytree_constant anchor not found")
 path.write_text(text.replace(old, new, 1))
+# The install's timestamp pyc no longer matches the patched source; the runtime user cannot rewrite it, so every
+# start would recompile the module in memory. Recompile it here.
+py_compile.compile(str(path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)

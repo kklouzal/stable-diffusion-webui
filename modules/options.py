@@ -1,4 +1,3 @@
-import os
 import json
 import sys
 import threading
@@ -6,9 +5,8 @@ from dataclasses import dataclass
 
 from modules import headless_ui as gr
 
-from modules import errors, openclaw_env
+from modules import openclaw_env, settings_file
 from modules.shared_cmd_options import cmd_opts
-from modules.paths_internal import script_path
 
 
 class OptionInfo:
@@ -200,12 +198,10 @@ class Options:
         assert not cmd_opts.freeze_settings, "saving settings is disabled"
 
         # Serialized before the file is opened, so a value json cannot encode leaves the file intact instead of
-        # truncated, and under a lock, so concurrent saves cannot interleave their writes. The file is rewritten in
-        # place, not replaced by rename: gb10/run.sh bind-mounts it as a single file, which rename cannot replace.
+        # truncated, and under a lock, so concurrent saves cannot interleave their writes. settings_file.write rewrites
+        # the file in place and fsyncs it: rename cannot replace the single-file bind mount gb10/run.sh uses.
         with _save_lock:
-            text = json.dumps(self.data, indent=4, ensure_ascii=False)
-            with open(filename, "w", encoding="utf8") as file:
-                file.write(text)
+            settings_file.write(filename, json.dumps(self.data, indent=4, ensure_ascii=False))
 
     def same_type(self, x, y):
         if x is None or y is None:
@@ -224,15 +220,7 @@ class Options:
         return None
 
     def load(self, filename):
-        try:
-            with open(filename, "r", encoding="utf8") as file:
-                self.data = json.load(file)
-        except FileNotFoundError:
-            self.data = {}
-        except Exception:
-            errors.report(f'\nCould not load settings\nThe config file "{filename}" is likely corrupted\nIt has been moved to the "tmp/config.json"\nReverting config to default\n\n''', exc_info=True)
-            os.replace(filename, os.path.join(script_path, "tmp", "config.json"))
-            self.data = {}
+        self.data = settings_file.read(filename)
         # 1.6.0 VAE defaults
         if self.data.get('sd_vae_as_default') is not None and self.data.get('sd_vae_overrides_per_model_preferences') is None:
             self.data['sd_vae_overrides_per_model_preferences'] = not self.data.get('sd_vae_as_default')

@@ -5,17 +5,22 @@ CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest}"
 PORT="${PORT:-7860}"
 DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT}}"
+# Scripts the deployment must load (names as /sdapi/v1/scripts lists them, in txt2img or img2img), comma-separated:
+# the owned extensions' and the host-installed third-party ones'. A missing one means an extension failed to load.
+EXPECTED_SCRIPTS="${EXPECTED_SCRIPTS:-controlnet,incantations,dynamic thresholding (cfg scale fix),teacache,openclaw multi-sampler,openclaw denoise ramp,tiled diffusion,tiled vae,ultimate sd upscale,detail daemon}"
 
-python3 - "${BASE_URL}" <<'PY'
+python3 - "${BASE_URL}" "${EXPECTED_SCRIPTS}" <<'PY'
 import json
 import sys
 import urllib.request
 
 base_url = sys.argv[1].rstrip('/')
+expected_scripts = {name.strip() for name in sys.argv[2].split(',') if name.strip()}
 
 for path in (
     '/sdapi/v1/progress?skip_current_image=true',
     '/sdapi/v1/sd-models',
+    '/sdapi/v1/scripts',
     '/sdapi/v1/openclaw/precision-map',
     '/sdapi/v1/openclaw/vae-decode-graphs',
 ):
@@ -32,6 +37,13 @@ for path in (
         if not isinstance(payload, list):
             raise SystemExit(f'{path}: expected model list')
         print(f'{path}: ok ({len(payload)} models)')
+    elif path == '/sdapi/v1/scripts':
+        if not isinstance(payload, dict) or not all(isinstance(payload.get(tab), list) for tab in ('txt2img', 'img2img')):
+            raise SystemExit(f'{path}: expected txt2img and img2img script lists')
+        missing = sorted(expected_scripts - set(payload['txt2img']) - set(payload['img2img']))
+        if missing:
+            raise SystemExit(f'{path}: expected scripts not loaded: {", ".join(missing)}')
+        print(f'{path}: ok ({len(expected_scripts)} expected scripts loaded)')
     elif path.startswith('/sdapi/v1/openclaw/precision-map'):
         summary = payload.get('summary', {}) if isinstance(payload, dict) else {}
         if not isinstance(payload, dict) or not payload.get('ok') or 'checkpoint' not in payload or 'precision' not in summary:
@@ -53,8 +65,9 @@ import torch
 
 print(f'python: {sys.version.split()[0]}')
 print(f'torch: {torch.__version__} cuda={torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'cuda device: {torch.cuda.get_device_name(0)}')
+if not torch.cuda.is_available():
+    raise SystemExit('torch cannot use a CUDA device in the container (started without --gpus, or a driver problem)')
+print(f'cuda device: {torch.cuda.get_device_name(0)}')
 
 required = ['triton', 'transformers', 'torchao', 'mslk']
 missing = [name for name in required if importlib.util.find_spec(name) is None]
@@ -76,39 +89,38 @@ from torchao.prototype.mx_formats.inference_workflow import MXDynamicActivationM
 from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
 from torchao.quantization import quantize_
 
-if torch.cuda.is_available():
-    layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
-    quantize_(
-        layer,
-        config=MXDynamicActivationMXWeightConfig(
-            activation_dtype=torch.float8_e4m3fn,
-            weight_dtype=torch.float8_e4m3fn,
-            kernel_preference=KernelPreference.AUTO,
-        ),
-        filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
-    )
-    sample = torch.randn(1, 1024, device='cuda', dtype=torch.bfloat16)
-    out = layer(sample)
-    torch.cuda.synchronize()
-    if out.dtype != torch.bfloat16 or not torch.isfinite(out).all():
-        raise SystemExit('MXFP8 TorchAO/MSLK smoke failed')
-    print('mxfp8 torchao/mslk: ok')
+layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
+quantize_(
+    layer,
+    config=MXDynamicActivationMXWeightConfig(
+        activation_dtype=torch.float8_e4m3fn,
+        weight_dtype=torch.float8_e4m3fn,
+        kernel_preference=KernelPreference.AUTO,
+    ),
+    filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
+)
+sample = torch.randn(1, 1024, device='cuda', dtype=torch.bfloat16)
+out = layer(sample)
+torch.cuda.synchronize()
+if out.dtype != torch.bfloat16 or not torch.isfinite(out).all():
+    raise SystemExit('MXFP8 TorchAO/MSLK smoke failed')
+print('mxfp8 torchao/mslk: ok')
 
-    nvfp4_layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
-    quantize_(
-        nvfp4_layer,
-        config=NVFP4DynamicActivationNVFP4WeightConfig(
-            use_dynamic_per_tensor_scale=True,
-            use_triton_kernel=True,
-        ),
-        filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
-        device=torch.device('cuda'),
-    )
-    nvfp4_out = nvfp4_layer(sample)
-    torch.cuda.synchronize()
-    if nvfp4_out.dtype != torch.bfloat16 or not torch.isfinite(nvfp4_out).all():
-        raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
-    print('nvfp4 torchao/mslk: ok')
+nvfp4_layer = torch.nn.Linear(1024, 1024, bias=False).cuda().bfloat16().eval()
+quantize_(
+    nvfp4_layer,
+    config=NVFP4DynamicActivationNVFP4WeightConfig(
+        use_dynamic_per_tensor_scale=True,
+        use_triton_kernel=True,
+    ),
+    filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear),
+    device=torch.device('cuda'),
+)
+nvfp4_out = nvfp4_layer(sample)
+torch.cuda.synchronize()
+if nvfp4_out.dtype != torch.bfloat16 or not torch.isfinite(nvfp4_out).all():
+    raise SystemExit('NVFP4 TorchAO/MSLK smoke failed')
+print('nvfp4 torchao/mslk: ok')
 
 # A1111 application modules are intentionally not imported here: API and
 # sampler/model modules require the normal WebUI bootstrap (opts, model state,

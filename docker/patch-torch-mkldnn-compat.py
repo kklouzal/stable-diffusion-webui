@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import py_compile
 import subprocess
 import sys
 
@@ -26,6 +27,8 @@ def main() -> int:
             raise SystemExit(f"expected torch.jit.script_method decorators not found in {target}")
     else:
         target.write_text(patched, encoding="utf-8")
+        # A stale timestamp pyc would be recompiled in memory on every start (the runtime user cannot rewrite it).
+        py_compile.compile(str(target), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
         print(f"Patched torch.jit script_method decorators in {target}")
 
     subprocess.run(

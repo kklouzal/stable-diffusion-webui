@@ -28,7 +28,9 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 ### Images kept for rollback
 
-Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`.
+Roll back with `IMAGE_TAG=local/gb10-a1111:<tag> gb10/run.sh`. These images predate the provenance labels, so also set
+`A1111_COMMIT_HASH` and `A1111_VERSION_TAG` to the image's commit and that commit's `git describe --tags`
+([launch/README.md](launch/README.md#deploy-gb10runsh)).
 
 | Tag | Image ID | Contents |
 |---|---|---|
@@ -70,7 +72,7 @@ table. The host-owned surfaces are:
 - the model directories `BLIP`, `CLIP`, `Codeformer`, `GFPGAN`, `karlo`, `RealESGRAN`, `torch_deepdanbooru`, `VAE` and
   `VAE-approx`
 - `Extensions/`
-- `Caches/compile/`
+- `Caches/app/` (the app's `cache/`, with torch.hub and Hugging Face downloads) and `Caches/compile/`
 - `Embeddings/`, `Hypernetworks/`, `Lora/` and `Outputs/`, which are symlinks into `/mnt/nas-warehouse/StableDiffusion/`
 
 The host root also has directories that run.sh does not mount. They are leftovers from earlier layouts, and nothing in

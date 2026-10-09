@@ -196,7 +196,7 @@ COPY docker/assert-resolved-package.py /opt/build/assert-resolved-package.py
 RUN --mount=type=cache,id=gb10-global-pip,target=/root/.cache/pip,sharing=locked \
     rustc --version \
     && cargo --version \
-    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-names-file /opt/build/base-python-protected-names.txt \
+    && python /opt/build/prepare-resolver-input.py --source /opt/build/requirements-image.txt --target /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides --include /opt/build/requirements-sd-webui-controlnet-image.txt --protected-constraints-file /opt/build/base-python-protected-constraints.txt \
     && python /opt/build/patch-headless-opencv-wheels.py --requirements /opt/build/requirements-resolver.txt --wheel-dir /opt/build/resolve-wheel-overrides \
     && python /opt/build/create-protected-package-stubs.py --constraints /opt/build/base-python-protected-constraints.txt --wheel-dir /opt/build/protected-resolver-stubs --requirements-out /opt/build/protected-resolver-stubs.txt --released-floors /opt/build/base-python-released-floors.txt --dependents-out /opt/build/protected-resolver-dependents.txt \
     && python -m venv /opt/build/resolver-venv \
@@ -301,6 +301,12 @@ ENV A1111_HOME=/opt/stable-diffusion-webui
 ENV GB10_A1111_CLIP_VIT_LARGE_PATCH14_PATH=/opt/gb10/hf-cache/openai-clip-vit-large-patch14
 ENV A1111_RUN_AS_USER=a1111
 ENV COMMANDLINE_ARGS=
+# stdout is a pipe in the container: unbuffered, log lines reach `docker logs` when written, in order with stderr.
+ENV PYTHONUNBUFFERED=1
+# torch.hub and Hugging Face downloads (ControlNet preprocessors such as Depth Anything) go under the app's cache/,
+# which gb10/run.sh mounts from the host (Caches/app), so they survive container replacement.
+ENV TORCH_HOME=/opt/stable-diffusion-webui/cache/torch
+ENV HF_HOME=/opt/stable-diffusion-webui/cache/huggingface
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/local/bin/gb10-a1111-entrypoint"]

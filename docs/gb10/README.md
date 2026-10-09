@@ -26,7 +26,12 @@ The design keeps the system reproducible and reviewable:
   `prepare_environment` bootstrap are gone.
 - **Launch path.**
   - The entrypoint (`docker/entrypoint.sh`) creates `tmp/`, `models/ControlNet/` and `models/VAE-approx/`.
-  - It writes `{}` to a missing or empty `config.json` and creates a missing `styles.csv`.
+  - It writes `{}` to a missing `config.json` and creates a missing `styles.csv`. It never rewrites an existing
+    `config.json`.
+  - The app rewrites `config.json` in place and fsyncs it, because rename cannot replace a single-file bind mount
+    (`modules/settings_file.py`). A file it cannot use (truncated, empty, not a JSON object) is reported, copied to
+    `tmp/config.json.corrupt-<UTC time>` and reset to `{}`, so the settings revert to their defaults instead of the
+    container crash-looping. `tmp/` survives restarts of the container but not its replacement.
   - It then drops to user `a1111` (UID/GID 2323) and runs the launcher (`docker/launch-a1111.sh`).
   - The launcher's default flags and the override rules are in [launch/README.md](launch/README.md#launch-flags).
 - **User data** (models, outputs, config, embeddings, extensions) stays on the host. It reaches the container through
@@ -82,6 +87,8 @@ The NGC PyTorch base owns the core framework layer, and later dependency resolut
   NGC version, except the released list below.
 - Resolve the A1111 dependency closure once in the builder stage, against resolver stubs of the protected packages.
   Then prebuild the wheels in that throwaway stage.
+- Drop every requirement on a protected package from the resolver input (`docker/prepare-resolver-input.py`). A
+  version specifier there would never be applied, so the build fails when the protected version does not satisfy it.
 - Install the resolved application set with `--no-deps`. Then fail the build if any protected package changed
   (`docker/check-protected-stack.py`).
 - The build also asserts that `gradio`, `gradio-client`, `opencv-python` and `mediapipe` are absent.

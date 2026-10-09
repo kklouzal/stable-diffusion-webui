@@ -59,8 +59,9 @@ print(json.dumps(events))
 
 
 def test_thread_pools_are_sized_right_after_torch_import():
-    # Fresh interpreter: initialize.imports() up to the pytorch_lightning import, which the probe stops.
-    result = subprocess.run([sys.executable, "-c", IMPORT_ORDER_PROBE], capture_output=True, text=True, check=True, timeout=300)
+    # Fresh interpreter: initialize.imports() up to the pytorch_lightning import, which the probe stops. The test host may
+    # have no CUDA device, which startup refuses without --skip-torch-cuda-test.
+    result = subprocess.run([sys.executable, "-c", IMPORT_ORDER_PROBE, "--skip-torch-cuda-test"], capture_output=True, text=True, check=True, timeout=300)
     events = json.loads(result.stdout.strip().splitlines()[-1])
 
     assert events == [["configure_torch_threads", True], "import pytorch_lightning"]
