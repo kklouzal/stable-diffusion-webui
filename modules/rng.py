@@ -9,14 +9,7 @@ def randn(seed, shape, generator=None):
     Uses the seed parameter to set the global torch seed; to generate more with that seed, use randn_like/randn_without_seed."""
 
     manual_seed(seed)
-
-    if shared.opts.randn_source == "NV":
-        return torch.asarray((generator or nv_rng).randn(shape), device=devices.device)
-
-    if shared.opts.randn_source == "CPU":
-        return torch.randn(shape, device=devices.cpu, generator=generator).to(devices.device)
-
-    return torch.randn(shape, device=devices.device, generator=generator)
+    return randn_without_seed(shape, generator=generator)
 
 
 def randn_local(seed, shape):
@@ -161,8 +154,4 @@ class ImageRNG:
         return torch.stack(xs).to(shared.device)
 
 
-devices.randn = randn
 devices.randn_local = randn_local
-devices.randn_like = randn_like
-devices.randn_without_seed = randn_without_seed
-devices.manual_seed = manual_seed
