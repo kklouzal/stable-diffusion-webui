@@ -7,7 +7,7 @@ from modules import devices
 
 from scripts.adapter import PlugableAdapter, Adapter, StyleAdapter, Adapter_light
 from scripts.controlnet_lllite import PlugableControlLLLite
-from scripts.cldm import PlugableControlModel, controlnet_dtype
+from scripts.cldm import PlugableControlModel
 from scripts.ipadapter.ipadapter_model import IPAdapterModel
 from scripts.ipadapter.plugable_ipadapter import PlugableIPAdapter
 from scripts.logging import logger
@@ -209,10 +209,7 @@ def build_model_by_guess(state_dict, unet, model_path: str) -> ControlModel:
 
         config['use_fp16'] = devices.dtype_unet == torch.float16
 
-        dtype = controlnet_dtype()
-        network = PlugableControlModel(config, state_dict, dtype=dtype)
-        if dtype != devices.dtype_unet:
-            network.control_model.float16_name = Path(model_path).name
+        network = PlugableControlModel(config, state_dict, dtype=devices.dtype_unet)
 
         return ControlModel(network, control_model_type)
 

@@ -43,7 +43,6 @@ import torch
 
 from PIL import Image
 from scripts.lvminthin import lvmin_thin, nake_nms
-from scripts.cldm import PlugableControlModel
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
 from scripts.hook import restore_secondary_hijacks
 
@@ -336,9 +335,7 @@ class Script(scripts.Script, metaclass=(
         # build_model_by_guess adds the UNet's current weights to a 'difference' model's deltas.
         depends_on_checkpoint = 'difference' in state_dict and unet is not None
         control_model = build_model_by_guess(state_dict, unet, model_path)
-        # A checkpoint ControlNet keeps the float16 weights it computes in under a bfloat16 UNet (cldm.controlnet_dtype).
-        if not isinstance(control_model.model, PlugableControlModel) or control_model.model.control_model.float16_name is None:
-            control_model.model.to('cpu', dtype=p.sd_model.dtype)
+        control_model.model.to('cpu', dtype=p.sd_model.dtype)
         logger.info(f"ControlNet model {model}({control_model.type}) loaded.")
         return BuiltControlModel(control_model, checkpoint_revision if depends_on_checkpoint else None)
 
