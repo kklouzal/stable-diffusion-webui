@@ -219,3 +219,17 @@ def test_patched_forward_falls_back_to_original_for_conditioning_kwargs(teacache
 
     torch.testing.assert_close(result, x + 3)
     assert calls == [{"transformer_options": {"control": True}}]
+
+
+def test_infotext_records_the_rescale_fit_only_when_the_cache_can_engage(teacache):
+    script = teacache.TeaCacheScript()
+    p = _processing_with_unet(types.SimpleNamespace())
+    script.process_before_every_sampling(p, True)
+    assert p.extra_generation_params["TeaCache rescale"] == "NoobAI-XL v-pred fit"
+    assert "TeaCache disabled reason" not in p.extra_generation_params
+
+    p = _processing_with_unet(types.SimpleNamespace(_controlnet_forward_hook_owner=object()))
+    script.process_before_every_sampling(p, True)
+    assert p.extra_generation_params["TeaCache disabled reason"] == "external UNet forward hook"
+    assert "TeaCache rescale" not in p.extra_generation_params
+    teacache._set_cache(None)

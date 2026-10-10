@@ -29,7 +29,10 @@ DEFAULT_MAX_CONSECUTIVE = 4
 DEFAULT_START = 0.35
 DEFAULT_END = 0.90
 
-# NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
+# Rescale polynomial upstream TeaCache fit on NoobAI-XL vpred v1.0 and applies to every SDXL-like UNet. It maps the
+# first-block relative L1 change to an estimate of the output change; an eps-prediction model (the production
+# checkpoint) has no fit of its own, so the threshold is calibrated against this v-pred fit. Recorded in infotext.
+SDXL_POLYNOMIAL_FIT = "NoobAI-XL v-pred fit"
 SDXL_POLYNOMIAL_COEFFICIENTS = (
     4.72656327e-03,
     1.09937816e+00,
@@ -414,6 +417,8 @@ class TeaCacheScript(scripts.Script):
             p.extra_generation_params["TeaCache end"] = end
         if disabled_reason:
             p.extra_generation_params["TeaCache disabled reason"] = disabled_reason
+        else:
+            p.extra_generation_params["TeaCache rescale"] = SDXL_POLYNOMIAL_FIT
 
     def postprocess(self, p: processing.StableDiffusionProcessing | None, *args):
         # restore model, clear cache
