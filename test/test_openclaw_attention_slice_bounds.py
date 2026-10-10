@@ -10,7 +10,7 @@ from test.helpers import load_source, module
 
 def _load_sd_hijack_optimizations():
     """modules/sd_hijack_optimizations.py as a private module on stand-ins for shared/devices/hypernetworks and for
-    the ldm/sgm attention classes its optimizers patch (the tests keep set_sdpa_backend from patching them)."""
+    the ldm/sgm attention classes its optimizers patch."""
     def default(value, default_value):
         return value if value is not None else (default_value() if callable(default_value) else default_value)
 
@@ -138,9 +138,8 @@ ALL_FOUR = [opt.SDPBackend.CUDNN_ATTENTION, opt.SDPBackend.FLASH_ATTENTION, opt.
 
 
 @pytest.fixture
-def sdpa_selection(monkeypatch):
-    """Restore the active selection afterwards and keep set_sdpa_backend from patching attention classes."""
-    monkeypatch.setattr(opt.SdOptimizationSdp, "apply", lambda self: None)
+def sdpa_selection():
+    """Restore the active selection afterwards."""
     previous = opt._active_sdpa_backend
     yield
     opt._active_sdpa_backend = previous
@@ -192,6 +191,23 @@ def test_set_sdpa_backend_parses_once_and_keeps_status_contract(sdpa_selection, 
     for _ in range(3):
         opt.run_scaled_dot_product_attention(q, k, v)
         opt.run_scaled_dot_product_attention(q, k, v, sdpa_backend_override="flash,math")
+
+
+@pytest.mark.parametrize("optimization", [None, "Doggettx"])
+def test_set_sdpa_backend_leaves_the_installed_attention_forwards_alone(sdpa_selection, monkeypatch, optimization):
+    # The SDP forwards read the selection per call; installing them here switched a process running another
+    # optimization (or sdp-no-mem) to SDP.
+    classes = [opt.ldm.modules.attention.CrossAttention, opt.ldm.modules.diffusionmodules.model.AttnBlock,
+               opt.sgm.modules.attention.CrossAttention, opt.sgm.modules.diffusionmodules.model.AttnBlock]
+    if optimization is not None:
+        for cls in classes:
+            monkeypatch.setattr(cls, "forward", opt.split_cross_attention_forward if "CrossAttention" in cls.__qualname__ else opt.cross_attention_attnblock_forward)
+    installed = [cls.forward for cls in classes]
+
+    opt.set_sdpa_backend("flash,math")
+
+    assert [cls.forward for cls in classes] == installed
+    assert opt.active_sdpa_backend() == "flash,math"
 
 
 def test_invalid_sdpa_backend_raises_at_set_time_and_keeps_selection(sdpa_selection):
