@@ -80,6 +80,8 @@ Environment overrides:
 | `OPENCLAW_CUDA_GRAPH_CACHE_MAX` | `8` | UNet graph cache size |
 | `OPENCLAW_VAE_DECODE_GRAPHS` | `1` | VAE decode CUDA graphs |
 | `OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX` | `4` | VAE decode graph cache size |
+| `OPENCLAW_GN_FAST_TRANSPOSE` | `1` | GroupNorm's NHWC -> NCHW input copy on a tiled-transpose CUDA kernel, bit-identical (`modules/openclaw_gn_transpose.py`; same default in the code, `0` disables) |
+| `OPENCLAW_LAYOUT_FOLDS` | `1` | elementwise ops write the layout their consumer reads, saving its copy (`modules/openclaw_layout_folds.py`; same default in the code, `0` disables) |
 | `OPENCLAW_WARMUP` | `generation-last` | after startup, replay the last generation once in the background so the first production request is warm (`off` disables; the image default is `off`). See [Startup warm-up](#startup-warm-up) |
 | `PYTORCH_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config: same speed and output, lower reserved peak |
 | `OPENCLAW_COMPILE_CACHE_ROOT` | `${HOST_ROOT}/Caches/compile` | host root of the Inductor, Triton and CUDA kernel caches |

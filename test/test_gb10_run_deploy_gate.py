@@ -289,7 +289,7 @@ def deploy(tmp_path):
                 "READY_TIMEOUT": "60",
                 **env,
             }
-            for name in ("IMAGE_TAG", "A1111_COMMIT_HASH", "A1111_VERSION_TAG", "COMMANDLINE_ARGS"):
+            for name in ("IMAGE_TAG", "A1111_COMMIT_HASH", "A1111_VERSION_TAG", "COMMANDLINE_ARGS", "OPENCLAW_GN_FAST_TRANSPOSE", "OPENCLAW_LAYOUT_FOLDS"):
                 if name not in env:
                     full_env.pop(name, None)
             return full_env
@@ -355,6 +355,8 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
     assert "A1111_COMMIT_HASH=c0ffee" in new["env"]
     assert f"A1111_VERSION_TAG={NEW_LABELS['org.opencontainers.image.version']}" in new["env"]
     assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in new["env"]
+    # The layout switches are passed with the code defaults.
+    assert "OPENCLAW_GN_FAST_TRANSPOSE=1" in new["env"] and "OPENCLAW_LAYOUT_FOLDS=1" in new["env"]
     # The old container was stopped gracefully and set aside, then removed once the new one passed.
     assert ["stop", "-t", "120", "gb10-a1111-latest"] in state["calls"]
     assert ["rename", "gb10-a1111-latest", "gb10-a1111-latest-previous"] in state["calls"]
@@ -376,6 +378,15 @@ def test_a_healthy_image_replaces_the_running_container(deploy):
     for check in (f"test -e {deploy.host}/config/config.json", f"test -d {deploy.host}/Extensions/ext-a",
                   f"test -d {deploy.host}/Extensions/ultimate-upscale-for-automatic1111", f"test -L {deploy.host}/Outputs"):
         assert check in sudo_commands
+
+
+def test_the_caller_can_turn_the_layout_switches_off(deploy):
+    result = deploy.run(OPENCLAW_GN_FAST_TRANSPOSE="0", OPENCLAW_LAYOUT_FOLDS="0")
+
+    assert result.returncode == 0, result.stdout
+    env = deploy.state()["containers"]["gb10-a1111-latest"]["env"]
+    assert "OPENCLAW_GN_FAST_TRANSPOSE=0" in env and "OPENCLAW_LAYOUT_FOLDS=0" in env
+    assert "OpenClaw GroupNorm fast transpose: 0, layout folds: 0" in result.stdout
 
 
 def test_an_outputs_symlink_to_an_unmounted_target_stops_the_deploy_before_anything_changes(deploy, tmp_path):
