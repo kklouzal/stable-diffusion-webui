@@ -21,7 +21,7 @@ def load_plumbing():
     source = ast.parse((ROOT / "modules/api/api.py").read_text())
     api = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "Api")
     methods = [node for node in api.body if isinstance(node, ast.FunctionDef) and node.name in (
-        "init_script_args", "persist_openclaw_denoise_ramp_args")]
+        "init_script_args",)]
     helpers = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in (
         "_set_script_arg", "_assign_script_args")]
     scripts = ast.parse((ROOT / "modules/scripts.py").read_text())
@@ -67,11 +67,17 @@ class ScriptArgumentRangeTests(unittest.TestCase):
                 self.assertEqual(p.script_args[:3], [0, "A0", "B0"])
                 self.assertEqual(defaults, [0, "default-A", "default-B"])
 
-    def test_persisted_defaults_never_overwrite_adjacent_script(self):
+    def test_request_args_never_become_later_defaults(self):
+        # The denoise ramp controller omits the script when its delta is 0: a later request without it must get the
+        # script default, not the previous request's delta.
         ramp = script("OpenClaw Denoise Ramp", 1, 2)
-        defaults = [0, "old", "neighbor"]
-        self.api.persist_openclaw_denoise_ramp_args(defaults, ramp, ["new", "overflow"])
-        self.assertEqual(defaults, [0, "new", "neighbor"])
+        self.api.get_script = lambda name, runner: {"OpenClaw Denoise Ramp": ramp}[name]
+        defaults = [0, 0.0, "neighbor"]
+        first = self.prepare({"OpenClaw Denoise Ramp": {"args": [0.075]}}, defaults=defaults)
+        self.assertEqual(first.script_args[:3], [0, 0.075, "neighbor"])
+        self.assertEqual(defaults, [0, 0.0, "neighbor"])
+        later = self.prepare({}, defaults=defaults)
+        self.assertEqual(later.script_args, [0, 0.0, "neighbor"])
 
     def test_both_overflows_and_empty_default_args_remain_isolated(self):
         p = self.prepare({"A": {"args": ["A0", "A1"]}, "B": {"args": ["B0", "B1"]}})

@@ -1077,14 +1077,6 @@ class Api:
                 script_args[script.args_from:script.args_to] = ui_default_values
         return script_args
 
-    @staticmethod
-    def persist_openclaw_denoise_ramp_args(default_script_args, script, requested_args):
-        if script.title() != "OpenClaw Denoise Ramp":
-            return
-
-        for idx, value in enumerate(requested_args[:script.args_to - script.args_from]):
-            _set_script_arg(default_script_args, script.args_from + idx, value)
-
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
         """(script_args, ranges): the request's script argument vector and the isolated ranges of variable-length
         arguments (see _assign_script_args)."""
@@ -1116,7 +1108,6 @@ class Api:
                         raise HTTPException(status_code=422, detail=f"always on script {alwayson_script_name} args must be a list")
 
                     _assign_script_args(script_args, ranges, alwayson_script, requested_args)
-                    self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
         return script_args, ranges
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
