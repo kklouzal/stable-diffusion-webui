@@ -37,11 +37,11 @@ ENV_NAME = "OPENCLAW_GN_FAST_TRANSPOSE"
 ENABLED = openclaw_env.env_bool(ENV_NAME, False)
 
 _DTYPES = (torch.bfloat16, torch.float16, torch.float32)
-# Tile: 64 channels x 64 pixels (8 KiB bf16, 16 KiB fp32 through shared memory), 4 warps. tools/benchmark_gn_transpose.py
-# sweeps alternatives on the GPU.
-BLOCK_C = 64
-BLOCK_HW = 64
-NUM_WARPS = 4
+# Tile: 128 channels x 128 pixels (32 KiB bf16, 64 KiB fp32 through shared memory), 8 warps: the fastest in the GB10
+# sweep of tools/benchmark_gn_transpose.py at the VAE full-resolution and UNet shapes.
+BLOCK_C = 128
+BLOCK_HW = 128
+NUM_WARPS = 8
 _MAX_GRID_YZ = 65535  # CUDA grid y/z limit: channel tiles and samples
 
 
