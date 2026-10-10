@@ -10,22 +10,19 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 ## Production (checked 2026-10-10)
 
-- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy12-b3c13fe2`, which is also `latest` (image ID
-  `sha256:002d2994ac8c...`, labelled with its revision, version and base digest). Deployed 2026-10-10 from commit
-  `b3c13fe2`. It has the same app code as deploy11 (`739bc58b`, docs-only changes since) and adds the [2026-10-09 correctness, quality and speed pass](notes/correctness-quality-speed-pass-2026-10-09.md)
-  to deploy10's [cleanup pass](notes/cleanup-pass-2026-10-09.md).
-- **Deploy.** It was the first one through the health-gated run.sh. The smoke test passed (CUDA, the 10 expected
-  scripts, the precision map with fp32 text encoders), and deploy10 was removed only afterwards. The deploy log is
-  under `deploy-logs/`.
-- **Live verification** (neutral prompt, the operator's last img2img request):
-  - 11.26 s, the same pixels as the validated candidate (`be72db5a687e8956`).
-  - The candidate's live API tests passed 35/35.
-  - Its UNet/VAE graphs were bit-identical to eager.
-  - Images differ from deploy10 by design: PAG `to_out`, the CLIP-L LoRA keys, fp32 text encoders and VAE input
-    rounding. See the note.
-- **Builds.** `gb10/build.sh` and `gb10/run.sh` from this checkout (branch `latest`). System-Statistics' Rebuild button
-  runs the same two scripts, and its Recreate timeout covers run.sh's health gate (2400 s, System-Statistics
-  `134578f`).
+- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy13-ab236f9b`, which is also `latest` (image ID
+  `sha256:b0cb1162aefd...`, labelled). It was deployed 2026-10-10 from `ab236f9b`, which adds
+  [pass 2](notes/correctness-quality-speed-pass-2-2026-10-10.md) to deploy11/12's
+  [2026-10-09 pass](notes/correctness-quality-speed-pass-2026-10-09.md).
+- **Live verification** (the operator's latest img2img, neutral prompt):
+  - The startup warm-up replayed it in 80 s.
+  - The first request then took 10.42 s, where a first request after a restart used to take 80-100 s.
+  - Median 10.38 s against 11.36 s on deploy12.
+  - The pixels are identical to deploy12: the layout kernels are exact, and the owner kept the established look.
+  - No tracebacks.
+  - `cudnn.benchmark` is off; the controller setting was changed at the owner's request.
+- **Builds.** `gb10/build.sh` and `gb10/run.sh` from this checkout (branch `latest`). System-Statistics' Rebuild and
+  Recreate buttons run the same scripts; Recreate waits up to 2400 s.
 
 ### Images kept for rollback
 
@@ -36,7 +33,8 @@ for them also set `A1111_COMMIT_HASH` and `A1111_VERSION_TAG` to the image's com
 
 | Tag | Image ID | Contents |
 |---|---|---|
-| `deploy12-b3c13fe2` (= `latest`) | `002d2994ac8c` | production: deploy11's code, rebuilt at the docs commit |
+| `deploy13-ab236f9b` (= `latest`) | `b0cb1162aefd` | production: pass 2 (layout kernels, warm-up, lifecycle fixes) |
+| `deploy12-b3c13fe2` | `002d2994ac8c` | deploy11's code, rebuilt at the docs commit |
 | `deploy11-739bc58b` | `66ba864d7c5d` | the 2026-10-09 correctness, quality and speed pass |
 | `deploy10-c22a9794` | `c4dcc49691e9` | the 2026-10-09 cleanup pass on top of deploy9 |
 | `deploy9-75a94f59` | `2708c45d4d9d` | correctness audit + performance pass 2 |
@@ -60,6 +58,8 @@ for them also set `A1111_COMMIT_HASH` and `A1111_VERSION_TAG` to the image's com
   - compile caches under `/opt/gb10/stable-diffusion/Caches/compile`, namespaced by the image stack and the driver
   - app caches and torch.hub/Hugging Face downloads under `/opt/gb10/stable-diffusion/Caches/app`
   - `PYTORCH_ALLOC_CONF=expandable_segments:True`
+  - `OPENCLAW_GN_FAST_TRANSPOSE=1`, `OPENCLAW_LAYOUT_FOLDS=1` (exact GroupNorm layout kernels)
+  - `OPENCLAW_WARMUP=generation-last` (replays the last generation once after a start)
 - **Text encoders** run in fp32 (autocast off, IEEE matmul); the UNet and VAE stay bf16.
 - **NHWC GroupNorm kernels** are off (`/sdapi/v1/openclaw/nhwc-groupnorm`). TeaCache is off by default.
 - **Production settings, read via `GET /sdapi/v1/options` on 2026-10-09:**
