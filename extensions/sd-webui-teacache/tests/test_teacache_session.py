@@ -46,13 +46,13 @@ def test_session_caches_device_tensors_for_hot_path_constants(teacache):
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
     signature = ((1, 2), "torch.float32", "cpu")
     old = torch.ones((1, 2), dtype=torch.float32)
-    session.previous_fb[0] = old
-    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+    session.previous_fb[(signature, 0)] = old
+    session.residuals[(signature, 0)] = torch.zeros((1, 2), dtype=torch.float32)
 
     session.update_condition(old * 1.001, signature)
 
     assert session.use_cache
-    assert session.distances[0].device == old.device
+    assert session.distances[(signature, 0)].device == old.device
     assert session._threshold_tensors[(str(old.device), torch.float32)].device == old.device
     assert session._coefficient_tensors[(str(old.device), torch.float32)].device == old.device
 
@@ -85,26 +85,32 @@ def test_hot_path_sync_constructs_are_explicitly_allowlisted(teacache):
 def test_progress_start_is_exclusive_and_end_is_inclusive(teacache):
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=4, start=0.2, end=0.8, steps=10, initial_step=2)
     signature = ((1,),)
-    session.previous_fb[0] = torch.zeros(1)
-    session.residuals[0] = (signature, torch.ones(1))
+    session.previous_fb[(signature, 0)] = torch.zeros(1)
+    session.residuals[(signature, 0)] = torch.ones(1)
     session.update_condition(torch.zeros(1), signature)
     assert not session.use_cache
 
-    session.current_step = 8
+    session.current_step = 7
+    session.next_step()
     session.update_condition(torch.zeros(1), signature)
     assert session.use_cache
 
 
-def test_session_requires_residual_for_current_call_index(teacache):
+def test_session_requires_residual_for_current_lane(teacache):
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
-    session.use_cache = True
     signature = ((1, 1), "torch.float32", "cpu")
-    session.residuals[0] = (signature, torch.ones((1, 1), dtype=torch.float32))
+    session.residuals[(signature, 0)] = torch.ones((1, 1), dtype=torch.float32)
+    session.previous_fb[(signature, 0)] = torch.zeros((1, 1))
 
-    assert session.current_residual(signature) is not None
-    assert session.current_residual(((2, 1), "torch.float32", "cpu")) is None
-    session.call_index = 1
-    assert session.current_residual(signature) is None
+    session.update_condition(torch.zeros((1, 1)), signature)
+    assert session.lane == (signature, 0)
+    assert session.current_residual() is not None
+    # The second call with this signature in the same step is its own lane, which has no residual yet.
+    session.update_condition(torch.zeros((1, 1)), signature)
+    assert session.lane == (signature, 1)
+    assert session.current_residual() is None
+    session.update_condition(torch.zeros((1, 1)), ((2, 1), "torch.float32", "cpu"))
+    assert session.current_residual() is None
 
 
 def test_session_isolates_cache_by_call_signature(teacache):
@@ -118,22 +124,24 @@ def test_session_isolates_cache_by_call_signature(teacache):
 
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
     old = torch.ones((1, 2), dtype=torch.float32)
-    session.previous_fb[0] = old
-    session.residuals[0] = (other_signature, torch.ones((1, 2), dtype=torch.float32))
+    session.previous_fb[(other_signature, 0)] = old
+    session.residuals[(other_signature, 0)] = torch.ones((1, 2), dtype=torch.float32)
     session.update_condition(old * 1.01, signature)
 
     assert not session.use_cache
-    session.store_current_residual(signature, torch.full((1, 2), 3.0))
-    session.use_cache = True
-    assert torch.equal(session.current_residual(signature), torch.full((1, 2), 3.0))
-    assert session.current_residual(other_signature) is None
+    session.store_current_residual(torch.full((1, 2), 3.0))
+    session.next_step()
+    session.update_condition(old * 1.01, signature)
+    assert torch.equal(session.current_residual(), torch.full((1, 2), 3.0))
+    session.update_condition(old * 1.01, other_signature)
+    assert torch.equal(session.current_residual(), torch.ones((1, 2)))
 
 
 def test_session_window_and_max_consecutive_are_quality_guards(teacache):
     signature = ((1, 2), "torch.float32", "cpu")
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=1, start=0.25, end=0.75, steps=4, initial_step=1)
-    session.previous_fb[0] = torch.ones((1, 2), dtype=torch.float32)
-    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+    session.previous_fb[(signature, 0)] = torch.ones((1, 2), dtype=torch.float32)
+    session.residuals[(signature, 0)] = torch.zeros((1, 2), dtype=torch.float32)
 
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert not session.use_cache
@@ -141,7 +149,7 @@ def test_session_window_and_max_consecutive_are_quality_guards(teacache):
     session.next_step()
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert session.use_cache
-    assert session.consecutive_hits == {0: 1}
+    assert session.consecutive_hits == {(signature, 0): 1}
 
     session.next_step()
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
@@ -152,45 +160,48 @@ def test_session_window_and_max_consecutive_are_quality_guards(teacache):
 def test_session_refreshes_on_nonfinite_distance_and_resets_accumulator(teacache, value):
     signature = ((1, 2), "torch.float32", "cpu")
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
-    session.previous_fb[0] = torch.ones((1, 2), dtype=torch.float32)
-    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+    session.previous_fb[(signature, 0)] = torch.ones((1, 2), dtype=torch.float32)
+    session.residuals[(signature, 0)] = torch.zeros((1, 2), dtype=torch.float32)
 
     session.update_condition(torch.full((1, 2), value, dtype=torch.float32), signature)
 
     assert not session.use_cache
-    assert torch.equal(session.distances[0], torch.zeros((), dtype=torch.float32))
+    assert torch.equal(session.distances[(signature, 0)], torch.zeros((), dtype=torch.float32))
 
 
 def test_session_detaches_first_block_residual_before_distance_math(teacache):
     signature = ((1, 2), "torch.float32", "cpu")
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
-    session.previous_fb[0] = torch.ones((1, 2), dtype=torch.float32)
-    session.residuals[0] = (signature, torch.zeros((1, 2), dtype=torch.float32))
+    session.previous_fb[(signature, 0)] = torch.ones((1, 2), dtype=torch.float32)
+    session.residuals[(signature, 0)] = torch.zeros((1, 2), dtype=torch.float32)
 
     session.update_condition(torch.ones((1, 2), dtype=torch.float32, requires_grad=True), signature)
 
     assert session.use_cache
-    assert not session.previous_fb[0].requires_grad
-    assert not session.distances[0].requires_grad
+    assert not session.previous_fb[(signature, 0)].requires_grad
+    assert not session.distances[(signature, 0)].requires_grad
 
 
 def test_storing_fresh_residual_resets_accumulated_distance(teacache):
     signature = ((1, 2), "torch.float32", "cpu")
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
-    session.distances[0] = torch.tensor(0.75)
+    session.update_condition(torch.ones((1, 2)), signature)
+    session.distances[(signature, 0)] = torch.tensor(0.75)
 
-    session.store_current_residual(signature, torch.ones((1, 2), dtype=torch.float32))
+    session.store_current_residual(torch.ones((1, 2), dtype=torch.float32))
 
-    torch.testing.assert_close(session.distances[0], torch.zeros(()))
+    torch.testing.assert_close(session.distances[(signature, 0)], torch.zeros(()))
 
 
 def test_cached_residual_is_cloned_not_mutable_alias(teacache):
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=4, start=0.0, end=1.0, steps=10)
     signature = ((1,),)
     residual = torch.ones(2)
-    session.store_current_residual(signature, residual)
+    session.update_condition(torch.ones(1), signature)
+    session.store_current_residual(residual)
     residual.add_(10)
-    torch.testing.assert_close(session.current_residual(signature), torch.ones(2))
+    session.use_cache = True
+    torch.testing.assert_close(session.current_residual(), torch.ones(2))
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -203,7 +214,7 @@ def test_previous_first_block_residual_is_an_owned_fp32_copy_with_unchanged_dist
     base = torch.randn(2, 8, 4, 4, generator=gen)
     residuals = [(base + 0.02 * torch.randn(2, 8, 4, 4, generator=gen)).to(dtype) for _ in range(4)]
     session.update_condition(residuals[0], signature)
-    session.store_current_residual(signature, residuals[0])
+    session.store_current_residual(residuals[0])
     previous = residuals[0].clone()
     residuals[0].add_(100)
     expected_distance = torch.zeros(())
@@ -216,9 +227,9 @@ def test_previous_first_block_residual_is_an_owned_fp32_copy_with_unchanged_dist
             rel, torch.tensor(teacache.SDXL_POLYNOMIAL_COEFFICIENTS)
         )
         assert session.use_cache
-        assert session.previous_fb[0].dtype == torch.float32
-        assert session.previous_fb[0].data_ptr() != current.data_ptr()
-        assert torch.equal(session.distances[0], expected_distance)
+        assert session.previous_fb[(signature, 0)].dtype == torch.float32
+        assert session.previous_fb[(signature, 0)].data_ptr() != current.data_ptr()
+        assert torch.equal(session.distances[(signature, 0)], expected_distance)
         previous = current.clone()
         current.add_(100)
 

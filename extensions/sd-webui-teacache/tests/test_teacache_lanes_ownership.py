@@ -18,7 +18,7 @@ class FakeUNet:
     num_classes = "sequential"
 
     def __init__(self):
-        self.deep_calls = []  # (step, lane) of every deep-path evaluation by TeaCache's own forward path
+        self.deep_calls = []  # (step, lane ordinal) of every deep-path evaluation by TeaCache's own forward path
         self.session = None
         self.time_embed = lambda t_emb: t_emb
         self.label_emb = lambda y: y
@@ -37,7 +37,7 @@ class FakeUNet:
 
     def _recorded_deep_block(self, h, emb, ctx):
         cache = self.session
-        self.deep_calls.append((None, None) if cache is None else (cache.current_step, cache.call_index))
+        self.deep_calls.append((None, None) if cache is None else (cache.current_step, cache.lane[1]))
         return self._deep_block(h, emb, ctx)
 
     def reference(self, x, timesteps=None, context=None, y=None, **kwargs):
@@ -134,21 +134,47 @@ def test_every_lane_is_bounded_by_max_consecutive_and_lanes_stay_coherent(teacac
     assert refreshed[1] == [1, 4, 7]
 
 
+def test_alternating_ngms_batch_layouts_each_keep_their_own_lane(teacache):
+    """NGMS drops the uncond on every other step: the cond+uncond batch and the cond-only batch alternate.
+
+    Keyed by call index, call 0 alternated between the two signatures and never hit; keyed by signature, each
+    layout reuses the residual of the last step that ran it.
+    """
+    unet = FakeUNet()
+    _patch(teacache, unet)
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10)
+    unet.session = session
+    teacache._set_cache(session)
+    x, timesteps, y = _inputs()
+    context = torch.zeros(2, 3, 8)
+    layouts = [(x, timesteps, context, y), (x[:1], timesteps[:1], context[:1], y[:1])]
+
+    outputs = []
+    for step in range(6):
+        x_in, t_in, c_in, y_in = layouts[step % 2]
+        outputs.append((unet.forward(x_in, timesteps=t_in, context=c_in, y=y_in), layouts[step % 2]))
+        teacache.next_step()
+
+    # Only the first step of each layout evaluates the deep path; every later step is a cache hit.
+    assert unet.deep_calls == [(1, 0), (2, 0)]
+    for out, (x_in, t_in, c_in, y_in) in outputs:
+        torch.testing.assert_close(out, unet.reference(x_in, timesteps=t_in, context=c_in, y=y_in))
+    assert sorted(lane[0][0][0] for lane in session.residuals) == [(1, 4, 2, 2), (2, 4, 2, 2)]
+
+
 def test_session_counts_hits_per_lane(teacache):
     session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=1, start=0.0, end=1.0, steps=10)
     signature = ((1, 2), "torch.float32", "cpu")
-    for lane in (0, 1):
-        session.call_index = lane
+    for _ in range(2):
         session.update_condition(torch.ones(1, 2), signature)
-        session.store_current_residual(signature, torch.zeros(1, 2))
+        session.store_current_residual(torch.zeros(1, 2))
     session.next_step()
     decisions = []
-    for lane in (0, 1):
-        session.call_index = lane
+    for _ in range(2):
         session.update_condition(torch.ones(1, 2), signature)
         decisions.append(session.use_cache)
     assert decisions == [True, True]
-    assert session.consecutive_hits == {0: 1, 1: 1}
+    assert session.consecutive_hits == {(signature, 0): 1, (signature, 1): 1}
 
 
 class FakeControlNetHook:
