@@ -202,6 +202,7 @@ patch_third_party_extensions() {
   fi
   sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-state-lifecycle.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
   sudo python3 "${PROJECT_ROOT}/gb10/patch-ultimate-upscale-subcanvas.py" "${extensions_root}/ultimate-upscale-for-automatic1111"
+  sudo python3 "${PROJECT_ROOT}/gb10/patch-detail-daemon.py" "${extensions_root}/sd-webui-detail-daemon"
 }
 
 # Mirrors an owned extension tree $1 onto $2, keeping the runtime data and model weights that live inside an
@@ -328,7 +329,7 @@ trap 'exit 143' TERM
 # Rehearse the patchers on a scratch copy of the third-party checkouts while production still runs: nothing under
 # Extensions changes before the live container is stopped, and a source a patcher rejects fails the deploy here.
 echo "Rehearsing the third-party extension patchers on a scratch copy: ${PATCH_REHEARSAL_ROOT}"
-for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111; do
+for third_party_extension in multidiffusion-upscaler-for-automatic1111 ultimate-upscale-for-automatic1111 sd-webui-detail-daemon; do
   if sudo test -d "${HOST_ROOT}/Extensions/${third_party_extension}"; then
     sudo rsync -a --exclude '.git/' --exclude '__pycache__/' \
       "${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"

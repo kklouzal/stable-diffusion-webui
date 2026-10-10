@@ -23,6 +23,8 @@ def test_every_patcher_runs_exactly_once_per_pass_and_every_referenced_patcher_e
     md_guard = function.index('if sudo test -d "${extensions_root}/multidiffusion-upscaler-for-automatic1111"; then')
     assert md_guard < function.index("patch-multidiffusion-performance.py") < function.index("\n  fi\n", md_guard)
     assert function.index("patch-ultimate-upscale-state-lifecycle.py") < function.index("patch-ultimate-upscale-subcanvas.py")
+    # Production requests use Detail Daemon: its patcher runs unconditionally, so a missing checkout fails the deploy.
+    assert function.index("\n  fi\n", md_guard) < function.index("patch-detail-daemon.py")
 
 
 def test_failable_steps_precede_the_teardown_and_mutations_follow_it():
@@ -50,3 +52,8 @@ def test_failable_steps_precede_the_teardown_and_mutations_follow_it():
     on_exit = RUN_SH[RUN_SH.index("on_exit() {"):]
     assert 'sudo rm -rf -- "${SCRATCH_ROOT}"' in on_exit[:on_exit.index("\n}\n")]
     assert '"${HOST_ROOT}/Extensions/${third_party_extension}" "${PATCH_REHEARSAL_ROOT}/"' in rehearsal
+    # Every patched checkout is copied into the rehearsal root.
+    rehearsed = re.search(r"^for third_party_extension in ([\w -]+); do$", rehearsal, flags=re.M).group(1).split()
+    function = RUN_SH[RUN_SH.index("patch_third_party_extensions() {"):]
+    patched = re.findall(r'"\$\{extensions_root\}/([\w-]+)"$', function[:function.index("\n}\n")], flags=re.M)
+    assert sorted(rehearsed) == sorted(set(patched))
