@@ -15,9 +15,9 @@ seed, init image, ControlNet units with their images, every always-on script's a
   no size, see docs/gb10/generation-last-api.md).
 - no outputs: save_images/send_images off, the init-image and ControlNet detected-map autosave options overridden
   off, OpenClaw Multi-Sampler snapshots off, override_settings restored afterwards, and the processing object marked
-  as already captured so generation_last never records the warm-up. The denoise-ramp default persistence of the API
-  path writes into a copy of the default script arguments. A selectable script (script_name) is never replayed: such
-  scripts save images on their own (Ultimate SD Upscale).
+  as already captured so generation_last never records the warm-up. The request runs through the API path, which
+  builds its script arguments from a copy of the Api's defaults and leaves those unchanged. A selectable script
+  (script_name) is never replayed: such scripts save images on their own (Ultimate SD Upscale).
 - labelled: progress task id TASK_ID (`current_task` of /sdapi/v1/progress while it runs).
 
 A snapshot that is missing or not replayable skips the warm-up (logged, state `skipped`). A failing warm-up is not a
@@ -149,8 +149,7 @@ def _generate(api, tabname: str, request: dict[str, Any]):
     img2img = tabname == "img2img"
     model = (models.StableDiffusionImg2ImgProcessingAPI if img2img else models.StableDiffusionTxt2ImgProcessingAPI)(**request)
     script_runner = scripts.scripts_img2img if img2img else scripts.scripts_txt2img
-    # A copy: the API path persists denoise-ramp arguments into the defaults it is given.
-    default_script_args = list(api.default_script_arg_img2img if img2img else api.default_script_arg_txt2img)
+    default_script_args = api.default_script_arg_img2img if img2img else api.default_script_arg_txt2img
 
     @api_module.decode_inline_images_once
     def run():
@@ -173,7 +172,8 @@ def _generate(api, tabname: str, request: dict[str, Any]):
 
 
 def run(api, load_snapshot=None) -> None:
-    """One warm-up, on the calling thread: build the request, then hold queue_lock while it runs. Never raises."""
+    """One warm-up, on the calling thread: build the request, then hold queue_lock while it runs. Always leaves a final
+    state (succeeded, skipped or failed); raises only a BaseException that is not an Exception, after recording it."""
     from modules import errors, generation_last, shared
 
     tabname = request = None
@@ -185,9 +185,11 @@ def run(api, load_snapshot=None) -> None:
         print(f"OpenClaw warm-up skipped: {reason}")
         _set_status(state="skipped", error=str(reason), finished_at=_utc_now())
         return
-    except Exception as error:
+    except BaseException as error:
         errors.report("OpenClaw warm-up failed: the last-generation snapshot could not be turned into a request", exc_info=True)
         _set_status(state="failed", error=f"{type(error).__name__}: {error}", finished_at=_utc_now())
+        if not isinstance(error, Exception):
+            raise
         return
 
     with api.queue_lock:
@@ -200,10 +202,15 @@ def run(api, load_snapshot=None) -> None:
                 raise RuntimeError("the warm-up generation was interrupted")
             if not getattr(processed, "images", None):
                 raise RuntimeError("the warm-up generation returned no images")
-        except Exception as error:
+        except BaseException as error:
+            # Every failure ends the `running` state (GET /sdapi/v1/openclaw/warmup and the deploy smoke test wait
+            # for a final one); only an Exception is absorbed, a BaseException (KeyboardInterrupt, SystemExit, a
+            # thread-killing exception) propagates once it is recorded.
             seconds = round(time.perf_counter() - started, 3)
             errors.report(f"OpenClaw warm-up failed after {seconds} s replaying the last {tabname} generation (request: {status()['request']})", exc_info=True)
             _set_status(state="failed", error=f"{type(error).__name__}: {error}", finished_at=_utc_now(), seconds=seconds)
+            if not isinstance(error, Exception):
+                raise
             return
         seconds = round(time.perf_counter() - started, 3)
         _set_status(state="succeeded", finished_at=_utc_now(), seconds=seconds)

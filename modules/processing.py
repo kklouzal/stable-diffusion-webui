@@ -1137,6 +1137,7 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
     p._generation_last_snapshot = None
     p._skipped_a_batch = False
     stored_opts = None
+    failure = None  # the exception process_images is raising, once there is one
     script_runner = p.scripts
     previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
 
@@ -1157,6 +1158,7 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             res = process_images_inner(p)
 
     except BaseException as e:
+        failure = e
         # Scripts remove their per-request hooks (UNet/VAE patches, sampler wrappers, CFG callbacks) in
         # postprocess_batch/postprocess, which a failed generation never reached; left installed they would
         # change the next request. Runs before extra networks and override settings are restored, as on success.
@@ -1165,18 +1167,30 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
         raise
 
     finally:
+        # The script lifecycle ends whatever the cleanup does. A restore failure is raised when nothing else is;
+        # otherwise it is reported and attached to the propagating exception as a note, never replacing it.
         try:
-            active_extra_network_data = p._active_extra_network_data
-            if active_extra_network_data is not None:
-                extra_networks.deactivate(p, active_extra_network_data)
+            try:
+                active_extra_network_data = p._active_extra_network_data
+                if active_extra_network_data is not None:
+                    extra_networks.deactivate(p, active_extra_network_data)
+            except BaseException as e:
+                failure = e
+                raise
+            finally:
+                p._active_extra_network_data = None
+                sd_models.apply_token_merging(p.sd_model, 0)
+
+                # restore opts to original state
+                try:
+                    if p.override_settings_restore_afterwards and stored_opts is not None:
+                        restore_processing_override_settings(stored_opts)
+                except Exception as restore_failure:
+                    if failure is None:
+                        raise
+                    errors.display(restore_failure, "restoring override settings after a failed generation")
+                    failure.add_note(f"restoring override settings after this failure also failed: {type(restore_failure).__name__}: {restore_failure}")
         finally:
-            p._active_extra_network_data = None
-            sd_models.apply_token_merging(p.sd_model, 0)
-
-            # restore opts to original state
-            if p.override_settings_restore_afterwards and stored_opts is not None:
-                restore_processing_override_settings(stored_opts)
-
             if script_runner is not None:
                 script_runner.end_generation(p, previous_script_lifecycle)
 

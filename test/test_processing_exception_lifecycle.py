@@ -182,3 +182,81 @@ def test_last_generation_snapshot_is_built_in_the_inner_loop_and_not_persisted_t
     calls = {ast.unparse(node.func) for node in ast.walk(inner) if isinstance(node, ast.Call)}
     assert "generation_last.snapshot_or_report" in calls
     assert not calls & {"generation_last.persist_or_report", "generation_last.capture_or_report", "generation_last.capture_completed_generation"}
+
+
+class _ScriptRunner:
+    def __init__(self, events):
+        self.events = events
+
+    def begin_generation(self, processing):
+        return "previous-lifecycle"
+
+    def before_process(self, processing):
+        pass
+
+    def cleanup_failed_generation(self, processing, primary, make_batch_images, make_processed):
+        self.events.append(("script-cleanup", type(primary).__name__))
+
+    def end_generation(self, processing, previous):
+        self.events.append(("end-generation", previous))
+
+
+class _RestoreFailure(RuntimeError):
+    pass
+
+
+def _process_images_with_failing_restore(events, *, generation_fails, deactivation_fails):
+    def process_images_inner(processing):
+        processing._active_extra_network_data = {"lora": ["example"]}
+        if generation_fails:
+            raise ValueError("generation failed")
+        return "result"
+
+    def deactivate(processing, data):
+        events.append("deactivate")
+        if deactivation_fails:
+            raise KeyError("deactivation failed")
+
+    def restore(stored):
+        events.append("restore-overrides")
+        raise _RestoreFailure("restore failed")
+
+    return _load_process_images(
+        store_processing_override_settings=lambda processing: {"stored": True},
+        apply_processing_override_settings=lambda processing: None,
+        restore_processing_override_settings=restore,
+        process_images_inner=process_images_inner,
+        sd_models=SimpleNamespace(apply_token_merging=lambda model, ratio: None),
+        sd_samplers=SimpleNamespace(fix_p_invalid_sampler_and_scheduler=lambda processing: None),
+        profiling=SimpleNamespace(Profiler=nullcontext),
+        extra_networks=SimpleNamespace(deactivate=deactivate),
+        errors=SimpleNamespace(display=lambda e, task: events.append(("reported", type(e).__name__, task))),
+        generation_last=SimpleNamespace(persist_or_report=lambda processing, snapshot: events.append("persist")),
+    )
+
+
+def _processing(events):
+    return SimpleNamespace(scripts=_ScriptRunner(events), sd_model=object(), override_settings_restore_afterwards=True, get_token_merging_ratio=lambda: 0.5)
+
+
+@pytest.mark.parametrize(("generation_fails", "deactivation_fails", "primary"), [(True, False, ValueError), (False, True, KeyError), (True, True, KeyError)])
+def test_a_failing_restore_is_a_note_on_the_propagating_failure_and_the_script_lifecycle_still_ends(generation_fails, deactivation_fails, primary):
+    events = []
+    process_images = _process_images_with_failing_restore(events, generation_fails=generation_fails, deactivation_fails=deactivation_fails)
+
+    with pytest.raises(primary) as raised:
+        process_images(_processing(events))
+
+    assert raised.value.__notes__ == ["restoring override settings after this failure also failed: _RestoreFailure: restore failed"]
+    assert events[-3:] == ["restore-overrides", ("reported", "_RestoreFailure", "restoring override settings after a failed generation"), ("end-generation", "previous-lifecycle")]
+    assert "persist" not in events
+
+
+def test_a_failing_restore_after_a_clean_generation_is_raised_and_the_script_lifecycle_still_ends():
+    events = []
+    process_images = _process_images_with_failing_restore(events, generation_fails=False, deactivation_fails=False)
+
+    with pytest.raises(_RestoreFailure):
+        process_images(_processing(events))
+
+    assert events == ["deactivate", "restore-overrides", ("end-generation", "previous-lifecycle")]

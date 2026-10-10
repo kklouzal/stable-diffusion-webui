@@ -342,15 +342,21 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.extra_params = []
 
     def _bind_request_chain(self, p) -> None:
-        """Run the chain this request first resolved for the sampler name, not the registry's current one.
+        """Run the chain this request first resolved for the chain name, not the registry's current one.
 
         The chain routes re-register chains from API calls that do not wait for queue_lock, and a sampler is created
         again for every batch, the hires pass and by scripts (Dynamic Thresholding): a chain saved mid-request would
-        otherwise run from the next batch or the hires pass on. The first sampler created for a name records its
-        config and definition on p; later ones for that name take them over."""
+        otherwise run from the next batch or the hires pass on. The first sampler created for a chain records its
+        definition and the sampler options derived from it on p; later ones for that chain take them over.
+
+        The key is the chain's own name: Dynamic Thresholding registers a renamed copy of the sampler per batch
+        ("<chain>_dynthres<N>"), so config.name differs between batches of one request. The current config keeps its
+        name and constructor (the renamed sampler's); only its chain-derived options are replaced."""
         chains = p.__dict__.setdefault("openclaw_multi_sampler_chains", {})
-        self.config, definition = chains.setdefault(self.config.name, (self.config, self.definition))
+        definition, options = chains.setdefault(self.definition["name"], (self.definition, self.config.options))
         self.definition = dict(definition)
+        if self.config.options is not options:
+            self.config = self.config._replace(options=options)
 
     def _sigmas_for_scheduler(self, p, steps: int, sampler_name: str, scheduler_name: str) -> torch.Tensor:
         """The full schedule of one stage's scheduler, from the core get_sigmas.

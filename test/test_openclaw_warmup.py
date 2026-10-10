@@ -143,7 +143,7 @@ def test_run_holds_queue_lock_and_marks_the_processing_object_captured(fresh_sta
     assert tabname == "img2img" and task_id == openclaw_warmup.TASK_ID
     assert model.save_images is False and model.send_images is False and model.override_settings_restore_afterwards is True
     assert model.prompt == "warm-up <lora:alpha:0.5> <lora:beta>" and (model.width, model.height) == (96, 64)
-    assert default_args == api.default_script_arg_img2img and default_args is not api.default_script_arg_img2img
+    assert default_args is api.default_script_arg_img2img  # the API path copies it (init_script_args)
     assert update == {"mask": None} and extra_pop == ("include_init_images",)
     assert [image.size for image in p.init_images] == [(96, 64)]
     # generation_last records nothing for this processing object, built or persisted.
@@ -208,6 +208,25 @@ def test_a_failed_warmup_is_reported_with_its_traceback_and_releases_the_lock(fr
         pass
 
 
+@pytest.mark.parametrize("phase", ["request", "generation"])
+def test_a_base_exception_is_recorded_as_failed_then_propagates(fresh_status, capsys, phase):
+    """A BaseException must not leave the status `running`/`pending`: the deploy smoke test waits for a final state."""
+    events = []
+    api = _api(events, fail=KeyboardInterrupt("stop") if phase == "generation" else None)
+
+    def interrupted_snapshot():
+        raise KeyboardInterrupt("stop")
+
+    with pytest.raises(KeyboardInterrupt):
+        openclaw_warmup.run(api, load_snapshot=_snapshot if phase == "generation" else interrupted_snapshot)
+
+    status = openclaw_warmup.status()
+    assert status["state"] == "failed" and status["error"] == "KeyboardInterrupt: stop" and status["finished_at"]
+    assert (status["seconds"] is not None) == (phase == "generation")
+    assert "OpenClaw warm-up failed" in capsys.readouterr().err
+    assert api.queue_lock._owner is None
+
+
 def test_a_missing_snapshot_skips_without_taking_the_lock(fresh_status, capsys):
     events = []
     api = _api(events)
@@ -257,7 +276,7 @@ def test_install_registers_the_status_route_and_starts_only_when_enabled(fresh_s
 def test_the_real_api_generation_path_gets_a_saveless_restoring_uncaptured_request(fresh_status, monkeypatch):
     """The real Api request preparation and generation task (process_images stubbed on CPU): the processing object
     saves nothing, restores its overrides, is never captured by generation_last, runs as TASK_ID under queue_lock, and
-    the denoise-ramp default persistence does not reach the Api's defaults."""
+    the Api's default script arguments stay unchanged."""
     from modules import generation_last, progress
     from modules.api import api as api_module
 

@@ -97,9 +97,11 @@ def lora_networks(monkeypatch):
 def default_runtime(monkeypatch):
     """The production state sd_hijack_unet's bf16-native path expects: no upcast, no quantized storage, no functional
     LoRA, no hypernetworks, switch on. Its users put repositories/ on sys.path before importing sd_hijack_unet."""
-    from modules import devices, sd_hijack_unet
+    from modules import devices, openclaw_layout_folds, sd_hijack_unet
 
     monkeypatch.setattr(sd_hijack_unet, "UNET_BF16_NATIVE_NORMS", True)
-    monkeypatch.setattr(sd_hijack_unet, "shared", SimpleNamespace(opts=SimpleNamespace(lora_functional=False), loaded_hypernetworks=[]))
+    runtime_shared = SimpleNamespace(opts=SimpleNamespace(lora_functional=False), loaded_hypernetworks=[])
+    monkeypatch.setattr(sd_hijack_unet, "shared", runtime_shared)
+    monkeypatch.setattr(openclaw_layout_folds, "shared", runtime_shared)
     for flag in ("unet_needs_upcast", "fp8", "mxfp8", "nvfp4"):
         monkeypatch.setattr(devices, flag, False)

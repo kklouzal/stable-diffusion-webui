@@ -4,6 +4,7 @@ import ast
 import importlib.util
 import sys
 import types
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def _core_source(names, namespace):
     tree = ast.parse(path.read_text(encoding="utf8"))
     body = [
         node for node in tree.body
-        if (isinstance(node, ast.FunctionDef) and node.name in names)
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names)
         or (isinstance(node, ast.Assign) and any(getattr(target, "id", None) in names for target in node.targets))
     ]
     assert len(body) == len(names)
@@ -41,13 +42,6 @@ def _install_a1111_stubs(monkeypatch) -> None:
             setattr(mod, key, value)
         monkeypatch.setitem(sys.modules, name, mod)
         return mod
-
-    class SamplerData:
-        def __init__(self, name, constructor, aliases=None, options=None):
-            self.name = name
-            self.constructor = constructor
-            self.aliases = aliases or []
-            self.options = options or {}
 
     class FakeSamplerConfig:
         def __init__(self, name, options=None):
@@ -98,11 +92,14 @@ def _install_a1111_stubs(monkeypatch) -> None:
     module("modules.script_loading", loaded_scripts={})
     module("modules.scripts", Script=object, AlwaysVisible=object())
     opts = types.SimpleNamespace(s_churn=0.0, s_tmin=0.0, s_tmax=0.0, s_noise=1.0, sgm_noise_multiplier=False)
-    core = _core_source(("sigma_params_defaults", "sigma_params_infotext", "sigma_params_kwargs"), {"opts": opts})
+    core = _core_source(
+        ("sigma_params_defaults", "sigma_params_infotext", "sigma_params_kwargs", "SamplerDataTuple", "SamplerData"),
+        {"opts": opts, "namedtuple": namedtuple},
+    )
     module(
         "modules.sd_samplers_common",
         sigma_params_kwargs=core["sigma_params_kwargs"],
-        SamplerData=SamplerData,
+        SamplerData=core["SamplerData"],
         InterruptedException=type("InterruptedException", (Exception,), {}),
         setup_img2img_steps=lambda p, steps=None: (steps or p.steps, getattr(p, "t_enc", steps or p.steps)),
         samples_to_images_tensor=lambda latent, approximation=2: latent,
@@ -629,12 +626,49 @@ def test_a_request_keeps_the_chain_it_first_resolved(multi, monkeypatch):
     assert later_batch.definition["samplers"] == ["Heun", "Euler"]  # the registry's chain changed
 
     later_batch._bind_request_chain(p)
-    assert later_batch.config is first_config
+    assert later_batch.config.options is first_config.options and later_batch.config.name == "Multi: oi2"
     assert later_batch.definition == first_batch.definition and later_batch.definition["samplers"] == ["Euler", "DPM2"]
 
     next_request = create_sampler("Multi: oi2")
     next_request._bind_request_chain(types.SimpleNamespace(extra_generation_params={}))
     assert next_request.definition["samplers"] == ["Heun", "Euler"]
+
+
+def test_dynamic_thresholding_batches_keep_the_chain_the_request_resolved(multi, monkeypatch):
+    # Incantations Dynamic Thresholding registers a renamed copy of the chain sampler per batch
+    # ("<chain>_dynthres<N>", via SamplerData._replace) and creates the sampler from it: every batch has another
+    # config.name, so the request's snapshot must be keyed by the chain, not the sampler name.
+    first = {"name": "Multi: oi2", "samplers": ["Euler", "DPM2"], "switch_ats": [1]}
+    monkeypatch.setattr(multi, "_load_custom_defs", lambda: [first])
+    multi._register_definitions()
+    last_id = 0
+
+    def dt_create_sampler():  # DT's make_sampler, then sd_samplers.create_sampler on the renamed sampler
+        nonlocal last_id
+        last_id += 1
+        base = multi.sd_samplers.all_samplers_map["Multi: oi2"]
+        config = base._replace(name=f"Multi: oi2_dynthres{last_id}", constructor=lambda model: base.constructor(model))
+        sampler = config.constructor(None)
+        sampler.config = config
+        return sampler
+
+    p = types.SimpleNamespace(extra_generation_params={})
+    first_batch = dt_create_sampler()
+    first_batch._bind_request_chain(p)
+    first_options = first_batch.config.options
+
+    monkeypatch.setattr(multi, "_load_custom_defs", lambda: [{**first, "samplers": ["Heun", "Euler"], "switch_ats": [2]}])
+    multi._register_definitions()
+    second_batch = dt_create_sampler()
+    assert second_batch.definition["samplers"] == ["Heun", "Euler"]  # the registry's chain changed
+    assert second_batch.config.options != first_options
+
+    second_batch._bind_request_chain(p)
+    assert list(p.openclaw_multi_sampler_chains) == ["Multi: oi2"]
+    assert second_batch.definition == first_batch.definition and second_batch.definition["samplers"] == ["Euler", "DPM2"]
+    assert second_batch.config.options is first_options
+    assert second_batch.config.name == "Multi: oi2_dynthres2" and isinstance(second_batch.config, multi.MultiSamplerData)
+    assert second_batch.config.total_steps(4) == first_batch.config.total_steps(4)
 
 
 def test_a_hires_chain_that_differs_is_recorded_under_hires_keys(multi):
