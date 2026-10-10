@@ -14,7 +14,7 @@ _SANF_KERNEL_CACHE = {}
 # Infotext key recording how PAG SANF treated a replaced CFG combiner. The only combine_denoised override in this
 # tree is Dynamic Thresholding's CustomCFGDenoiser, so a combiner other than the core's is Dynamic Thresholding.
 SANF_NOTE_KEY = "PAG SANF note"
-SANF_NOTE_COMPOSES_DT = "PAG SANF blends the dynamically thresholded CFG"
+SANF_NOTE_OVERRIDES_DT = "Dynamic thresholding overridden by PAG SANF"
 
 
 def is_stock_combiner(combine_denoised):
@@ -183,11 +183,9 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
         so Dynamic Thresholding / CFG-Fix and similar extensions can still
         rescale the base CFG result before PAG is added.
 
-        PAG SANF with the core combiner chooses per cond between its raw CFG
-        and PAG terms. With a replaced combiner (Dynamic Thresholding) the CFG
-        candidate is that combiner's guidance, original_func's result minus
-        uncond, and the PAG candidate the image's summed PAG terms; this is
-        recorded in generation_params under SANF_NOTE_KEY.
+        PAG SANF rebuilds the CFG term from the raw model outputs and discards
+        original_func's result; when original_func is not the core combiner that
+        is recorded in generation_params under SANF_NOTE_KEY.
         """
         pag_params = cfg_dict.get('pag_params')
         if pag_params is None:
@@ -223,22 +221,19 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
         if pag_x_out.shape[0] != n_cond:
                 raise RuntimeError(f"PAG output has {pag_x_out.shape[0]} rows, expected the {n_cond} cond rows of x_out")
 
-        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5 picks, per element, the
-        # CFG or the PAG guidance. With the core combiner each cond's raw CFG term
-        # competes with its PAG term (the stock path, unchanged). A replaced
-        # combiner (Dynamic Thresholding) only yields the image's whole rescaled
-        # guidance, so that competes with the image's summed PAG terms.
+        # Dynamic Thresholding can be composed cleanly with the base CFG path above.
+        # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
+        # blend, so it cannot faithfully preserve a dynamically-thresholded base.
+        # In that case keep the previous SANF behavior and record in the infotext
+        # that the replaced combiner did not apply.
         use_saliency_map = pag_params.pag_sanf
-        sanf_composed = use_saliency_map and not is_stock_combiner(original_func)
-        if sanf_composed:
-                generation_params[SANF_NOTE_KEY] = SANF_NOTE_COMPOSES_DT
-                cfg_guidance = denoised - denoised_uncond
         if use_saliency_map:
+                if not is_stock_combiner(original_func):
+                        generation_params[SANF_NOTE_KEY] = SANF_NOTE_OVERRIDES_DT
                 denoised = denoised_uncond.clone()
 
         ### Add PAG guidance on top of the base CFG result
         for i, conds in enumerate(conds_list):
-                pag_guidance = None
                 for cond_index, weight in conds:
                         pag_delta = x_out[cond_index] - pag_x_out[cond_index]
                         pag_x = pag_delta * (weight * pag_scale)
@@ -248,17 +243,10 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
                                         denoised[i] += pag_x
                                 continue
 
-                        if sanf_composed:
-                                pag_guidance = pag_x if pag_guidance is None else pag_guidance + pag_x
-                                continue
-
+                        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
                         with timing.timed(timings, "combine_sanf_blend"):
                                 model_delta = x_out[cond_index] - denoised_uncond[i]
                                 sal_cfg = _sanf_guidance_blend(model_delta * (weight * cond_scale), pag_x)
                                 denoised[i] += sal_cfg
-
-                if sanf_composed:
-                        with timing.timed(timings, "combine_sanf_blend"):
-                                denoised[i] += _sanf_guidance_blend(cfg_guidance[i], pag_guidance)
 
         return denoised
