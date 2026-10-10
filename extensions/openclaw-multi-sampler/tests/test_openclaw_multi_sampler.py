@@ -603,3 +603,59 @@ def test_disabled_snapshots_ignore_the_directory(multi, snapshot_root):
     p = types.SimpleNamespace()
     multi.OpenClawMultiSamplerScript().process(p, enabled=False, snapshot_dir="/tmp/elsewhere")
     assert p.openclaw_multi_sampler_snapshots == {"enabled": False}
+
+
+def test_a_request_keeps_the_chain_it_first_resolved(multi, monkeypatch):
+    # The chain routes re-register chains without waiting for queue_lock; a sampler is created again for every batch,
+    # the hires pass and by Dynamic Thresholding. Each must run the chain the request started with.
+    first = {"name": "Multi: oi2", "samplers": ["Euler", "DPM2"], "switch_ats": [1]}
+    monkeypatch.setattr(multi, "_load_custom_defs", lambda: [first])
+    multi._register_definitions()
+
+    def create_sampler(name):  # as sd_samplers.create_sampler does
+        config = multi.sd_samplers.all_samplers_map[name]
+        sampler = config.constructor(None)
+        sampler.config = config
+        return sampler
+
+    p = types.SimpleNamespace(extra_generation_params={})
+    first_batch = create_sampler("Multi: oi2")
+    first_batch._bind_request_chain(p)
+    first_config = first_batch.config
+
+    monkeypatch.setattr(multi, "_load_custom_defs", lambda: [{**first, "samplers": ["Heun", "Euler"]}])
+    multi._register_definitions()
+    later_batch = create_sampler("Multi: oi2")
+    assert later_batch.definition["samplers"] == ["Heun", "Euler"]  # the registry's chain changed
+
+    later_batch._bind_request_chain(p)
+    assert later_batch.config is first_config
+    assert later_batch.definition == first_batch.definition and later_batch.definition["samplers"] == ["Euler", "DPM2"]
+
+    next_request = create_sampler("Multi: oi2")
+    next_request._bind_request_chain(types.SimpleNamespace(extra_generation_params={}))
+    assert next_request.definition["samplers"] == ["Heun", "Euler"]
+
+
+def test_a_hires_chain_that_differs_is_recorded_under_hires_keys(multi):
+    p = types.SimpleNamespace(is_hr_pass=False, extra_generation_params={})
+    first_pass = {"Sampler chain": "Euler@0-2 -> DPM2@2-4", "Sampler chain scheduler": "karras"}
+    multi._record_chain_infotext(p, first_pass)
+
+    p.is_hr_pass = True
+    multi._record_chain_infotext(p, dict(first_pass))  # the same chain: recorded once
+    assert p.extra_generation_params == first_pass
+
+    hires = {"Sampler chain": "Heun@0-3 -> Euler@3-6", "Sampler chain schedulers": "Karras -> Exponential"}
+    multi._record_chain_infotext(p, hires)
+    assert p.extra_generation_params == {
+        **first_pass,
+        "Hires sampler chain": "Heun@0-3 -> Euler@3-6",
+        "Hires sampler chain schedulers": "Karras -> Exponential",
+    }
+
+
+def test_a_hires_chain_after_a_plain_first_pass_is_recorded_under_hires_keys(multi):
+    p = types.SimpleNamespace(is_hr_pass=True, extra_generation_params={"Sampler": "Euler"})
+    multi._record_chain_infotext(p, {"Sampler chain": "Heun@0-3 -> Euler@3-6"})
+    assert p.extra_generation_params == {"Sampler": "Euler", "Hires sampler chain": "Heun@0-3 -> Euler@3-6"}

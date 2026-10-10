@@ -189,6 +189,13 @@ def _attention_identity(vae: Any) -> tuple[Any, ...]:
     return (forward, optimizations.active_sdpa_backend() if optimizations is not None else None)
 
 
+def execution_identity(vae: Any) -> tuple[Any, ...]:
+    """What a VAE pass (decode or encode) computes with beyond its weights and hooks: the options it reads per call
+    (_option_identity) and the installed attention implementation (_attention_identity; the encoder uses the same
+    AttnBlock class). The img2img init latent cache (modules/processing.py) keys its encodes on it too."""
+    return (_option_identity(), _attention_identity(vae))
+
+
 def _runtime_identity(model: Any) -> tuple[Any, ...]:
     info = getattr(model, "sd_checkpoint_info", None)
     model_identity = (
@@ -278,8 +285,7 @@ def _key(model: Any, x: torch.Tensor) -> tuple[Any, ...]:
         "vae_cuda_graph",
         _runtime_identity(model),
         _tensor_key(x),
-        _option_identity(),
-        _attention_identity(model.first_stage_model),
+        execution_identity(model.first_stage_model),
         _mutation_epochs(),
     )
 

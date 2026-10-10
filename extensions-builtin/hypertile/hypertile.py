@@ -313,6 +313,16 @@ def self_attn_forward(params: HypertileParams, scale_depth=True) -> Callable:
     return wrapper
 
 
+def class_forward(module: nn.Module) -> Callable:
+    """module's class forward, looked up on every call. sd_hijack installs the cross-attention optimization's forward on
+    the class and replaces it when the optimization changes; a bound method stored at hook time kept calling the
+    previous one. A forward another patch set on the instance is wrapped as it is instead."""
+    def forward(*args, **kwargs):
+        return type(module).forward(module, *args, **kwargs)
+
+    return forward
+
+
 def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_size_max=128, swap_size=1, max_depth=3, is_sdxl=False):
     hypertile_layers = getattr(model, "__webui_hypertile_layers", None)
     if hypertile_layers is None:
@@ -327,7 +337,7 @@ def hypertile_hook_model(model: nn.Module, width, height, *, enable=False, tile_
                 if any(layer_name.endswith(try_name) for try_name in layers[depth]):
                     params = HypertileParams()
                     module.__webui_hypertile_params = params
-                    params.forward = module.forward
+                    params.forward = module.__dict__.get("forward") or class_forward(module)
                     params.depth = depth
                     params.layer_name = layer_name
                     module.forward = self_attn_forward(params)

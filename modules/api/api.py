@@ -78,8 +78,14 @@ _CONTROLNET_UNIT_IMAGE_FIELDS = ("image", "input_image", "mask", "mask_image", "
 def _validate_override_settings(override_settings, opts) -> None:
     """Reject, as a malformed request (422) before the job starts, override_settings that opts.set(is_api=True) would
     refuse once the generation runs (it raised there as a 500): an unknown option, or a value whose type differs from
-    the option's default (int and float interchangeable, None accepted). API-restricted options stay ignored."""
+    the option's default (int and float interchangeable, None accepted). API-restricted options stay ignored.
+    A checkpoint or VAE that is not available is a 422 too: the generation would otherwise replace it silently (the
+    configured checkpoint, no VAE). Checkpoints resolve as POST /options resolves them (checkpoint_aliases)."""
     for key, value in (override_settings or {}).items():
+        if key == "sd_model_checkpoint" and not (isinstance(value, str) and value in sd_models.checkpoint_aliases):
+            raise HTTPException(status_code=422, detail=f"override_settings: option 'sd_model_checkpoint': checkpoint {value!r} not found")
+        if key == "sd_vae" and not (isinstance(value, str) and value in shared_items.sd_vae_items()):
+            raise HTTPException(status_code=422, detail=f"override_settings: option 'sd_vae': VAE {value!r} not found")
         if opts.data.get(key) == value:
             continue  # opts.set leaves an unchanged value alone before looking the option up
         if key not in opts.data_labels:
@@ -1077,14 +1083,6 @@ class Api:
                 script_args[script.args_from:script.args_to] = ui_default_values
         return script_args
 
-    @staticmethod
-    def persist_openclaw_denoise_ramp_args(default_script_args, script, requested_args):
-        if script.title() != "OpenClaw Denoise Ramp":
-            return
-
-        for idx, value in enumerate(requested_args[:script.args_to - script.args_from]):
-            _set_script_arg(default_script_args, script.args_from + idx, value)
-
     def init_script_args(self, request, default_script_args, selectable_scripts, selectable_idx, script_runner, *, input_script_args=None):
         """(script_args, ranges): the request's script argument vector and the isolated ranges of variable-length
         arguments (see _assign_script_args)."""
@@ -1116,7 +1114,6 @@ class Api:
                         raise HTTPException(status_code=422, detail=f"always on script {alwayson_script_name} args must be a list")
 
                     _assign_script_args(script_args, ranges, alwayson_script, requested_args)
-                    self.persist_openclaw_denoise_ramp_args(default_script_args, alwayson_script, requested_args)
         return script_args, ranges
 
     def apply_infotext(self, request, tabname, *, script_runner=None, mentioned_script_args=None):
@@ -1426,15 +1423,10 @@ class Api:
         shared.state.skip()
 
     def get_config(self):
-        options = {}
-        for key in shared.opts.data.keys():
-            metadata = shared.opts.data_labels.get(key)
-            if(metadata is not None):
-                options.update({key: shared.opts.data.get(key, shared.opts.data_labels.get(key).default)})
-            else:
-                options.update({key: shared.opts.data.get(key, None)})
-
-        return options
+        # One copy of the stored options (every key read its own stored value before, too): a generation thread
+        # setting override_settings may insert a key, and iterating the live dict then raised "dictionary changed
+        # size during iteration". dict() copies a dict without running Python code, so no other thread interleaves.
+        return dict(shared.opts.data)
 
     def set_config(self, req: dict[str, Any]):
         """Apply settings between generations (queue_lock): a concurrent POST used to change shared.opts while a

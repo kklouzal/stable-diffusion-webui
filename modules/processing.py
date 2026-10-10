@@ -18,7 +18,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last, openclaw_cuda_graphs, openclaw_vae_decode_graphs
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
@@ -1060,29 +1060,70 @@ def store_processing_override_settings(p: StableDiffusionProcessing):
     return {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data_labels}
 
 
+def _override_callbacks(changed_keys, *, reload_checkpoint, reload_vae):
+    """The calls that make the loaded model match changed options, each once: the checkpoint and VAE reloads, then
+    the onchange callback of every other changed option (e.g. cross_attention_optimization re-hijacks the model,
+    fp8_storage and the mxfp8/nvfp4 options reload the weights). The options are set without their callbacks
+    (opts.set(run_callbacks=False)) so that several options sharing a callback run it once."""
+    callbacks = []
+    if reload_checkpoint:
+        callbacks.append(sd_models.reload_model_weights)
+    if reload_vae:
+        callbacks.append(sd_vae.reload_vae_weights)
+    for k in changed_keys:
+        if k in ('sd_model_checkpoint', 'sd_vae'):
+            continue
+        onchange = opts.data_labels[k].onchange
+        if onchange is not None and onchange not in callbacks:
+            callbacks.append(onchange)
+    return callbacks
+
+
 def apply_processing_override_settings(p: StableDiffusionProcessing):
+    """Sets p.override_settings and applies them to the loaded model (see _override_callbacks). They are applied
+    whole or not at all: if setting an option or applying it fails, every option the request set is restored
+    (restore_processing_override_settings) and the failure propagates, so a checkpoint that fails to load is not
+    left configured for every later request."""
     # if no checkpoint override or the override checkpoint can't be found, remove override entry and load opts checkpoint
     # and if after running refiner, the refiner model is not unloaded - webui swaps back to main model here, if model over is present it will be reloaded afterwards
     if sd_models.checkpoint_aliases.get(p.override_settings.get('sd_model_checkpoint')) is None:
         p.override_settings.pop('sd_model_checkpoint', None)
         sd_models.reload_model_weights()
 
-    for k, v in p.override_settings.items():
-        opts.set(k, v, is_api=True, run_callbacks=False)
-
-        if k == 'sd_model_checkpoint':
-            sd_models.reload_model_weights()
-
-        if k == 'sd_vae':
-            sd_vae.reload_vae_weights()
+    previous = store_processing_override_settings(p)
+    try:
+        changed = [k for k, v in p.override_settings.items() if opts.set(k, v, is_api=True, run_callbacks=False)]
+        for callback in _override_callbacks(changed, reload_checkpoint='sd_model_checkpoint' in p.override_settings, reload_vae='sd_vae' in p.override_settings):
+            callback()
+    except BaseException:
+        restore_processing_override_settings(previous)
+        raise
 
 
 def restore_processing_override_settings(stored_opts):
+    """Sets every stored option back first, then applies the changed ones (_override_callbacks; the VAE is reloaded
+    whenever sd_vae is stored). A failing reload or callback therefore cannot leave a later option at the request's
+    value; the first failure is raised once every callback has run. The checkpoint is not reloaded here: the next
+    generation's apply_processing_override_settings loads the configured one."""
+    changed, failures = [], []
     for k, v in stored_opts.items():
-        setattr(opts, k, v)
+        if opts.data.get(k, opts.get_default(k)) == v:
+            continue
+        try:
+            setattr(opts, k, v)
+        except Exception as e:
+            failures.append(e)
+        else:
+            changed.append(k)
 
-        if k == 'sd_vae':
-            sd_vae.reload_vae_weights()
+    for callback in _override_callbacks(changed, reload_checkpoint=False, reload_vae='sd_vae' in stored_opts):
+        try:
+            callback()
+        except Exception as e:
+            failures.append(e)
+
+    if failures:
+        raise RuntimeError(f"restoring settings {list(stored_opts)} failed: {'; '.join(f'{type(e).__name__}: {e}' for e in failures)}") from failures[0]
 
 
 def _failed_batch_images(p):
@@ -1094,6 +1135,7 @@ def _failed_batch_images(p):
 def process_images(p: StableDiffusionProcessing) -> Processed:
     p._active_extra_network_data = None
     p._generation_last_snapshot = None
+    p._skipped_a_batch = False
     stored_opts = None
     script_runner = p.scripts
     previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
@@ -1216,6 +1258,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             p.iteration = n
 
             if state.skipped:
+                # The skipped batch's images are its last latent, decoded: not a completed generation.
+                p._skipped_a_batch = True
                 state.skipped = False
 
             if state.interrupted or state.stopping_generation:
@@ -1719,6 +1763,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         noise = self.rng.next()
 
         if not self.disable_extra_networks:
+            self._active_extra_network_data = self.hr_extra_network_data
             with devices.autocast():
                 extra_networks.activate(self, self.hr_extra_network_data)
 
@@ -1945,6 +1990,11 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         # below holds none of them.
         if self.image_mask is not None or self.latent_mask is not None:
             return "masked_request"
+        # Tiled VAE (VAEHook) replaces encoder.forward per request (in process(), before init); the key cannot see
+        # what that Python override computes.
+        vae = self.sd_model.first_stage_model
+        if openclaw_cuda_graphs.instance_overrides(vae, "encode") or openclaw_cuda_graphs.instance_overrides(vae.encoder, "forward"):
+            return "vae_encoder_override"
         return None
 
     def _img2img_init_cache_key(self, key_images, key_raw_images, repeat_init_latent, add_color_corrections):
@@ -1995,6 +2045,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             str(devices.dtype),
             str(devices.dtype_vae),
             str(shared.device),
+            # upcast_attn, the NHWC GroupNorm scope, the installed AttnBlock forward and the SDPA backend: none is in
+            # the weights, and each changes what the encoder computes.
+            openclaw_vae_decode_graphs.execution_identity(self.sd_model.first_stage_model),
         )
 
     def _restore_img2img_init_cache(self, cache_key, add_color_corrections):

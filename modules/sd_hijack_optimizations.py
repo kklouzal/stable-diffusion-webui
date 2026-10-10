@@ -586,11 +586,13 @@ def active_sdpa_backend() -> str:
 
 
 def set_sdpa_backend(sdpa_backend: str | None = None):
+    """Selects the SDPA backends the SDP attention forwards use. They read the selection on every call
+    (run_scaled_dot_product_attention), so no forward is installed here: that switched a process running another
+    cross-attention optimization (or sdp-no-mem) to the SDP forwards."""
     global _active_sdpa_backend
     _, normalized_sdpa_backend = _normalize_sdpa_backend_choice(sdpa_backend or _active_sdpa_backend)
     _sdpa_backend_selection(normalized_sdpa_backend)  # parse once here; attention calls only hit the cache
     _active_sdpa_backend = normalized_sdpa_backend
-    SdOptimizationSdp().apply()
     return sdpa_backend_status()
 
 

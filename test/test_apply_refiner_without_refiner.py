@@ -1,3 +1,4 @@
+import contextlib
 from types import SimpleNamespace
 
 import torch
@@ -39,7 +40,7 @@ class _CountingSigmas:
 
 
 def _denoiser(inner_model, refiner_checkpoint_info=None, refiner_switch_at=0.8):
-    p = SimpleNamespace(refiner_checkpoint_info=refiner_checkpoint_info, refiner_switch_at=refiner_switch_at, extra_generation_params={})
+    p = SimpleNamespace(refiner_checkpoint_info=refiner_checkpoint_info, refiner_switch_at=refiner_switch_at, extra_generation_params={}, _active_extra_network_data=None)
     return SimpleNamespace(p=p, inner_model=inner_model, step=3, total_steps=10)
 
 
@@ -108,3 +109,49 @@ def test_switch_decision_matches_the_reference_argmin_and_copies_the_table_once(
         reference = (999 - torch.argmin(torch.abs(table - torch.max(batch_sigma)))) / 1000 >= switch_at
         assert switched == bool(reference) == bool(switches)
     assert wrapper.openclaw_cpu_sigmas[0] is table and wrapper.reads == len(queries)
+
+
+class _RecordingNetwork:
+    """An extra network whose activate records the arguments it is active with."""
+
+    def __init__(self):
+        self.active = None
+
+    def activate(self, p, params_list):
+        self.active = list(params_list)
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_the_refiner_stage_runs_with_the_request_extra_networks(monkeypatch, active):
+    # Loading the refiner computes its empty-prompt padding with sd_models.get_empty_cond, which resets every extra
+    # network (extra_networks.activate(dummy_p, {})): the request's LoRAs were dropped for the refiner stage.
+    from modules import extra_networks
+
+    monkeypatch.setitem(shared.opts.data, "refiner_switch_by_sample_steps", True)
+    network = _RecordingNetwork()
+    monkeypatch.setattr(extra_networks, "extra_network_registry", {"lora": network})
+    request_networks = {"lora": ["<lora:style:0.8>"]}
+
+    class TextEncoderModel:
+        def get_learned_conditioning(self, prompts):
+            return {"crossattn": torch.zeros(1)}
+
+    def reload_model_weights(info):  # the load step that resets the networks
+        sd_models.get_empty_cond(TextEncoderModel())
+
+    monkeypatch.setattr(sd_models, "reload_model_weights", reload_model_weights)
+    monkeypatch.setattr(sd_samplers_common.devices, "torch_gc", lambda: None)
+    monkeypatch.setattr(sd_samplers_common.devices, "autocast", contextlib.nullcontext)  # CPU test: no CUDA probe
+    denoiser = _denoiser(None, refiner_checkpoint_info=SimpleNamespace(short_title="refiner"), refiner_switch_at=0.2)
+    denoiser.p.scripts = None
+    denoiser.p._active_extra_network_data = request_networks if active else None
+    seen_by_conds = []
+    denoiser.p.setup_conds = lambda: seen_by_conds.append(network.active)
+    denoiser.update_inner_model = lambda: None
+    network.activate(denoiser.p, request_networks["lora"])
+
+    assert sd_samplers_common.apply_refiner(denoiser) is True
+
+    expected = request_networks["lora"] if active else []
+    assert network.active == expected
+    assert seen_by_conds == [expected]  # the refiner's conds are computed with them
