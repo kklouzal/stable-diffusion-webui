@@ -2,7 +2,7 @@ import contextlib
 from functools import lru_cache
 
 import torch
-from modules import errors, shared
+from modules import errors, openclaw_env, shared
 
 if shared.cmd_opts.use_ipex:
     from modules import xpu_specific
@@ -83,6 +83,20 @@ def enable_tf32():
 
 
 errors.run(enable_tf32, "Enabling TF32")
+
+
+def apply_blas_preference(prefer_cublaslt: bool) -> None:
+    """OPENCLAW_PREFER_CUBLASLT=1 routes torch's CUDA GEMMs through cuBLASLt instead of cuBLAS (default off, A/B knob).
+
+    Output-changing: other GEMM kernels, so other reduction orders. Deterministic: cuBLASLt's heuristic picks one
+    algorithm per shape and configuration, with no autotuning. libtorch's own TORCH_BLAS_PREFER_CUBLASLT=1 does the same
+    but silently ignores any value other than 1/0; this switch uses the openclaw_env grammar, read once at import, so a
+    malformed value fails startup (outside errors.run on purpose)."""
+    if prefer_cublaslt:
+        torch.backends.cuda.preferred_blas_library("cublaslt")
+
+
+apply_blas_preference(openclaw_env.env_bool("OPENCLAW_PREFER_CUBLASLT", False))
 
 cpu: torch.device = torch.device("cpu")
 fp8: bool = False

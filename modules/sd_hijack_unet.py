@@ -4,7 +4,7 @@ import math
 import sgm.modules.diffusionmodules.model as _SGM_VAE
 import sgm.modules.diffusionmodules.util as _sgm_util
 
-from modules import devices, openclaw_fused_geglu, shared, openclaw_nhwc_groupnorm as nhwc_group_norm
+from modules import devices, openclaw_fused_geglu, openclaw_layout_folds, shared, openclaw_nhwc_groupnorm as nhwc_group_norm, openclaw_gn_transpose as gn_transpose
 from modules.sd_hijack_utils import CondFunc
 
 
@@ -195,8 +195,9 @@ def group_norm32_bf16_forward(orig_func, self, x):
     y = unet_nhwc_group_norm(self, x)
     if y is not None:
         return y
+    # ATen's CUDA group_norm copies a channels_last input to NCHW; gn_transpose makes that same copy faster (switch).
     with torch.autocast("cuda", enabled=False):
-        return torch.nn.GroupNorm.forward(self, x)
+        return torch.nn.GroupNorm.forward(self, gn_transpose.for_group_norm(x))
 
 
 class UnetGroupNorm(torch.nn.GroupNorm):
@@ -271,14 +272,15 @@ class VaeGroupNorm(torch.nn.GroupNorm):
     """sgm VAE GroupNorm (Normalize): the NHWC kernel for eligible channels_last input while the vae scope is on.
 
     Swapped onto the instances at construction (state_dict keys and isinstance unchanged). Off, or for any other input,
-    it runs the class-level GroupNorm.forward exactly as a plain GroupNorm instance does."""
+    it runs the class-level GroupNorm.forward exactly as a plain GroupNorm instance does, on the NCHW copy of
+    modules/openclaw_gn_transpose.py when that switch is on (the same tensor ATen's CUDA group_norm copies to itself)."""
 
     def forward(self, x):
         if nhwc_group_norm.VAE in nhwc_group_norm.scopes() and nhwc_group_norm.vae_norm_eligible(self, x):
             y = nhwc_group_norm.group_norm(self, x)
             if y is not None:
                 return y
-        return torch.nn.GroupNorm.forward(self, x)
+        return torch.nn.GroupNorm.forward(self, gn_transpose.for_group_norm(x))
 
 
 def vae_normalize(orig_func, *args, **kwargs):
@@ -385,6 +387,9 @@ _VAE_SILU_SCOPES = frozenset((nhwc_group_norm.VAE, nhwc_group_norm.SILU))
 CondFunc('sgm.modules.diffusionmodules.openaimodel.ResBlock._forward', sgm_resblock_forward, lambda *args, **kwargs: _UNET_SILU_SCOPES <= nhwc_group_norm.scopes())
 CondFunc('sgm.modules.diffusionmodules.model.Normalize', vae_normalize)
 CondFunc('sgm.modules.diffusionmodules.model.ResnetBlock.forward', sgm_vae_resnet_block_forward, lambda *args, **kwargs: _VAE_SILU_SCOPES <= nhwc_group_norm.scopes())
+# Layout folds (modules/openclaw_layout_folds.py, switch): installed after the NHWC GroupNorm forwards, so they run
+# first and defer to them while that switch's unet/vae scope is on.
+openclaw_layout_folds.install()
 
 first_stage_cond = lambda _, self, *args, **kwargs: devices.unet_needs_upcast and self.model.diffusion_model.dtype in (torch.float16, torch.bfloat16)
 first_stage_sub = lambda orig_func, self, x, **kwargs: orig_func(self, x.to(devices.dtype_vae), **kwargs)
