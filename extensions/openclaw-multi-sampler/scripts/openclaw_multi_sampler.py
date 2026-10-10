@@ -35,6 +35,8 @@ _SIGNATURE_PARAM_CACHE: dict[int, set[str]] = {}
 _SAMPLER_FUNC_CACHE: dict[str, tuple[Any, str]] = {}
 # The schedule labels the core get_sigmas records; a scheduler chain records its stage schedulers itself.
 _SCHEDULE_LABEL_KEYS = ("Schedule type", "Hires schedule type")
+# The infotext a chain run records. A hires pass whose chain differs records it under "Hires sampler chain..." keys.
+_CHAIN_INFOTEXT_KEYS = ("Sampler chain", "Sampler chain schedulers", "Sampler chain scheduler")
 logger = logging.getLogger(__name__)
 
 
@@ -339,6 +341,17 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         self.definition = dict(definition)
         self.extra_params = []
 
+    def _bind_request_chain(self, p) -> None:
+        """Run the chain this request first resolved for the sampler name, not the registry's current one.
+
+        The chain routes re-register chains from API calls that do not wait for queue_lock, and a sampler is created
+        again for every batch, the hires pass and by scripts (Dynamic Thresholding): a chain saved mid-request would
+        otherwise run from the next batch or the hires pass on. The first sampler created for a name records its
+        config and definition on p; later ones for that name take them over."""
+        chains = p.__dict__.setdefault("openclaw_multi_sampler_chains", {})
+        self.config, definition = chains.setdefault(self.config.name, (self.config, self.definition))
+        self.definition = dict(definition)
+
     def _sigmas_for_scheduler(self, p, steps: int, sampler_name: str, scheduler_name: str) -> torch.Tensor:
         """The full schedule of one stage's scheduler, from the core get_sigmas.
 
@@ -539,14 +552,15 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         state.sampling_step = 0
         self.last_latent = x
         self.set_sampler_extra_args(p, conditioning, unconditional_conditioning, image_conditioning)
-        p.extra_generation_params["Sampler chain"] = _format_stage_scheduler_metadata(stages)
+        chain_params = {"Sampler chain": _format_stage_scheduler_metadata(stages)}
         scheduler_names = [scheduler_name for _sampler_name, scheduler_name, _stage_sigmas, _start, _end in stages if scheduler_name]
         if scheduler_names:
-            p.extra_generation_params["Sampler chain schedulers"] = " -> ".join(scheduler_names)
+            chain_params["Sampler chain schedulers"] = " -> ".join(scheduler_names)
         else:
             scheduler = _sampler_data_for(self.definition).options.get("scheduler")
             if scheduler:
-                p.extra_generation_params["Sampler chain scheduler"] = scheduler
+                chain_params["Sampler chain scheduler"] = scheduler
+        _record_chain_infotext(p, chain_params)
         noise_sampler = None
         noise_sampler_created = False
         try:
@@ -574,6 +588,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
             return self.last_latent
 
     def sample(self, p, x, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
+        self._bind_request_chain(p)
         steps = steps or p.steps
         sigmas = self._base_sigmas(p, steps)
         x = self.scale_initial_noise(p, x, sigmas[0])
@@ -582,6 +597,7 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         return samples
 
     def sample_img2img(self, p, x, noise, conditioning, unconditional_conditioning, steps=None, image_conditioning=None):
+        self._bind_request_chain(p)
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
         sigmas = self._base_sigmas(p, steps)
         ramp_sigmas_for_img2img = _load_denoise_ramp_func()
@@ -613,6 +629,16 @@ class MultiKDiffusionSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         )
         self.add_infotext(p)
         return samples
+
+
+def _record_chain_infotext(p, chain_params: dict[str, str]) -> None:
+    """The first pass records its chain under _CHAIN_INFOTEXT_KEYS. A hires pass running another chain (or the first
+    pass ran none) records its own under "Hires sampler chain..." keys; it used to overwrite the first pass's."""
+    params = p.extra_generation_params
+    if not getattr(p, "is_hr_pass", False):
+        params.update(chain_params)
+    elif any(params.get(key) != chain_params.get(key) for key in _CHAIN_INFOTEXT_KEYS):
+        params.update({f"Hires s{key[1:]}": value for key, value in chain_params.items()})
 
 
 class MultiSamplerData(sd_samplers_common.SamplerData):
