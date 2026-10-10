@@ -10,9 +10,9 @@ Run AUTOMATIC1111 as a GB10-native, API-only appliance on the NVIDIA NGC PyTorch
 
 ## Production (checked 2026-10-10)
 
-- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy11-739bc58b`, which is also `latest` (image ID
-  `sha256:66ba864d7c5d...`, labelled with its revision, version and base digest). Deployed 2026-10-10 from commit
-  `739bc58b`, it adds the [2026-10-09 correctness, quality and speed pass](notes/correctness-quality-speed-pass-2026-10-09.md)
+- **Running image.** `gb10-a1111-latest` runs `local/gb10-a1111:deploy12-b3c13fe2`, which is also `latest` (image ID
+  `sha256:002d2994ac8c...`, labelled with its revision, version and base digest). Deployed 2026-10-10 from commit
+  `b3c13fe2`. It has the same app code as deploy11 (`739bc58b`, docs-only changes since) and adds the [2026-10-09 correctness, quality and speed pass](notes/correctness-quality-speed-pass-2026-10-09.md)
   to deploy10's [cleanup pass](notes/cleanup-pass-2026-10-09.md).
 - **Deploy.** It was the first one through the health-gated run.sh. The smoke test passed (CUDA, the 10 expected
   scripts, the precision map with fp32 text encoders), and deploy10 was removed only afterwards. The deploy log is
@@ -36,7 +36,8 @@ for them also set `A1111_COMMIT_HASH` and `A1111_VERSION_TAG` to the image's com
 
 | Tag | Image ID | Contents |
 |---|---|---|
-| `deploy11-739bc58b` (= `latest`) | `66ba864d7c5d` | production: the 2026-10-09 correctness, quality and speed pass |
+| `deploy12-b3c13fe2` (= `latest`) | `002d2994ac8c` | production: deploy11's code, rebuilt at the docs commit |
+| `deploy11-739bc58b` | `66ba864d7c5d` | the 2026-10-09 correctness, quality and speed pass |
 | `deploy10-c22a9794` | `c4dcc49691e9` | the 2026-10-09 cleanup pass on top of deploy9 |
 | `deploy9-75a94f59` | `2708c45d4d9d` | correctness audit + performance pass 2 |
 | `deploy8-2b5e4039` | `e4501073fe84` | correctness audit plus its follow-ups (image-URL byte/pixel budgets, atomic patchers, sampler-registry publication) |
