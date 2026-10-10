@@ -9,6 +9,19 @@ from sgm.modules.diffusionmodules.openaimodel import conv_nd, linear, zero_modul
     TimestepEmbedSequential, ResBlock, Downsample, SpatialTransformer, exists
 
 
+def controlnet_dtype():
+    """Weight and activation dtype of a checkpoint ControlNet (not Control-LoRA, which patches in the UNet's weights).
+
+    With a bfloat16 UNet on CUDA: float16. The checkpoints are published in float16, and bfloat16 activations cost about
+    a decade of accuracy: residual rel L2 against float32 on xinsir depth SDXL is 1.1e-1 (mean over the 10 residuals) in
+    bfloat16 and 1.0e-2 under float16 autocast with the file's own weights. ControlNet.forward then runs under a nested
+    float16 autocast, returns the residuals in the UNet's dtype and fails on float16 overflow. Otherwise the UNet dtype.
+    """
+    if devices.dtype_unet == torch.bfloat16 and devices.get_device_for("controlnet").type == "cuda":
+        return torch.float16
+    return devices.dtype_unet
+
+
 def _loaded_value(value, expected_dtype, dtype):
     """`value` bit for bit as the former path left it: copied into a parameter
     of `expected_dtype` by load_state_dict, then Module.to(dtype)."""
@@ -38,6 +51,13 @@ def controlnet_from_state_dict(config, state_dict, dtype=None):
     unloaded = [name for name, tensor in (*model.named_parameters(), *model.named_buffers()) if tensor.is_meta]
     if unloaded:
         raise RuntimeError(f"ControlNet tensors not provided by the checkpoint: {unloaded[:8]}")
+    if dtype == torch.float16:
+        loaded = model.state_dict()
+        overflowed = [key for key, value in state_dict.items()
+                      if value.is_floating_point() and value.dtype != torch.float16
+                      and bool((torch.isinf(loaded[key]) & torch.isfinite(value)).any())]
+        if overflowed:
+            raise RuntimeError(f"ControlNet weights overflow float16: {overflowed[:8]}")
     return model
 
 
@@ -164,6 +184,9 @@ class ControlNet(nn.Module):
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
         self.dtype = torch.float16 if use_fp16 else torch.float32
+        # The model's name while it computes in float16 under a bfloat16 UNet (controlnet_dtype; set by
+        # build_model_by_guess on its float16 weights). None: compute in devices.dtype_unet under the caller's autocast.
+        self.float16_name = None
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
@@ -384,7 +407,12 @@ class ControlNet(nn.Module):
         which TimestepEmbedSequential calls without emb/context, and the union merge mixes per-type task
         embeddings. Callers may compute it once per hint and pass it to forward as ``guided_hint``.
         """
-        hint = hint.to(devices.dtype_unet)
+        if self.float16_name is None:
+            return self._guided_hint(hint.to(devices.dtype_unet), control_type)
+        with torch.autocast(hint.device.type, dtype=torch.float16):
+            return self._guided_hint(hint.to(torch.float16), control_type)
+
+    def _guided_hint(self, hint, control_type):
         if self.control_add_embedding is not None:
             assert control_type is not None
             if len(control_type) > 0:
@@ -394,12 +422,28 @@ class ControlNet(nn.Module):
         return self.input_hint_block(hint, None, None)
 
     def forward(self, x, hint, timesteps, context, y=None, control_type: List[int] = None, guided_hint=None, **kwargs):
+        """The 13 (SD) or 10 (SDXL) residuals, in x's dtype."""
         original_type = x.dtype
-        # Compute in the UNet dtype the weights are converted to when the model is built
-        # (controlnet_model_guess); self.dtype is only the construction dtype and stays float32 under
-        # bfloat16, which made every input an fp32 copy that autocast cast back per layer.
-        dtype = devices.dtype_unet
+        if self.float16_name is None:
+            # Compute in the UNet dtype the weights are converted to when the model is built (controlnet_model_guess);
+            # self.dtype is only the construction dtype.
+            outs = self._forward(x, hint, timesteps, context, y, control_type, guided_hint, devices.dtype_unet)
+            return [o.to(original_type) for o in outs]
+        # float16 weights under a bfloat16 UNet: the nested autocast keeps the outer bfloat16 autocast from casting the
+        # activations (and the weights) to bfloat16. GroupNorm/LayerNorm still run in float32 (autocast's float32 list:
+        # sd_hijack_unet's bfloat16-native norms do not apply to float16 inputs).
+        with torch.autocast(x.device.type, dtype=torch.float16):
+            outs = self._forward(x, hint, timesteps, context, y, control_type, guided_hint, torch.float16)
+        outs = [o.to(original_type) for o in outs]
+        # float16 tops out at 65504 and an overflow anywhere reaches the residuals as inf/NaN. A float32 sum is
+        # non-finite exactly when an element is (|sum| <= 65504 * numel stays finite). One host sync per call.
+        if not bool(torch.isfinite(torch.stack([o.sum(dtype=torch.float32) for o in outs])).all()):
+            raise RuntimeError(
+                f"ControlNet {self.float16_name} produced non-finite residuals computing in float16 (overflow past 65504); "
+                "this model cannot run in float16 under a bfloat16 UNet")
+        return outs
 
+    def _forward(self, x, hint, timesteps, context, y, control_type, guided_hint, dtype):
         x = x.to(dtype)
         # Timesteps stay float32 like the UNet's (sd_hijack_unet.apply_model): a half-precision cast would quantize them.
         timesteps = timesteps.to(torch.float32)
@@ -416,7 +460,7 @@ class ControlNet(nn.Module):
             emb += self.control_add_embedding(control_type, emb.dtype, emb.device)
 
         if guided_hint is None:
-            guided_hint = self.compute_guided_hint(hint, control_type)
+            guided_hint = self._guided_hint(hint.to(dtype), control_type)
 
         outs = []
 
@@ -436,7 +480,5 @@ class ControlNet(nn.Module):
 
         h = self.middle_block(h, emb, context)
         outs.append(self.middle_block_out(h, emb, context))
-
-        outs = [o.to(original_type) for o in outs]
 
         return outs

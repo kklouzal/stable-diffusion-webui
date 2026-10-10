@@ -43,6 +43,7 @@ import torch
 
 from PIL import Image
 from scripts.lvminthin import lvmin_thin, nake_nms
+from scripts.cldm import PlugableControlModel
 from scripts.controlnet_model_guess import build_model_by_guess, ControlModel
 from scripts.hook import restore_secondary_hijacks
 
@@ -94,33 +95,17 @@ def prepare_mask(
         blur_x=p.mask_blur_x, blur_y=p.mask_blur_y)
 
 
-def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
+def set_numpy_seed(p: processing.StableDiffusionProcessing) -> int:
     """
-    Set the random seed for NumPy based on the provided parameters.
+    Seed NumPy's global generator, which the shuffle preprocessor draws from, and return the seed.
 
-    Args:
-        p (processing.StableDiffusionProcessing): The instance of the StableDiffusionProcessing class.
-
-    Returns:
-        Optional[int]: The computed random seed if successful, or None if an exception occurs.
-
-    This function sets the random seed for NumPy using the seed and subseed values from the given instance of
-    StableDiffusionProcessing. If either seed or subseed is -1, it uses the first value from `all_seeds`.
-    Otherwise, it takes the maximum of the provided seed value and 0.
-
-    The final random seed is computed by adding the seed and subseed values, applying a bitwise AND operation
-    with 0xFFFFFFFF to ensure it fits within a 32-bit integer.
+    The seed is the request's first image seed `p.all_seeds[0]` alone: it is what the "Seed" infotext entry records, so
+    replaying an infotext reproduces the preprocessor result. (The former seed + subseed sum depended on the requested
+    seed being -1 or not and on a subseed the infotext omits.)
     """
-    try:
-        tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed), 0))
-        tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed), 0))
-        seed = (tmp_seed + tmp_subseed) & 0xFFFFFFFF
-        np.random.seed(seed)
-        return seed
-    except Exception as e:
-        logger.warning(e)
-        logger.warning('Warning: Failed to use consistent random seed.')
-        return None
+    seed = int(p.all_seeds[0]) & 0xFFFFFFFF
+    np.random.seed(seed)
+    return seed
 
 
 # v / 255 for every uint8 v, divided on the CPU in float32 exactly like the
@@ -351,7 +336,9 @@ class Script(scripts.Script, metaclass=(
         # build_model_by_guess adds the UNet's current weights to a 'difference' model's deltas.
         depends_on_checkpoint = 'difference' in state_dict and unet is not None
         control_model = build_model_by_guess(state_dict, unet, model_path)
-        control_model.model.to('cpu', dtype=p.sd_model.dtype)
+        # A checkpoint ControlNet keeps the float16 weights it computes in under a bfloat16 UNet (cldm.controlnet_dtype).
+        if not isinstance(control_model.model, PlugableControlModel) or control_model.model.control_model.float16_name is None:
+            control_model.model.to('cpu', dtype=p.sd_model.dtype)
         logger.info(f"ControlNet model {model}({control_model.type}) loaded.")
         return BuiltControlModel(control_model, checkpoint_revision if depends_on_checkpoint else None)
 

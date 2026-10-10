@@ -8,7 +8,7 @@ from safetensors.torch import load_file
 
 from depth_anything_v2.dpt import DepthAnythingV2
 from depth_anything_v2.util.transform import Resize, NormalizeImage, PrepareForNet
-from .util import load_model
+from .util import build_with_state_dict, load_model
 from .annotator_path import models_path
 
 transform = Compose(
@@ -34,15 +34,6 @@ class DepthAnythingV2Detector:
 
     def __init__(self, device: torch.device):
         self.device = device
-        self.model = (
-            DepthAnythingV2(
-                encoder="vitl",
-                features=256,
-                out_channels=[256, 512, 1024, 1024],
-            )
-            .to(device)
-            .eval()
-        )
         remote_url = os.environ.get(
             "CONTROLNET_DEPTH_ANYTHING_V2_MODEL_URL",
             "https://huggingface.co/MackinationsAi/Depth-Anything-V2_Safetensors/resolve/main/depth_anything_v2_vitl.safetensors",
@@ -50,7 +41,18 @@ class DepthAnythingV2Detector:
         model_path = load_model(
             "depth_anything_v2_vitl.safetensors", remote_url=remote_url, model_dir=self.model_dir
         )
-        self.model.load_state_dict(load_file(model_path))
+        self.model = (
+            build_with_state_dict(
+                lambda: DepthAnythingV2(
+                    encoder="vitl",
+                    features=256,
+                    out_channels=[256, 512, 1024, 1024],
+                ),
+                load_file(model_path),
+            )
+            .to(device)
+            .eval()
+        )
 
     def __call__(self, image: np.ndarray, colored: bool = True) -> np.ndarray:
         self.model.to(self.device)

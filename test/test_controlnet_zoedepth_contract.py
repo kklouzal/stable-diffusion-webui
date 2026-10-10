@@ -21,50 +21,42 @@ def _zoe_detector_class(*methods, **namespace):
     return namespace["ZoeDetector"]
 
 
-def test_zoedepth_loader_allows_only_derived_timm_position_indices(tmp_path):
+def test_zoedepth_loader_builds_with_the_checkpoint_and_only_derived_timm_position_indices_unused(tmp_path):
+    """load_model hands build_with_state_dict (whose key-set enforcement the extension's depth_preprocessors_test
+    covers) the infer-config build, the mmapped CPU checkpoint and exactly the derived position-index keys."""
     import os
     from types import SimpleNamespace
 
-    import pytest
-
-    loads = []
+    calls = []
 
     class Model:
-        device = "cpu"
-
-        def __init__(self, missing, unexpected):
-            self.incompatible = SimpleNamespace(missing_keys=missing, unexpected_keys=unexpected)
-
-        def load_state_dict(self, state, strict=True):
-            loads.append((state, strict))
-            return self.incompatible
-
         def eval(self):
+            calls.append("eval")
             return self
 
         def to(self, device):
+            calls.append(("to", device))
             return self
 
-    def load(missing=(), unexpected=()):
-        model = Model(list(missing), list(unexpected))
-        torch_stub = SimpleNamespace(load=lambda path, map_location: {"model": ("weights", path, map_location)})
-        detector_class = _zoe_detector_class("load_model", os=os, torch=torch_stub, get_config=lambda *args: "config",
-                                             ZoeDepth=SimpleNamespace(build_from_config=lambda config: model))
-        detector = detector_class()
-        detector.model_dir, detector.device, detector.model = str(tmp_path), "cpu", None
-        detector.load_model()
-        return detector, model
+    model = Model()
+    unused = frozenset({"core.core.pretrained.model.blocks.0.attn.relative_position_index"})
 
+    def build_with_state_dict(build, state_dict, unused_keys):
+        calls.append(("build", build(), state_dict, unused_keys))
+        return model
+
+    torch_stub = SimpleNamespace(load=lambda path, **kwargs: {"model": ("weights", path, kwargs)})
+    detector_class = _zoe_detector_class(
+        "load_model", os=os, torch=torch_stub, get_config=lambda *args: ("config", args),
+        ZoeDepth=SimpleNamespace(build_from_config=lambda config: ("built", config)),
+        build_with_state_dict=build_with_state_dict, UNUSED_CHECKPOINT_KEYS=unused)
+    detector = detector_class()
+    detector.model_dir, detector.device, detector.model = str(tmp_path), "cuda:0", None
     (tmp_path / "ZoeD_M12_N.pt").write_bytes(b"checkpoint")
-    # Newer timm derives relative_position_index buffers instead of loading them: those checkpoint keys are expected.
-    detector, model = load(unexpected=["core.core.pretrained.model.blocks.0.attn.relative_position_index"])
+    detector.load_model()
     assert detector.model is model
-    assert loads == [(("weights", str(tmp_path / "ZoeD_M12_N.pt"), "cpu"), False)]
-    # Any other mismatch still fails the load.
-    for mismatch in ({"missing": ["core.core.pretrained.model.blocks.0.attn.qkv.weight"]},
-                     {"unexpected": ["core.core.pretrained.model.blocks.0.attn.relative_position_bias_table"]}):
-        with pytest.raises(RuntimeError, match="Unsupported ZoeDepth checkpoint mismatch"):
-            load(**mismatch)
+    checkpoint = ("weights", str(tmp_path / "ZoeD_M12_N.pt"), {"map_location": "cpu", "mmap": True})
+    assert calls == [("build", ("built", ("config", ("zoedepth", "infer"))), checkpoint, unused), "eval", ("to", "cuda:0")]
 
 
 def test_zoedepth_sources_avoid_deprecated_torch_and_timm_apis():
