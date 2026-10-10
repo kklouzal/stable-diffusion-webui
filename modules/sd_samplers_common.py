@@ -257,7 +257,7 @@ def apply_refiner(cfg_denoiser, sigma=None):
 
     # The load computes the refiner's empty-prompt padding with sd_models.get_empty_cond, which resets every extra
     # network so that no LoRA reaches the padding. The refiner stage runs with the request's networks again.
-    active_extra_network_data = cfg_denoiser.p._active_extra_network_data
+    active_extra_network_data = getattr(cfg_denoiser.p, "_active_extra_network_data", None)
     if active_extra_network_data is not None:
         with devices.autocast():
             extra_networks.activate(cfg_denoiser.p, active_extra_network_data)

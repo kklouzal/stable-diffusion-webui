@@ -15,9 +15,9 @@ seed, init image, ControlNet units with their images, every always-on script's a
   no size, see docs/gb10/generation-last-api.md).
 - no outputs: save_images/send_images off, the init-image and ControlNet detected-map autosave options overridden
   off, OpenClaw Multi-Sampler snapshots off, override_settings restored afterwards, and the processing object marked
-  as already captured so generation_last never records the warm-up. The denoise-ramp default persistence of the API
-  path writes into a copy of the default script arguments. A selectable script (script_name) is never replayed: such
-  scripts save images on their own (Ultimate SD Upscale).
+  as already captured so generation_last never records the warm-up. The request runs through the API path, which
+  builds its script arguments from a copy of the Api's defaults and leaves those unchanged. A selectable script
+  (script_name) is never replayed: such scripts save images on their own (Ultimate SD Upscale).
 - labelled: progress task id TASK_ID (`current_task` of /sdapi/v1/progress while it runs).
 
 A snapshot that is missing or not replayable skips the warm-up (logged, state `skipped`). A failing warm-up is not a
@@ -149,8 +149,7 @@ def _generate(api, tabname: str, request: dict[str, Any]):
     img2img = tabname == "img2img"
     model = (models.StableDiffusionImg2ImgProcessingAPI if img2img else models.StableDiffusionTxt2ImgProcessingAPI)(**request)
     script_runner = scripts.scripts_img2img if img2img else scripts.scripts_txt2img
-    # A copy: the API path persists denoise-ramp arguments into the defaults it is given.
-    default_script_args = list(api.default_script_arg_img2img if img2img else api.default_script_arg_txt2img)
+    default_script_args = api.default_script_arg_img2img if img2img else api.default_script_arg_txt2img
 
     @api_module.decode_inline_images_once
     def run():

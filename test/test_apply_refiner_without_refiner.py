@@ -121,7 +121,7 @@ class _RecordingNetwork:
         self.active = list(params_list)
 
 
-@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("active", [True, False, "absent"])
 def test_the_refiner_stage_runs_with_the_request_extra_networks(monkeypatch, active):
     # Loading the refiner computes its empty-prompt padding with sd_models.get_empty_cond, which resets every extra
     # network (extra_networks.activate(dummy_p, {})): the request's LoRAs were dropped for the refiner stage.
@@ -144,7 +144,10 @@ def test_the_refiner_stage_runs_with_the_request_extra_networks(monkeypatch, act
     monkeypatch.setattr(sd_samplers_common.devices, "autocast", contextlib.nullcontext)  # CPU test: no CUDA probe
     denoiser = _denoiser(None, refiner_checkpoint_info=SimpleNamespace(short_title="refiner"), refiner_switch_at=0.2)
     denoiser.p.scripts = None
-    denoiser.p._active_extra_network_data = request_networks if active else None
+    if active == "absent":  # a processing object that did not come through process_images
+        del denoiser.p._active_extra_network_data
+    else:
+        denoiser.p._active_extra_network_data = request_networks if active else None
     seen_by_conds = []
     denoiser.p.setup_conds = lambda: seen_by_conds.append(network.active)
     denoiser.update_inner_model = lambda: None
@@ -152,6 +155,6 @@ def test_the_refiner_stage_runs_with_the_request_extra_networks(monkeypatch, act
 
     assert sd_samplers_common.apply_refiner(denoiser) is True
 
-    expected = request_networks["lora"] if active else []
+    expected = request_networks["lora"] if active is True else []
     assert network.active == expected
     assert seen_by_conds == [expected]  # the refiner's conds are computed with them
