@@ -85,6 +85,63 @@ def test_a_failing_vae_reload_restores_the_vae_option(initialize, monkeypatch):
     assert vae_reloads == ["missing.safetensors", before]  # the restore reloads the previous VAE
 
 
+def test_an_override_runs_the_option_onchange_and_the_restore_runs_it_again(initialize, monkeypatch):
+    from modules import call_queue, processing, shared, sd_models
+
+    key = "cross_attention_optimization"
+    hits = []
+    # registered as configure_opts_onchange registers it: wrapped in queue_lock, which the generation already holds
+    onchange = call_queue.wrap_queued_call(lambda: hits.append(shared.opts.cross_attention_optimization))
+    monkeypatch.setattr(shared.opts.data_labels[key], "onchange", onchange)
+    monkeypatch.setattr(sd_models, "reload_model_weights", lambda *a, **k: None)
+    p = _override(monkeypatch, **{key: "Doggettx"})
+    before = getattr(shared.opts, key)
+
+    stored = processing.store_processing_override_settings(p)
+    with call_queue.queue_lock:
+        processing.apply_processing_override_settings(p)
+    assert hits == ["Doggettx"]  # the installed optimization follows the option
+    processing.apply_processing_override_settings(p)
+    assert hits == ["Doggettx"]  # unchanged: not applied again
+
+    processing.restore_processing_override_settings(stored)
+    assert hits == ["Doggettx", before]
+    assert getattr(shared.opts, key) == before
+
+
+def test_options_sharing_a_callback_run_it_once(initialize, monkeypatch):
+    from modules import processing, shared, sd_models
+
+    hits = []
+
+    def reload():  # one callback object for several options, as configure_opts_onchange registers it
+        hits.append(1)
+
+    for key in ("mxfp8_storage", "nvfp4_storage"):
+        monkeypatch.setattr(shared.opts.data_labels[key], "onchange", reload)
+    monkeypatch.setattr(sd_models, "reload_model_weights", lambda *a, **k: None)
+    p = _override(monkeypatch, mxfp8_storage="Enable for SDXL", nvfp4_storage="Enable for SDXL")
+
+    processing.apply_processing_override_settings(p)
+
+    assert hits == [1]
+
+
+def test_a_failing_onchange_restores_every_option_of_the_request(initialize, monkeypatch):
+    from modules import processing, shared, sd_models
+
+    key = "cross_attention_optimization"
+    monkeypatch.setattr(shared.opts.data_labels[key], "onchange", _fail)
+    monkeypatch.setattr(sd_models, "reload_model_weights", lambda *a, **k: None)
+    p = _override(monkeypatch, **{key: "Doggettx", "CLIP_stop_at_last_layers": 7})
+    before = (getattr(shared.opts, key), shared.opts.CLIP_stop_at_last_layers)
+
+    with pytest.raises(RuntimeError):
+        processing.apply_processing_override_settings(p)
+
+    assert (getattr(shared.opts, key), shared.opts.CLIP_stop_at_last_layers) == before
+
+
 def test_a_failing_restore_reload_still_restores_later_options(initialize, monkeypatch):
     from modules import processing, shared, sd_vae
 

@@ -1060,13 +1060,22 @@ def store_processing_override_settings(p: StableDiffusionProcessing):
     return {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data_labels}
 
 
-def _override_callbacks(*, reload_checkpoint, reload_vae):
-    """The reloads that make the loaded model match the options: the checkpoint, then the VAE."""
+def _override_callbacks(changed_keys, *, reload_checkpoint, reload_vae):
+    """The calls that make the loaded model match changed options, each once: the checkpoint and VAE reloads, then
+    the onchange callback of every other changed option (e.g. cross_attention_optimization re-hijacks the model,
+    fp8_storage and the mxfp8/nvfp4 options reload the weights). The options are set without their callbacks
+    (opts.set(run_callbacks=False)) so that several options sharing a callback run it once."""
     callbacks = []
     if reload_checkpoint:
         callbacks.append(sd_models.reload_model_weights)
     if reload_vae:
         callbacks.append(sd_vae.reload_vae_weights)
+    for k in changed_keys:
+        if k in ('sd_model_checkpoint', 'sd_vae'):
+            continue
+        onchange = opts.data_labels[k].onchange
+        if onchange is not None and onchange not in callbacks:
+            callbacks.append(onchange)
     return callbacks
 
 
@@ -1083,9 +1092,8 @@ def apply_processing_override_settings(p: StableDiffusionProcessing):
 
     previous = store_processing_override_settings(p)
     try:
-        for k, v in p.override_settings.items():
-            opts.set(k, v, is_api=True, run_callbacks=False)
-        for callback in _override_callbacks(reload_checkpoint='sd_model_checkpoint' in p.override_settings, reload_vae='sd_vae' in p.override_settings):
+        changed = [k for k, v in p.override_settings.items() if opts.set(k, v, is_api=True, run_callbacks=False)]
+        for callback in _override_callbacks(changed, reload_checkpoint='sd_model_checkpoint' in p.override_settings, reload_vae='sd_vae' in p.override_settings):
             callback()
     except BaseException:
         restore_processing_override_settings(previous)
@@ -1093,18 +1101,22 @@ def apply_processing_override_settings(p: StableDiffusionProcessing):
 
 
 def restore_processing_override_settings(stored_opts):
-    """Sets every stored option back first, then reloads (_override_callbacks; the VAE whenever sd_vae is stored). A
-    failing reload therefore cannot leave a later option at the request's value; the first failure is raised once
-    every reload has run. The checkpoint is not reloaded here: the next generation's
-    apply_processing_override_settings loads the configured one."""
-    failures = []
+    """Sets every stored option back first, then applies the changed ones (_override_callbacks; the VAE is reloaded
+    whenever sd_vae is stored). A failing reload or callback therefore cannot leave a later option at the request's
+    value; the first failure is raised once every callback has run. The checkpoint is not reloaded here: the next
+    generation's apply_processing_override_settings loads the configured one."""
+    changed, failures = [], []
     for k, v in stored_opts.items():
+        if opts.data.get(k, opts.get_default(k)) == v:
+            continue
         try:
             setattr(opts, k, v)
         except Exception as e:
             failures.append(e)
+        else:
+            changed.append(k)
 
-    for callback in _override_callbacks(reload_checkpoint=False, reload_vae='sd_vae' in stored_opts):
+    for callback in _override_callbacks(changed, reload_checkpoint=False, reload_vae='sd_vae' in stored_opts):
         try:
             callback()
         except Exception as e:
