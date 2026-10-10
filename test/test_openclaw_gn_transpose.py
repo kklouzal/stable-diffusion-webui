@@ -237,11 +237,12 @@ def cuda_switch_on(monkeypatch):
     monkeypatch.setattr(gn_transpose, "ENABLED", True)
 
 
-def _cuda_cl(shape, dtype, seed=0):
+def _cuda_cl(shape, dtype, seed=0, special=True):
+    """A channels_last CUDA tensor; with `special`, its first five NCHW elements are inf, -inf, nan, -0.0 and 0.0."""
     generator = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(shape, generator=generator, device="cuda") * 3 + 0.25
     flat = x.view(-1)
-    if flat.numel() >= 5:
+    if special and flat.numel() >= 5:
         flat[:5] = torch.tensor([float("inf"), float("-inf"), float("nan"), -0.0, 0.0], device="cuda")
     return x.to(dtype).contiguous(memory_format=CL)
 
@@ -273,15 +274,16 @@ def test_cuda_aten_group_norm_copies_channels_last_input_to_nchw():
         bias = torch.randn(320, device="cuda", dtype=dtype)
         with torch.inference_mode():
             y = F.group_norm(x, 32, weight, bias, 1e-5)
-            assert y.is_contiguous() and torch.equal(y, F.group_norm(x.contiguous(), 32, weight, bias, 1e-5))
+            reference = F.group_norm(x.contiguous(), 32, weight, bias, 1e-5)
+            # Bitwise, so the NaN the special inputs produce compares equal to itself.
+            assert y.is_contiguous() and torch.equal(y.view(_BITS[dtype]), reference.view(_BITS[dtype]))
 
 
 @needs_cuda
 @pytest.mark.parametrize("dtype", _CUDA_DTYPES, ids=str)
 @pytest.mark.parametrize("shape", [s for s in _CUDA_SHAPES if s[1] % 32 == 0], ids=str)
 def test_cuda_group_norm_outputs_are_bitwise_unchanged(cuda_switch_on, shape, dtype):
-    x = _cuda_cl(shape, dtype, seed=1)
-    x.view(-1)[:5] = 0.5  # finite statistics
+    x = _cuda_cl(shape, dtype, seed=1, special=False)  # finite statistics
     channels = shape[1]
     weight = torch.randn(channels, device="cuda", dtype=dtype)
     bias = torch.randn(channels, device="cuda", dtype=dtype)
@@ -300,8 +302,7 @@ def test_cuda_hijacked_norms_are_bitwise_unchanged(cuda_switch_on, default_runti
         norm, shape, autocast = sgm_util.GroupNorm32(32, 640), (2, 640, 80, 80), True
     norm = randomize(norm).eval().to("cuda", BF16)
     reference = copy.deepcopy(norm)
-    x = _cuda_cl(shape, BF16, seed=2)
-    x.view(-1)[:5] = 0.5
+    x = _cuda_cl(shape, BF16, seed=2, special=False)
     with torch.inference_mode(), torch.autocast("cuda", dtype=BF16, enabled=autocast):
         on = norm(x)
         monkeypatch.setattr(gn_transpose, "ENABLED", False)
