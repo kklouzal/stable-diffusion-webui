@@ -59,6 +59,23 @@ requests each) gave:
 - The rest: GEMMs about 35%, flash attention about 10%, GEGLU 6.7%.
 - The layout work stays parked by owner decision ("VAE-only layout" below).
 
+### Final validation
+
+The final validation ran on the real `build.sh` image of `c77391d7`. It has provenance labels and no dependency drift
+from deploy10.
+
+- **Workloads:** plain 4.126 s ± 0.003 and n-w1 11.259 s ± 0.023, against deploy10's 4.138 and 11.335. The pixels are
+  identical to the A/B build.
+- **Tiling:** tiling and plain requests in either order give identical images.
+- **Graphs vs eager:** UNet/VAE graph output is bit-identical to eager for plain, tiling and Tiled VAE (fast and
+  non-fast). The fused Tiled VAE normalization runs on CUDA.
+- **Live API tests:** 35/35.
+- **Ultimate SD Upscale:** 2048², 16 tiles of 512, padding 32, blur 8.
+  - Graphs are bypassed on both builds.
+  - Each tile is now generated at its exact crop size (616 px) instead of being resampled to 576 px and back. That is
+    14% more pixels, and the request goes from 24.7 s to 28.3 s.
+  - The owner chose the sharper exact-size tiles.
+
 ## Output changes on the production path
 
 All of these were checked on the GPU. Sample sheets were shown to the operator.
