@@ -4,11 +4,22 @@ import torch.nn.functional as F
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
+from modules.sd_samplers_cfg_denoiser import CFGDenoiser
 from scripts.ui_wrapper import UIWrapper, cond_crossattn
 from scripts.incant_utils import timing
 
 logger = logging.getLogger(__name__)
 _SANF_KERNEL_CACHE = {}
+
+# Infotext key recording how PAG SANF treated a replaced CFG combiner. The only combine_denoised override in this
+# tree is Dynamic Thresholding's CustomCFGDenoiser, so a combiner other than the core's is Dynamic Thresholding.
+SANF_NOTE_KEY = "PAG SANF note"
+SANF_NOTE_OVERRIDES_DT = "Dynamic thresholding overridden by PAG SANF"
+
+
+def is_stock_combiner(combine_denoised):
+        """True when combine_denoised is the core CFGDenoiser's own method, not an extension's override."""
+        return getattr(combine_denoised, '__func__', None) is CFGDenoiser.combine_denoised
 
 
 def sanf_gaussian_blur3(x):
@@ -77,7 +88,7 @@ class CFGCombinerScript(UIWrapper):
             if not getattr(p, 'incant_cfg_params', None) or p.incant_cfg_params.get('pag_params') is None:
                 return
             def cfg_denoise_callback(params):
-                return self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
+                return self.on_cfg_denoiser_callback(params, p.incant_cfg_params, p.extra_generation_params)
 
             script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
             logger.debug('Hooked CFG combiner callback')
@@ -92,17 +103,21 @@ class CFGCombinerScript(UIWrapper):
             self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
 
-        def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict):
+        def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict, generation_params: dict):
             """Callback for when the CFG denoiser is available.
 
             Installs one owned wrapper for the batch. Later callbacks for the
             same denoiser reuse the wrapper and only observe the mutable state
             in cfg_dict / pag_params.
             """
-            self.patch_cfg_denoiser(params.denoiser, cfg_dict)
+            self.patch_cfg_denoiser(params.denoiser, cfg_dict, generation_params)
 
-        def patch_cfg_denoiser(self, denoiser, cfg_dict: dict):
-            """Install the GB10 combine_denoised wrapper once for this denoiser."""
+        def patch_cfg_denoiser(self, denoiser, cfg_dict: dict, generation_params: dict):
+            """Install the GB10 combine_denoised wrapper once for this denoiser.
+
+            generation_params is the request's extra_generation_params; the wrapper records there what PAG SANF
+            did with a replaced CFG combiner.
+            """
             if not cfg_dict:
                     logger.error("Unable to patch CFG Denoiser, no dict passed as cfg_dict")
                     return
@@ -127,6 +142,7 @@ class CFGCombinerScript(UIWrapper):
                             cond_scale,
                             original_func=original_func,
                             cfg_dict=cfg_dict,
+                            generation_params=generation_params,
                     )
 
             gb10_combine_denoised.__name__ = 'gb10_incantations_combine_denoised'
@@ -160,12 +176,16 @@ class CFGCombinerScript(UIWrapper):
             cfg_dict['wrapped_combine_denoised'] = None
 
 
-def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, original_func, cfg_dict):
+def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, original_func, cfg_dict, generation_params):
         """Owned combine_denoised wrapper adding PAG guidance.
 
         The captured original_func is intentionally called for the base CFG path
         so Dynamic Thresholding / CFG-Fix and similar extensions can still
         rescale the base CFG result before PAG is added.
+
+        PAG SANF rebuilds the CFG term from the raw model outputs and discards
+        original_func's result; when original_func is not the core combiner that
+        is recorded in generation_params under SANF_NOTE_KEY.
         """
         pag_params = cfg_dict.get('pag_params')
         if pag_params is None:
@@ -204,10 +224,12 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
         # Dynamic Thresholding can be composed cleanly with the base CFG path above.
         # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
         # blend, so it cannot faithfully preserve a dynamically-thresholded base.
-        # In that case keep the previous SANF behavior rather than pretending both
-        # rescalers are fully applied.
+        # In that case keep the previous SANF behavior and record in the infotext
+        # that the replaced combiner did not apply.
         use_saliency_map = pag_params.pag_sanf
         if use_saliency_map:
+                if not is_stock_combiner(original_func):
+                        generation_params[SANF_NOTE_KEY] = SANF_NOTE_OVERRIDES_DT
                 denoised = denoised_uncond.clone()
 
         ### Add PAG guidance on top of the base CFG result
