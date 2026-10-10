@@ -1135,6 +1135,7 @@ def _failed_batch_images(p):
 def process_images(p: StableDiffusionProcessing) -> Processed:
     p._active_extra_network_data = None
     p._generation_last_snapshot = None
+    p._skipped_a_batch = False
     stored_opts = None
     script_runner = p.scripts
     previous_script_lifecycle = script_runner.begin_generation(p) if script_runner is not None else None
@@ -1257,6 +1258,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             p.iteration = n
 
             if state.skipped:
+                # The skipped batch's images are its last latent, decoded: not a completed generation.
+                p._skipped_a_batch = True
                 state.skipped = False
 
             if state.interrupted or state.stopping_generation:

@@ -191,6 +191,20 @@ class GenerationLastTests(unittest.TestCase):
         self.assertIsNone(self.module.capture_completed_generation(replacement, self.processed))
         self.assertEqual(self.module.get_last_snapshot(), first)
 
+    def test_skipped_generation_does_not_replace_previous_snapshot(self):
+        # POST /skip ends the batch with its last latent, decoded. processing resets state.skipped at the next batch
+        # and records the skip on p.
+        first = self.module.capture_completed_generation(StableDiffusionProcessingTxt2Img(), self.processed)
+
+        self.shared.state.skipped = True
+        self.assertIsNone(self.module.capture_completed_generation(StableDiffusionProcessingTxt2Img(), self.processed))
+        self.shared.state.skipped = False
+        earlier_batch_skipped = StableDiffusionProcessingTxt2Img()
+        earlier_batch_skipped._skipped_a_batch = True
+        self.assertIsNone(self.module.capture_completed_generation(earlier_batch_skipped, self.processed))
+        self.assertIsNone(self.module.snapshot_or_report(earlier_batch_skipped, self.processed))
+        self.assertEqual(self.module.get_last_snapshot(), first)
+
     def test_img2img_assets_and_missing_assets_control_replayability(self):
         img2img = StableDiffusionProcessingImg2Img()
         img2img.init_images = [Image.new("RGB", (16, 16), "red")]

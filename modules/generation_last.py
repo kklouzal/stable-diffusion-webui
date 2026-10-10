@@ -645,8 +645,12 @@ def build_snapshot(p, processed, *, completed_at: str | None = None) -> dict[str
 
 
 def _completed_successfully(p, processed) -> bool:
+    """False for an interrupted, stopped or skipped generation: a skipped batch (POST /skip) returns its last latent,
+    decoded. processing resets state.skipped at the next batch and records the skip on p (_skipped_a_batch)."""
     state = getattr(shared, "state", None)
     if getattr(state, "interrupted", False) or getattr(state, "stopping_generation", False):
+        return False
+    if getattr(state, "skipped", False) or getattr(p, "_skipped_a_batch", False):
         return False
     images = getattr(processed, "images", None)
     return bool(images)
