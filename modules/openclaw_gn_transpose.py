@@ -21,7 +21,8 @@ Callers: sd_hijack_unet.group_norm32_bf16_forward (UNet/ControlNet GroupNorm32 a
 bf16-native path) and VaeGroupNorm.forward (every sgm VAE GroupNorm), right before the class-level GroupNorm.forward
 (the Lora extension's patch stays in the chain and receives the NCHW tensor; its merged mode only touches weights).
 
-Switch (default off): OPENCLAW_GN_FAST_TRANSPOSE, read once at import (startup) with the openclaw_env grammar; an
+Switch (default on since the 2026-10-10 GPU A/B: bit-identical output, n-w1 -8.7%, plain txt2img -14% together with
+OPENCLAW_LAYOUT_FOLDS): OPENCLAW_GN_FAST_TRANSPOSE, read once at import (startup) with the openclaw_env grammar; an
 invalid value, or a missing Triton while it is on, fails the import. The state is fixed for the process, so CUDA graph
 keys need not include it.
 """
@@ -34,7 +35,7 @@ from modules import openclaw_env
 from modules.openclaw_nhwc_groupnorm import is_nhwc
 
 ENV_NAME = "OPENCLAW_GN_FAST_TRANSPOSE"
-ENABLED = openclaw_env.env_bool(ENV_NAME, False)
+ENABLED = openclaw_env.env_bool(ENV_NAME, True)
 
 _DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 # Tile: 128 channels x 128 pixels (32 KiB bf16, 64 KiB fp32 through shared memory), 8 warps: the fastest in the GB10

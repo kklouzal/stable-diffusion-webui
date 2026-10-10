@@ -1,7 +1,7 @@
 """Fast NHWC -> NCHW GroupNorm input copy: modules/openclaw_gn_transpose.py and its two call sites in sd_hijack_unet.
 
 CPU tests:
-- the switch: off by default, read with the openclaw_env grammar at import, an invalid value fails the import;
+- the switch: on by default, read with the openclaw_env grammar at import, an invalid value fails the import;
 - the wrapper: which tensors it covers (CUDA, channels_last and not also NCHW-contiguous, bf16/fp16/fp32, no autograd)
   and that it returns everything else unchanged (the same object), CPU included;
 - the call sites: GroupNorm32 / SpatialTransformer.norm on the bf16-native path and VaeGroupNorm hand ATen the copy,
@@ -48,8 +48,9 @@ def _import_with(value):
     return subprocess.run([sys.executable, "-c", code], cwd=_ROOT, env=env, capture_output=True, text=True, timeout=300)
 
 
-def test_switch_is_off_by_default_and_an_invalid_value_fails_the_import():
-    for value, expected in ((None, "False False"), ("", "False False"), ("0", "False False"), ("off", "False False")):
+def test_switch_is_on_by_default_and_an_invalid_value_fails_the_import():
+    pytest.importorskip("triton")
+    for value, expected in ((None, "True True"), ("", "True True"), ("0", "False False"), ("off", "False False")):
         process = _import_with(value)
         assert process.returncode == 0 and process.stdout.split("\n")[-2] == expected, process.stderr[-2000:]
     process = _import_with("fast")

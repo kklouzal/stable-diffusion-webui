@@ -24,7 +24,7 @@ every GroupNorm, conv, dropout, embedding and skip module is still called as a m
 nonlinearity (what sd_hijack.apply_optimizations installs), no autograd, dropout inactive. Anything else runs the forward
 installed below these.
 
-Switch (default off): OPENCLAW_LAYOUT_FOLDS, read once at import (startup) with the openclaw_env grammar; an invalid
+Switch (default on since the 2026-10-10 GPU A/B, see openclaw_gn_transpose): OPENCLAW_LAYOUT_FOLDS, read once at import (startup) with the openclaw_env grammar; an invalid
 value fails the import. Off, nothing is installed. The state is fixed for the process, so CUDA graph keys need not
 include it.
 """
@@ -39,7 +39,7 @@ from modules import openclaw_env, openclaw_nhwc_groupnorm as nhwc_group_norm
 from modules.sd_hijack_utils import CondFunc
 
 ENV_NAME = "OPENCLAW_LAYOUT_FOLDS"
-ENABLED = openclaw_env.env_bool(ENV_NAME, False)
+ENABLED = openclaw_env.env_bool(ENV_NAME, True)
 
 _CL = torch.channels_last
 _TORCH_SILU_FORWARD = torch.nn.SiLU.forward

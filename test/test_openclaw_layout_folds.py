@@ -1,7 +1,7 @@
 """Layout folds (modules/openclaw_layout_folds.py): SiLU written channels_last for the conv after it, ResBlock
 `h + emb_out` written NCHW for the GroupNorm after it, in the sgm ResBlock and the sgm VAE ResnetBlock.
 
-CPU tests: the switch (default off, invalid value fails the import, off installs nothing); with the folds installed,
+CPU tests: the switch (default on, invalid value fails the import, off installs nothing); with the folds installed,
 the sgm ResBlock (identity and conv skip), VAE ResnetBlock (identity and nin shortcut) and a VAE decoder in
 channels_last give torch.equal outputs with the same strides as the upstream forwards, while the convs now receive
 channels_last input and the out GroupNorm NCHW input (CPU group_norm made to copy like ATen's CUDA one); every fallback
@@ -44,8 +44,8 @@ def _import_with(value):
     return subprocess.run([sys.executable, "-c", code], cwd=_ROOT, env=env, capture_output=True, text=True, timeout=300)
 
 
-def test_switch_is_off_by_default_and_an_invalid_value_fails_the_import():
-    for value, expected in ((None, "False"), ("", "False"), ("0", "False"), ("1", "True"), ("yes", "True")):
+def test_switch_is_on_by_default_and_an_invalid_value_fails_the_import():
+    for value, expected in ((None, "True"), ("", "True"), ("0", "False"), ("1", "True"), ("yes", "True")):
         process = _import_with(value)
         assert process.returncode == 0 and process.stdout.split("\n")[-2] == expected, process.stderr[-2000:]
     process = _import_with("2")
