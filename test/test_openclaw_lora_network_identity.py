@@ -131,6 +131,44 @@ def test_file_signature_is_hashed_once_per_file_revision(lora_networks, tmp_path
     assert second == ("sha256", real_sha256(b"wxyz").hexdigest())
     assert networks.network_file_signature(tmp_path / "missing.safetensors") is None
 
+def test_file_signatures_are_the_sequential_digests_in_request_order(lora_networks, tmp_path, monkeypatch):
+    """The concurrent signature pass returns, for every requested file in order (duplicates, missing files and
+    path-likes included), exactly what sequential network_file_signature calls return, and hashes each distinct
+    file once on worker threads."""
+    networks = lora_networks
+    payloads = [os.urandom(size) for size in (0, 1, 3 * 1024 * 1024 + 7, 2 * 1024 * 1024)]
+    files = []
+    for index, payload in enumerate(payloads):
+        path = tmp_path / f"lora-{index}.safetensors"
+        path.write_bytes(payload)
+        files.append(path)
+    requested = [files[2], str(files[0]), files[3], files[1], tmp_path / "missing.safetensors", files[2]]
+
+    hashing_threads = []
+    real_signature = networks.network_file_signature
+
+    def recording_signature(filename):
+        hashing_threads.append((os.fspath(filename), threading.current_thread().name))
+        return real_signature(filename)
+
+    monkeypatch.setattr(networks, "_file_signature_memo", {})
+    monkeypatch.setattr(networks, "network_file_signature", recording_signature)
+    concurrent = networks.network_file_signatures(requested)
+    monkeypatch.setattr(networks, "_file_signature_memo", {})
+    sequential = [real_signature(filename) for filename in requested]
+    reversed_order = networks.network_file_signatures(list(reversed(requested)))
+
+    expected = [("sha256", networks.hashlib.sha256(payloads[2]).hexdigest()), ("sha256", networks.hashlib.sha256(payloads[0]).hexdigest()),
+                ("sha256", networks.hashlib.sha256(payloads[3]).hexdigest()), ("sha256", networks.hashlib.sha256(payloads[1]).hexdigest()),
+                None, ("sha256", networks.hashlib.sha256(payloads[2]).hexdigest())]
+    assert concurrent == sequential == expected
+    assert reversed_order == list(reversed(expected))
+    first_pass = hashing_threads[:5]
+    assert sorted(name for name, _thread in first_pass) == sorted(dict.fromkeys(os.fspath(f) for f in requested))
+    assert all(thread.startswith("lora-signature") for _name, thread in first_pass)
+    assert networks.network_file_signatures([files[1]]) == [expected[3]]
+    assert networks.network_file_signatures([]) == []
+
 
 def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_networks, monkeypatch):
     networks = lora_networks
