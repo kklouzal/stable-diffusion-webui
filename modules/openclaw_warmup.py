@@ -173,7 +173,8 @@ def _generate(api, tabname: str, request: dict[str, Any]):
 
 
 def run(api, load_snapshot=None) -> None:
-    """One warm-up, on the calling thread: build the request, then hold queue_lock while it runs. Never raises."""
+    """One warm-up, on the calling thread: build the request, then hold queue_lock while it runs. Always leaves a final
+    state (succeeded, skipped or failed); raises only a BaseException that is not an Exception, after recording it."""
     from modules import errors, generation_last, shared
 
     tabname = request = None
@@ -185,9 +186,11 @@ def run(api, load_snapshot=None) -> None:
         print(f"OpenClaw warm-up skipped: {reason}")
         _set_status(state="skipped", error=str(reason), finished_at=_utc_now())
         return
-    except Exception as error:
+    except BaseException as error:
         errors.report("OpenClaw warm-up failed: the last-generation snapshot could not be turned into a request", exc_info=True)
         _set_status(state="failed", error=f"{type(error).__name__}: {error}", finished_at=_utc_now())
+        if not isinstance(error, Exception):
+            raise
         return
 
     with api.queue_lock:
@@ -200,10 +203,15 @@ def run(api, load_snapshot=None) -> None:
                 raise RuntimeError("the warm-up generation was interrupted")
             if not getattr(processed, "images", None):
                 raise RuntimeError("the warm-up generation returned no images")
-        except Exception as error:
+        except BaseException as error:
+            # Every failure ends the `running` state (GET /sdapi/v1/openclaw/warmup and the deploy smoke test wait
+            # for a final one); only an Exception is absorbed, a BaseException (KeyboardInterrupt, SystemExit, a
+            # thread-killing exception) propagates once it is recorded.
             seconds = round(time.perf_counter() - started, 3)
             errors.report(f"OpenClaw warm-up failed after {seconds} s replaying the last {tabname} generation (request: {status()['request']})", exc_info=True)
             _set_status(state="failed", error=f"{type(error).__name__}: {error}", finished_at=_utc_now(), seconds=seconds)
+            if not isinstance(error, Exception):
+                raise
             return
         seconds = round(time.perf_counter() - started, 3)
         _set_status(state="succeeded", finished_at=_utc_now(), seconds=seconds)

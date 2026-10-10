@@ -208,6 +208,25 @@ def test_a_failed_warmup_is_reported_with_its_traceback_and_releases_the_lock(fr
         pass
 
 
+@pytest.mark.parametrize("phase", ["request", "generation"])
+def test_a_base_exception_is_recorded_as_failed_then_propagates(fresh_status, capsys, phase):
+    """A BaseException must not leave the status `running`/`pending`: the deploy smoke test waits for a final state."""
+    events = []
+    api = _api(events, fail=KeyboardInterrupt("stop") if phase == "generation" else None)
+
+    def interrupted_snapshot():
+        raise KeyboardInterrupt("stop")
+
+    with pytest.raises(KeyboardInterrupt):
+        openclaw_warmup.run(api, load_snapshot=_snapshot if phase == "generation" else interrupted_snapshot)
+
+    status = openclaw_warmup.status()
+    assert status["state"] == "failed" and status["error"] == "KeyboardInterrupt: stop" and status["finished_at"]
+    assert (status["seconds"] is not None) == (phase == "generation")
+    assert "OpenClaw warm-up failed" in capsys.readouterr().err
+    assert api.queue_lock._owner is None
+
+
 def test_a_missing_snapshot_skips_without_taking_the_lock(fresh_status, capsys):
     events = []
     api = _api(events)
