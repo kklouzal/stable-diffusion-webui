@@ -15,9 +15,10 @@ from modules.sd_hijack import model_hijack
 from modules.textual_inversion import textual_inversion
 
 _last_cleared_at = 0.0
-_compile_slots: dict[str, dict[str, Any]] = {}
-_compile_desired: dict[str, bool] = {"vae": False}
-_compile_status: dict[str, Any] = {"vae": False, "last_error": None}
+# torch.compile of first_stage_model compiled only its forward: the core calls decode/encode, which ran uncompiled,
+# and the OptimizedModule wrapper renamed the state_dict keys to `_orig_mod.*`, so an in-place checkpoint switch
+# (load_state_dict strict=False) skipped every VAE weight. The route stays for its callers and never compiles.
+VAE_COMPILE_DISABLED_REASON = "VAE decode uses CUDA graphs; module compile does not reach decode/encode"
 _backend_activity_lock = threading.Lock()
 _backend_activity_stack: list[dict[str, Any]] = []
 _backend_activity_token = 0
@@ -174,20 +175,8 @@ def _install_backend_status_hooks() -> None:
             def wrapped(model, vae_file=None, vae_source="from unknown source"):
                 detail = os.path.basename(str(vae_file)) if vae_file else str(vae_source)
                 token = _push_backend_activity("vae_load", "Loading VAE", detail=detail)
-                restore_compile = False
                 try:
-                    first_stage = getattr(model, "first_stage_model", None)
-                    unwrapped = _unwrap_compiled_module(first_stage)
-                    if first_stage is not None and first_stage is not unwrapped:
-                        model.first_stage_model = unwrapped
-                        if getattr(sd_models.model_data, "sd_model", None) is model:
-                            _compile_slots.pop("vae", None)
-                            _compile_status["vae"] = False
-                            restore_compile = bool(_compile_desired.get("vae"))
-                    result = original(model, vae_file=vae_file, vae_source=vae_source)
-                    if restore_compile:
-                        apply_torch_compile_settings(vae=True)
-                    return result
+                    return original(model, vae_file=vae_file, vae_source=vae_source)
                 finally:
                     _pop_backend_activity(token)
             return wrapped
@@ -295,71 +284,17 @@ def _install_backend_status_hooks() -> None:
     _backend_lora_hooks_installed = True
 
 
-def _get_vae_module():
-    return getattr(sd_models.model_data.sd_model, "first_stage_model", None)
-
-
-def _set_vae_module(module: Any) -> None:
-    sd_models.model_data.sd_model.first_stage_model = module
-
-
-def _unwrap_compiled_module(module: Any) -> Any:
-    return getattr(module, "_orig_mod", module)
-
-
-def _compile_module_slot(name: str, enabled: bool, getter, setter) -> dict[str, Any]:
-    module = getter()
-    if module is None:
-        _compile_status[name] = False
-        _compile_slots.pop(name, None)
-        return {"name": name, "enabled": False, "changed": False, "error": "module not found"}
-
-    slot = _compile_slots.get(name)
-    unwrapped = _unwrap_compiled_module(module)
-
-    if enabled:
-        if slot and unwrapped is slot["original"] and module is not unwrapped:
-            _compile_status[name] = True
-            return {"name": name, "enabled": True, "changed": False, "already_compiled": True}
-
-        original = unwrapped
-        original.eval()
-        token = _push_backend_activity("torch_compile", f"Compiling {name.upper()}", detail="torch.compile reduce-overhead/dynamic")
-        try:
-            compiled = torch.compile(original, mode="reduce-overhead", fullgraph=False, dynamic=True)
-            setter(compiled)
-        finally:
-            _pop_backend_activity(token)
-        _compile_slots[name] = {"original": original}
-        _compile_status[name] = True
-        return {"name": name, "enabled": True, "changed": True, "mode": "reduce-overhead", "dynamic": True}
-
-    if module is not unwrapped:
-        token = _push_backend_activity("torch_compile", f"Restoring uncompiled {name.upper()}")
-        try:
-            setter(unwrapped)
-        finally:
-            _pop_backend_activity(token)
-        _compile_slots.pop(name, None)
-        _compile_status[name] = False
-        return {"name": name, "enabled": False, "changed": True}
-
-    _compile_slots.pop(name, None)
-    _compile_status[name] = False
-    return {"name": name, "enabled": False, "changed": False}
-
-
-def apply_torch_compile_settings(vae: bool = False) -> dict[str, Any]:
-    results = []
-    _compile_status["last_error"] = None
-    _compile_desired["vae"] = bool(vae)
-    try:
-        results.append(_compile_module_slot("vae", _compile_desired["vae"], _get_vae_module, _set_vae_module))
-        return {"ok": True, "desired": dict(_compile_desired), "status": dict(_compile_status), "results": results}
-    except Exception as exc:
-        _compile_status["last_error"] = str(exc)
-        return {"ok": False, "error": str(exc), "desired": dict(_compile_desired), "status": dict(_compile_status), "results": results}
-
+def torch_compile_status(requested_vae: bool | None = None) -> dict[str, Any]:
+    """The torch-compile route's answer: the VAE is never compiled (VAE_COMPILE_DISABLED_REASON)."""
+    result = {
+        "ok": True,
+        "desired": {"vae": False},
+        "status": {"vae": False, "last_error": None},
+        "disabled_reason": {"vae": VAE_COMPILE_DISABLED_REASON},
+    }
+    if requested_vae is not None:
+        result["requested"] = {"vae": requested_vae}
+    return result
 
 
 def _body_flag(data: Any, key: str, default: bool = False) -> bool:
@@ -450,12 +385,6 @@ def on_model_loaded(_: Any) -> None:
         _pop_backend_activity(_startup_model_load_token)
         _startup_model_load_token = None
 
-    if _compile_desired["vae"]:
-        token = _push_backend_activity("torch_compile", "Reapplying VAE compile after model load")
-        try:
-            apply_torch_compile_settings(**_compile_desired)
-        finally:
-            _pop_backend_activity(token)
 
 
 def apply_cudnn_benchmark(enabled: bool) -> dict[str, Any]:
@@ -542,13 +471,12 @@ def _cudnn_benchmark_locked(enabled: bool) -> dict[str, Any]:
         return apply_cudnn_benchmark(enabled)
 
 
-def _torch_compile_locked(data: dict[str, Any]) -> dict[str, Any]:
+def _torch_compile_request(data: dict[str, Any]) -> dict[str, Any]:
     try:
         vae = data.get("target") == "vae-only" or _body_flag(data, "vae") or _body_flag(data, "enabled")
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-    with call_queue.queue_lock:
-        return apply_torch_compile_settings(vae=vae)
+    return torch_compile_status(requested_vae=vae)
 
 
 def on_app_started(_: object, app: FastAPI) -> None:
@@ -584,12 +512,11 @@ def on_app_started(_: object, app: FastAPI) -> None:
 
     @app.post("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile(request: Request):
-        data = await request.json()
-        return await run_in_threadpool(_torch_compile_locked, data)
+        return _torch_compile_request(await request.json())
 
     @app.get("/sdapi/v1/openclaw/torch-compile")
     async def _torch_compile_status():
-        return {"ok": True, "desired": dict(_compile_desired), "status": dict(_compile_status)}
+        return torch_compile_status()
 
     @app.get("/sdapi/v1/openclaw/backend-status")
     async def _backend_status():

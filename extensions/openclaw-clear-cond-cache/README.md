@@ -20,7 +20,7 @@ The clear-cond-cache endpoint runs under A1111's `queue_lock`. Without a body it
 
 The token-count endpoint accepts JSON `{"text": string, "steps": number}` and returns `{"ok": true, "token_count": number, "max_length": number}` using A1111's active tokenizer/model hijack path after stripping extra-network tags and expanding prompt schedules; it reports the count of the longest scheduled prompt. While no text encoder is loaded it returns `ok: false` with no count.
 
-`POST .../torch-compile` with `{"vae": bool}` (`enabled` and `"target": "vae-only"` are accepted too) compiles the loaded VAE with `torch.compile` (`reduce-overhead`, dynamic shapes) or restores the uncompiled module, under `queue_lock`; the choice is reapplied after every model load. `GET` returns the `desired` and actual `status`.
+`POST .../torch-compile` with `{"vae": bool}` (`enabled` and `"target": "vae-only"` are accepted too) never compiles: it echoes the `requested` value and answers `status.vae: false` with `disabled_reason.vae` "VAE decode uses CUDA graphs; module compile does not reach decode/encode". `GET` returns the same status. The VAE compile it replaced wrapped `first_stage_model` with `torch.compile`, which compiled only `forward` (the core calls `decode`/`encode`) and renamed the VAE's state_dict keys to `_orig_mod.*`, so an in-place checkpoint switch skipped every VAE weight.
 
 `POST .../cudnn-benchmark` with `{"enabled": bool}` sets `torch.backends.cudnn.benchmark` under `queue_lock`, so it never changes between the steps of one image; `GET` returns the current value.
 
@@ -28,4 +28,4 @@ The token-count endpoint accepts JSON `{"text": string, "steps": number}` and re
 
 Boolean body fields are parsed, not truth-tested: a value that is not a boolean returns `{"ok": false, "error": ...}`.
 
-`GET .../backend-status` returns the innermost active backend phase (checkpoint load/read/apply, model creation and device move, empty-prompt conditioning, VAE load, LoRA loading, quantized-weight preparation, VAE compile, startup model load) with its label and detail, or `active: false` when idle.
+`GET .../backend-status` returns the innermost active backend phase (checkpoint load/read/apply, model creation and device move, empty-prompt conditioning, VAE load, LoRA loading, quantized-weight preparation, startup model load) with its label and detail, or `active: false` when idle.

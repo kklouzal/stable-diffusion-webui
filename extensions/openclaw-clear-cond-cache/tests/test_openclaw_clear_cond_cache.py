@@ -7,7 +7,10 @@ import threading
 import types
 from pathlib import Path
 import unittest
+from unittest import mock
 import uuid
+
+import torch
 
 EXT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = EXT_ROOT / "scripts" / "openclaw_clear_cond_cache.py"
@@ -242,18 +245,6 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.module.clear_cond_cache = self._record({"ok": True}, expect_lock=True)
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/clear-cond-cache", {"targets": ["c"]}), {"ok": True})
 
-    def test_torch_compile_takes_queue_lock_in_the_threadpool(self):
-        calls = []
-
-        def apply(vae=False):
-            calls.append(vae)
-            return self._record({"ok": True, "vae": vae}, expect_lock=True)()
-
-        self.module.apply_torch_compile_settings = apply
-        self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/torch-compile", {"target": "vae-only"}), {"ok": True, "vae": True})
-        self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/torch-compile", {"enabled": False}), {"ok": True, "vae": False})
-        self.assertEqual(calls, [True, False])
-
     def test_cudnn_benchmark_takes_queue_lock_in_the_threadpool(self):
         calls = []
 
@@ -266,30 +257,27 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.assertEqual(calls, [True])
 
     def test_boolean_fields_parse_text_instead_of_truth_testing_it(self):
-        cudnn_calls, compile_calls = [], []
+        cudnn_calls = []
 
         def apply_cudnn(enabled):
             cudnn_calls.append(enabled)
             return self._record({"ok": True}, expect_lock=True)()
 
-        def apply_compile(vae=False):
-            compile_calls.append(vae)
-            return self._record({"ok": True}, expect_lock=True)()
-
         self.module.apply_cudnn_benchmark = apply_cudnn
-        self.module.apply_torch_compile_settings = apply_compile
         self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": "false"})
         self._call("POST", "/sdapi/v1/openclaw/cudnn-benchmark", {"enabled": "on"})
-        self._call("POST", "/sdapi/v1/openclaw/torch-compile", {"vae": "false"})
-        # bool("false") was True: these turned cuDNN benchmark and VAE compile on.
+        # bool("false") was True: this turned cuDNN benchmark on.
         self.assertEqual(cudnn_calls, [False, True])
-        self.assertEqual(compile_calls, [False])
+        compile_route = self.app.routes[("POST", "/sdapi/v1/openclaw/torch-compile")]
+        self.assertEqual(asyncio.run(compile_route(_FakeRequest({"vae": "false"})))["requested"], {"vae": False})
 
         rejected = asyncio.run(self.app.routes[("POST", "/sdapi/v1/openclaw/cudnn-benchmark")](_FakeRequest({"enabled": "maybe"})))
         self.assertEqual(rejected["ok"], False)
         self.assertIn("not a boolean", rejected["error"])
-        self.assertEqual(self.module._torch_compile_locked({"enabled": [1]})["ok"], False)
-        self.assertEqual((cudnn_calls, compile_calls), ([False, True], [False]))
+        rejected = asyncio.run(compile_route(_FakeRequest({"enabled": [1]})))
+        self.assertEqual(rejected["ok"], False)
+        self.assertIn("not a boolean", rejected["error"])
+        self.assertEqual(cudnn_calls, [False, True])
 
     def test_model_merge_flags_parse_text_and_keep_their_defaults(self):
         merges = []
@@ -316,48 +304,59 @@ class BlockingHandlersRunOffTheEventLoopTests(unittest.TestCase):
         self.assertEqual(self._call("POST", "/sdapi/v1/openclaw/token_counter", {"text": "a b c"}), {"ok": True, "token_count": 3})
 
 
-class _Vae:
-    def eval(self):
-        return self
+class _TinyVae(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = torch.nn.Conv2d(3, 4, 1)
+        self.decoder = torch.nn.Conv2d(4, 3, 1)
 
 
-class _Compiled:
-    def __init__(self, original):
-        self._orig_mod = original
+class TorchCompileRouteTests(unittest.TestCase):
+    """The VAE compile slot is gone: the route answers without ever wrapping first_stage_model."""
 
-
-class TorchCompileSlotTests(unittest.TestCase):
     def setUp(self):
         install_a1111_stubs()
         self.module = import_extension_module()
-        self.compiled_originals = []
-        self.module.torch = types.SimpleNamespace(compile=lambda original, **kwargs: self.compiled_originals.append(original) or _Compiled(original))
-        self.model = types.SimpleNamespace(first_stage_model=_Vae())
+        self.vae = _TinyVae()
+        self.model = types.SimpleNamespace(first_stage_model=self.vae)
         sys.modules["modules.sd_models"].model_data.sd_model = self.model
+        self.app = _FakeApp()
+        self.module.on_app_started(None, self.app)
 
-    def test_vae_compile_slot_tracks_the_module_objects(self):
-        vae = self.model.first_stage_model
-        self.assertEqual(self.module.apply_torch_compile_settings(vae=True), {
-            "ok": True, "desired": {"vae": True}, "status": {"vae": True, "last_error": None},
-            "results": [{"name": "vae", "enabled": True, "changed": True, "mode": "reduce-overhead", "dynamic": True}],
-        })
-        compiled = self.model.first_stage_model
-        self.assertIs(compiled._orig_mod, vae)
+    def _route(self, method, payload=None):
+        handler = self.app.routes[(method, "/sdapi/v1/openclaw/torch-compile")]
+        return asyncio.run(handler(_FakeRequest(payload)) if method == "POST" else handler())
 
-        again = self.module.apply_torch_compile_settings(vae=True)
-        self.assertEqual(again["results"], [{"name": "vae", "enabled": True, "changed": False, "already_compiled": True}])
-        self.assertIs(self.model.first_stage_model, compiled)
+    def test_vae_request_is_answered_as_disabled_and_never_compiles(self):
+        reason = "VAE decode uses CUDA graphs; module compile does not reach decode/encode"
+        status = {
+            "ok": True, "desired": {"vae": False}, "status": {"vae": False, "last_error": None},
+            "disabled_reason": {"vae": reason},
+        }
+        with mock.patch.object(torch, "compile", side_effect=AssertionError("torch.compile called")):
+            for payload in ({"vae": True}, {"target": "vae-only"}, {"enabled": "true"}):
+                self.assertEqual(self._route("POST", payload), {**status, "requested": {"vae": True}})
+            self.assertEqual(self._route("POST", {"vae": False}), {**status, "requested": {"vae": False}})
+            self.assertEqual(self._route("GET"), status)
+            self.module.on_model_loaded(None)
+        self.assertIs(self.model.first_stage_model, self.vae)
 
-        disabled = self.module.apply_torch_compile_settings(vae=False)
-        self.assertEqual((disabled["status"], disabled["results"]), ({"vae": False, "last_error": None}, [{"name": "vae", "enabled": False, "changed": True}]))
-        self.assertIs(self.model.first_stage_model, vae)
+    def test_in_place_checkpoint_load_reaches_every_vae_weight(self):
+        # sd_models.load_model_weights loads a switched checkpoint with load_state_dict(strict=False).
+        self._route("POST", {"vae": True})
+        fresh = _TinyVae().state_dict()
+        result = self.model.first_stage_model.load_state_dict(fresh, strict=False)
+        self.assertEqual((result.missing_keys, result.unexpected_keys), ([], []))
+        for key, value in self.model.first_stage_model.state_dict().items():
+            self.assertTrue(torch.equal(value, fresh[key]), key)
 
-        # a reloaded model's VAE is a new object: compile it, never reinstall the old one
-        self.module.apply_torch_compile_settings(vae=True)
-        self.model.first_stage_model = fresh = _Vae()
-        self.assertEqual(self.module.apply_torch_compile_settings(vae=True)["results"][0]["changed"], True)
-        self.assertIs(self.model.first_stage_model._orig_mod, fresh)
-        self.assertEqual(self.compiled_originals, [vae, vae, fresh])
+    def test_compile_wrapper_would_skip_every_vae_weight(self):
+        # Why the slot was removed: the OptimizedModule wrapper (built lazily, nothing compiles here) renames the
+        # keys, so the same strict=False load matched none of them.
+        wrapped = torch.compile(_TinyVae())
+        result = wrapped.load_state_dict(_TinyVae().state_dict(), strict=False)
+        self.assertEqual(sorted(result.unexpected_keys), sorted(_TinyVae().state_dict()))
+        self.assertTrue(all(key.startswith("_orig_mod.") for key in result.missing_keys))
 
 
 class ClearCondCacheTests(unittest.TestCase):
