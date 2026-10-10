@@ -18,7 +18,7 @@ from skimage import exposure
 from typing import Any
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling, openclaw_generation_diagnostics, openclaw_cache_epochs, generation_last, openclaw_cuda_graphs, openclaw_vae_decode_graphs
 from modules.rng import slerp # noqa: F401
 from modules.sd_hijack import model_hijack
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes, float_images_to_uint8
@@ -1986,6 +1986,11 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         # below holds none of them.
         if self.image_mask is not None or self.latent_mask is not None:
             return "masked_request"
+        # Tiled VAE (VAEHook) replaces encoder.forward per request (in process(), before init); the key cannot see
+        # what that Python override computes.
+        vae = self.sd_model.first_stage_model
+        if openclaw_cuda_graphs.instance_overrides(vae, "encode") or openclaw_cuda_graphs.instance_overrides(vae.encoder, "forward"):
+            return "vae_encoder_override"
         return None
 
     def _img2img_init_cache_key(self, key_images, key_raw_images, repeat_init_latent, add_color_corrections):
@@ -2036,6 +2041,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             str(devices.dtype),
             str(devices.dtype_vae),
             str(shared.device),
+            # upcast_attn, the NHWC GroupNorm scope, the installed AttnBlock forward and the SDPA backend: none is in
+            # the weights, and each changes what the encoder computes.
+            openclaw_vae_decode_graphs.execution_identity(self.sd_model.first_stage_model),
         )
 
     def _restore_img2img_init_cache(self, cache_key, add_color_corrections):

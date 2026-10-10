@@ -35,9 +35,30 @@ def _random_image(mode, size, seed):
     return Image.fromarray(rng.integers(0, 256, (size[1], size[0], channels), dtype=np.uint8), mode)
 
 
+class _AttnBlock(torch.nn.Module):
+    def forward(self, x):
+        return x
+
+
+class _Encoder(torch.nn.Module):
+    def forward(self, x):
+        return x
+
+
+class _VAE(torch.nn.Module):
+    """The modules the init cache key reads: the encoder (Tiled VAE overrides its forward) and the AttnBlock."""
+
+    def __init__(self):
+        super().__init__()
+        self.encoder = _Encoder()
+        self.decoder = torch.nn.Module()
+        self.decoder.mid = torch.nn.Module()
+        self.decoder.mid.attn_1 = _AttnBlock()
+
+
 @pytest.fixture
 def harness(monkeypatch):
-    model = SimpleNamespace(cond_stage_key="crossattn", sd_checkpoint_info=SimpleNamespace(filename="m.safetensors", hash="h", sha256="s"), is_sdxl_inpaint=False)
+    model = SimpleNamespace(cond_stage_key="crossattn", sd_checkpoint_info=SimpleNamespace(filename="m.safetensors", hash="h", sha256="s"), is_sdxl_inpaint=False, first_stage_model=_VAE())
     sampler = SimpleNamespace(conditioning_key="crossattn", model_wrap=SimpleNamespace(inner_model=model))
     encoded = []
     flattened = []
@@ -80,7 +101,7 @@ def harness(monkeypatch):
         p.init([""], [1], [1])
         return p
 
-    return SimpleNamespace(make=make, encoded=encoded, flattened=flattened)
+    return SimpleNamespace(make=make, encoded=encoded, flattened=flattened, model=model)
 
 
 def test_raw_image_key_hits_before_flatten_and_matches_old_pipeline(harness):
@@ -185,6 +206,45 @@ def test_tiling_is_part_of_the_init_cache_key(harness):
 
     assert harness.make([raw.copy()], tiling=True).openclaw_img2img_init_cache_stats["last_hit"] is True
     assert len(harness.encoded) == 2
+
+
+def test_an_instance_encoder_forward_bypasses_the_init_cache(harness):
+    # Tiled VAE (VAEHook) assigns encoder.forward in process(); its restore assigns the saved bound method back.
+    raw = _random_image("RGB", (64, 48), 13)
+    encoder = harness.model.first_stage_model.encoder
+
+    encoder.forward = lambda x: x
+    first = harness.make([raw])
+    second = harness.make([raw.copy()])
+    assert second.openclaw_img2img_init_cache_stats["bypass_reason"] == "vae_encoder_override"
+    assert first.openclaw_img2img_init_cache_stats["last_hit"] is second.openclaw_img2img_init_cache_stats["last_hit"] is False
+    assert len(harness.encoded) == 2
+
+    encoder.forward = _Encoder.forward.__get__(encoder)
+    harness.make([raw.copy()])
+    assert harness.make([raw.copy()]).openclaw_img2img_init_cache_stats["last_hit"] is True
+    assert len(harness.encoded) == 3
+
+
+@pytest.mark.parametrize("change", ["upcast_attn", "sdpa_backend", "attn_block_forward", "nhwc_group_norm"])
+def test_vae_execution_state_is_part_of_the_init_cache_key(harness, monkeypatch, change):
+    from modules import openclaw_vae_decode_graphs, sd_hijack_optimizations
+
+    raw = _random_image("RGB", (64, 48), 14)
+    harness.make([raw])
+    if change == "upcast_attn":
+        monkeypatch.setattr(processing.opts, "upcast_attn", not processing.opts.upcast_attn, raising=False)
+    elif change == "sdpa_backend":
+        monkeypatch.setattr(sd_hijack_optimizations, "active_sdpa_backend", lambda: "another-backend")
+    elif change == "attn_block_forward":  # sd_hijack installs the cross-attention optimization's forward on the class
+        monkeypatch.setattr(_AttnBlock, "forward", lambda self, x: x + 0)
+    else:
+        monkeypatch.setattr(openclaw_vae_decode_graphs, "_nhwc_group_norm_state", lambda: ("another-scope",))
+
+    changed = harness.make([raw.copy()])
+    assert changed.openclaw_img2img_init_cache_stats["last_hit"] is False
+    assert len(harness.encoded) == 2
+    assert harness.make([raw.copy()]).openclaw_img2img_init_cache_stats["last_hit"] is True
 
 
 def test_soft_latent_masks_stay_float32_and_complementary(harness, monkeypatch):

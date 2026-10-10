@@ -19,6 +19,7 @@ def _init_cache_key_processing(monkeypatch, checkpoint_hash="abcd", checkpoint_s
         sd_checkpoint_info=checkpoint,
         cond_stage_key="concat",
         is_sdxl_inpaint=False,
+        first_stage_model=SimpleNamespace(encoder=SimpleNamespace()),
     )
     monkeypatch.setattr(processing.shared, "sd_model", sd_model, raising=False)
     monkeypatch.setattr(processing.sd_vae, "get_loaded_vae_name", lambda: "vae", raising=False)
