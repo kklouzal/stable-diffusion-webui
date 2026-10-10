@@ -1060,29 +1060,58 @@ def store_processing_override_settings(p: StableDiffusionProcessing):
     return {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data_labels}
 
 
+def _override_callbacks(*, reload_checkpoint, reload_vae):
+    """The reloads that make the loaded model match the options: the checkpoint, then the VAE."""
+    callbacks = []
+    if reload_checkpoint:
+        callbacks.append(sd_models.reload_model_weights)
+    if reload_vae:
+        callbacks.append(sd_vae.reload_vae_weights)
+    return callbacks
+
+
 def apply_processing_override_settings(p: StableDiffusionProcessing):
+    """Sets p.override_settings and applies them to the loaded model (see _override_callbacks). They are applied
+    whole or not at all: if setting an option or applying it fails, every option the request set is restored
+    (restore_processing_override_settings) and the failure propagates, so a checkpoint that fails to load is not
+    left configured for every later request."""
     # if no checkpoint override or the override checkpoint can't be found, remove override entry and load opts checkpoint
     # and if after running refiner, the refiner model is not unloaded - webui swaps back to main model here, if model over is present it will be reloaded afterwards
     if sd_models.checkpoint_aliases.get(p.override_settings.get('sd_model_checkpoint')) is None:
         p.override_settings.pop('sd_model_checkpoint', None)
         sd_models.reload_model_weights()
 
-    for k, v in p.override_settings.items():
-        opts.set(k, v, is_api=True, run_callbacks=False)
-
-        if k == 'sd_model_checkpoint':
-            sd_models.reload_model_weights()
-
-        if k == 'sd_vae':
-            sd_vae.reload_vae_weights()
+    previous = store_processing_override_settings(p)
+    try:
+        for k, v in p.override_settings.items():
+            opts.set(k, v, is_api=True, run_callbacks=False)
+        for callback in _override_callbacks(reload_checkpoint='sd_model_checkpoint' in p.override_settings, reload_vae='sd_vae' in p.override_settings):
+            callback()
+    except BaseException:
+        restore_processing_override_settings(previous)
+        raise
 
 
 def restore_processing_override_settings(stored_opts):
+    """Sets every stored option back first, then reloads (_override_callbacks; the VAE whenever sd_vae is stored). A
+    failing reload therefore cannot leave a later option at the request's value; the first failure is raised once
+    every reload has run. The checkpoint is not reloaded here: the next generation's
+    apply_processing_override_settings loads the configured one."""
+    failures = []
     for k, v in stored_opts.items():
-        setattr(opts, k, v)
+        try:
+            setattr(opts, k, v)
+        except Exception as e:
+            failures.append(e)
 
-        if k == 'sd_vae':
-            sd_vae.reload_vae_weights()
+    for callback in _override_callbacks(reload_checkpoint=False, reload_vae='sd_vae' in stored_opts):
+        try:
+            callback()
+        except Exception as e:
+            failures.append(e)
+
+    if failures:
+        raise RuntimeError(f"restoring settings {list(stored_opts)} failed: {'; '.join(f'{type(e).__name__}: {e}' for e in failures)}") from failures[0]
 
 
 def _failed_batch_images(p):
