@@ -199,6 +199,23 @@ def test_nchw_conv_weights_keep_the_upstream_layouts(cuda_like):
     assert torch.equal(off, on) and on_log == off_log and all(layout == "NCHW" for _, layout in on_log)
 
 
+def test_functional_lora_keeps_the_upstream_conv_inputs(cuda_like):
+    """lora_functional runs each network's down/up convs (NCHW weights) on the conv input: the SiLU fold stands aside
+    so they get the NCHW input they get upstream; the add fold for the GroupNorm still applies."""
+    cuda_like.setattr(folds.shared.opts, "lora_functional", True)
+    block = _resblock()
+    args = (_input((2, 64, 8, 12)), _input((2, 128), torch.contiguous_format, 1))
+    off, off_log = _run(block, args, _resblock_watch(block))
+    _install(cuda_like)
+    on, on_log = _run(block, args, _resblock_watch(block))
+    assert off_log == _UPSTREAM_LOG
+    assert torch.equal(off, on) and on_log == [("in_norm", "NHWC"), ("in_conv", "NCHW"), ("out_norm", "NCHW"), ("out_conv", "NCHW")]
+    x = _input((2, 64, 8, 12), torch.contiguous_format)
+    assert not folds.silu_for_conv(x, block.in_layers[2]).is_contiguous(memory_format=CL)
+    cuda_like.setattr(folds.shared.opts, "lora_functional", False)
+    assert folds.silu_for_conv(x, block.in_layers[2]).is_contiguous(memory_format=CL)
+
+
 def test_cpu_group_norm_keeps_the_upstream_add(upstream, default_runtime):
     """On CPU ATen's group_norm reads channels_last as it is: the add stays channels_last (the SiLU fold still applies)."""
     upstream.setattr(sd_hijack_unet, "bf16_native_norm_eligible", lambda module, x: x.dtype == BF16 and not torch.is_grad_enabled())

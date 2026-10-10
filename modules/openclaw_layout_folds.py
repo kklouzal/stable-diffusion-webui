@@ -8,7 +8,7 @@ of the layout the consumer would have copied it to:
 - silu_for_conv: SiLU written channels_last when the following conv reads channels_last. ATen's convolution (cuDNN's
   cudnn_conv_suggest_memory_format, oneDNN likewise) computes channels_last whenever its weight is channels_last and
   copies an NCHW input with input.contiguous(channels_last) first; on a channels_last input that is a no-op, so the conv
-  runs the same call on the same values.
+  runs the same call on the same values. Stands aside under functional LoRA (lora_functional; see silu_for_conv).
 - add_for_group_norm: `h + other` written NCHW when a GroupNorm on CUDA reads it next (ATen's CUDA group_norm copies a
   channels_last input to NCHW; see modules/openclaw_gn_transpose.py). The GroupNorm then normalizes the same NCHW values.
 Bitwise contract: the folded op is the same ATen elementwise kernel (silu, add) on the same operands, so every value is
@@ -35,7 +35,7 @@ import sgm.modules.diffusionmodules.model as sgm_vae
 import torch
 import torch.nn.functional as F
 
-from modules import openclaw_env, openclaw_nhwc_groupnorm as nhwc_group_norm
+from modules import openclaw_env, openclaw_nhwc_groupnorm as nhwc_group_norm, shared
 from modules.sd_hijack_utils import CondFunc
 
 ENV_NAME = "OPENCLAW_LAYOUT_FOLDS"
@@ -51,8 +51,15 @@ def _gn_reads_nchw(x: torch.Tensor) -> bool:
 
 
 def silu_for_conv(x: torch.Tensor, conv: torch.nn.Module) -> torch.Tensor:
-    """F.silu(x), written channels_last when `conv` (called next on it) reads a channels_last input."""
-    if x.dim() == 4 and not x.is_contiguous(memory_format=_CL) and isinstance(conv, torch.nn.Conv2d) and nhwc_group_norm.is_nhwc(conv.weight):
+    """F.silu(x), written channels_last when `conv` (called next on it) reads a channels_last input.
+
+    Not under functional LoRA (lora_functional): the Lora extension's Conv2d forward then also runs each network's
+    down/up convs on this input, and those keep NCHW weights, so a channels_last input would pick another conv kernel
+    for them than the NCHW input they get upstream."""
+    if (
+        x.dim() == 4 and not x.is_contiguous(memory_format=_CL) and isinstance(conv, torch.nn.Conv2d)
+        and nhwc_group_norm.is_nhwc(conv.weight) and not getattr(shared.opts, "lora_functional", False)
+    ):
         return torch.ops.aten.silu.out(x, out=torch.empty_like(x, memory_format=_CL))
     return F.silu(x)
 
