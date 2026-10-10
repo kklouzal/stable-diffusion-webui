@@ -1760,6 +1760,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         noise = self.rng.next()
 
         if not self.disable_extra_networks:
+            self._active_extra_network_data = self.hr_extra_network_data
             with devices.autocast():
                 extra_networks.activate(self, self.hr_extra_network_data)
 

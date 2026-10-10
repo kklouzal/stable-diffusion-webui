@@ -251,9 +251,16 @@ def apply_refiner(cfg_denoiser, sigma=None):
     cfg_denoiser.p.extra_generation_params['Refiner'] = refiner_checkpoint_info.short_title
     cfg_denoiser.p.extra_generation_params['Refiner switch at'] = refiner_switch_at
 
-    from modules import sd_models
+    from modules import sd_models, extra_networks
     with sd_models.SkipWritingToConfig():
         sd_models.reload_model_weights(info=refiner_checkpoint_info)
+
+    # The load computes the refiner's empty-prompt padding with sd_models.get_empty_cond, which resets every extra
+    # network so that no LoRA reaches the padding. The refiner stage runs with the request's networks again.
+    active_extra_network_data = cfg_denoiser.p._active_extra_network_data
+    if active_extra_network_data is not None:
+        with devices.autocast():
+            extra_networks.activate(cfg_denoiser.p, active_extra_network_data)
 
     devices.torch_gc()
     cfg_denoiser.p.setup_conds()
