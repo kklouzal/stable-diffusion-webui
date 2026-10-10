@@ -191,52 +191,27 @@ class TestPreprocessorsStayLoaded(unittest.TestCase):
 
 
 class TestSetNumpySeed(unittest.TestCase):
-    def test_seed_subseed_minus_one(self):
+    @staticmethod
+    def processing(seed, subseed, all_seeds):
         p = processing.StableDiffusionProcessing()
-        p.seed = -1
-        p.subseed = -1
-        p.all_seeds = [123, 456]
-        expected_seed = (123 + 123) & 0xFFFFFFFF
-        self.assertEqual(set_numpy_seed(p), expected_seed)
+        p.seed, p.subseed, p.all_seeds = seed, subseed, all_seeds
+        return p
 
-    def test_valid_seed_subseed(self):
-        p = processing.StableDiffusionProcessing()
-        p.seed = 50
-        p.subseed = 100
-        p.all_seeds = [123, 456]
-        expected_seed = (50 + 100) & 0xFFFFFFFF
-        self.assertEqual(set_numpy_seed(p), expected_seed)
+    def test_first_image_seed_alone(self):
+        # A random-seed request and the replay of its infotext (Seed: 123) seed NumPy alike, whatever the subseed.
+        for seed, subseed in ((-1, -1), (123, -1), (123, 77), (-1, 4567)):
+            with self.subTest(seed=seed, subseed=subseed):
+                self.assertEqual(set_numpy_seed(self.processing(seed, subseed, [123, 124])), 123)
 
-    def test_invalid_seed_subseed(self):
-        p = processing.StableDiffusionProcessing()
-        p.seed = "invalid"
-        p.subseed = 2.5
-        p.all_seeds = [123, 456]
-        self.assertEqual(set_numpy_seed(p), None)
+    def test_seeds_numpy_global_state(self):
+        set_numpy_seed(self.processing(-1, -1, [2 ** 32 + 5]))
+        first = np.random.randint(0, 2 ** 31, 4)
+        set_numpy_seed(self.processing(5, 9, [5]))
+        np.testing.assert_array_equal(np.random.randint(0, 2 ** 31, 4), first)
 
-    def test_empty_all_seeds(self):
-        p = processing.StableDiffusionProcessing()
-        p.seed = -1
-        p.subseed = 2
-        p.all_seeds = []
-        self.assertEqual(set_numpy_seed(p), None)
-
-    def test_random_state_change(self):
-        p = processing.StableDiffusionProcessing()
-        p.seed = 50
-        p.subseed = 100
-        p.all_seeds = [123, 456]
-        expected_seed = (50 + 100) & 0xFFFFFFFF
-
-        np.random.seed(0)  # set a known seed
-        before_random = np.random.randint(0, 1000)  # get a random integer
-
-        seed = set_numpy_seed(p)
-        self.assertEqual(seed, expected_seed)
-
-        after_random = np.random.randint(0, 1000)  # get another random integer
-
-        self.assertNotEqual(before_random, after_random)
+    def test_missing_seeds_fail(self):
+        with self.assertRaises(IndexError):
+            set_numpy_seed(self.processing(-1, -1, []))
 
 
 class MockImg2ImgProcessing(processing.StableDiffusionProcessing):

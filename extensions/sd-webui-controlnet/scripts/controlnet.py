@@ -95,33 +95,17 @@ def prepare_mask(
         blur_x=p.mask_blur_x, blur_y=p.mask_blur_y)
 
 
-def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
+def set_numpy_seed(p: processing.StableDiffusionProcessing) -> int:
     """
-    Set the random seed for NumPy based on the provided parameters.
+    Seed NumPy's global generator, which the shuffle preprocessor draws from, and return the seed.
 
-    Args:
-        p (processing.StableDiffusionProcessing): The instance of the StableDiffusionProcessing class.
-
-    Returns:
-        Optional[int]: The computed random seed if successful, or None if an exception occurs.
-
-    This function sets the random seed for NumPy using the seed and subseed values from the given instance of
-    StableDiffusionProcessing. If either seed or subseed is -1, it uses the first value from `all_seeds`.
-    Otherwise, it takes the maximum of the provided seed value and 0.
-
-    The final random seed is computed by adding the seed and subseed values, applying a bitwise AND operation
-    with 0xFFFFFFFF to ensure it fits within a 32-bit integer.
+    The seed is the request's first image seed `p.all_seeds[0]` alone: it is what the "Seed" infotext entry records, so
+    replaying an infotext reproduces the preprocessor result. (The former seed + subseed sum depended on the requested
+    seed being -1 or not and on a subseed the infotext omits.)
     """
-    try:
-        tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed), 0))
-        tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed), 0))
-        seed = (tmp_seed + tmp_subseed) & 0xFFFFFFFF
-        np.random.seed(seed)
-        return seed
-    except Exception as e:
-        logger.warning(e)
-        logger.warning('Warning: Failed to use consistent random seed.')
-        return None
+    seed = int(p.all_seeds[0]) & 0xFFFFFFFF
+    np.random.seed(seed)
+    return seed
 
 
 # v / 255 for every uint8 v, divided on the CPU in float32 exactly like the
