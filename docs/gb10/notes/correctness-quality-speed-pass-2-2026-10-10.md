@@ -139,5 +139,6 @@ of 84 °C, with no errors and no host issue.
 - **Token merging.** `token_merging_ratio` 0.05 applies to img2img when `token_merging_ratio_img2img` is 0. That is
   A1111's documented semantics.
 - **ControlNet detected map.** It is attached to every response (about 32 ms and 0.74 MB). The controller only reads
-  the generated image; `control_net_no_detectmap=true` would drop the map.
+  the generated image; `control_net_no_detectmap=true` would drop the map. (Update 2026-10-10: set to true at the owner's request; responses now carry only the
+  generated image, and depth guidance is unchanged.)
 - **VAE compile toggle.** The controller's `compile_vae` toggle now re-sends a no-op request each generation.
