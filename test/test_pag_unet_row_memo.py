@@ -361,6 +361,9 @@ class Harness:
             # The core's torch with a resizing cat; equal to torch for this harness's aligned shapes.
             "modules.sd_hijack_unet": stub("modules.sd_hijack_unet", th=torch),
             "modules.lowvram": stub("modules.lowvram", send_everything_to_cpu=lambda: None),
+            # The core's generator helpers (hook.UnetHook.noise_like) with the CPU randn source.
+            "modules.rng": stub("modules.rng", create_generator=lambda seed: torch.Generator().manual_seed(seed),
+                                randn_without_seed=lambda shape, generator=None: torch.randn(shape, generator=generator)),
             "modules.scripts": stub("modules.scripts", script_callbacks=self.script_callbacks),
             # cldm keeps ControlNet weights' layout with the NHWC GroupNorm switch (real module: torch-only, off here).
             "modules.openclaw_nhwc_groupnorm": load_source("modules.openclaw_nhwc_groupnorm", "modules/openclaw_nhwc_groupnorm.py"),
@@ -375,7 +378,7 @@ class Harness:
             "ldm.models.diffusion": stub("ldm.models.diffusion", package=True),
             "ldm.models.diffusion.ddpm": stub("ldm.models.diffusion.ddpm", extract_into_tensor=extract_into_tensor),
         })
-        for name in ("devices", "lowvram", "scripts", "openclaw_nhwc_groupnorm"):
+        for name in ("devices", "lowvram", "rng", "scripts", "openclaw_nhwc_groupnorm"):
             setattr(cn_modules["modules"], name, cn_modules[f"modules.{name}"])
         with isolated_modules(cn_modules, {"modules", "scripts", "ldm"}):
             self.hook = importlib.import_module("scripts.hook")
@@ -419,7 +422,7 @@ class Harness:
             cfg_injection=cfg_injection,
         )
         self.sd_ldm = types.SimpleNamespace(is_sdxl=True, model=self.sd_model.model)
-        self.process = types.SimpleNamespace(sample=lambda *a, **k: None)
+        self.process = types.SimpleNamespace(sample=lambda *a, **k: None, seeds=[seed])
         self.unet_hook = self.hook.UnetHook(lowvram=False)
         self.unet_hook.hook(
             model=self.unet,

@@ -16,7 +16,7 @@ from scripts.enums import (
     ControlNetUnionControlType,
 )
 from scripts.ipadapter.ipadapter_model import ImageEmbed
-from modules import devices, lowvram, shared, scripts, sd_unet_row_memo
+from modules import devices, lowvram, rng, shared, scripts, sd_unet_row_memo
 from modules.sd_hijack_unet import th
 
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
@@ -248,9 +248,7 @@ class AbstractLowScaleModel(LdmAbstractLowScaleModel):
     def __init__(self):
         super().__init__(noise_schedule_config={})
 
-    def q_sample(self, x_start, t, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x_start)
+    def q_sample(self, x_start, t, noise):
         return (extract_into_tensor(self.sqrt_alphas_cumprod.to(x_start), t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod.to(x_start), t, x_start.shape) * noise)
 
@@ -280,9 +278,7 @@ def register_schedule(self):
     setattr(self, 'sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
 
-def predict_q_sample(ldm, x_start, t, noise=None):
-    if noise is None:
-        noise = torch.randn_like(x_start)
+def predict_q_sample(ldm, x_start, t, noise):
     return extract_into_tensor(ldm.sqrt_alphas_cumprod.to(x_start), t, x_start.shape) * x_start + extract_into_tensor(ldm.sqrt_one_minus_alphas_cumprod.to(x_start), t, x_start.shape) * noise
 
 
@@ -345,6 +341,20 @@ class UnetHook(nn.Module):
         # so a hook leaked by a failed generation can never touch a later one.
         self.sampling_active = False
         self._warned_outside_sampling = False
+        # The processing object hook() was given and the generator of this hook's own noise (reference and ReVision
+        # q_sample) in the running process.sample() call, created on first use; see noise_like.
+        self.process = None
+        self.noise_generator = None
+
+    def noise_like(self, x):
+        """Standard normal noise shaped like x for the reference/ReVision q_sample, from the core's generator
+        (modules/rng.py, so the randn source setting applies) seeded per process.sample() call from the batch's first
+        image seed: the same request gives the same noise whatever consumed the global RNG before. The seed is derived
+        (sha256) rather than the image seed itself, whose generator draws the initial latent noise."""
+        if self.noise_generator is None:
+            digest = hashlib.sha256(f"controlnet-noise:{int(self.process.seeds[0])}".encode()).digest()
+            self.noise_generator = rng.create_generator(int.from_bytes(digest[:4], "little"))
+        return rng.randn_without_seed(x.shape, generator=self.noise_generator).to(x)
 
     @staticmethod
     def mark_hires_conds(process):
@@ -412,6 +422,7 @@ class UnetHook(nn.Module):
         self.model = model
         self.sd_ldm = sd_ldm
         self.control_params = control_params
+        self.process = process
 
         model_is_sdxl = getattr(self.sd_ldm, 'is_sdxl', False)
 
@@ -425,12 +436,13 @@ class UnetHook(nn.Module):
             # Hires conds that exist already (hires_fix_use_firstpass_conds, lowvram); the others are computed
             # inside sample_hr_pass and marked by Script.before_hr.
             UnetHook.mark_hires_conds(process)
-            previously_active = outer.sampling_active
+            previously_active, previous_generator = outer.sampling_active, outer.noise_generator
             outer.sampling_active = True
+            outer.noise_generator = None
             try:
                 return process.sample_before_CN_hack(*args, **kwargs)
             finally:
-                outer.sampling_active = previously_active
+                outer.sampling_active, outer.noise_generator = previously_active, previous_generator
 
         # Control models this hook already placed on the device (outside lowvram nothing moves them back
         # while the hook is active) and the timestep frequencies computed per device.
@@ -527,7 +539,7 @@ class UnetHook(nn.Module):
                     if param.control_model_type == ControlModelType.ReVision:
                         if param.vision_hint_count is None:
                             k = torch.Tensor([int(param.preprocessor['threshold_a'] * 1000)]).to(param.hint_cond).long().clip(0, 999)
-                            param.vision_hint_count = outer.revision_q_sampler.q_sample(param.hint_cond, k)
+                            param.vision_hint_count = outer.revision_q_sampler.q_sample(param.hint_cond, k, outer.noise_like(param.hint_cond))
                         revision_emb = param.vision_hint_count
                         if isinstance(revision_emb, torch.Tensor):
                             revision_y1280 += revision_emb * param.weight
@@ -838,7 +850,7 @@ class UnetHook(nn.Module):
                     continue
 
                 ref_latent = batch_rows(param.used_hint_cond_latent, x.shape[0])
-                ref_xt = predict_q_sample(outer.sd_ldm, ref_latent, torch.round(timesteps.float()).long())
+                ref_xt = predict_q_sample(outer.sd_ldm, ref_latent, torch.round(timesteps.float()).long(), outer.noise_like(ref_latent))
 
                 # Inpaint Hijack
                 if x.shape[1] == 9:
@@ -1257,6 +1269,7 @@ class UnetHook(nn.Module):
                 del model._controlnet_forward_hook_restore
         self._forward_hook_wrapper = None
         self.control_params = None
+        self.process = None
 
     @staticmethod
     def restore_leaked(model):
