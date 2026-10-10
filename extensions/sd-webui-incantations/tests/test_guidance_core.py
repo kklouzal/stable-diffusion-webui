@@ -803,10 +803,23 @@ class SANFCombinerTests(unittest.TestCase):
             for cond_index, weight in conds:
                 cfg_term = (x_out[cond_index] - uncond[i]) * (weight * cond_scale)
                 pag_term = (x_out[cond_index] - self.pag_x_out[cond_index]) * (weight * 4.0)
-                mask = torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(cfg_term.abs()).float(), dim=0) >= \
-                    torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(pag_term.abs()).float(), dim=0)
-                out[i] += torch.where(mask, cfg_term, pag_term)
+                out[i] += self.sanf_choice(cfg_term, pag_term)
         return out
+
+    def composed_sanf_oracle(self, x_out, cond_scale):
+        """uncond + a saliency choice of the thresholded guidance t = DT(...) - uncond or the image's summed PAG terms."""
+        uncond = x_out[-2:]
+        guidance = self.dt_combiner()(x_out, self.conds_list, self.uncond, cond_scale) - uncond
+        out = uncond.clone()
+        for i, conds in enumerate(self.conds_list):
+            pag_sum = sum((x_out[c] - self.pag_x_out[c]) * (w * 4.0) for c, w in conds)
+            out[i] += self.sanf_choice(guidance[i], pag_sum)
+        return out
+
+    def sanf_choice(self, cfg_term, pag_term):
+        mask = torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(cfg_term.abs()).float(), dim=0) >= \
+            torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(pag_term.abs()).float(), dim=0)
+        return torch.where(mask, cfg_term, pag_term)
 
     def test_stock_combiner_is_detected(self):
         self.assertTrue(self.cfg_combiner.is_stock_combiner(self.stock_combiner()))
@@ -817,10 +830,11 @@ class SANFCombinerTests(unittest.TestCase):
         torch.testing.assert_close(out, self.raw_sanf_oracle(self.x_out, 6.0), rtol=0, atol=0)
         self.assertEqual(generation_params, {})
 
-    def test_sanf_overriding_dynamic_thresholding_is_recorded(self):
+    def test_sanf_composes_dynamic_thresholding_and_records_it(self):
         out, generation_params = self.combine(self.dt_combiner(), sanf=True)
-        torch.testing.assert_close(out, self.raw_sanf_oracle(self.x_out, 6.0), rtol=0, atol=0)
-        self.assertEqual(generation_params, {"PAG SANF note": "Dynamic thresholding overridden by PAG SANF"})
+        torch.testing.assert_close(out, self.composed_sanf_oracle(self.x_out, 6.0), rtol=0, atol=0)
+        self.assertFalse(torch.equal(out, self.raw_sanf_oracle(self.x_out, 6.0)))
+        self.assertEqual(generation_params, {"PAG SANF note": "PAG SANF blends the dynamically thresholded CFG"})
 
     def test_plain_pag_keeps_dynamic_thresholding_and_records_nothing(self):
         out, generation_params = self.combine(self.dt_combiner(), sanf=False)
@@ -834,9 +848,10 @@ class SANFCombinerTests(unittest.TestCase):
     def test_ngms_cond_only_call(self):
         # NGMS skips the uncond pass: the cond rows stand in for uncond and the combiner runs at scale 1.
         x_out = torch.cat([self.x_out[:3], self.x_out[[0, 2]]])
-        for combiner in (self.stock_combiner(), self.dt_combiner()):
-            out, _ = self.combine(combiner, sanf=True, x_out=x_out, cond_scale=1.0)
-            torch.testing.assert_close(out, self.raw_sanf_oracle(x_out, 1.0), rtol=0, atol=0)
+        out, _ = self.combine(self.stock_combiner(), sanf=True, x_out=x_out, cond_scale=1.0)
+        torch.testing.assert_close(out, self.raw_sanf_oracle(x_out, 1.0), rtol=0, atol=0)
+        out, _ = self.combine(self.dt_combiner(), sanf=True, x_out=x_out, cond_scale=1.0)
+        torch.testing.assert_close(out, self.composed_sanf_oracle(x_out, 1.0), rtol=0, atol=0)
 
 
 class PAGBatchingTests(unittest.TestCase):
