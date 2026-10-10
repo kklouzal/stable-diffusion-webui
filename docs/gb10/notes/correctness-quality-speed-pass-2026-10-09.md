@@ -294,11 +294,10 @@ All of these were checked on the GPU. Sample sheets were shown to the operator.
 
 ## Owner items
 
-- **System-Statistics.** `~/System-Statistics` runs run.sh with a 120 s subprocess timeout (SIGKILL). The new run.sh
-  waits for readiness and the smoke test, so it can take longer. Raise that timeout (for example to 1200 s) before
-  using the recreate or rebuild buttons.
-- **API exposure (G-14).** The API listens on the LAN with no `--api-auth`, and `--enable-insecure-extension-access`
-  is a dead flag.
+- **System-Statistics.** Done: its Recreate timeout for this container is 2400 s (System-Statistics `134578f`).
+- **API exposure (G-14).** Decided 2026-10-10: no API authentication. This is a local container on a trusted LAN.
+  `--enable-insecure-extension-access` is read by no code; it stays in the launcher defaults as a no-op, so
+  `/cmd-flags` is unchanged.
 - **Multi-sampler infotext.** The chain's eta never reaches the infotext.
 - **img2img call count.** img2img makes one sampler call fewer than requested; this is the ldm reference behaviour
   (A-12 note).

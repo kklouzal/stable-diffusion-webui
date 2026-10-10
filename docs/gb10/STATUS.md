@@ -112,5 +112,9 @@ the container reads them:
 2. Owner decisions on host leftovers: the directories listed above that run.sh does not mount, and the quarantine copy
    `Extensions.quarantine/20260503-194044/sd-webui-prompt-all-in-one`.
 3. Adopt or replace the third-party extensions, starting with MultiDiffusion and detail-daemon (EXTENSIONS.md).
+4. The VAE-only layout re-evaluation (NHWC GroupNorm or an NCHW VAE), deferred by the owner on 2026-10-09; see
+   [notes/correctness-quality-speed-pass-2026-10-09.md](notes/correctness-quality-speed-pass-2026-10-09.md).
+
+The API has no authentication by design: it is a local container on a trusted LAN.
 
 History before 2026-10 lives in git and in [notes/](notes/README.md).

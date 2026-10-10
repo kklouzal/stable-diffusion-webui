@@ -65,3 +65,5 @@ gb10/smoke-*.log
 gb10/warm-delay-*.json
 gb10/warm-delay-*.txt
 gb10/warm-delay-*.patch
+# Claude Code session state (agent worktrees, settings)
+.claude/
