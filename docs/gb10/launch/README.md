@@ -80,6 +80,7 @@ Environment overrides:
 | `OPENCLAW_CUDA_GRAPH_CACHE_MAX` | `8` | UNet graph cache size |
 | `OPENCLAW_VAE_DECODE_GRAPHS` | `1` | VAE decode CUDA graphs |
 | `OPENCLAW_VAE_DECODE_GRAPH_CACHE_MAX` | `4` | VAE decode graph cache size |
+| `OPENCLAW_WARMUP` | `generation-last` | after startup, replay the last generation once in the background so the first production request is warm (`off` disables; the image default is `off`). See [Startup warm-up](#startup-warm-up) |
 | `PYTORCH_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config: same speed and output, lower reserved peak |
 | `OPENCLAW_COMPILE_CACHE_ROOT` | `${HOST_ROOT}/Caches/compile` | host root of the Inductor, Triton and CUDA kernel caches |
 | `OPENCLAW_COMPILE_CACHE_NAMESPACE` | image torch/Triton/CUDA versions + host driver version | cache namespace. App-only deploys reuse warm caches |
@@ -88,6 +89,7 @@ Environment overrides:
 | `STOP_TIMEOUT` | `120` | seconds `docker stop` waits after SIGTERM before it kills the old container |
 | `READY_TIMEOUT` | `900` | seconds the new container gets to answer `/sdapi/v1/progress` (the API serves once the startup model is loaded) |
 | `EXPECTED_SCRIPTS` | the owned and host-installed extensions' scripts | passed to `gb10/smoke-test.sh` |
+| `WARMUP_TIMEOUT` | `900` | seconds `gb10/smoke-test.sh` waits for the startup warm-up to finish |
 
 An image built before the provenance labels (deploy10 and older) needs `A1111_COMMIT_HASH` and `A1111_VERSION_TAG`
 set to the commit it was built from and that commit's `git describe --tags`. Without them run.sh stops before it
@@ -119,7 +121,9 @@ Order of operations:
    contract. Each patcher accepts a pristine upstream file or an already-patched one, and fails on anything else.
 7. `chown -R 2323:2323` the mounted host directories, then start the new container from the image ID.
 8. Wait until the new container answers `/sdapi/v1/progress` (`READY_TIMEOUT`), then run `gb10/smoke-test.sh`. A
-   container that exits or restarts fails at once.
+   container that exits or restarts fails at once. The API answers while the startup warm-up runs; the smoke test
+   first waits for the warm-up to finish (`WARMUP_TIMEOUT`), because its precision-map check takes the generation lock.
+   A failed or skipped warm-up is printed as a warning and does not fail the deploy.
 9. On success, remove `${CONTAINER_NAME}-previous`.
 
 Any failure or interruption (Ctrl-C, SIGTERM) after step 4 rolls back:
@@ -139,8 +143,9 @@ removes the failed container and exits non-zero.
 
 run.sh never deletes an owned extension that was removed from the checkout. Remove its host copy by hand.
 
-`gb10/smoke-test.sh` (overrides `CONTAINER_NAME`, `PORT`, `DOCKER_BIN`, `BASE_URL`, `EXPECTED_SCRIPTS`) checks a
-running container in two parts:
+`gb10/smoke-test.sh` (overrides `CONTAINER_NAME`, `PORT`, `DOCKER_BIN`, `BASE_URL`, `EXPECTED_SCRIPTS`,
+`WARMUP_TIMEOUT`) first waits until `/sdapi/v1/openclaw/warmup` is no longer `pending` or `running` and prints its
+outcome, then checks the running container in two parts:
 - GET requests to `/sdapi/v1/progress`, `/sd-models`, `/scripts`, `/openclaw/precision-map` and
   `/openclaw/vae-decode-graphs`. Every name in `EXPECTED_SCRIPTS` (comma-separated, as `/sdapi/v1/scripts` lists it,
   in txt2img or img2img) must be loaded. The default lists ControlNet, Incantations, Dynamic Thresholding, TeaCache, the
@@ -152,6 +157,35 @@ running container in two parts:
 The script generates no images.
 
 `gb10/stop.sh` stops the container (`docker stop -t ${STOP_TIMEOUT}`, default 120 s) and removes it.
+
+## Startup warm-up
+
+After a (re)start the first production img2img took about 100 s instead of 13 s: cuDNN/cuBLAS first use and autotuning
+per shape, ControlNet and annotator loads, LoRA loads and merges, CUDA graph captures. With
+`OPENCLAW_WARMUP=generation-last` (run.sh's default; the code default is `off`), the server replays the last completed
+generation (`/sdapi/v1/generation/last`, see [generation-last-api.md](../generation-last-api.md)) once, in a background
+thread started after the API is set up (`modules/openclaw_warmup.py`). It holds the generation lock like any
+generation, so requests arriving meanwhile wait for it; `/sdapi/v1/progress` answers throughout and shows the task id
+`openclaw-warmup`. Any other value of `OPENCLAW_WARMUP` stops the server at startup.
+
+What is replayed: the stored request (sampler, scheduler, steps, CFG, denoising, seed, init image, ControlNet units
+and images, every always-on script's arguments, override settings), with:
+- the prompt `warm-up` followed by the stored LoRA tags (the snapshot keeps no prompt text), an empty negative prompt
+  and no styles. A prompt longer than one 75-token chunk has a longer conditioning, so shape-keyed work (UNet CUDA
+  graphs) may still be done by the first real request.
+- img2img at the init image's size; txt2img at 1024x1024 without the hires pass (the snapshot keeps no size).
+
+The warm-up writes nothing: no images (`save_images` off; `save_init_img` and ControlNet's detected-map autosave
+overridden off; Multi-Sampler snapshots off), no generation-last record, and no option change (its override settings
+are restored afterwards, whatever the stored request said). The one file it rewrites is A1111's prompt-history
+`params.txt` inside the container (not mounted). A stored request that ran a selectable script (`script_name`, e.g.
+Ultimate SD upscale) is not replayed, since such scripts save images on their own; neither is a missing or
+non-replayable snapshot (state `skipped`). The warm-up's diagnostics stay the "last generation" ones of
+`/sdapi/v1/openclaw/generation-diagnostics` until the first real request.
+
+`GET /sdapi/v1/openclaw/warmup` returns `{mode, state, started_at, finished_at, seconds, error, request}`; `state` is
+`off`, `pending` (waiting for the lock), `running`, `succeeded`, `failed` or `skipped`. A failure is logged with its
+traceback (`*** OpenClaw warm-up failed ...`) and never affects later requests.
 
 ## Launch flags
 

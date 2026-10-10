@@ -8,6 +8,33 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT}}"
 # Scripts the deployment must load (names as /sdapi/v1/scripts lists them, in txt2img or img2img), comma-separated:
 # the owned extensions' and the host-installed third-party ones'. A missing one means an extension failed to load.
 EXPECTED_SCRIPTS="${EXPECTED_SCRIPTS:-controlnet,incantations,dynamic thresholding (cfg scale fix),teacache,openclaw multi-sampler,openclaw denoise ramp,tiled diffusion,tiled vae,ultimate sd upscale,detail daemon}"
+# Seconds to wait for the startup warm-up (OPENCLAW_WARMUP) to finish: it holds queue_lock, which the precision-map
+# check below also takes.
+WARMUP_TIMEOUT="${WARMUP_TIMEOUT:-900}"
+
+# The warm-up's outcome is reported, not checked: a failed or skipped warm-up is not a deploy failure (the server's log
+# holds the traceback). Only a warm-up still running after WARMUP_TIMEOUT fails, since it blocks every generation.
+python3 - "${BASE_URL}" "${WARMUP_TIMEOUT}" <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+url = sys.argv[1].rstrip('/') + '/sdapi/v1/openclaw/warmup'
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    with urllib.request.urlopen(url, timeout=30) as response:
+        status = json.loads(response.read())
+    if status.get('state') not in ('pending', 'running'):
+        break
+    if time.monotonic() >= deadline:
+        raise SystemExit(f'/sdapi/v1/openclaw/warmup: still {status.get("state")} after {sys.argv[2]} s')
+    time.sleep(2)
+state = status.get('state')
+if state in ('failed', 'skipped'):
+    print(f'WARNING: /sdapi/v1/openclaw/warmup: {state}: {status.get("error")}', file=sys.stderr)
+print(f'/sdapi/v1/openclaw/warmup: {state} (mode={status.get("mode")}, seconds={status.get("seconds")})')
+PY
 
 python3 - "${BASE_URL}" "${EXPECTED_SCRIPTS}" <<'PY'
 import json

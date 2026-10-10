@@ -19,6 +19,7 @@ import network_norm
 import network_oft
 
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from typing import Union
 
 from modules import cache, shared, devices, sd_models, errors, scripts, sd_hijack, torchao_model_cache, torchao_weight_quant, openclaw_cuda_graphs, openclaw_cache_epochs
@@ -270,6 +271,20 @@ def network_file_signature(filename):
 _file_signature_lock = threading.Lock()
 _file_signature_memo = {}
 _file_signature_memo_capacity = 1024
+_file_signature_workers = 8
+
+
+def network_file_signatures(filenames):
+    """network_file_signature of each file, in order. Distinct files are hashed concurrently (file reads and hashlib
+    release the GIL): the uncached digests of a request's LoRAs cost about the slowest file instead of their sum
+    (~0.5 s for the eight production LoRAs from page cache). Each digest is the one a sequential call returns."""
+    filenames = [os.fspath(filename) for filename in filenames]
+    distinct = list(dict.fromkeys(filenames))
+    if len(distinct) < 2:
+        return [network_file_signature(filename) for filename in filenames]
+    with ThreadPoolExecutor(max_workers=min(len(distinct), _file_signature_workers), thread_name_prefix="lora-signature") as executor:
+        signatures = dict(zip(distinct, executor.map(network_file_signature, distinct)))
+    return [signatures[filename] for filename in filenames]
 
 
 def _execution_identity():
@@ -674,7 +689,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         openclaw_cache_epochs.observe("E12", "reject", reason="rejected", semantic_key=("missing", len(names)))
         raise RuntimeError("one or more requested LoRA sources are unavailable")
 
-    signatures = [network_file_signature(item.filename) for item in networks_on_disk]
+    signatures = network_file_signatures(item.filename for item in networks_on_disk)
     source_keys = [network_source_key(item, signature) for item, signature in zip(networks_on_disk, signatures)]
     identity_done = time.perf_counter()
     te_values = te_multipliers or [1.0] * len(names)

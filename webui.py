@@ -43,6 +43,10 @@ def api_only():
     script_callbacks.before_ui_callback()
 
     api = create_api(app)
+    # Registers GET /sdapi/v1/openclaw/warmup; with OPENCLAW_WARMUP=generation-last, an app_started callback starts the
+    # warm-up replay of the last generation (modules/openclaw_warmup.py).
+    from modules import openclaw_warmup
+    openclaw_warmup.install(api)
     script_callbacks.app_started_callback(None, app)
 
     print(f"Startup time: {startup_timer.summary()}.")
