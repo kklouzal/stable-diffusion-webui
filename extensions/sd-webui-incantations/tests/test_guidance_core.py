@@ -1,10 +1,13 @@
+import ast
 import collections
 import functools
 import importlib
 import importlib.util
+import inspect
 import itertools
 import math
 import sys
+import textwrap
 import types
 from pathlib import Path
 import unittest
@@ -107,9 +110,24 @@ def install_a1111_stubs():
     sd_samplers_timesteps_mod.samplers_data_timesteps = [
         SamplerData(name, None, [], {}) for name in ("DDIM", "DDIM CFG++", "PLMS", "UniPC")
     ]
+    sd_samplers_cfg_denoiser_mod = types.ModuleType("modules.sd_samplers_cfg_denoiser")
+
+    class CFGDenoiser:
+        # modules/sd_samplers_cfg_denoiser.py's CFGDenoiser.combine_denoised, verbatim (StockCombinerStubTests).
+        def combine_denoised(self, x_out, conds_list, uncond, cond_scale):
+            denoised_uncond = x_out[-uncond.shape[0]:]
+            denoised = torch.clone(denoised_uncond)
+
+            for i, conds in enumerate(conds_list):
+                for cond_index, weight in conds:
+                    denoised[i] += (x_out[cond_index] - denoised_uncond[i]) * (weight * cond_scale)
+
+            return denoised
+
+    sd_samplers_cfg_denoiser_mod.CFGDenoiser = CFGDenoiser
     sd_samplers_kdiffusion_mod = types.ModuleType("modules.sd_samplers_kdiffusion")
 
-    class CFGDenoiserKDiffusion:
+    class CFGDenoiserKDiffusion(CFGDenoiser):
         def __init__(self, model):
             self.model = model
 
@@ -137,6 +155,7 @@ def install_a1111_stubs():
             "modules.sd_samplers": sd_samplers_mod,
             "modules.sd_samplers_common": sd_samplers_common_mod,
             "modules.sd_samplers_timesteps": sd_samplers_timesteps_mod,
+            "modules.sd_samplers_cfg_denoiser": sd_samplers_cfg_denoiser_mod,
             "modules.sd_samplers_kdiffusion": sd_samplers_kdiffusion_mod,
             "modules.sd_unet_row_memo": row_memo_mod,
         }
@@ -558,6 +577,7 @@ class CFGCombinerTests(unittest.TestCase):
             7.5,
             original_func=original,
             cfg_dict={"pag_params": None},
+            generation_params={},
         )
         self.assertTrue(called["value"])
         self.assertTrue(torch.equal(out, torch.full_like(out, 7.5)))
@@ -586,6 +606,7 @@ class CFGCombinerTests(unittest.TestCase):
             6.0,
             original_func=original,
             cfg_dict={"pag_params": Pag()},
+            generation_params={},
         )
         self.assertEqual(tuple(out.shape), (2, 4, 4, 4))
         self.assertTrue(torch.equal(out, torch.full_like(out, 6.0)))
@@ -611,7 +632,7 @@ class CFGCombinerTests(unittest.TestCase):
         conds_list = [[(0, 0.5), (1, 0.5)], [(2, 1.0)]]
         out = self.cfg_combiner.combine_denoised_pass_conds_list(
             x_out, conds_list, torch.zeros(2, 77, 8), 6.0,
-            original_func=original, cfg_dict={"pag_params": self.pag_params(pag_x_out)},
+            original_func=original, cfg_dict={"pag_params": self.pag_params(pag_x_out)}, generation_params={},
         )
         expected0 = (x_out[0] - pag_x_out[0]) * 1.0 + (x_out[1] - pag_x_out[1]) * 1.0
         torch.testing.assert_close(out[0], expected0)
@@ -625,7 +646,7 @@ class CFGCombinerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "expected the 2 cond rows"):
             self.cfg_combiner.combine_denoised_pass_conds_list(
                 x_out, [[(0, 1.0)], [(1, 1.0)]], torch.zeros(2, 77, 8), 6.0,
-                original_func=original, cfg_dict={"pag_params": self.pag_params(torch.randn(4, 4, 2, 2))},
+                original_func=original, cfg_dict={"pag_params": self.pag_params(torch.randn(4, 4, 2, 2))}, generation_params={},
             )
 
     def test_cfg_combiner_process_batch_skips_inactive_callback(self):
@@ -699,7 +720,7 @@ class CFGCombinerTests(unittest.TestCase):
             "wrapped_combine_denoised": None,
             "pag_params": None,
         }
-        script.patch_cfg_denoiser(denoiser, cfg_dict)
+        script.patch_cfg_denoiser(denoiser, cfg_dict, {})
         wrapped = denoiser.combine_denoised
         self.assertIs(cfg_dict["wrapped_combine_denoised"], wrapped)
         self.assertIsNot(wrapped, original)
@@ -708,7 +729,7 @@ class CFGCombinerTests(unittest.TestCase):
         self.assertIs(denoiser.combine_denoised, original)
         self.assertIsNone(cfg_dict["denoiser"])
 
-        script.patch_cfg_denoiser(denoiser, cfg_dict)
+        script.patch_cfg_denoiser(denoiser, cfg_dict, {})
         wrapped = denoiser.combine_denoised
 
         def external_wrapper(*args, **kwargs):
@@ -718,6 +739,119 @@ class CFGCombinerTests(unittest.TestCase):
         script.restore_cfg_denoiser(cfg_dict)
         self.assertIs(denoiser.combine_denoised, external_wrapper)
         self.assertIsNone(cfg_dict["denoiser"])
+
+
+class StockCombinerStubTests(unittest.TestCase):
+    def test_stub_combine_denoised_is_the_core_method(self):
+        def method_ast(source_lines):
+            return ast.dump(ast.parse(textwrap.dedent("".join(source_lines))).body[0])
+
+        install_a1111_stubs()
+        stub = sys.modules["modules.sd_samplers_cfg_denoiser"].CFGDenoiser.combine_denoised
+        core = ast.parse((REPO_ROOT / "modules" / "sd_samplers_cfg_denoiser.py").read_text(encoding="utf-8"))
+        cfg_denoiser = next(node for node in core.body if isinstance(node, ast.ClassDef) and node.name == "CFGDenoiser")
+        core_method = next(node for node in cfg_denoiser.body if isinstance(node, ast.FunctionDef) and node.name == "combine_denoised")
+        self.assertEqual(method_ast(inspect.getsourcelines(stub)[0]), ast.dump(core_method))
+
+
+class SANFCombinerTests(unittest.TestCase):
+    """PAG SANF with the core combiner and with Dynamic Thresholding's combiner."""
+
+    @classmethod
+    def setUpClass(cls):
+        install_a1111_stubs()
+        cls.cfg_combiner = importlib.import_module("scripts.cfg_combiner")
+        cls.dynamic_thresholding = importlib.import_module("scripts.dynamic_thresholding")
+        cls.CFGDenoiser = sys.modules["modules.sd_samplers_cfg_denoiser"].CFGDenoiser
+
+    def setUp(self):
+        generator = torch.Generator().manual_seed(1234)
+        # AND prompt for image 0 (cond rows 0 and 1), plain prompt for image 1 (cond row 2); rows 3-4 are uncond.
+        self.conds_list = [[(0, 0.75), (1, 0.25)], [(2, 1.0)]]
+        self.x_out = torch.randn(5, 4, 6, 6, generator=generator)
+        self.pag_x_out = self.x_out[:3] + 0.3 * torch.randn(3, 4, 6, 6, generator=generator)
+        self.uncond = torch.zeros(2, 77, 8)
+
+    def pag_params(self, sanf):
+        return types.SimpleNamespace(pag_active=True, pag_x_out=self.pag_x_out, pag_scale=4.0, pag_start_step=0,
+                                     pag_end_step=10, step=3, pag_sanf=sanf)
+
+    def stock_combiner(self):
+        return self.CFGDenoiser().combine_denoised
+
+    def dt_combiner(self):
+        dt = DynThresh(4.5, 1.0, "Constant", 0.0, "Constant", 0.0, 4.0, 15, True, "MEAN", "AD", 1.0)
+        denoiser = self.dynamic_thresholding.CustomCFGDenoiser(object(), dt)
+        denoiser.step = 3
+        denoiser.total_steps = 15
+        return denoiser.combine_denoised
+
+    def combine(self, original_func, sanf, x_out=None, cond_scale=6.0):
+        generation_params = {}
+        out = self.cfg_combiner.combine_denoised_pass_conds_list(
+            self.x_out if x_out is None else x_out, self.conds_list, self.uncond, cond_scale,
+            original_func=original_func, cfg_dict={"pag_params": self.pag_params(sanf)},
+            generation_params=generation_params,
+        )
+        return out, generation_params
+
+    def raw_sanf_oracle(self, x_out, cond_scale):
+        """The SANF formula on the raw CFG terms: uncond + per cond a saliency choice of its CFG or PAG term."""
+        uncond = x_out[-2:]
+        out = uncond.clone()
+        for i, conds in enumerate(self.conds_list):
+            for cond_index, weight in conds:
+                cfg_term = (x_out[cond_index] - uncond[i]) * (weight * cond_scale)
+                pag_term = (x_out[cond_index] - self.pag_x_out[cond_index]) * (weight * 4.0)
+                out[i] += self.sanf_choice(cfg_term, pag_term)
+        return out
+
+    def composed_sanf_oracle(self, x_out, cond_scale):
+        """uncond + a saliency choice of the thresholded guidance t = DT(...) - uncond or the image's summed PAG terms."""
+        uncond = x_out[-2:]
+        guidance = self.dt_combiner()(x_out, self.conds_list, self.uncond, cond_scale) - uncond
+        out = uncond.clone()
+        for i, conds in enumerate(self.conds_list):
+            pag_sum = sum((x_out[c] - self.pag_x_out[c]) * (w * 4.0) for c, w in conds)
+            out[i] += self.sanf_choice(guidance[i], pag_sum)
+        return out
+
+    def sanf_choice(self, cfg_term, pag_term):
+        mask = torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(cfg_term.abs()).float(), dim=0) >= \
+            torch.softmax(self.cfg_combiner.sanf_gaussian_blur3(pag_term.abs()).float(), dim=0)
+        return torch.where(mask, cfg_term, pag_term)
+
+    def test_stock_combiner_is_detected(self):
+        self.assertTrue(self.cfg_combiner.is_stock_combiner(self.stock_combiner()))
+        self.assertFalse(self.cfg_combiner.is_stock_combiner(self.dt_combiner()))
+
+    def test_sanf_with_stock_combiner_is_the_raw_formula_and_records_nothing(self):
+        out, generation_params = self.combine(self.stock_combiner(), sanf=True)
+        torch.testing.assert_close(out, self.raw_sanf_oracle(self.x_out, 6.0), rtol=0, atol=0)
+        self.assertEqual(generation_params, {})
+
+    def test_sanf_composes_dynamic_thresholding_and_records_it(self):
+        out, generation_params = self.combine(self.dt_combiner(), sanf=True)
+        torch.testing.assert_close(out, self.composed_sanf_oracle(self.x_out, 6.0), rtol=0, atol=0)
+        self.assertFalse(torch.equal(out, self.raw_sanf_oracle(self.x_out, 6.0)))
+        self.assertEqual(generation_params, {"PAG SANF note": "PAG SANF blends the dynamically thresholded CFG"})
+
+    def test_plain_pag_keeps_dynamic_thresholding_and_records_nothing(self):
+        out, generation_params = self.combine(self.dt_combiner(), sanf=False)
+        expected = self.dt_combiner()(self.x_out, self.conds_list, self.uncond, 6.0)
+        for i, conds in enumerate(self.conds_list):
+            for cond_index, weight in conds:
+                expected[i] += (self.x_out[cond_index] - self.pag_x_out[cond_index]) * (weight * 4.0)
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        self.assertEqual(generation_params, {})
+
+    def test_ngms_cond_only_call(self):
+        # NGMS skips the uncond pass: the cond rows stand in for uncond and the combiner runs at scale 1.
+        x_out = torch.cat([self.x_out[:3], self.x_out[[0, 2]]])
+        out, _ = self.combine(self.stock_combiner(), sanf=True, x_out=x_out, cond_scale=1.0)
+        torch.testing.assert_close(out, self.raw_sanf_oracle(x_out, 1.0), rtol=0, atol=0)
+        out, _ = self.combine(self.dt_combiner(), sanf=True, x_out=x_out, cond_scale=1.0)
+        torch.testing.assert_close(out, self.composed_sanf_oracle(x_out, 1.0), rtol=0, atol=0)
 
 
 class PAGBatchingTests(unittest.TestCase):

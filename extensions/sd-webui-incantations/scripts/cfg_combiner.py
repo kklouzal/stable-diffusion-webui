@@ -4,11 +4,22 @@ import torch.nn.functional as F
 from modules import script_callbacks
 from modules.script_callbacks import CFGDenoiserParams
 from modules.processing import StableDiffusionProcessing
+from modules.sd_samplers_cfg_denoiser import CFGDenoiser
 from scripts.ui_wrapper import UIWrapper, cond_crossattn
 from scripts.incant_utils import timing
 
 logger = logging.getLogger(__name__)
 _SANF_KERNEL_CACHE = {}
+
+# Infotext key recording how PAG SANF treated a replaced CFG combiner. The only combine_denoised override in this
+# tree is Dynamic Thresholding's CustomCFGDenoiser, so a combiner other than the core's is Dynamic Thresholding.
+SANF_NOTE_KEY = "PAG SANF note"
+SANF_NOTE_COMPOSES_DT = "PAG SANF blends the dynamically thresholded CFG"
+
+
+def is_stock_combiner(combine_denoised):
+        """True when combine_denoised is the core CFGDenoiser's own method, not an extension's override."""
+        return getattr(combine_denoised, '__func__', None) is CFGDenoiser.combine_denoised
 
 
 def sanf_gaussian_blur3(x):
@@ -77,7 +88,7 @@ class CFGCombinerScript(UIWrapper):
             if not getattr(p, 'incant_cfg_params', None) or p.incant_cfg_params.get('pag_params') is None:
                 return
             def cfg_denoise_callback(params):
-                return self.on_cfg_denoiser_callback(params, p.incant_cfg_params)
+                return self.on_cfg_denoiser_callback(params, p.incant_cfg_params, p.extra_generation_params)
 
             script_callbacks.on_cfg_denoiser(self.track_callback(cfg_denoise_callback))
             logger.debug('Hooked CFG combiner callback')
@@ -92,17 +103,21 @@ class CFGCombinerScript(UIWrapper):
             self.restore_cfg_denoiser(cfg_dict)
             self.remove_callbacks()
 
-        def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict):
+        def on_cfg_denoiser_callback(self, params: CFGDenoiserParams, cfg_dict: dict, generation_params: dict):
             """Callback for when the CFG denoiser is available.
 
             Installs one owned wrapper for the batch. Later callbacks for the
             same denoiser reuse the wrapper and only observe the mutable state
             in cfg_dict / pag_params.
             """
-            self.patch_cfg_denoiser(params.denoiser, cfg_dict)
+            self.patch_cfg_denoiser(params.denoiser, cfg_dict, generation_params)
 
-        def patch_cfg_denoiser(self, denoiser, cfg_dict: dict):
-            """Install the GB10 combine_denoised wrapper once for this denoiser."""
+        def patch_cfg_denoiser(self, denoiser, cfg_dict: dict, generation_params: dict):
+            """Install the GB10 combine_denoised wrapper once for this denoiser.
+
+            generation_params is the request's extra_generation_params; the wrapper records there what PAG SANF
+            did with a replaced CFG combiner.
+            """
             if not cfg_dict:
                     logger.error("Unable to patch CFG Denoiser, no dict passed as cfg_dict")
                     return
@@ -127,6 +142,7 @@ class CFGCombinerScript(UIWrapper):
                             cond_scale,
                             original_func=original_func,
                             cfg_dict=cfg_dict,
+                            generation_params=generation_params,
                     )
 
             gb10_combine_denoised.__name__ = 'gb10_incantations_combine_denoised'
@@ -160,12 +176,18 @@ class CFGCombinerScript(UIWrapper):
             cfg_dict['wrapped_combine_denoised'] = None
 
 
-def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, original_func, cfg_dict):
+def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, original_func, cfg_dict, generation_params):
         """Owned combine_denoised wrapper adding PAG guidance.
 
         The captured original_func is intentionally called for the base CFG path
         so Dynamic Thresholding / CFG-Fix and similar extensions can still
         rescale the base CFG result before PAG is added.
+
+        PAG SANF with the core combiner chooses per cond between its raw CFG
+        and PAG terms. With a replaced combiner (Dynamic Thresholding) the CFG
+        candidate is that combiner's guidance, original_func's result minus
+        uncond, and the PAG candidate the image's summed PAG terms; this is
+        recorded in generation_params under SANF_NOTE_KEY.
         """
         pag_params = cfg_dict.get('pag_params')
         if pag_params is None:
@@ -201,17 +223,22 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
         if pag_x_out.shape[0] != n_cond:
                 raise RuntimeError(f"PAG output has {pag_x_out.shape[0]} rows, expected the {n_cond} cond rows of x_out")
 
-        # Dynamic Thresholding can be composed cleanly with the base CFG path above.
-        # PAG SANF replaces the CFG contribution with a saliency-selected CFG/PAG
-        # blend, so it cannot faithfully preserve a dynamically-thresholded base.
-        # In that case keep the previous SANF behavior rather than pretending both
-        # rescalers are fully applied.
+        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5 picks, per element, the
+        # CFG or the PAG guidance. With the core combiner each cond's raw CFG term
+        # competes with its PAG term (the stock path, unchanged). A replaced
+        # combiner (Dynamic Thresholding) only yields the image's whole rescaled
+        # guidance, so that competes with the image's summed PAG terms.
         use_saliency_map = pag_params.pag_sanf
+        sanf_composed = use_saliency_map and not is_stock_combiner(original_func)
+        if sanf_composed:
+                generation_params[SANF_NOTE_KEY] = SANF_NOTE_COMPOSES_DT
+                cfg_guidance = denoised - denoised_uncond
         if use_saliency_map:
                 denoised = denoised_uncond.clone()
 
         ### Add PAG guidance on top of the base CFG result
         for i, conds in enumerate(conds_list):
+                pag_guidance = None
                 for cond_index, weight in conds:
                         pag_delta = x_out[cond_index] - pag_x_out[cond_index]
                         pag_x = pag_delta * (weight * pag_scale)
@@ -221,10 +248,17 @@ def combine_denoised_pass_conds_list(x_out, conds_list, uncond, cond_scale, *, o
                                         denoised[i] += pag_x
                                 continue
 
-                        # Saliency Adaptive Noise Fusion arXiv.2311.10329v5
+                        if sanf_composed:
+                                pag_guidance = pag_x if pag_guidance is None else pag_guidance + pag_x
+                                continue
+
                         with timing.timed(timings, "combine_sanf_blend"):
                                 model_delta = x_out[cond_index] - denoised_uncond[i]
                                 sal_cfg = _sanf_guidance_blend(model_delta * (weight * cond_scale), pag_x)
                                 denoised[i] += sal_cfg
+
+                if sanf_composed:
+                        with timing.timed(timings, "combine_sanf_blend"):
+                                denoised[i] += _sanf_guidance_blend(cfg_guidance[i], pag_guidance)
 
         return denoised

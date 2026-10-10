@@ -29,7 +29,10 @@ DEFAULT_MAX_CONSECUTIVE = 4
 DEFAULT_START = 0.35
 DEFAULT_END = 0.90
 
-# NoobAI XL vpred v1.0 coefficients used by upstream TeaCache for SDXL-like UNets.
+# Rescale polynomial upstream TeaCache fit on NoobAI-XL vpred v1.0 and applies to every SDXL-like UNet. It maps the
+# first-block relative L1 change to an estimate of the output change; an eps-prediction model (the production
+# checkpoint) has no fit of its own, so the threshold is calibrated against this v-pred fit. Recorded in infotext.
+SDXL_POLYNOMIAL_FIT = "NoobAI-XL v-pred fit"
 SDXL_POLYNOMIAL_COEFFICIENTS = (
     4.72656327e-03,
     1.09937816e+00,
@@ -197,20 +200,29 @@ class TeaCacheSession:
         self.steps = steps
         self.disabled_reason = disabled_reason
 
+        # 1-based step of the full schedule that the pass's first sampler step runs (img2img/hires start later);
+        # progress is current_step / steps.
+        self.initial_step = initial_step
         self.current_step = initial_step
-        # Per-call-lane state, keyed by the UNet call's index within the denoiser step (call_index).
-        self.call_index = 0
-        self.residuals: dict[int, tuple[tuple, torch.Tensor]] = {}
+        # Per-call-lane state. A lane is (call signature, ordinal of the call among this denoiser step's calls with
+        # that signature). Keying by the plain call index never matched when the step's call layout alternates:
+        # NGMS skips the uncond on every other step, so call 0 alternates between the cond+uncond batch and the
+        # cond-only batch and its signature never equalled the cached one. With the signature in the key, each
+        # layout keeps its own lane (refreshed from the last step that ran it), and same-signature calls within a
+        # step (PAG's identical-input replay) stay separate lanes in call order.
+        self.lane: tuple = ()
+        self.signature_calls: dict[tuple, int] = {}
+        self.residuals: dict[tuple, torch.Tensor] = {}
         # (context, y) the lane's cached residual was computed with; a lane missing here was stored without them.
-        self.residual_conditioning: dict[int, tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = {}
-        self.previous_fb: dict[int, torch.Tensor] = {}
-        self.distances: dict[int, torch.Tensor] = {}
+        self.residual_conditioning: dict[tuple, tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = {}
+        self.previous_fb: dict[tuple, torch.Tensor] = {}
+        self.distances: dict[tuple, torch.Tensor] = {}
         self._threshold_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
         self._coefficient_tensors: dict[tuple[str, torch.dtype], torch.Tensor] = {}
         # Consecutive cache hits per lane: every lane decides on its own distance, so max_consecutive must bound
         # each lane's staleness. A shared lane-0 counter, advanced or reset by lane 0 before later lanes checked
         # it, put those lanes (e.g. PAG's identical-input replay) out of refresh phase with lane 0.
-        self.consecutive_hits: dict[int, int] = {}
+        self.consecutive_hits: dict[tuple, int] = {}
         self.use_cache = True
 
     def _device_constant(
@@ -237,7 +249,9 @@ class TeaCacheSession:
         # converts only the current residual (bf16 -> fp32 is exact, so the values are unchanged), and the
         # stored copy replaces the separate clone that kept the lane independent of the producer's tensor.
         current_fb = first_block_residual.detach().to(dtype=torch.float32, copy=True)
-        lane = self.call_index
+        ordinal = self.signature_calls.get(signature, 0)
+        self.signature_calls[signature] = ordinal + 1
+        lane = self.lane = (signature, ordinal)
         self.use_cache = not self.disabled_reason
         # check step range
         progress = self.current_step / max(1, self.steps)
@@ -247,10 +261,9 @@ class TeaCacheSession:
         hits = self.consecutive_hits.get(lane, 0)
         if self.max_consecutive > 0 and hits >= self.max_consecutive:
             self.use_cache = False
-        # check cached value exists for this exact UNet call shape/conditioning lane
+        # check this lane has a cached residual and a previous first-block residual
         previous_fb = self.previous_fb.get(lane)
-        cached = self.residuals.get(lane)
-        if previous_fb is None or cached is None or cached[0] != signature:
+        if previous_fb is None or lane not in self.residuals:
             self.use_cache = False
         conditioning_changed = False
         if self.use_cache:
@@ -280,33 +293,33 @@ class TeaCacheSession:
 
         self.previous_fb[lane] = current_fb
 
-    def next_step(self):
-        self.current_step += 1
-        self.call_index = 0
+    def begin_step(self, sampler_step: int):
+        """Start a denoiser call of the pass's 0-based sampler step ``sampler_step``: new lane ordinals."""
+        self.current_step = self.initial_step + sampler_step
+        self.signature_calls.clear()
 
-    def current_residual(self, signature: tuple) -> Optional[torch.Tensor]:
-        cached = self.residuals.get(self.call_index)
-        if not self.use_cache or cached is None or cached[0] != signature:
+    # The methods below act on the lane chosen by the last update_condition call.
+    def current_residual(self) -> Optional[torch.Tensor]:
+        if not self.use_cache:
             return None
-        return cached[1]
+        return self.residuals.get(self.lane)
 
     def reset_current_distance(self, reference: torch.Tensor):
-        self.distances[self.call_index] = reference.detach().new_zeros(())
+        self.distances[self.lane] = reference.detach().new_zeros(())
 
     def store_current_residual(
         self,
-        signature: tuple,
         residual: torch.Tensor,
         context: Optional[torch.Tensor] = None,
         y: Optional[torch.Tensor] = None,
     ):
         residual = residual.detach()
-        self.residuals[self.call_index] = (signature, residual.clone())
+        self.residuals[self.lane] = residual.clone()
         # Copies: the producer may reuse or edit its conditioning buffers after this call returns.
-        self.residual_conditioning[self.call_index] = tuple(
+        self.residual_conditioning[self.lane] = tuple(
             None if value is None else value.detach().clone() for value in (context, y)
         )
-        self.consecutive_hits[self.call_index] = 0
+        self.consecutive_hits[self.lane] = 0
         self.reset_current_distance(residual)
 
 
@@ -414,6 +427,8 @@ class TeaCacheScript(scripts.Script):
             p.extra_generation_params["TeaCache end"] = end
         if disabled_reason:
             p.extra_generation_params["TeaCache disabled reason"] = disabled_reason
+        else:
+            p.extra_generation_params["TeaCache rescale"] = SDXL_POLYNOMIAL_FIT
 
     def postprocess(self, p: processing.StableDiffusionProcessing | None, *args):
         # restore model, clear cache
@@ -473,7 +488,7 @@ def _patched_forward_inner(
     cache.update_condition(first_block_residual, signature, context, y)
 
     # use cache or call full model
-    cached_residual = cache.current_residual(signature)
+    cached_residual = cache.current_residual()
     if cached_residual is not None:
         h = h + cached_residual
     else:
@@ -490,9 +505,7 @@ def _patched_forward_inner(
             cache.reset_current_distance(original_h)
             raise
 
-        cache.store_current_residual(signature, h - original_h, context, y)
-
-    cache.call_index += 1
+        cache.store_current_residual(h - original_h, context, y)
 
     h = h.to(dtype=x.dtype)
 
@@ -520,10 +533,26 @@ def patched_forward(
 patched_forward._openclaw_teacache_patch = True
 
 
-def next_step(*args):
+def _sampler_step(denoiser) -> int:
+    """The 0-based sampler step of the CFG denoiser call in progress.
+
+    ``denoiser.step`` counts this pass's denoiser calls; ``total_steps`` is the number of calls its ``steps`` sampler
+    steps make (two per step for second-order samplers, summed per stage for "Multi" chains). Counting denoiser
+    calls as steps ran the start/end window twice as fast under second-order samplers. Same mapping as
+    Incantations' ``ui_wrapper.sampler_step`` and the core's progress measure (refiner switch, skip-early-CFG).
+    """
+    steps = getattr(denoiser, "steps", None)
+    total_steps = getattr(denoiser, "total_steps", None)
+    if not steps or not total_steps:
+        raise RuntimeError(f"TeaCache: the CFG denoiser has no step count for this pass (steps={steps!r}, total_steps={total_steps!r})")
+    return denoiser.step * steps // total_steps
+
+
+def begin_denoiser_call(params):
+    # Runs before the denoiser call's UNet calls (cfg_denoiser_callback), so every lane of the call sees its step.
     cache = _get_cache()
     if cache is not None:
-        cache.next_step()
+        cache.begin_step(_sampler_step(params.denoiser))
 
 
-script_callbacks.on_cfg_after_cfg(next_step)
+script_callbacks.on_cfg_denoiser(begin_denoiser_call)

@@ -70,7 +70,7 @@ A1111-Controller uses these, so they stay installed on the host:
 |---|---|
 | `multidiffusion-upscaler-for-automatic1111` | `patch-multidiffusion-performance.py` |
 | `ultimate-upscale-for-automatic1111` | `patch-ultimate-upscale-state-lifecycle.py` and `patch-ultimate-upscale-subcanvas.py` |
-| `sd-webui-detail-daemon` | none |
+| `sd-webui-detail-daemon` | `patch-detail-daemon.py` |
 
 What the patches do:
 
@@ -101,8 +101,18 @@ What the patches do:
   - Redraw tiles are exactly `tile_width x tile_height`.
   - Each tile gets a window of the canvas, bitwise identical to processing the whole canvas at those sizes.
   - This changes images on purpose compared with upstream and deploy10.
+- **`patch-detail-daemon.py`** fails a request whose Detail Daemon schedule would call the model with sigma <= 0:
+  - Each step scales the sigma by `1 - 0.1*s` (cond rows, mode `cond`), `1 + 0.1*s` (uncond rows, mode `uncond`) or
+    `1 - 0.1*s*cfg_scale` (every row, mode `both`), where `s` is the step's schedule value. The Detail Amount field is
+    unbounded, so `amount*cfg >= 10` in `both` (`amount >= 10` in `cond`, `<= -10` in `uncond`) made a factor <= 0;
+    sigma_to_t then took the log of a non-positive sigma and the image came out wrong without an error.
+  - The schedule is built at each pass's first denoiser call (its length is that pass's step count). Every factor is
+    checked there with the same float64 arithmetic before the daemon changes any sigma; a factor that is not > 0
+    (NaN included) raises a ValueError naming the daemon, the step and the factor.
+  - A request whose factors are all positive runs the upstream code unchanged.
 
-The Ultimate Upscale patchers apply exact blocks to upstream Coyote-A master `2322caa`. Each patcher accepts the
+The Ultimate Upscale patchers apply exact blocks to upstream Coyote-A master `2322caa`, the Detail Daemon patcher to
+upstream muerrilla master `1947999`. Each patcher accepts the
 original text or its already-patched text, and fails the deploy on anything else. A patcher whose blocks changed
 since deploy10 also upgrades the deploy10 text in place (`patchlib` `previous`: the target is reverted to upstream,
 proven by a round trip, and patched again); `--check` reports such a target as outdated. The `PREVIOUS`/`DEPLOY10`

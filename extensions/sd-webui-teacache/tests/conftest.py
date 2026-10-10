@@ -44,7 +44,7 @@ def _install_stub_modules(monkeypatch):
     module("modules")
     module("modules.headless_ui", Row=lambda *a, **k: None, Slider=lambda *a, **k: None, Number=lambda *a, **k: None)
     module("modules.processing", StableDiffusionProcessing=object)
-    module("modules.script_callbacks", on_cfg_after_cfg=lambda callback: callback)
+    module("modules.script_callbacks", on_cfg_denoiser=lambda callback: callback)
     module("modules.scripts", Script=object, AlwaysVisible=object())
     module("modules.sd_samplers_common", setup_img2img_steps=lambda p, steps=None: (steps or p.steps, steps or p.steps))
     module("modules.sd_hijack_unet", th=torch)
