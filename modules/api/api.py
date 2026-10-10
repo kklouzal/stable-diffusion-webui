@@ -78,8 +78,14 @@ _CONTROLNET_UNIT_IMAGE_FIELDS = ("image", "input_image", "mask", "mask_image", "
 def _validate_override_settings(override_settings, opts) -> None:
     """Reject, as a malformed request (422) before the job starts, override_settings that opts.set(is_api=True) would
     refuse once the generation runs (it raised there as a 500): an unknown option, or a value whose type differs from
-    the option's default (int and float interchangeable, None accepted). API-restricted options stay ignored."""
+    the option's default (int and float interchangeable, None accepted). API-restricted options stay ignored.
+    A checkpoint or VAE that is not available is a 422 too: the generation would otherwise replace it silently (the
+    configured checkpoint, no VAE). Checkpoints resolve as POST /options resolves them (checkpoint_aliases)."""
     for key, value in (override_settings or {}).items():
+        if key == "sd_model_checkpoint" and not (isinstance(value, str) and value in sd_models.checkpoint_aliases):
+            raise HTTPException(status_code=422, detail=f"override_settings: option 'sd_model_checkpoint': checkpoint {value!r} not found")
+        if key == "sd_vae" and not (isinstance(value, str) and value in shared_items.sd_vae_items()):
+            raise HTTPException(status_code=422, detail=f"override_settings: option 'sd_vae': VAE {value!r} not found")
         if opts.data.get(key) == value:
             continue  # opts.set leaves an unchanged value alone before looking the option up
         if key not in opts.data_labels:
