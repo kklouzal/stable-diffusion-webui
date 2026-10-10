@@ -60,6 +60,11 @@ def _patch(teacache, unet):
     unet.forward = teacache.patched_forward.__get__(unet)
 
 
+def _begin_step(teacache, step, steps=10, total_steps=10):
+    """The core's cfg_denoiser_callback for the denoiser call number ``step`` of a pass of ``steps`` sampler steps."""
+    teacache.begin_denoiser_call(SimpleNamespace(denoiser=SimpleNamespace(step=step, steps=steps, total_steps=total_steps)))
+
+
 def _inputs(batch=2):
     x = torch.linspace(-1.0, 1.0, batch * 4 * 2 * 2).reshape(batch, 4, 2, 2)
     timesteps = torch.full((batch,), 500.0)
@@ -78,10 +83,11 @@ def test_context_change_refreshes_lane_instead_of_reusing_stale_residual(teacach
     first_prompt = torch.zeros(2, 3, 8)
     second_prompt = torch.ones(2, 3, 8)
 
+    _begin_step(teacache, 0)
     unet.forward(x, timesteps=timesteps, context=first_prompt, y=y)
-    teacache.next_step()
+    _begin_step(teacache, 1)
     switched = unet.forward(x, timesteps=timesteps, context=second_prompt, y=y)
-    teacache.next_step()
+    _begin_step(teacache, 2)
     unchanged = unet.forward(x, timesteps=timesteps, context=second_prompt, y=y)
 
     # Refresh on the switch step: output is the true forward for the new prompt, not the old prompt's residual.
@@ -101,8 +107,9 @@ def test_vector_conditioning_change_refreshes_lane(teacache):
     x, timesteps, y = _inputs()
     context = torch.zeros(2, 3, 8)
 
+    _begin_step(teacache, 0)
     unet.forward(x, timesteps=timesteps, context=context, y=y)
-    teacache.next_step()
+    _begin_step(teacache, 1)
     # Swapped vector conditioning moves the first-block distance far less than the threshold, yet the cached
     # residual belongs to different conditioning.
     out = unet.forward(x, timesteps=timesteps, context=context, y=y.flip(0))
@@ -121,10 +128,10 @@ def test_every_lane_is_bounded_by_max_consecutive_and_lanes_stay_coherent(teacac
     x, timesteps, y = _inputs()
     context = torch.zeros(2, 3, 8)
 
-    for _ in range(7):
+    for step in range(7):
+        _begin_step(teacache, step)
         unet.forward(x, timesteps=timesteps, context=context, y=y)  # lane 0: main pass
         unet.forward(x, timesteps=timesteps, context=context, y=y)  # lane 1: PAG-style replay
-        teacache.next_step()
 
     refreshed = {lane: [step for step, call_lane in unet.deep_calls if call_lane == lane] for lane in (0, 1)}
     # Refresh, two hits, refresh, ... for each lane. With the former shared lane-0 counter, lane 1 checked a
@@ -151,9 +158,9 @@ def test_alternating_ngms_batch_layouts_each_keep_their_own_lane(teacache):
 
     outputs = []
     for step in range(6):
+        _begin_step(teacache, step)
         x_in, t_in, c_in, y_in = layouts[step % 2]
         outputs.append((unet.forward(x_in, timesteps=t_in, context=c_in, y=y_in), layouts[step % 2]))
-        teacache.next_step()
 
     # Only the first step of each layout evaluates the deep path; every later step is a cache hit.
     assert unet.deep_calls == [(1, 0), (2, 0)]
@@ -168,7 +175,7 @@ def test_session_counts_hits_per_lane(teacache):
     for _ in range(2):
         session.update_condition(torch.ones(1, 2), signature)
         session.store_current_residual(torch.zeros(1, 2))
-    session.next_step()
+    session.begin_step(1)
     decisions = []
     for _ in range(2):
         session.update_condition(torch.ones(1, 2), signature)
@@ -279,3 +286,41 @@ def test_patch_from_an_earlier_script_load_is_still_restored(teacache, load_teac
 
     assert unet.forward is original
     assert not unet._teacache_patched
+
+
+@pytest.mark.parametrize("calls_per_step", [1, 2])
+def test_step_window_counts_sampler_steps_not_denoiser_calls(teacache, calls_per_step):
+    """A second-order sampler makes two denoiser calls per step (total_steps = 2 * steps).
+
+    The start/end window is in sampler steps: with start 0.3 / end 0.6 over 10 steps, only steps 4..6 (1-based)
+    may reuse, whatever the sampler's call rate. Counting calls ran the window twice as fast under Heun/DPM2.
+    """
+    unet = FakeUNet()
+    _patch(teacache, unet)
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.3, end=0.6, steps=10)
+    unet.session = session
+    teacache._set_cache(session)
+    x, timesteps, y = _inputs()
+    context = torch.zeros(2, 3, 8)
+
+    for call in range(10 * calls_per_step):
+        _begin_step(teacache, call, steps=10, total_steps=10 * calls_per_step)
+        unet.forward(x, timesteps=timesteps, context=context, y=y)
+
+    cached_steps = sorted({step for step in range(1, 11)} - {step for step, _ in unet.deep_calls})
+    assert cached_steps == [4, 5, 6]
+
+
+def test_step_window_offsets_img2img_passes_by_their_initial_step(teacache):
+    session = teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=20, initial_step=8)
+    teacache._set_cache(session)
+    _begin_step(teacache, 5, steps=13, total_steps=26)
+    assert session.current_step == 8 + 2
+    teacache._set_cache(None)
+
+
+def test_denoiser_without_a_step_count_fails_closed(teacache):
+    teacache._set_cache(teacache.TeaCacheSession(threshold=1.0, max_consecutive=0, start=0.0, end=1.0, steps=10))
+    with pytest.raises(RuntimeError, match="no step count"):
+        _begin_step(teacache, 0, steps=None, total_steps=None)
+    teacache._set_cache(None)

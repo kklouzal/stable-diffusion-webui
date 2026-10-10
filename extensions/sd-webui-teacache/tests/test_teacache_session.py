@@ -90,8 +90,7 @@ def test_progress_start_is_exclusive_and_end_is_inclusive(teacache):
     session.update_condition(torch.zeros(1), signature)
     assert not session.use_cache
 
-    session.current_step = 7
-    session.next_step()
+    session.begin_step(6)
     session.update_condition(torch.zeros(1), signature)
     assert session.use_cache
 
@@ -130,7 +129,7 @@ def test_session_isolates_cache_by_call_signature(teacache):
 
     assert not session.use_cache
     session.store_current_residual(torch.full((1, 2), 3.0))
-    session.next_step()
+    session.begin_step(1)
     session.update_condition(old * 1.01, signature)
     assert torch.equal(session.current_residual(), torch.full((1, 2), 3.0))
     session.update_condition(old * 1.01, other_signature)
@@ -146,12 +145,12 @@ def test_session_window_and_max_consecutive_are_quality_guards(teacache):
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert not session.use_cache
 
-    session.next_step()
+    session.begin_step(1)
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert session.use_cache
     assert session.consecutive_hits == {(signature, 0): 1}
 
-    session.next_step()
+    session.begin_step(2)
     session.update_condition(torch.ones((1, 2), dtype=torch.float32), signature)
     assert not session.use_cache
 
@@ -218,8 +217,8 @@ def test_previous_first_block_residual_is_an_owned_fp32_copy_with_unchanged_dist
     previous = residuals[0].clone()
     residuals[0].add_(100)
     expected_distance = torch.zeros(())
-    for current in residuals[1:]:
-        session.next_step()
+    for step, current in enumerate(residuals[1:], start=1):
+        session.begin_step(step)
         session.update_condition(current, signature)
         prev_f, curr_f = previous.float(), current.float()
         rel = (prev_f - curr_f).abs().mean() / prev_f.abs().mean().clamp_min(torch.finfo(torch.float32).eps)

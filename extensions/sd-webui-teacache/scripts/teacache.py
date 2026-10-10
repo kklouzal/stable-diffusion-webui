@@ -200,6 +200,9 @@ class TeaCacheSession:
         self.steps = steps
         self.disabled_reason = disabled_reason
 
+        # 1-based step of the full schedule that the pass's first sampler step runs (img2img/hires start later);
+        # progress is current_step / steps.
+        self.initial_step = initial_step
         self.current_step = initial_step
         # Per-call-lane state. A lane is (call signature, ordinal of the call among this denoiser step's calls with
         # that signature). Keying by the plain call index never matched when the step's call layout alternates:
@@ -290,8 +293,9 @@ class TeaCacheSession:
 
         self.previous_fb[lane] = current_fb
 
-    def next_step(self):
-        self.current_step += 1
+    def begin_step(self, sampler_step: int):
+        """Start a denoiser call of the pass's 0-based sampler step ``sampler_step``: new lane ordinals."""
+        self.current_step = self.initial_step + sampler_step
         self.signature_calls.clear()
 
     # The methods below act on the lane chosen by the last update_condition call.
@@ -529,10 +533,26 @@ def patched_forward(
 patched_forward._openclaw_teacache_patch = True
 
 
-def next_step(*args):
+def _sampler_step(denoiser) -> int:
+    """The 0-based sampler step of the CFG denoiser call in progress.
+
+    ``denoiser.step`` counts this pass's denoiser calls; ``total_steps`` is the number of calls its ``steps`` sampler
+    steps make (two per step for second-order samplers, summed per stage for "Multi" chains). Counting denoiser
+    calls as steps ran the start/end window twice as fast under second-order samplers. Same mapping as
+    Incantations' ``ui_wrapper.sampler_step`` and the core's progress measure (refiner switch, skip-early-CFG).
+    """
+    steps = getattr(denoiser, "steps", None)
+    total_steps = getattr(denoiser, "total_steps", None)
+    if not steps or not total_steps:
+        raise RuntimeError(f"TeaCache: the CFG denoiser has no step count for this pass (steps={steps!r}, total_steps={total_steps!r})")
+    return denoiser.step * steps // total_steps
+
+
+def begin_denoiser_call(params):
+    # Runs before the denoiser call's UNet calls (cfg_denoiser_callback), so every lane of the call sees its step.
     cache = _get_cache()
     if cache is not None:
-        cache.next_step()
+        cache.begin_step(_sampler_step(params.denoiser))
 
 
-script_callbacks.on_cfg_after_cfg(next_step)
+script_callbacks.on_cfg_denoiser(begin_denoiser_call)
