@@ -8,6 +8,7 @@ These notes are dated records, named `topic-YYYY-MM-DD.md`. Each one describes t
 
 | Date | Note |
 |---|---|
+| 2026-10-10 | [correctness-quality-speed-pass-2-2026-10-10.md](correctness-quality-speed-pass-2-2026-10-10.md): second pass: exact GroupNorm layout kernels, startup warm-up, request-lifecycle fixes, GPU A/B on the operator's current settings |
 | 2026-10-09 | [correctness-quality-speed-pass-2026-10-09.md](correctness-quality-speed-pass-2026-10-09.md): end-to-end correctness, quality and speed pass, with GPU A/B on the operator's workload |
 | 2026-10-09 | [cleanup-pass-2026-10-09.md](cleanup-pass-2026-10-09.md): dead code, duplication and stale surfaces removed, with the bugs fixed along the way |
 | 2026-10-07 | [performance-pass-2-2026-10-07.md](performance-pass-2-2026-10-07.md): exact performance changes, plus the parked NHWC GroupNorm and all-NCHW work |
