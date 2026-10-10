@@ -182,3 +182,43 @@ def test_sdxl_depth_table_tiles_only_its_depth0_layers_at_1024(hypertile):
         unet.get_submodule(name)(torch.zeros(1, side * side, 1))
     assert sorted(name for name, batch in seen.items() if batch > 1) == sorted(
         name for name in level1 if name.endswith("transformer_blocks.0.attn1"))
+
+
+def _attention_model(attention_class):
+    model = torch.nn.Module()
+    parent = model
+    for part in "input_blocks.1.1.transformer_blocks.0".split("."):
+        parent.add_module(part, torch.nn.Module())
+        parent = getattr(parent, part)
+    parent.add_module("attn1", attention_class())
+    return model, parent.attn1
+
+
+def test_the_wrapped_forward_follows_a_cross_attention_optimization_change(hypertile, monkeypatch):
+    # sd_hijack installs the optimization's forward on the attention class; a bound method stored when the layer was
+    # hooked kept calling the previous optimization, with hypertile enabled or not.
+    class Attention(torch.nn.Module):
+        def forward(self, x, context=None):
+            return "old-impl"
+
+    model, attn = _attention_model(Attention)
+    x = torch.zeros(1, 64, 8)
+    hypertile.hypertile_hook_model(model, 64, 64, enable=True, max_depth=0)
+    hypertile.hypertile_hook_model(model, 64, 64, enable=False, max_depth=0)
+    monkeypatch.setattr(Attention, "forward", lambda self, x, context=None: "new-impl")
+
+    assert attn(x) == "new-impl"
+    hypertile.hypertile_hook_model(model, 64, 64, enable=True, max_depth=0)
+    assert attn(x) == "new-impl"  # 64 tokens: below one tile, a single call
+
+
+def test_an_instance_forward_set_before_hooking_stays_wrapped(hypertile):
+    class Attention(torch.nn.Module):
+        def forward(self, x, context=None):
+            return "class"
+
+    model, attn = _attention_model(Attention)
+    attn.forward = lambda x, context=None: "patched"
+    hypertile.hypertile_hook_model(model, 64, 64, enable=False, max_depth=0)
+
+    assert attn(torch.zeros(1, 64, 8)) == "patched"
