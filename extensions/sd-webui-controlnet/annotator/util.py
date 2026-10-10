@@ -1,6 +1,9 @@
 import numpy as np
 import cv2
 import os
+import threading
+
+import torch
 
 
 def load_model(filename: str, remote_url: str, model_dir: str) -> str:
@@ -16,6 +19,65 @@ def load_model(filename: str, remote_url: str, model_dir: str) -> str:
         from scripts.utils import load_file_from_url
         load_file_from_url(remote_url, model_dir=model_dir)
     return local_path
+
+
+_meta_parameters_lock = threading.Lock()
+
+
+def _build_with_meta_parameters(build):
+    """build() with every parameter it registers in this thread moved to the meta device, so no parameter storage is
+    allocated or randomly initialized. Buffers are built as usual: non-persistent ones (absent from any state dict)
+    keep their computed values. Parameters other threads register meanwhile are not affected."""
+    owner = threading.get_ident()
+    register_parameter = torch.nn.Module.register_parameter
+
+    def register_meta_parameter(module, name, param):
+        register_parameter(module, name, param)
+        if param is not None and not param.is_meta and threading.get_ident() == owner:
+            module._parameters[name] = torch.nn.Parameter(param.to("meta"), requires_grad=param.requires_grad)
+
+    with _meta_parameters_lock:
+        torch.nn.Module.register_parameter = register_meta_parameter
+        try:
+            return build()
+        finally:
+            torch.nn.Module.register_parameter = register_parameter
+
+
+def _as_copied_into(value, target):
+    """`value` as copying it into `target` (load_state_dict without assign) leaves it: target's dtype and strides."""
+    if value.shape != target.shape or (value.dtype == target.dtype and value.stride() == target.stride()):
+        return value  # a shape mismatch is load_state_dict's error to raise
+    return torch.empty_strided(target.shape, target.stride(), dtype=target.dtype).copy_(value)
+
+
+def build_with_state_dict(build, state_dict, unused_keys=frozenset()):
+    """The module build() returns, holding `state_dict` exactly as build() + load_state_dict(state_dict) leaves it,
+    without allocating and randomly initializing the parameters the checkpoint overwrites.
+
+    The model's tensors take the checkpoint's values with the model's dtypes and strides; checkpoint tensors that
+    already match are used as they are (they may be memory-mapped). The checkpoint must hold every key of the
+    model's state dict, and its other keys must be exactly `unused_keys`: any other difference raises RuntimeError,
+    as does a parameter shared by several modules (assigning would untie it). The module stays on the CPU, in the
+    mode build() left it in.
+    """
+    model = _build_with_meta_parameters(build)
+    shared = sorted(dict(model.named_parameters(remove_duplicate=False)).keys() - dict(model.named_parameters()).keys())
+    if shared:
+        raise RuntimeError(f"{type(model).__name__} shares parameters, which loading by assignment would untie: {shared}")
+    expected = model.state_dict()
+    missing = sorted(expected.keys() - state_dict.keys())
+    unexpected = state_dict.keys() - expected.keys()
+    if missing or unexpected != unused_keys:
+        raise RuntimeError(
+            f"Unsupported {type(model).__name__} checkpoint: missing keys {missing}, "
+            f"unexpected keys {sorted(unexpected - unused_keys)}, absent unused keys {sorted(unused_keys - unexpected)}")
+    model.load_state_dict(
+        {key: _as_copied_into(state_dict[key], target) for key, target in expected.items()}, strict=True, assign=True)
+    unloaded = [name for name, tensor in (*model.named_parameters(), *model.named_buffers()) if tensor.is_meta]
+    if unloaded:
+        raise RuntimeError(f"{type(model).__name__} tensors not loaded from the checkpoint: {unloaded}")
+    return model
 
 
 def HWC3(x):

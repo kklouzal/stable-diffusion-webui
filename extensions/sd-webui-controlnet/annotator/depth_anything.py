@@ -8,7 +8,7 @@ from torchvision.transforms import Compose
 from depth_anything.dpt import DPT_DINOv2, DPTHead
 from depth_anything_v2.dinov2 import DINOv2
 from depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
-from .util import load_model
+from .util import build_with_state_dict, load_model
 from .annotator_path import models_path
 
 
@@ -55,7 +55,6 @@ class DepthAnythingDetector:
 
     def __init__(self, device: torch.device):
         self.device = device
-        self.model = DepthAnythingV1().to(device).eval()
         remote_url = os.environ.get(
             "CONTROLNET_DEPTH_ANYTHING_MODEL_URL",
             "https://huggingface.co/spaces/LiheYoung/Depth-Anything/resolve/main/checkpoints/depth_anything_vitl14.pth",
@@ -63,7 +62,9 @@ class DepthAnythingDetector:
         model_path = load_model(
             "depth_anything_vitl14.pth", remote_url=remote_url, model_dir=self.model_dir
         )
-        self.model.load_state_dict(torch.load(model_path), strict=True)
+        self.model = build_with_state_dict(
+            DepthAnythingV1, torch.load(model_path, map_location="cpu", mmap=True)
+        ).to(device).eval()
 
     def __call__(self, image: np.ndarray, colored: bool = True) -> np.ndarray:
         self.model.to(self.device)

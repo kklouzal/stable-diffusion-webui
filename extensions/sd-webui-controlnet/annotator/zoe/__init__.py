@@ -8,6 +8,13 @@ from .zoedepth.models.zoedepth.zoedepth_v1 import ZoeDepth
 from .zoedepth.utils.config import get_config
 from modules import devices
 from annotator.annotator_path import models_path
+from annotator.util import build_with_state_dict
+
+# The checkpoint's BEiT blocks carry relative_position_index, which the timm BEiT the model is built from keeps as a
+# non-persistent buffer computed in __init__ (the checkpoint's values are the same).
+UNUSED_CHECKPOINT_KEYS = frozenset(
+    f"core.core.pretrained.model.blocks.{block}.attn.relative_position_index" for block in range(24)
+)
 
 
 class ZoeDetector:
@@ -24,20 +31,11 @@ class ZoeDetector:
             from scripts.utils import load_file_from_url
             load_file_from_url(remote_model_path, model_dir=self.model_dir)
         conf = get_config("zoedepth", "infer")
-        model = ZoeDepth.build_from_config(conf)
-        incompatible = model.load_state_dict(
-            torch.load(modelpath, map_location=model.device)['model'], strict=False
+        model = build_with_state_dict(
+            lambda: ZoeDepth.build_from_config(conf),
+            torch.load(modelpath, map_location="cpu", mmap=True)['model'],
+            UNUSED_CHECKPOINT_KEYS,
         )
-        unsupported_missing = list(incompatible.missing_keys)
-        unsupported_unexpected = [
-            key for key in incompatible.unexpected_keys
-            if not key.endswith(".attn.relative_position_index")
-        ]
-        if unsupported_missing or unsupported_unexpected:
-            raise RuntimeError(
-                "Unsupported ZoeDepth checkpoint mismatch: "
-                f"missing={unsupported_missing}, unexpected={unsupported_unexpected}"
-            )
         model.eval()
         self.model = model.to(self.device)
 
