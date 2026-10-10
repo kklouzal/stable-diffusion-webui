@@ -170,6 +170,43 @@ def test_file_signatures_are_the_sequential_digests_in_request_order(lora_networ
     assert networks.network_file_signatures([]) == []
 
 
+def test_memoized_file_signatures_create_no_pool_and_hash_only_the_misses(lora_networks, tmp_path, monkeypatch):
+    networks = lora_networks
+    files = []
+    for index in range(4):
+        path = tmp_path / f"warm-{index}.safetensors"
+        path.write_bytes(os.urandom(1024 + index))
+        files.append(path)
+    requested = [files[0], files[1], str(files[2]), files[3], files[0]]
+    monkeypatch.setattr(networks, "_file_signature_memo", {})
+    cold = networks.network_file_signatures(requested)
+    assert cold == [networks.network_file_signature(filename) for filename in requested]
+
+    def no_pool(*_args, **_kwargs):
+        raise AssertionError("a warm call must not create a thread pool")
+
+    real_pool = networks.ThreadPoolExecutor
+    monkeypatch.setattr(networks, "ThreadPoolExecutor", no_pool)
+    hashed = []
+    real_signature = networks.network_file_signature
+    monkeypatch.setattr(networks, "network_file_signature", lambda filename: hashed.append(filename) or real_signature(filename))
+    assert networks.network_file_signatures(requested) == cold
+    assert hashed == []
+
+    files[1].write_bytes(b"changed")  # one miss: hashed in this thread
+    assert networks.network_file_signatures(requested) == [cold[0], ("sha256", networks.hashlib.sha256(b"changed").hexdigest()), *cold[2:]]
+    assert hashed == [os.fspath(files[1])]
+
+    pools = []
+    monkeypatch.setattr(networks, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or real_pool(**kwargs))
+    files[2].write_bytes(b"two")
+    files[3].write_bytes(b"three")  # two misses: pooled, sized to the misses only
+    hashed.clear()
+    result = networks.network_file_signatures(requested)
+    assert result[2:4] == [("sha256", networks.hashlib.sha256(b"two").hexdigest()), ("sha256", networks.hashlib.sha256(b"three").hexdigest())]
+    assert sorted(hashed) == sorted([str(files[2]), os.fspath(files[3])]) and [pool["max_workers"] for pool in pools] == [2]
+
+
 def test_duplicate_aliases_to_same_lora_keep_independent_multiplier_owners(lora_networks, monkeypatch):
     networks = lora_networks
     base, _module, _payload = _base_network(networks)
