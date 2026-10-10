@@ -4,7 +4,7 @@ import math
 import sgm.modules.diffusionmodules.model as _SGM_VAE
 import sgm.modules.diffusionmodules.util as _sgm_util
 
-from modules import devices, openclaw_fused_geglu, shared, openclaw_nhwc_groupnorm as nhwc_group_norm, openclaw_gn_transpose as gn_transpose
+from modules import devices, openclaw_fused_geglu, openclaw_layout_folds, shared, openclaw_nhwc_groupnorm as nhwc_group_norm, openclaw_gn_transpose as gn_transpose
 from modules.sd_hijack_utils import CondFunc
 
 
@@ -387,6 +387,9 @@ _VAE_SILU_SCOPES = frozenset((nhwc_group_norm.VAE, nhwc_group_norm.SILU))
 CondFunc('sgm.modules.diffusionmodules.openaimodel.ResBlock._forward', sgm_resblock_forward, lambda *args, **kwargs: _UNET_SILU_SCOPES <= nhwc_group_norm.scopes())
 CondFunc('sgm.modules.diffusionmodules.model.Normalize', vae_normalize)
 CondFunc('sgm.modules.diffusionmodules.model.ResnetBlock.forward', sgm_vae_resnet_block_forward, lambda *args, **kwargs: _VAE_SILU_SCOPES <= nhwc_group_norm.scopes())
+# Layout folds (modules/openclaw_layout_folds.py, switch): installed after the NHWC GroupNorm forwards, so they run
+# first and defer to them while that switch's unet/vae scope is on.
+openclaw_layout_folds.install()
 
 first_stage_cond = lambda _, self, *args, **kwargs: devices.unet_needs_upcast and self.model.diffusion_model.dtype in (torch.float16, torch.bfloat16)
 first_stage_sub = lambda orig_func, self, x, **kwargs: orig_func(self, x.to(devices.dtype_vae), **kwargs)
