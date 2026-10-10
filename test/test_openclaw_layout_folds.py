@@ -53,17 +53,28 @@ def test_switch_is_off_by_default_and_an_invalid_value_fails_the_import():
 
 
 def test_off_installs_nothing(monkeypatch):
+    monkeypatch.setattr(sgm_openaimodel.ResBlock, "_forward", _below_folds(sgm_openaimodel.ResBlock._forward))
+    monkeypatch.setattr(sgm_vae.ResnetBlock, "forward", _below_folds(sgm_vae.ResnetBlock.forward))
     monkeypatch.setattr(folds, "ENABLED", False)
     before = (sgm_openaimodel.ResBlock._forward, sgm_vae.ResnetBlock.forward)
     folds.install()
     assert (sgm_openaimodel.ResBlock._forward, sgm_vae.ResnetBlock.forward) == before
 
 
+def _below_folds(forward):
+    """The forward below the folds' CondFunc when OPENCLAW_LAYOUT_FOLDS=1 installed it at import, else `forward`."""
+    for cell in forward.__closure__ or ():
+        condfunc = cell.cell_contents
+        if getattr(condfunc, "_CondFunc__sub_func", None) in (folds.sgm_resblock_forward, folds.sgm_vae_resnet_block_forward):
+            return condfunc._CondFunc__orig_func
+    return forward
+
+
 @pytest.fixture
 def upstream(monkeypatch):
-    """The forwards installed today (restored after the test), to compare the folds against."""
-    monkeypatch.setattr(sgm_openaimodel.ResBlock, "_forward", sgm_openaimodel.ResBlock._forward)
-    monkeypatch.setattr(sgm_vae.ResnetBlock, "forward", sgm_vae.ResnetBlock.forward)
+    """The forwards installed without the folds (restored after the test), to compare the folds against."""
+    monkeypatch.setattr(sgm_openaimodel.ResBlock, "_forward", _below_folds(sgm_openaimodel.ResBlock._forward))
+    monkeypatch.setattr(sgm_vae.ResnetBlock, "forward", _below_folds(sgm_vae.ResnetBlock.forward))
     monkeypatch.setattr(sgm_vae, "nonlinearity", F.silu)  # what sd_hijack.apply_optimizations installs
     for name, value in (("_SCOPES", frozenset()), ("_STATE_KEY", ())):
         monkeypatch.setattr(nhwc, name, value)
@@ -73,7 +84,7 @@ def upstream(monkeypatch):
 def _install(monkeypatch):
     monkeypatch.setattr(folds, "ENABLED", True)
     folds.install()
-    assert "CondFunc" in sgm_openaimodel.ResBlock._forward.__qualname__
+    assert _below_folds(sgm_openaimodel.ResBlock._forward) is not sgm_openaimodel.ResBlock._forward
 
 
 @pytest.fixture
