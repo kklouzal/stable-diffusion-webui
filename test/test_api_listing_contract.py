@@ -1,5 +1,6 @@
 import ast
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -359,3 +360,33 @@ def test_extensions_list_preserves_public_git_metadata_shape(monkeypatch):
         }
     ]
     assert events == [("list", None), ("read", "remote-ext"), ("read", "local-ext")]
+
+
+def test_config_reads_while_a_generation_inserts_options(monkeypatch):
+    # A generation applying override_settings inserts keys into opts.data (an option never saved to the settings file)
+    # while GET /options reads it from another thread.
+    api_class = load_metadata_listing_api_class()
+    data = {f"saved_{index}": index for index in range(2000)}
+    shared_stub = SimpleNamespace(opts=SimpleNamespace(data=data, data_labels={}))
+    monkeypatch.setitem(api_class.get_config.__globals__, "shared", shared_stub)
+    stop = threading.Event()
+
+    def generation():
+        index = 0
+        while not stop.is_set():
+            data[f"override_{index}"] = index
+            data.pop(f"override_{index - 50}", None)
+            index += 1
+
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads as often as possible
+    thread = threading.Thread(target=generation)
+    thread.start()
+    try:
+        for _ in range(200):
+            options = api_class().get_config()
+            assert all(options[f"saved_{index}"] == index for index in range(2000))
+    finally:
+        stop.set()
+        thread.join()
+        sys.setswitchinterval(previous_interval)

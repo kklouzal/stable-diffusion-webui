@@ -1423,15 +1423,10 @@ class Api:
         shared.state.skip()
 
     def get_config(self):
-        options = {}
-        for key in shared.opts.data.keys():
-            metadata = shared.opts.data_labels.get(key)
-            if(metadata is not None):
-                options.update({key: shared.opts.data.get(key, shared.opts.data_labels.get(key).default)})
-            else:
-                options.update({key: shared.opts.data.get(key, None)})
-
-        return options
+        # One copy of the stored options (every key read its own stored value before, too): a generation thread
+        # setting override_settings may insert a key, and iterating the live dict then raised "dictionary changed
+        # size during iteration". dict() copies a dict without running Python code, so no other thread interleaves.
+        return dict(shared.opts.data)
 
     def set_config(self, req: dict[str, Any]):
         """Apply settings between generations (queue_lock): a concurrent POST used to change shared.opts while a
