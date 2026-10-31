@@ -9,6 +9,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-local/gb10-a1111:latest}"
 CONTAINER_NAME="${CONTAINER_NAME:-gb10-a1111-latest}"
 HOST_ROOT="${HOST_ROOT:-/opt/gb10/stable-diffusion}"
+MODEL_HOST_ROOT="${MODEL_HOST_ROOT:-/models/local/stable-diffusion}"
+HF_MODEL_ROOT="${HF_MODEL_ROOT:-/models/hf}"
+TORCH_MODEL_ROOT="${TORCH_MODEL_ROOT:-/models/local/torch}"
 PORT="${PORT:-7860}"
 OUTPUTS_TARGET="${OUTPUTS_TARGET:-/mnt/nas-warehouse/StableDiffusion/Outputs}"
 DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
@@ -52,11 +55,9 @@ close_deploy_log() {
 }
 trap close_deploy_log EXIT
 
-# Host directory under HOST_ROOT -> path under the container's app directory. One table drives the host mkdir,
-# the ownership repair and the bind mounts, in this order. Caches/app holds the app's cache/ (hash and metadata
-# caches, and TORCH_HOME/HF_HOME downloads, which the image places under cache/); the compile cache mount below nests
-# inside it at cache/compile.
-HOST_DIR_MOUNTS=(
+# Model payloads are separate from mutable application/config/extension state.
+# Each table retains the existing in-container path and drives mkdir, ownership and binds.
+MODEL_DIR_MOUNTS=(
   BLIP:models/BLIP
   CLIP:models/CLIP
   Codeformer:models/Codeformer
@@ -69,15 +70,43 @@ HOST_DIR_MOUNTS=(
   VAE:models/VAE
   VAE-approx:models/VAE-approx
   Embeddings:embeddings
-  Extensions:extensions
   Models:models/Stable-diffusion
+  controlnet/models:extensions/sd-webui-controlnet/models
+  controlnet/annotator-downloads:extensions/sd-webui-controlnet/annotator/downloads
+)
+HOST_DIR_MOUNTS=(
+  Extensions:extensions
   Caches/app:cache
 )
 HOST_DIRS=("${HOST_DIR_MOUNTS[@]%%:*}" config)
+MODEL_DIRS=("${MODEL_DIR_MOUNTS[@]%%:*}")
 
 for d in "${HOST_DIRS[@]}"; do
   sudo mkdir -p "${HOST_ROOT}/${d}"
 done
+for d in "${MODEL_DIRS[@]}"; do
+  if ! sudo test -L "${MODEL_HOST_ROOT}/${d}"; then
+    sudo mkdir -p "${MODEL_HOST_ROOT}/${d}"
+  fi
+done
+sudo mkdir -p "${HF_MODEL_ROOT}/hub" "${HF_MODEL_ROOT}/modules" "${HF_MODEL_ROOT}/xet" "${TORCH_MODEL_ROOT}"
+
+# Central models are shared with host operators and other services. Preserve their
+# ownership/ACLs; provisioning belongs to the model-store owner, not a deploy.
+for model_path in "${MODEL_DIRS[@]/#/${MODEL_HOST_ROOT}/}" "${HF_MODEL_ROOT}/hub" "${HF_MODEL_ROOT}/modules" "${HF_MODEL_ROOT}/xet" "${TORCH_MODEL_ROOT}"; do
+  if sudo test -L "${model_path}"; then
+    # Preserved remote model aliases need read/search access, never remote writes.
+    if ! sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -r "${model_path}" ||
+       ! sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -x "${model_path}"; then
+      echo "ERROR: model alias is not readable/searchable by runtime UID/GID 2323: ${model_path}" >&2
+      exit 1
+    fi
+  elif ! sudo setpriv --reuid=2323 --regid=2323 --clear-groups test -w "${model_path}"; then
+    echo "ERROR: central model directory is not writable by runtime UID/GID 2323: ${model_path}" >&2
+    exit 1
+  fi
+done
+
 
 # Host paths are created and written as root, so they are also tested as root: the invoking user may not see them.
 if ! sudo test -e "${HOST_ROOT}/Outputs" && ! sudo test -L "${HOST_ROOT}/Outputs"; then
@@ -403,11 +432,21 @@ DOCKER_ARGS=(
   -e TRITON_CACHE_DIR="/opt/stable-diffusion-webui/cache/compile/triton/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e CUDA_CACHE_PATH="/opt/stable-diffusion-webui/cache/compile/cuda/${OPENCLAW_COMPILE_CACHE_NAMESPACE}"
   -e GENERATION_LAST_DIR="/opt/stable-diffusion-webui/generation-last"
+  -e HF_HUB_CACHE=/models/hf/hub
+  -e HF_MODULES_CACHE=/models/hf/modules
+  -e HF_XET_CACHE=/models/hf/xet
+  -e TORCH_HOME=/models/local/torch
 )
 for mount in "${HOST_DIR_MOUNTS[@]}"; do
   DOCKER_ARGS+=(-v "${HOST_ROOT}/${mount%%:*}:/opt/stable-diffusion-webui/${mount#*:}")
 done
+for mount in "${MODEL_DIR_MOUNTS[@]}"; do
+  DOCKER_ARGS+=(-v "${MODEL_HOST_ROOT}/${mount%%:*}:/opt/stable-diffusion-webui/${mount#*:}")
+done
 DOCKER_ARGS+=(
+  -v "${HF_MODEL_ROOT}:/models/hf"
+  -v "${TORCH_MODEL_ROOT}:/models/local/torch"
+  -v /models/remote/StableDiffusion:/models/remote/StableDiffusion:ro
   -v "${HOST_ROOT}/Outputs:/opt/stable-diffusion-webui/outputs"
   -v "${OPENCLAW_COMPILE_CACHE_ROOT}:/opt/stable-diffusion-webui/cache/compile"
   -v "${HOST_ROOT}/config/config.json:/opt/stable-diffusion-webui/config.json"
@@ -442,6 +481,7 @@ echo "Deployed ${CONTAINER_NAME} from ${IMAGE_TAG} (${TARGET_IMAGE_ID}); replace
 echo "Version: ${A1111_VERSION_TAG} (commit ${A1111_COMMIT_HASH})"
 echo "CPU set: ${CPUSET_CPUS}"
 echo "Host data root: ${HOST_ROOT}"
+echo "Model root: ${MODEL_HOST_ROOT}"
 echo "Outputs symlink target: ${OUTPUTS_TARGET}"
 echo "OpenClaw SDPA backend: ${OPENCLAW_SDPA_BACKEND}"
 echo "OpenClaw CUDA graphs: ${OPENCLAW_CUDA_GRAPHS} cache=${OPENCLAW_CUDA_GRAPH_CACHE_MAX}"

@@ -283,6 +283,10 @@ def deploy(tmp_path):
                 "FAKE_SUDO_LOG": str(tmp_path / "sudo.log"),
                 "DOCKER_BIN": str(bin_dir / "docker"),
                 "HOST_ROOT": str(host),
+                "PORT": "7860",
+                "MODEL_HOST_ROOT": str(tmp_path / "model-store"),
+                "HF_MODEL_ROOT": str(tmp_path / "hf-model-store"),
+                "TORCH_MODEL_ROOT": str(tmp_path / "torch-model-store"),
                 "OUTPUTS_TARGET": str(outputs),
                 "OPENCLAW_COMPILE_CACHE_NAMESPACE": "test-stack",
                 "TMPDIR": str(tmp_path / "tmp"),
@@ -537,3 +541,33 @@ def test_ctrl_c_during_the_rollback_does_not_stop_it(deploy):
     _assert_rolled_back(deploy, subprocess.CompletedProcess(proc.args, proc.returncode, output, ""))
     assert proc.returncode == 1
     assert "within 8 s" in output and "ERROR: rollback:" not in output
+
+
+def test_model_mounts_use_central_store_without_reowning_it(deploy):
+    result = deploy.run()
+    assert result.returncode == 0
+    args = deploy.state()["containers"]["gb10-a1111-latest"]["run_args"]
+    mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "-v"]
+    root = deploy.host.parent
+    assert str(root / "model-store/Models") + ":/opt/stable-diffusion-webui/models/Stable-diffusion" in mounts
+    assert str(root / "model-store/controlnet/models") + ":/opt/stable-diffusion-webui/extensions/sd-webui-controlnet/models" in mounts
+    assert str(root / "model-store/controlnet/annotator-downloads") + ":/opt/stable-diffusion-webui/extensions/sd-webui-controlnet/annotator/downloads" in mounts
+    assert str(deploy.host / "Caches/app") + ":/opt/stable-diffusion-webui/cache" in mounts
+    assert "/models/remote/StableDiffusion:/models/remote/StableDiffusion:ro" in mounts
+    assert not any("chown" in line and "model-store" in line for line in deploy.sudo_commands())
+
+
+def test_existing_model_alias_needs_no_remote_write_or_ownership_change(deploy):
+    root = deploy.host.parent
+    alias = root / "model-store/Lora"
+    alias.parent.mkdir()
+    remote = root / "remote-models"
+    remote.mkdir()
+    alias.symlink_to(remote, target_is_directory=True)
+    result = deploy.run()
+    assert result.returncode == 0
+    calls = deploy.sudo_commands()
+    assert any("test -r " + str(alias) in line for line in calls)
+    assert any("test -x " + str(alias) in line for line in calls)
+    assert not any("test -w " + str(alias) in line for line in calls)
+    assert not any("mkdir -p " + str(alias) in line or "chown" in line and str(alias) in line for line in calls)

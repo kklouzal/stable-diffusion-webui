@@ -3,11 +3,11 @@
 The `sd-webui-controlnet` extension is repo-owned under `extensions/sd-webui-controlnet` and `gb10/run.sh` mirrors it
 into `/opt/gb10/stable-diffusion/Extensions/sd-webui-controlnet` on every deploy.
 
-Put ControlNet models in the checkout: `~/stable-diffusion-webui/extensions/sd-webui-controlnet/models/`. The
-weights are git-ignored (large data); commit a `<model file>.sha256` sidecar (`sha256sum <file>`, bare file name)
-next to each one. run.sh copies them to the host `models/` directory, which it protects (`P /models/***`), so a
-model placed only on the host also survives a deploy, but removing a model from the checkout does not remove it from
-the host: delete it there by hand.
+Put ControlNet weights in `/models/local/stable-diffusion/controlnet/models/`.
+Keep each `<model file>.sha256` sidecar beside its selected model. `gb10/run.sh`
+binds this directory at the extension's existing in-container `models/` path;
+weights no longer live in the source checkout or mirrored extension directory.
+The central store's ownership and ACLs are preserved during deployment.
 
 Every checkpoint in use is SDXL, so the models must be SDXL ControlNets. Installed today:
 
@@ -17,4 +17,5 @@ Every checkpoint in use is SDXL, so the models must be SDXL ControlNets. Install
   inpaint control.
 
 Preprocessor (annotator) weights are separate: they download on first use into the host
-`Extensions/sd-webui-controlnet/annotator/downloads/`, which run.sh also preserves.
+`/models/local/stable-diffusion/controlnet/annotator-downloads/`, bound at the
+extension's original in-container `annotator/downloads/` path.
